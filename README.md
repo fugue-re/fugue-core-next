@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="Fugue logo" src="https://raw.githubusercontent.com/fugue-re/fugue-core/master/data/fugue-logo-border-t.png" width="20%">
+  <img alt="Fugue logo" src="https://raw.githubusercontent.com/fugue-re/fugue-core-next/dev/data/fugue-next-logo-border-t.png" width="20%">
 </p>
 
 # Fugue Binary Analysis Framework
