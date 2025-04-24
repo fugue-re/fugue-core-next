@@ -52,7 +52,7 @@ impl ControlFlowRecovery {
     }
 }
 
-impl AnalysisPass for ControlFlowRecovery {
+impl AnalysisPass<'_> for ControlFlowRecovery {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         let mut builder = FunctionBuilder::new();
 

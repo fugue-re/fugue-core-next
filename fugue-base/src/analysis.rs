@@ -16,18 +16,21 @@ pub enum AnalysisError {
     PassFailed(String, anyhow::Error),
 }
 
-pub struct AnalysisManager<S = ()> {
-    passes: HashMap<String, Box<dyn AnalysisPass<S>>>,
+pub struct AnalysisManager<'a, S: 'a = ()> {
+    passes: HashMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
-impl<S> AnalysisManager<S> {
+impl<'a, S> AnalysisManager<'a, S>
+where
+    S: 'a,
+{
     pub fn new() -> Self {
         AnalysisManager {
             passes: HashMap::new(),
         }
     }
 
-    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
+    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<'a, S> + 'a) {
         self.passes.insert(name.into(), Box::new(pass));
     }
 
@@ -45,13 +48,13 @@ impl<S> AnalysisManager<S> {
     }
 }
 
-impl AnalysisManager {
+impl<'a> AnalysisManager<'a> {
     pub fn analyse(&mut self, project: &mut Project, pass_name: &str) -> Result<(), AnalysisError> {
         self.analyse_with(project, pass_name, &mut Default::default())
     }
 }
 
-pub trait AnalysisPass<S = ()> {
+pub trait AnalysisPass<'a, S: 'a = ()> {
     fn analyse(&mut self, #[allow(unused)] project: &mut Project) -> Result<(), AnalysisError> {
         unimplemented!(
             "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
@@ -67,29 +70,30 @@ pub trait AnalysisPass<S = ()> {
     }
 }
 
-impl<S, F> AnalysisPass<S> for F
+impl<'a, S, F> AnalysisPass<'a, S> for F
 where
-    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError>,
+    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError> + 'a,
+    S: 'a,
 {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         self(project, state)
     }
 }
 
-pub trait AnalysisCondition {
+pub trait AnalysisCondition<'a> {
     fn evaluate(&mut self) -> bool;
 }
 
-impl<F> AnalysisCondition for F
+impl<'a, F> AnalysisCondition<'a> for F
 where
-    F: FnMut() -> bool,
+    F: FnMut() -> bool + 'a,
 {
     fn evaluate(&mut self) -> bool {
         self()
     }
 }
 
-impl AnalysisCondition for usize {
+impl<'a> AnalysisCondition<'a> for usize {
     fn evaluate(&mut self) -> bool {
         if let Some(nself) = self.checked_sub(1) {
             *self = nself;
@@ -100,13 +104,13 @@ impl AnalysisCondition for usize {
     }
 }
 
-pub struct AnalysisGroup<S = ()> {
-    passes: Vec<Box<dyn AnalysisPass<S>>>,
+pub struct AnalysisGroup<'a, S: 'a = ()> {
+    passes: Vec<Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
-impl<S, P> FromIterator<P> for AnalysisGroup<S>
+impl<'a, S, P> FromIterator<P> for AnalysisGroup<'a, S>
 where
-    P: AnalysisPass<S> + 'static,
+    P: AnalysisPass<'a, S> + 'a,
 {
     fn from_iter<T: IntoIterator<Item = P>>(iter: T) -> Self {
         let mut group = AnalysisGroup::new();
@@ -115,16 +119,19 @@ where
     }
 }
 
-impl<S> AnalysisGroup<S> {
+impl<'a, S> AnalysisGroup<'a, S>
+where
+    S: 'a,
+{
     pub fn new() -> Self {
         AnalysisGroup { passes: Vec::new() }
     }
 
-    pub fn add_pass(&mut self, pass: impl AnalysisPass<S> + 'static) {
+    pub fn add_pass(&mut self, pass: impl AnalysisPass<'a, S> + 'a) {
         self.passes.push(Box::new(pass));
     }
 
-    pub fn add_passes(&mut self, passes: impl IntoIterator<Item = impl AnalysisPass<S> + 'static>) {
+    pub fn add_passes(&mut self, passes: impl IntoIterator<Item = impl AnalysisPass<'a, S> + 'a>) {
         self.passes.extend(
             passes
                 .into_iter()
@@ -133,7 +140,10 @@ impl<S> AnalysisGroup<S> {
     }
 }
 
-impl<S> AnalysisPass<S> for AnalysisGroup<S> {
+impl<'a, S> AnalysisPass<'a, S> for AnalysisGroup<'a, S>
+where
+    S: 'a,
+{
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         for pass in self.passes.iter_mut() {
             pass.analyse_with(project, state)?;
@@ -142,15 +152,18 @@ impl<S> AnalysisPass<S> for AnalysisGroup<S> {
     }
 }
 
-pub struct IteratedAnalysis<S = ()> {
-    pass: Box<dyn AnalysisPass<S>>,
-    condition: Box<dyn AnalysisCondition>,
+pub struct IteratedAnalysis<'a, S: 'a = ()> {
+    pass: Box<dyn AnalysisPass<'a, S> + 'a>,
+    condition: Box<dyn AnalysisCondition<'a> + 'a>,
 }
 
-impl<S> IteratedAnalysis<S> {
+impl<'a, S> IteratedAnalysis<'a, S>
+where
+    S: 'a,
+{
     pub fn new(
-        pass: impl AnalysisPass<S> + 'static,
-        condition: impl AnalysisCondition + 'static,
+        pass: impl AnalysisPass<'a, S> + 'a,
+        condition: impl AnalysisCondition<'a> + 'a,
     ) -> Self {
         IteratedAnalysis {
             pass: Box::new(pass),
@@ -159,7 +172,10 @@ impl<S> IteratedAnalysis<S> {
     }
 }
 
-impl<S> AnalysisPass<S> for IteratedAnalysis<S> {
+impl<'a, S> AnalysisPass<'a, S> for IteratedAnalysis<'a, S>
+where
+    S: 'a,
+{
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         while self.condition.evaluate() {
             self.pass.analyse_with(project, state)?;
@@ -168,15 +184,18 @@ impl<S> AnalysisPass<S> for IteratedAnalysis<S> {
     }
 }
 
-pub struct ConditionalAnalysis<S = ()> {
-    pass: Box<dyn AnalysisPass<S>>,
-    condition: Box<dyn AnalysisCondition>,
+pub struct ConditionalAnalysis<'a, S: 'a = ()> {
+    pass: Box<dyn AnalysisPass<'a, S> + 'a>,
+    condition: Box<dyn AnalysisCondition<'a> + 'a>,
 }
 
-impl<S> ConditionalAnalysis<S> {
+impl<'a, S> ConditionalAnalysis<'a, S>
+where
+    S: 'a,
+{
     pub fn new(
-        pass: impl AnalysisPass<S> + 'static,
-        condition: impl AnalysisCondition + 'static,
+        pass: impl AnalysisPass<'a, S> + 'a,
+        condition: impl AnalysisCondition<'a> + 'a,
     ) -> Self {
         ConditionalAnalysis {
             pass: Box::new(pass),
@@ -185,7 +204,10 @@ impl<S> ConditionalAnalysis<S> {
     }
 }
 
-impl<S> AnalysisPass<S> for ConditionalAnalysis<S> {
+impl<'a, S> AnalysisPass<'a, S> for ConditionalAnalysis<'a, S>
+where
+    S: 'a,
+{
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         if self.condition.evaluate() {
             self.pass.analyse_with(project, state)?;
@@ -194,13 +216,16 @@ impl<S> AnalysisPass<S> for ConditionalAnalysis<S> {
     }
 }
 
-pub struct StatefulAnalysis<S> {
-    pass: Box<dyn AnalysisPass<S>>,
+pub struct StatefulAnalysis<'a, S: 'a = ()> {
+    pass: Box<dyn AnalysisPass<'a, S> + 'a>,
     state: S,
 }
 
-impl<S> StatefulAnalysis<S> {
-    pub fn new(pass: impl AnalysisPass<S> + 'static, state: S) -> Self {
+impl<'a, S> StatefulAnalysis<'a, S>
+where
+    S: 'a,
+{
+    pub fn new(pass: impl AnalysisPass<'a, S> + 'a, state: S) -> Self {
         StatefulAnalysis {
             pass: Box::new(pass),
             state,
@@ -208,36 +233,44 @@ impl<S> StatefulAnalysis<S> {
     }
 }
 
-impl<S> AnalysisPass for StatefulAnalysis<S> {
+impl<'a, S> AnalysisPass<'a> for StatefulAnalysis<'a, S>
+where
+    S: 'a,
+{
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         self.pass.analyse_with(project, &mut self.state)
     }
 }
 
-pub trait AnalysisPassExt<S> {
-    fn conditional(self, condition: impl AnalysisCondition + 'static) -> ConditionalAnalysis<S>
+pub trait AnalysisPassExt<'a, S: 'a> {
+    fn conditional(self, condition: impl AnalysisCondition<'a> + 'a) -> ConditionalAnalysis<'a, S>
     where
-        Self: AnalysisPass<S> + Sized + 'static,
+        Self: AnalysisPass<'a, S> + Sized + 'a,
     {
         ConditionalAnalysis::new(self, condition)
     }
 
-    fn iterated(self, condition: impl AnalysisCondition + 'static) -> IteratedAnalysis<S>
+    fn iterated(self, condition: impl AnalysisCondition<'a> + 'a) -> IteratedAnalysis<'a, S>
     where
-        Self: AnalysisPass<S> + Sized + 'static,
+        Self: AnalysisPass<'a, S> + Sized + 'a,
     {
         IteratedAnalysis::new(self, condition)
     }
 
-    fn with_state(self, state: S) -> StatefulAnalysis<S>
+    fn with_state(self, state: S) -> StatefulAnalysis<'a, S>
     where
-        Self: AnalysisPass<S> + Sized + 'static,
+        Self: AnalysisPass<'a, S> + Sized + 'a,
     {
         StatefulAnalysis::new(self, state)
     }
 }
 
-impl<S, P> AnalysisPassExt<S> for P where P: AnalysisPass<S> + Sized + 'static {}
+impl<'a, S, P> AnalysisPassExt<'a, S> for P
+where
+    P: AnalysisPass<'a, S> + Sized + 'a,
+    S: 'a,
+{
+}
 
 pub type NoState = ();
 
@@ -249,8 +282,23 @@ mod test {
 
     #[test]
     fn test_analysis_passes() -> Result<(), Box<dyn std::error::Error>> {
-        let mut analyses = AnalysisManager::new();
         let mut project = Project::from_file::<InMemoryStorage>("tests/ls.elf")?;
+        let mut my_mut = 0;
+        let mut my_beep = 2;
+
+        let mut analyses = AnalysisManager::new();
+
+        pub struct Simple<'a> {
+            my_mut: &'a mut usize,
+        }
+
+        impl<'a> AnalysisPass<'a> for Simple<'a> {
+            fn analyse(&mut self, _project: &mut Project) -> Result<(), AnalysisError> {
+                println!("Hello, world; {}!", self.my_mut);
+                *self.my_mut += 1;
+                Ok(())
+            }
+        }
 
         analyses.add_pass(
             "hello-world",
@@ -259,6 +307,35 @@ mod test {
                 Ok(())
             },
         );
+
+        analyses.add_pass(
+            "simple",
+            Simple {
+                my_mut: &mut my_mut,
+            },
+        );
+
+        let mut group = AnalysisGroup::new();
+
+        group.add_pass(|_project: &mut Project, _state: &mut ()| {
+            let my_bloop = &mut my_beep;
+            println!("Hello, world (step 1); {my_bloop}!");
+            *my_bloop += 1;
+            Ok(())
+        });
+
+        group.add_passes([
+            |_project: &mut Project, state: &mut ()| {
+                println!("Hello, world (step 2); state is {state:?}!");
+                Ok(())
+            },
+            |_project: &mut Project, state: &mut ()| {
+                println!("Hello, world (step 3); state is {state:?}!");
+                Ok(())
+            },
+        ]);
+
+        analyses.add_pass("basic-list-hello-world", group.iterated(3));
 
         analyses.add_pass(
             "cond-hello-world",
@@ -287,6 +364,8 @@ mod test {
         );
 
         analyses.analyse(&mut project, "hello-world")?;
+        analyses.analyse(&mut project, "simple")?;
+        analyses.analyse(&mut project, "basic-list-hello-world")?;
         analyses.analyse(&mut project, "cond-hello-world")?;
 
         Ok(())
