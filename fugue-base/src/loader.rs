@@ -40,6 +40,8 @@ pub enum LoaderError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Lifter(#[from] LifterBuilderError),
+    #[error("cannot load object: {0}")]
+    Other(anyhow::Error),
     #[error("cannot load object; unsupported architecture")]
     UnsupportedArch,
 }
@@ -57,6 +59,20 @@ impl LoaderError {
         M: Debug + Display + Send + Sync + 'static,
     {
         Self::Format(anyhow::Error::msg(m))
+    }
+
+    pub fn other<E>(e: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Other(e.into())
+    }
+
+    pub fn other_with<M>(m: M) -> Self
+    where
+        M: Debug + Display + Send + Sync + 'static,
+    {
+        Self::Other(anyhow::Error::msg(m))
     }
 }
 

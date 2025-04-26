@@ -3,6 +3,7 @@ members = [
   "fugue",
   "fugue-arch",
   "fugue-base",
+  "fugue-core-idalib",
   "fugue-bytes",
   "fugue-bv",
   "fugue-fp",
@@ -16,7 +17,7 @@ members = [
   "fugue-specs",
   "fugue-sleigh",
   "fugue-sleigh-language",
-  "fugue-sleigh-semantics",
+  "fugue-sleigh-semantics", "fugue-core-idalib",
 ]
 resolver = "2"
 
