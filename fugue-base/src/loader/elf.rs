@@ -131,21 +131,22 @@ pub fn elf_symbols<'a>(
     let mut section_map = Vec::new();
 
     let base = if is_object {
-        let mut base = 0x10u64;
-
+        let mut base = 0u64;
         for sect in elf.sections() {
-            if sect.size() == 0 {
-                section_map.push(None);
-                continue;
-            }
-
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
+                // NOTE: we could probably panic here
                 section_map.push(None);
                 continue;
             };
 
             if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
                 section_map.push(None);
+                continue;
+            }
+
+            if sect.size() == 0 {
+                section_map.push(None);
+                base += 1; // assume byte alignment (same as IDA Pro)
                 continue;
             }
 
@@ -166,6 +167,8 @@ pub fn elf_symbols<'a>(
             .unwrap_or(0)
             + addr_size as u64
     };
+
+    let aligned_base = (base + addr_size.wrapping_sub(1) as u64) & !(addr_size as u64).wrapping_sub(1);
 
     let mut locals = LocalSymbols::new();
 
@@ -220,7 +223,7 @@ pub fn elf_symbols<'a>(
     // NOTE: this template is used to create a stub for the external symbols, such that
     // if we were to consider the external address as a function, and call to it, we would
     // hit valid code, and return.
-    let mut externs = ExternSymbols::new(base, arch.external_thunk_template());
+    let mut externs = ExternSymbols::new(aligned_base, arch.external_thunk_template());
     let template_size = externs.template().len();
 
     for (index, addr, sym, kind) in syms
@@ -250,7 +253,7 @@ pub fn elf_symbols<'a>(
             }
         })
         .enumerate()
-        .map(|(idx, (oidx, sym, kind))| (oidx, base + (idx * template_size) as u64, sym, kind))
+        .map(|(idx, (oidx, sym, kind))| (oidx, aligned_base + (idx * template_size) as u64, sym, kind))
     {
         let sym = sym.name().ok().map(ustr::ustr);
         externs.add_symbol_with(index, addr, sym, kind);
@@ -425,6 +428,7 @@ where
         locals: &'file LocalSymbols,
         externs: &'file ExternSymbols,
     ) -> Self {
+        let is_object = elf.kind() == ObjectKind::Relocatable;
         Self {
             elf,
             sects: elf.sections(),
@@ -434,7 +438,7 @@ where
             current_base: Address::zero(),
             locals,
             externs: Some(externs),
-            is_object: elf.kind() == ObjectKind::Relocatable,
+            is_object,
         }
     }
 
@@ -476,7 +480,20 @@ where
 
             let size = sect.size();
 
-            if size == 0 || (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+            tracing::trace!(
+                "processing section with size {size}; is allocated: {}",
+                sh_flags as u32 & SHF_ALLOC == SHF_ALLOC
+            );
+
+            let is_alloc = sh_flags as u32 & SHF_ALLOC == SHF_ALLOC;
+
+            if !is_alloc {
+                continue;
+            }
+
+            if size == 0 {
+                // implies alloc. hence we add a gap with 1 byte alignment
+                self.current_base += 1usize;
                 continue;
             }
 

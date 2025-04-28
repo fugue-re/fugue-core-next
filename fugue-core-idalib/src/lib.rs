@@ -104,12 +104,13 @@ impl Loadable for IDABinary {
             }
         }
 
-        // If we have an extern segment, to avoid having to deal with arbitrary relocations
-        // we create a new segment that maps the original extern segment pointers. We can calculate
+        // If we have an extern segment, to avoid having to deal with arbitrary relocations we
+        // create a new segment that maps the original extern segment pointers. We can calculate
         // the size of this segment by dividing the size of the original segment by the address
         // size.
         if let Some(extern_segm) = extern_segm {
-            let count = (extern_segm.end_address() - extern_segm.start_address()) as usize / self.lifter.address_size();
+            let count = (extern_segm.end_address() - extern_segm.start_address()) as usize
+                / self.lifter.address_size();
             end += count * self.architecture.external_thunk_template().len();
         }
 
