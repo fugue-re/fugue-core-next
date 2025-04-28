@@ -168,7 +168,8 @@ pub fn elf_symbols<'a>(
             + addr_size as u64
     };
 
-    let aligned_base = (base + addr_size.wrapping_sub(1) as u64) & !(addr_size as u64).wrapping_sub(1);
+    let aligned_base =
+        (base + addr_size.wrapping_sub(1) as u64) & !(addr_size as u64).wrapping_sub(1);
 
     let mut locals = LocalSymbols::new();
 
@@ -225,6 +226,8 @@ pub fn elf_symbols<'a>(
     // hit valid code, and return.
     let mut externs = ExternSymbols::new(aligned_base, arch.external_thunk_template());
     let template_size = externs.template().len();
+    let aligned_template_size = (template_size + addr_size.wrapping_sub(1) as usize)
+        & !(addr_size as usize).wrapping_sub(1);
 
     for (index, addr, sym, kind) in syms
         .enumerate()
@@ -253,7 +256,14 @@ pub fn elf_symbols<'a>(
             }
         })
         .enumerate()
-        .map(|(idx, (oidx, sym, kind))| (oidx, aligned_base + (idx * template_size) as u64, sym, kind))
+        .map(|(idx, (oidx, sym, kind))| {
+            (
+                oidx,
+                aligned_base + (idx * aligned_template_size) as u64,
+                sym,
+                kind,
+            )
+        })
     {
         let sym = sym.name().ok().map(ustr::ustr);
         externs.add_symbol_with(index, addr, sym, kind);
