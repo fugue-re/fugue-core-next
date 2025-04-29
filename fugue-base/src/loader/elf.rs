@@ -189,7 +189,7 @@ pub fn elf_symbols<'a>(
 
         tracing::trace!(
             "symbol {} in section {:?} at {:#x}",
-            symbol.name().ok().unwrap_or("?"),
+            symbol.name().ok().unwrap_or("<unnamed>"),
             section,
             address
         );
@@ -1262,19 +1262,11 @@ mod test {
             tracing::info!("architecture: {}", elf.architecture());
 
             for sym in elf.locals().iter() {
-                let symbol = sym.symbol();
-                let address = sym.address();
-                let properties = sym.properties();
-
-                tracing::info!("local symbol {symbol:?} at {address}: {properties:?}");
+                tracing::info!("local symbol {sym}");
             }
 
             for sym in elf.externs().iter() {
-                let symbol = sym.symbol();
-                let address = sym.address();
-                let properties = sym.properties();
-
-                tracing::info!("external symbol {symbol:?} at {address}: {properties:?}");
+                tracing::info!("external symbol {sym}");
             }
 
             Ok(())
@@ -1304,19 +1296,11 @@ mod test {
             tracing::info!("architecture: {}", elf.architecture());
 
             for sym in elf.locals().iter() {
-                let symbol = sym.symbol();
-                let address = sym.address();
-                let properties = sym.properties();
-
-                tracing::info!("local symbol {symbol:?} at {address}: {properties:?}");
+                tracing::info!("local symbol {sym}");
             }
 
             for sym in elf.externs().iter() {
-                let symbol = sym.symbol();
-                let address = sym.address();
-                let properties = sym.properties();
-
-                tracing::info!("external symbol {symbol:?} at {address}: {properties:?}");
+                tracing::info!("external symbol {sym}");
             }
 
             Ok(())

@@ -9,6 +9,10 @@ fallible-iterator = "0.3"
 fugue-base = { version = "0.3", path = "../fugue-base" }
 idalib = { version = "0.5", git = "ssh://git@github.com/binarly-io/idalib.git", branch = "feature/processor-metadata-apis" }
 thiserror = "1"
+tracing = "0.1"
 
 [build-dependencies]
 idalib-build = { version = "0.5", git = "ssh://git@github.com/binarly-io/idalib.git", branch = "feature/processor-metadata-apis" }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

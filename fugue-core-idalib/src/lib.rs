@@ -3,6 +3,7 @@ use fallible_iterator::FallibleIterator;
 use fugue_base::arch::Arch;
 use fugue_base::lifter::{Language, Lifter, LifterBuilder};
 use fugue_base::loader::{Loadable, LoadableFromFile, LoadableSegment, LoaderError};
+use fugue_base::memory::SegmentProperties;
 use fugue_base::types::{Address, AttributeMap};
 
 use idalib::idb::IDB;
@@ -92,26 +93,9 @@ impl Loadable for IDABinary {
         let mut start = Address::MAX;
         let mut end = Address::zero();
 
-        let mut extern_segm = None;
-
         for (_, segm) in self.database.segments() {
             start = start.min(segm.start_address().into());
-            // NOTE: we use inclusive ranges
             end = end.max(segm.end_address().wrapping_sub(1).into());
-
-            if segm.r#type().is_extern() {
-                extern_segm = Some(segm);
-            }
-        }
-
-        // If we have an extern segment, to avoid having to deal with arbitrary relocations we
-        // create a new segment that maps the original extern segment pointers. We can calculate
-        // the size of this segment by dividing the size of the original segment by the address
-        // size.
-        if let Some(extern_segm) = extern_segm {
-            let count = (extern_segm.end_address() - extern_segm.start_address()) as usize
-                / self.lifter.address_size();
-            end += count * self.architecture.external_thunk_template().len();
         }
 
         (start, end)
@@ -120,6 +104,62 @@ impl Loadable for IDABinary {
     fn segments<'a>(
         &'a self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
-        fallible_iterator::empty()
+        // NOTE: we take all segments verbatim from IDA except the extern segment; we
+        // opt to patch each entry with the architecture's "external function template",
+        // which amounts to a return instruction, and hence fits in the space available
+        // for all architectures we support.
+
+        let address_size = self.lifter.address_size();
+
+        fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
+            let start = Address::from(segm.start_address());
+            let end = Address::from(segm.end_address().wrapping_sub(1));
+
+            tracing::trace!("loading segment {start}-{end}");
+
+            let name = segm.name().unwrap_or_else(|| String::from("LOAD"));
+            let permissions = segm.permissions();
+            let type_ = segm.r#type();
+
+            let mut properties = SegmentProperties::default();
+
+            if permissions.is_readable() {
+                properties |= SegmentProperties::PERM_READ;
+            }
+
+            if permissions.is_writable() {
+                properties |= SegmentProperties::PERM_WRITE;
+            }
+
+            if permissions.is_executable() {
+                properties |= SegmentProperties::PERM_EXECUTE;
+            }
+
+            if type_.is_bss() {
+                properties |= SegmentProperties::UNINITIALISED;
+            }
+
+            let mut bytes = segm.bytes();
+
+            if type_.is_extern() {
+                properties |= SegmentProperties::EXTERNAL;
+
+                let template = self.architecture.external_thunk_template();
+                let template_len = template.len();
+                let aligned_template_len =
+                    template_len.next_multiple_of(address_size);
+
+                if aligned_template_len > address_size {
+                    tracing::warn!("external thunk template is larger than available space in extern segment; skipping");
+                } else {
+                    tracing::trace!("patching extern segment with external thunk template");
+                    for chunk in bytes.chunks_exact_mut(aligned_template_len) {
+                        chunk[..template_len].copy_from_slice(template.bytes());
+                    }
+                }
+            }
+
+            Ok(LoadableSegment::from_parts(name, start, properties, segm.bytes()))
+        }))
     }
 }

@@ -1,8 +1,10 @@
 use bitflags::bitflags;
 
 bitflags! {
-    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SegmentProperties: u8 {
+        const NONE          = 0b0000_0000;
+
         const PERM_READ     = 0b0000_0001;
         const PERM_WRITE    = 0b0000_0010;
         const PERM_EXECUTE  = 0b0000_0100;

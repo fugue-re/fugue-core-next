@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fmt::Display;
 
 use smallvec::SmallVec;
 use ustr::{Ustr, UstrMap};
@@ -54,6 +55,16 @@ pub struct SymbolEntry {
     properties: SymbolProperties,
 }
 
+impl Display for SymbolEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(sym) = &self.symbol {
+            write!(f, "{sym} at {}; {}", self.address, self.properties)
+        } else {
+            write!(f, "<unnamed> at {}; {}", self.address, self.properties)
+        }
+    }
+}
+
 impl SymbolEntry {
     pub fn new(
         address: Address,
@@ -88,6 +99,24 @@ bitflags::bitflags! {
         const LOCAL    = 0b0000_0010;
         const FUNCTION = 0b0000_0100;
         const DATA     = 0b0000_1000;
+    }
+}
+
+impl Display for SymbolProperties {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut names = self.iter_names();
+
+        let Some((name, _)) = names.next() else {
+            return f.write_str("NONE");
+        };
+
+        f.write_str(name)?;
+
+        for (name, _) in names {
+            write!(f, "|{}", name)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -228,9 +257,7 @@ impl LocalSymbols {
         self.sym_to_addr.contains_key(&sym)
     }
 
-    pub fn iter<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = SymbolEntry> + 'a {
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
         self.addr_to_sym
             .iter()
             .map(|(&addr, (sym, props))| SymbolEntry {
@@ -389,9 +416,7 @@ impl ExternSymbols {
         self.sym_to_addr.contains_key(&sym)
     }
 
-    pub fn iter<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = SymbolEntry> + 'a {
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
         self.addr_to_sym
             .iter()
             .map(|(&addr, (sym, props))| SymbolEntry {
