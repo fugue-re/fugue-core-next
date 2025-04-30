@@ -1001,6 +1001,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
                         resolve_state(&mut dstate)?;
 
+                        if dstate.delay_slot_length() != 0 {
+                            // nested delay slots
+                            return None;
+                        }
+
                         let length = dstate.len();
 
                         if length == 0 || length > (buffer_limit - fall_offset) {
