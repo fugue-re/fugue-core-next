@@ -2,7 +2,10 @@ use fallible_iterator::FallibleIterator;
 
 use fugue_base::arch::Arch;
 use fugue_base::lifter::{Language, Lifter, LifterBuilder};
-use fugue_base::loader::{Loadable, LoadableFromFile, LoadableSegment, LoaderError};
+use fugue_base::loader::symbols::SymbolProperties;
+use fugue_base::loader::{
+    ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
+};
 use fugue_base::memory::SegmentProperties;
 use fugue_base::types::{Address, AttributeMap};
 
@@ -12,7 +15,53 @@ pub struct IDABinary {
     database: IDB,
     architecture: Arch,
     lifter: Lifter,
+    local_symbols: LocalSymbols,
+    extern_symbols: Option<ExternSymbols>,
     attributes: AttributeMap,
+}
+
+fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
+    let mut locals = LocalSymbols::new();
+    let mut externs = db.segment_by_name("extern").map(|segm| {
+        let addr = segm.start_address();
+        let templ = arch.external_thunk_template();
+        let bounds = addr..segm.end_address();
+        (ExternSymbols::new(addr, templ), bounds)
+    });
+
+    // TODO: implement names API for globals
+
+    for (n, fcn) in db.functions() {
+        let addr = fcn.start_address();
+        let name = fcn.name().map(|s| s.into());
+        let props = SymbolProperties::FUNCTION;
+
+        if matches!(externs, Some((_, ref bounds)) if bounds.contains(&fcn.start_address())) {
+            externs
+                .as_mut()
+                .unwrap()
+                .0
+                .add_symbol_with(n, addr, name, props);
+        } else {
+            locals.add_symbol_with(n, addr, name, props);
+        }
+    }
+
+    (locals, externs.map(|(symbols, _)| symbols))
+}
+
+impl IDABinary {
+    pub fn database(&self) -> &IDB {
+        &self.database
+    }
+
+    pub fn locals(&self) -> &LocalSymbols {
+        &self.local_symbols
+    }
+
+    pub fn externs(&self) -> Option<&ExternSymbols> {
+        self.extern_symbols.as_ref()
+    }
 }
 
 impl LoadableFromFile for IDABinary {
@@ -59,10 +108,14 @@ impl LoadableFromFile for IDABinary {
         let lifter = builder.build().map_err(LoaderError::other)?;
         let architecture = Arch::new(lifter.language());
 
+        let (local_symbols, extern_symbols) = ida_symbols(&architecture, &database);
+
         Ok(IDABinary {
             database,
             architecture,
             lifter,
+            local_symbols,
+            extern_symbols,
             attributes,
         })
     }
@@ -87,6 +140,14 @@ impl Loadable for IDABinary {
 
     fn lifter(&self) -> Lifter {
         self.lifter.clone()
+    }
+
+    fn local_symbols(&self) -> Option<&LocalSymbols> {
+        Some(&self.local_symbols)
+    }
+
+    fn extern_symbols(&self) -> Option<&ExternSymbols> {
+        self.extern_symbols.as_ref()
     }
 
     fn segment_range(&self) -> (Address, Address) {

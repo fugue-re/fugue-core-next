@@ -120,6 +120,28 @@ impl Display for SymbolProperties {
     }
 }
 
+impl SymbolProperties {
+    pub fn new() -> Self {
+        Self::NONE
+    }
+
+    pub fn is_extern(self) -> bool {
+        self.contains(SymbolProperties::EXTERN)
+    }
+
+    pub fn is_local(self) -> bool {
+        self.contains(SymbolProperties::LOCAL)
+    }
+
+    pub fn is_function(self) -> bool {
+        self.contains(SymbolProperties::FUNCTION)
+    }
+
+    pub fn is_data(self) -> bool {
+        self.contains(SymbolProperties::DATA)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LocalSymbols {
     indices: BTreeMap<usize, Address>,
@@ -302,7 +324,7 @@ impl ExternSymbols {
         addr: impl Into<Address>,
         symbol: impl Into<Option<Ustr>>,
     ) {
-        Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::LOCAL)
+        Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::EXTERN)
     }
 
     pub fn add_symbol_with(
