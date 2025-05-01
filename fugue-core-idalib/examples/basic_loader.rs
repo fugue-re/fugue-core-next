@@ -23,15 +23,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tracing::info!("architecture: {}", binary.architecture());
 
-        /*
         for sym in binary.locals().iter() {
             tracing::info!("local symbol {sym}");
         }
 
-        for sym in binary.externs().iter() {
+        for sym in binary
+            .externs()
+            .map(|externs| externs.iter())
+            .into_iter()
+            .flatten()
+        {
             tracing::info!("external symbol {sym}");
         }
-        */
 
         Ok(())
     })

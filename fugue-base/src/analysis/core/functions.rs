@@ -24,7 +24,8 @@ pub struct ControlFlowRecovery {
     candidates: VecDeque<Address>,
 }
 
-struct FunctionBuilder {
+pub struct FunctionBuilder {
+    entry: Address,
     candidates: VecDeque<Address>,
     local_targets: BTreeSet<Address>,
     global_targets: BTreeSet<Address>,
@@ -87,10 +88,15 @@ impl AnalysisPass<'_> for ControlFlowRecovery {
 impl FunctionBuilder {
     pub fn new() -> Self {
         FunctionBuilder {
+            entry: Address::zero(),
             candidates: VecDeque::new(),
             local_targets: BTreeSet::new(),
             global_targets: BTreeSet::new(),
         }
+    }
+
+    pub fn entry(&self) -> Address {
+        self.entry
     }
 
     pub fn add_candidate(&mut self, address: impl Into<Address>) {
@@ -103,6 +109,7 @@ impl FunctionBuilder {
     }
 
     pub fn clear(&mut self) {
+        self.entry = Address::zero();
         self.candidates.clear();
         self.local_targets.clear();
         self.global_targets.clear();
@@ -113,9 +120,8 @@ impl FunctionBuilder {
 
         tracing::debug!("exploring from {candidate}");
 
-        self.candidates.clear();
-        self.local_targets.clear();
-        self.global_targets.clear();
+        self.clear();
+        self.entry = candidate;
 
         self.candidates.push_back(candidate);
 

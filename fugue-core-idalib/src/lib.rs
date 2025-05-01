@@ -1,5 +1,7 @@
 use fallible_iterator::FallibleIterator;
 
+use fugue_base::analysis::core::functions::{ControlFlowRecovery, FunctionBuilder};
+use fugue_base::analysis::{AnalysisError, AnalysisPass};
 use fugue_base::arch::Arch;
 use fugue_base::lifter::{Language, Lifter, LifterBuilder};
 use fugue_base::loader::symbols::SymbolProperties;
@@ -7,9 +9,10 @@ use fugue_base::loader::{
     ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
 };
 use fugue_base::memory::SegmentProperties;
+use fugue_base::project::Project;
 use fugue_base::types::{Address, AttributeMap};
 
-use idalib::idb::IDB;
+use idalib::idb::{IDBOpenOptions, IDB};
 
 pub struct IDABinary {
     database: IDB,
@@ -75,8 +78,16 @@ impl LoadableFromFile for IDABinary {
         let path = path.as_ref();
         let attributes = attributes.into();
 
-        // NOTE: we likely want to add an API to tell IDA where to store the database...
-        let database = IDB::open_with(path, true, false).map_err(LoaderError::other)?;
+        let mut database_opts = IDBOpenOptions::new();
+
+        database_opts.save(false);
+        database_opts.auto_analyse(true);
+
+        if let Some(idb) = attributes.get_attr::<String>("idb.path") {
+            database_opts.idb(idb);
+        }
+
+        let database = database_opts.open(path).map_err(LoaderError::other)?;
         let processor = database.processor();
 
         let is_32 = database.meta().is_32bit_exactly();
@@ -222,5 +233,68 @@ impl Loadable for IDABinary {
 
             Ok(LoadableSegment::from_parts(name, start, properties, segm.bytes()))
         }))
+    }
+}
+
+pub struct IDAFunctionRecovery<'a> {
+    database: &'a IDB,
+}
+
+impl<'a> IDAFunctionRecovery<'a> {
+    pub fn new(database: &'a IDB) -> Self {
+        IDAFunctionRecovery { database }
+    }
+}
+
+impl<'a> AnalysisPass<'a, ControlFlowRecovery> for IDAFunctionRecovery<'a> {
+    fn analyse_with(
+        &mut self,
+        project: &mut Project,
+        state: &mut ControlFlowRecovery,
+    ) -> Result<(), AnalysisError> {
+        let extern_bounds = project.extern_symbols().map(|externs| externs.bounds());
+        for (_, f) in self.database.functions() {
+            let addr = Address::from(f.start_address());
+            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
+                continue;
+            }
+            state.add_candidate(addr);
+        }
+        Ok(())
+    }
+}
+
+pub struct IDAFunctionBuilder<'a> {
+    database: &'a IDB,
+}
+
+impl<'a> IDAFunctionBuilder<'a> {
+    pub fn new(database: &'a IDB) -> Self {
+        IDAFunctionBuilder { database }
+    }
+}
+
+impl<'a> AnalysisPass<'a, FunctionBuilder> for IDAFunctionBuilder<'a> {
+    fn analyse_with(
+        &mut self,
+        _project: &mut Project,
+        builder: &mut FunctionBuilder,
+    ) -> Result<(), AnalysisError> {
+        let entry = builder.entry();
+        let Some(f) = self.database.function_at(entry.into()) else {
+            return Ok(());
+        };
+
+        let Ok(cfg) = f.cfg() else {
+            return Ok(());
+        };
+
+        for block in cfg.blocks() {
+            builder.add_candidate(block.start_address());
+        }
+
+        // TODO: we need to add support for hinting block edges
+
+        Ok(())
     }
 }

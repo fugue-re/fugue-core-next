@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt::Display;
+use std::ops::RangeInclusive;
 
 use smallvec::SmallVec;
 use ustr::{Ustr, UstrMap};
@@ -361,6 +362,10 @@ impl ExternSymbols {
         } else {
             self.base() + self.size() - 1usize
         }
+    }
+
+    pub fn bounds(&self) -> RangeInclusive<Address> {
+        self.base()..=self.last_address()
     }
 
     pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Ustr>, SymbolProperties)> {
