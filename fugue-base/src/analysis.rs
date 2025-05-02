@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::project::Project;
@@ -19,7 +20,7 @@ pub enum AnalysisError {
 pub type NoState = ();
 
 pub struct AnalysisManager<'a, S: 'a = NoState> {
-    passes: HashMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
+    passes: IndexMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
 impl<'a, S> AnalysisManager<'a, S>
@@ -28,7 +29,7 @@ where
 {
     pub fn new() -> Self {
         AnalysisManager {
-            passes: HashMap::new(),
+            passes: IndexMap::new(),
         }
     }
 
@@ -114,14 +115,15 @@ where
 }
 
 pub struct AnalysisGroup<'a, S: 'a = NoState> {
-    passes: Vec<Box<dyn AnalysisPass<'a, S> + 'a>>,
+    passes: IndexMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
-impl<'a, S, P> FromIterator<P> for AnalysisGroup<'a, S>
+impl<'a, S, N, P> FromIterator<(N, P)> for AnalysisGroup<'a, S>
 where
+    N: Into<String>,
     P: AnalysisPass<'a, S> + 'a,
 {
-    fn from_iter<T: IntoIterator<Item = P>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item = (N, P)>>(iter: T) -> Self {
         let mut group = AnalysisGroup::new();
         group.add_passes(iter);
         group
@@ -133,18 +135,23 @@ where
     S: 'a,
 {
     pub fn new() -> Self {
-        AnalysisGroup { passes: Vec::new() }
+        AnalysisGroup {
+            passes: IndexMap::new(),
+        }
     }
 
-    pub fn add_pass(&mut self, pass: impl AnalysisPass<'a, S> + 'a) {
-        self.passes.push(Box::new(pass));
+    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<'a, S> + 'a) {
+        self.passes.insert(name.into(), Box::new(pass));
     }
 
-    pub fn add_passes(&mut self, passes: impl IntoIterator<Item = impl AnalysisPass<'a, S> + 'a>) {
+    pub fn add_passes(
+        &mut self,
+        passes: impl IntoIterator<Item = (impl Into<String>, impl AnalysisPass<'a, S> + 'a)>,
+    ) {
         self.passes.extend(
             passes
                 .into_iter()
-                .map(|pass| Box::new(pass) as Box<dyn AnalysisPass<S>>),
+                .map(|(name, pass)| (name.into(), Box::new(pass) as Box<dyn AnalysisPass<S>>)),
         );
     }
 }
@@ -154,7 +161,7 @@ where
     S: 'a,
 {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
-        for pass in self.passes.iter_mut() {
+        for pass in self.passes.values_mut() {
             pass.analyse_with(project, state)?;
         }
         Ok(())
@@ -328,7 +335,7 @@ mod test {
 
         let mut group = AnalysisGroup::new();
 
-        group.add_pass(|_project: &mut Project, _state: &mut NoState| {
+        group.add_pass("bloop-step", |_project: &mut Project, _state: &mut NoState| {
             let my_bloop = &mut my_beep;
             println!("Hello, world (step 1); {my_bloop}!");
             *my_bloop += 1;
@@ -336,14 +343,14 @@ mod test {
         });
 
         group.add_passes([
-            |_project: &mut Project, state: &mut NoState| {
+            ("step1", |_project: &mut Project, state: &mut NoState| {
                 println!("Hello, world (step 2); state is {state:?}!");
                 Ok(())
-            },
-            |_project: &mut Project, state: &mut NoState| {
+            }),
+            ("step2", |_project: &mut Project, state: &mut NoState| {
                 println!("Hello, world (step 3); state is {state:?}!");
                 Ok(())
-            },
+            }),
         ]);
 
         analyses.add_pass("basic-list-hello-world", group.iterated(3));
@@ -351,24 +358,24 @@ mod test {
         analyses.add_pass(
             "cond-hello-world",
             AnalysisGroup::from_iter([
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                ("step1", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 1); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 1);
                     Ok(())
-                },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                }),
+                ("step2", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 2); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 2);
                     Ok(())
-                },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                }),
+                ("step3", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 3); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 3);
                     Ok(())
-                },
+                }),
             ])
             .iterated(5)
             .with_state(Vec::new()),
@@ -384,26 +391,26 @@ mod test {
         analyses.add_pass(
             "cond-hello-world",
             AnalysisGroup::from_iter([
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                ("step1", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 1); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 1);
                     Ok(())
-                },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                }),
+                ("step2", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 2); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 2);
                     Ok(())
-                },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                }),
+                ("step3", |_project: &mut Project, state: &mut Vec<usize>| {
                     println!("Hello, world (step 3); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 3);
                     Ok(())
-                },
+                }),
             ])
-            .iterated(5)
+            .iterated(5),
         );
 
         analyses.analyse_with(&mut project, "cond-hello-world", &mut Vec::new())?;

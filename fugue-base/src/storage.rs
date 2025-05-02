@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::loader::{Loadable, LoadableSegment, LoaderError};
 use crate::types::Address;
 
-pub mod mdbx;
+// pub mod mdbx;
 pub mod memmap;
 
 pub use memmap::{MemoryMappedStorage, MemoryMappedStorageError};
