@@ -4,40 +4,41 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use itertools::Itertools;
 
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::lifter::{LiftedInsnTargetKind, LifterExt};
+use crate::lifter::LifterExt as _;
+use crate::entities::flow_graph::{FlowKind, FlowTarget};
 use crate::project::Project;
 use crate::storage::StorageProvider;
 use crate::types::Address;
 
-pub struct ControlFlowRecoveryConfig {
+pub struct FunctionRecoveryConfig {
     pub max_blocks: usize,
 }
 
-impl Default for ControlFlowRecoveryConfig {
+impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
-        ControlFlowRecoveryConfig { max_blocks: 65536 }
+        FunctionRecoveryConfig { max_blocks: 65536 }
     }
 }
 
-pub struct ControlFlowRecovery {
-    config: ControlFlowRecoveryConfig,
+pub struct FunctionRecovery {
+    config: FunctionRecoveryConfig,
     candidates: VecDeque<Address>,
 }
 
 pub struct FunctionBuilder {
     entry: Address,
     candidates: VecDeque<Address>,
-    local_targets: BTreeSet<Address>,
+    local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<Address>,
 }
 
-impl ControlFlowRecovery {
+impl FunctionRecovery {
     pub fn new() -> Self {
-        ControlFlowRecovery::new_with(ControlFlowRecoveryConfig::default())
+        FunctionRecovery::new_with(FunctionRecoveryConfig::default())
     }
 
-    pub fn new_with(config: ControlFlowRecoveryConfig) -> Self {
-        ControlFlowRecovery {
+    pub fn new_with(config: FunctionRecoveryConfig) -> Self {
+        FunctionRecovery {
             config,
             candidates: VecDeque::new(),
         }
@@ -53,7 +54,7 @@ impl ControlFlowRecovery {
     }
 }
 
-impl AnalysisPass<'_> for ControlFlowRecovery {
+impl AnalysisPass<'_> for FunctionRecovery {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         let mut builder = FunctionBuilder::new();
 
@@ -108,6 +109,16 @@ impl FunctionBuilder {
             .extend(addresses.into_iter().map(|addr| addr.into()));
     }
 
+    pub fn add_local_target(
+        &mut self,
+        from: impl Into<Address>,
+        to: impl Into<Address>,
+        kind: FlowKind,
+    ) {
+        self.local_targets
+            .insert(FlowTarget::new(from.into(), to.into(), kind));
+    }
+
     pub fn clear(&mut self) {
         self.entry = Address::zero();
         self.candidates.clear();
@@ -136,7 +147,7 @@ impl FunctionBuilder {
                     continue 'outer;
                 }
 
-                if !self.local_targets.insert(block) {
+                if insns.contains_key(&block) {
                     continue;
                 }
 
@@ -175,16 +186,19 @@ impl FunctionBuilder {
                                 // These targets are what we can statically compute by scanning
                                 // the instruction's PCode branch operations--we will miss things
                                 // like PC relative jumps.
-                                for (kind, target) in insn.iter_targets() {
-                                    match kind {
-                                        LiftedInsnTargetKind::Local => {
-                                            if !self.local_targets.contains(&target) {
-                                                self.candidates.push_back(target);
-                                            }
+                                for (target, kind, addr) in insn.iter_targets() {
+                                    if kind.is_local() {
+                                        let Some(target) =
+                                            FlowTarget::from_insn_target(insn, target, addr)
+                                        else {
+                                            continue;
+                                        };
+
+                                        if self.local_targets.insert(target) {
+                                            self.candidates.push_back(addr);
                                         }
-                                        LiftedInsnTargetKind::Global => {
-                                            self.global_targets.insert(target);
-                                        }
+                                    } else {
+                                        self.global_targets.insert(addr);
                                     }
                                 }
                             }
@@ -214,8 +228,9 @@ impl FunctionBuilder {
             let mut iblocks = self
                 .local_targets
                 .iter()
+                .map(|target| target.from())
                 .skip(1)
-                .chain(std::iter::once(&Address::MAX));
+                .chain(std::iter::once(Address::MAX));
 
             // Targets may contain invalid addresses...
             let mut blocks = Vec::new();
@@ -223,7 +238,7 @@ impl FunctionBuilder {
             while let Some(next_block_start) = iblocks.next() {
                 blocks.push(
                     iinsns
-                        .peeking_take_while(|(start, _)| *start < next_block_start)
+                        .peeking_take_while(|(start, _)| **start < next_block_start)
                         .collect::<Vec<_>>(),
                 );
             }
@@ -267,7 +282,7 @@ mod test {
                     ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
                 ],
             )?;
-            let mut cfr = ControlFlowRecovery::new();
+            let mut cfr = FunctionRecovery::new();
 
             cfr.analyse(&mut project)?;
 

@@ -221,14 +221,14 @@ impl LiftedInsn {
 
     pub fn iter_targets<'a>(
         &'a self,
-    ) -> impl Iterator<Item = (LiftedInsnTargetKind, Address)> + 'a {
+    ) -> impl Iterator<Item = (&'a LiftedInsnTarget, LiftedInsnTargetKind, Address)> + 'a {
         use LiftedInsnTarget::*;
         use LiftedInsnTargetKind::*;
 
         self.targets.iter().filter_map(|(_, target)| match *target {
-            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
-            InterBlk(taken) => Some((Local, taken)),
-            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((Global, taken)),
+            IntraBlk(taken, _) if taken.position() == 0 => Some((target, Local, taken.address())),
+            InterBlk(taken) => Some((target, Local, taken)),
+            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((target, Global, taken)),
             _ => None,
         })
     }

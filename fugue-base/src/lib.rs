@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod arch;
+pub mod entities;
 pub mod loader;
 pub mod lifter;
 pub mod memory;

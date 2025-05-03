@@ -1,8 +1,9 @@
 use fallible_iterator::FallibleIterator;
 
-use fugue_base::analysis::core::functions::{ControlFlowRecovery, FunctionBuilder};
+use fugue_base::analysis::core::functions::{FunctionBuilder, FunctionRecovery};
 use fugue_base::analysis::{AnalysisError, AnalysisPass};
 use fugue_base::arch::Arch;
+use fugue_base::entities::flow_graph::FlowKind;
 use fugue_base::lifter::{Language, Lifter, LifterBuilder};
 use fugue_base::loader::symbols::SymbolProperties;
 use fugue_base::loader::{
@@ -246,11 +247,11 @@ impl<'a> IDAFunctionRecovery<'a> {
     }
 }
 
-impl<'a> AnalysisPass<'a, ControlFlowRecovery> for IDAFunctionRecovery<'a> {
+impl<'a> AnalysisPass<'a, FunctionRecovery> for IDAFunctionRecovery<'a> {
     fn analyse_with(
         &mut self,
         project: &mut Project,
-        state: &mut ControlFlowRecovery,
+        state: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
         let extern_bounds = project.extern_symbols().map(|externs| externs.bounds());
         for (_, f) in self.database.functions() {
@@ -289,11 +290,31 @@ impl<'a> AnalysisPass<'a, FunctionBuilder> for IDAFunctionBuilder<'a> {
             return Ok(());
         };
 
-        for block in cfg.blocks() {
+        let last_insns = cfg
+            .blocks()
+            .map(|b| {
+                let mut addr = b.start_address();
+                loop {
+                    let insn = self
+                        .database
+                        .insn_at(addr.into())
+                        .expect("valid instruction");
+                    if insn.is_basic_block_end(false) {
+                        return insn.address();
+                    }
+                    addr += insn.len() as u64;
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (i, block) in cfg.blocks().enumerate() {
+            let last_insn = last_insns[i];
+            for succ in block.succs_with(&cfg) {
+                // TODO: classify edges correctly
+                builder.add_local_target(last_insn, succ.start_address(), FlowKind::Branch);
+            }
             builder.add_candidate(block.start_address());
         }
-
-        // TODO: we need to add support for hinting block edges
 
         Ok(())
     }

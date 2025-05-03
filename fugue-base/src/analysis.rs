@@ -404,6 +404,9 @@ where
     }
 }
 
+// NOTE: AnalysisPass here will always be AnalysisPass<NoState>; this means that we
+// cannot implement `as_group` or `as_group_mut` for `StatefulAnalysis` as it would
+// require `S` to be `NoState` as well.
 impl<'a, S> AnalysisPass<'a> for StatefulAnalysis<'a, S>
 where
     S: 'a,
@@ -562,6 +565,15 @@ mod test {
         for (name, _pass) in g1.passes() {
             println!("pass: {name}");
         }
+
+        let g2 = analyses
+            .get_pass("cond-hello-world")
+            .unwrap()
+            .as_group();
+
+        // NOTE: here g2 will be None, because with_state erases the inner state type.
+
+        assert!(g2.is_none());
 
         let mut analyses = AnalysisManager::<Vec<usize>>::new();
 
