@@ -6,7 +6,7 @@ use fugue_lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 use fugue_lifter::{Language, Varnode};
 
 use crate::arch::{Arch, ArchImpl, Flag};
-use crate::loader::symbols::FunctionThunkTemplate;
+use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),
@@ -27,8 +27,8 @@ pub struct X86_64 {
 }
 
 impl ArchImpl for X86_64 {
-    fn external_thunk_template(&self) -> FunctionThunkTemplate {
-        FunctionThunkTemplate::new([0xc3])
+    fn external_function_template(&self) -> ExternFunctionTemplate {
+        ExternFunctionTemplate::new([0xc3])
     }
 
     fn flags(&self) -> &[Flag] {

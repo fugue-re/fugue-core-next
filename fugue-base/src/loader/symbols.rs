@@ -6,16 +6,16 @@ use std::ops::RangeInclusive;
 use smallvec::SmallVec;
 use ustr::{Ustr, UstrMap};
 
-use crate::lifter::ContextUpdates;
+use crate::lifter::ContextSet;
 use crate::types::Address;
 
 #[derive(Debug, Clone)]
-pub struct FunctionThunkTemplate {
+pub struct ExternFunctionTemplate {
     bytes: SmallVec<[u8; 16]>,
-    context: ContextUpdates,
+    context: ContextSet,
 }
 
-impl<T> From<T> for FunctionThunkTemplate
+impl<T> From<T> for ExternFunctionTemplate
 where
     T: AsRef<[u8]>,
 {
@@ -24,12 +24,12 @@ where
     }
 }
 
-impl FunctionThunkTemplate {
+impl ExternFunctionTemplate {
     pub fn new(bytes: impl AsRef<[u8]>) -> Self {
-        Self::new_with(bytes, ContextUpdates::default())
+        Self::new_with(bytes, ContextSet::default())
     }
 
-    pub fn new_with(bytes: impl AsRef<[u8]>, context: ContextUpdates) -> Self {
+    pub fn new_with(bytes: impl AsRef<[u8]>, context: ContextSet) -> Self {
         Self {
             bytes: SmallVec::from_slice(bytes.as_ref()),
             context,
@@ -40,7 +40,7 @@ impl FunctionThunkTemplate {
         &self.bytes
     }
 
-    pub fn context(&self) -> &ContextUpdates {
+    pub fn context(&self) -> &ContextSet {
         &self.context
     }
 
@@ -305,11 +305,11 @@ pub struct ExternSymbols {
     indices: BTreeMap<usize, Address>,
     sym_to_addr: UstrMap<Address>,
     addr_to_sym: BTreeMap<Address, (Option<Ustr>, Cell<SymbolProperties>)>,
-    template: FunctionThunkTemplate,
+    template: ExternFunctionTemplate,
 }
 
 impl ExternSymbols {
-    pub fn new(base: impl Into<Address>, template: FunctionThunkTemplate) -> Self {
+    pub fn new(base: impl Into<Address>, template: ExternFunctionTemplate) -> Self {
         Self {
             base: base.into(),
             indices: BTreeMap::new(),
@@ -453,7 +453,7 @@ impl ExternSymbols {
             })
     }
 
-    pub fn template(&self) -> &FunctionThunkTemplate {
+    pub fn template(&self) -> &ExternFunctionTemplate {
         &self.template
     }
 

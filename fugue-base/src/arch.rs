@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 use fugue_lifter::{Language, Varnode};
 
-use crate::loader::symbols::FunctionThunkTemplate;
+use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Endian;
 
 pub mod aarch64;
@@ -103,7 +103,7 @@ pub trait ArchImpl: Send + Sync + 'static {
         }
     }
 
-    fn external_thunk_template(&self) -> FunctionThunkTemplate;
+    fn external_function_template(&self) -> ExternFunctionTemplate;
 
     fn flags(&self) -> &[Flag] {
         &[]
@@ -223,8 +223,8 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn external_thunk_template(&self) -> FunctionThunkTemplate {
-        self.0.external_thunk_template()
+    pub fn external_thunk_template(&self) -> ExternFunctionTemplate {
+        self.0.external_function_template()
     }
 
     pub fn flags(&self) -> &[Flag] {

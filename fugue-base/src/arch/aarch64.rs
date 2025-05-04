@@ -5,7 +5,7 @@ use fugue_lifter::aarch64::le::register::{
 use fugue_lifter::{Language, Varnode};
 
 use crate::arch::{Arch, ArchImpl};
-use crate::loader::symbols::FunctionThunkTemplate;
+use crate::loader::symbols::ExternFunctionTemplate;
 
 const GPRS: &[Varnode] = &[
     X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
@@ -18,8 +18,8 @@ pub struct AArch64 {
 }
 
 impl ArchImpl for AArch64 {
-    fn external_thunk_template(&self) -> FunctionThunkTemplate {
-        FunctionThunkTemplate::new([0xc0, 0x03, 0x5f, 0xd6]) // RET
+    fn external_function_template(&self) -> ExternFunctionTemplate {
+        ExternFunctionTemplate::new([0xc0, 0x03, 0x5f, 0xd6]) // RET
     }
 
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {

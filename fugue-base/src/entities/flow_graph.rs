@@ -1,4 +1,4 @@
-use crate::lifter::{LiftedInsn, LiftedInsnTarget};
+use crate::entities::{Insn, InsnTarget};
 use crate::types::Address;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,8 +17,8 @@ pub enum FlowKind {
 }
 
 impl FlowKind {
-    pub fn from_insn_target(insn: &LiftedInsn, target: &LiftedInsnTarget) -> Option<Self> {
-        use LiftedInsnTarget::*;
+    pub fn from_insn_target(insn: &Insn, target: &InsnTarget) -> Option<Self> {
+        use InsnTarget::*;
 
         let kind = match target {
             IntraBlk(target, false) if target.position() == 0 => {
@@ -101,8 +101,8 @@ impl FlowTarget {
     }
 
     pub fn from_insn_target(
-        insn: &LiftedInsn,
-        target: &LiftedInsnTarget,
+        insn: &Insn,
+        target: &InsnTarget,
         to: impl Into<Address>,
     ) -> Option<Self> {
         let kind = FlowKind::from_insn_target(insn, target)?;
