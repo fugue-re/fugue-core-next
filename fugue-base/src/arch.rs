@@ -7,8 +7,9 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 use fugue_lifter::{Language, Varnode};
 
+use crate::lifter::ContextSet;
 use crate::loader::symbols::ExternFunctionTemplate;
-use crate::types::Endian;
+use crate::types::{Address, Endian};
 
 pub mod aarch64;
 pub mod arm;
@@ -101,6 +102,11 @@ pub trait ArchImpl: Send + Sync + 'static {
         } else {
             Endian::Big
         }
+    }
+
+    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+        let naddr = addr.wrap(self.language());
+        (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate;
@@ -221,6 +227,10 @@ impl Arch {
 
     pub fn endian(&self) -> Endian {
         self.0.endian()
+    }
+
+    pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+        self.0.canonicalise_address(addr)
     }
 
     pub fn external_thunk_template(&self) -> ExternFunctionTemplate {

@@ -7,6 +7,7 @@ use fugue_lifter::{Language, Varnode};
 use crate::arch::{Arch, ArchImpl};
 use crate::lifter::ContextSet;
 use crate::loader::symbols::ExternFunctionTemplate;
+use crate::types::Address;
 
 const GPRS: &[Varnode] = &[
     R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
@@ -18,6 +19,13 @@ pub struct Arm {
 }
 
 impl ArchImpl for Arm {
+    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+        let t_mode = (addr.offset() & 0x1) as u32;
+        // TODO: check if ARM ldef will remove the LSB.
+        let naddr = addr.wrap(self.language());
+        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
+    }
+
     fn external_function_template(&self) -> ExternFunctionTemplate {
         if self.language.variant().ends_with("T") {
             let mut bytes = [0x70, 0x47];

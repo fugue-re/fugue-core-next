@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use itertools::Itertools;
 
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::lifter::LifterExt as _;
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
+use crate::lifter::{ContextSet, LifterExt as _};
 use crate::project::Project;
 use crate::storage::StorageProvider;
 use crate::types::Address;
@@ -16,18 +16,18 @@ pub struct FunctionRecoveryConfig {
 
 impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
-        FunctionRecoveryConfig { max_blocks: 65536 }
+        FunctionRecoveryConfig { max_blocks: 0x10000 }
     }
 }
 
 pub struct FunctionRecovery {
     config: FunctionRecoveryConfig,
-    candidates: VecDeque<Address>,
+    candidates: VecDeque<(Address, ContextSet)>,
 }
 
 pub struct FunctionBuilder {
     entry: Address,
-    candidates: VecDeque<Address>,
+    candidates: VecDeque<(Address, ContextSet)>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<Address>,
 }
@@ -45,12 +45,30 @@ impl FunctionRecovery {
     }
 
     pub fn add_candidate(&mut self, address: impl Into<Address>) {
-        self.candidates.push_back(address.into());
+        self.add_candidate_with_context(address, ContextSet::new());
+    }
+
+    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
+        self.candidates.push_back((address.into(), context));
     }
 
     pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.candidates
-            .extend(addresses.into_iter().map(|addr| addr.into()));
+        self.add_candidates_with_context(
+            addresses
+                .into_iter()
+                .zip(std::iter::repeat(ContextSet::new())),
+        );
+    }
+
+    pub fn add_candidates_with_context(
+        &mut self,
+        candidates: impl IntoIterator<Item = (impl Into<Address>, ContextSet)>,
+    ) {
+        self.candidates.extend(
+            candidates
+                .into_iter()
+                .map(|(addr, context)| (addr.into(), context)),
+        );
     }
 }
 
@@ -72,12 +90,12 @@ impl AnalysisPass<'_> for FunctionRecovery {
             self.add_candidate(symbol.address());
         }
 
-        while let Some(address) = self.candidates.pop_front() {
+        while let Some((address, context)) = self.candidates.pop_front() {
             if !project.storage.contains_segment(address) {
                 tracing::trace!("skipping {address}: not mapped");
             }
 
-            let _f = builder.analyse(project, address);
+            let _f = builder.analyse(project, address, context);
 
             self.add_candidates(builder.global_targets.iter().copied());
         }
@@ -101,12 +119,30 @@ impl FunctionBuilder {
     }
 
     pub fn add_candidate(&mut self, address: impl Into<Address>) {
-        self.candidates.push_back(address.into());
+        self.add_candidate_with_context(address, ContextSet::new());
+    }
+
+    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
+        self.candidates.push_back((address.into(), context));
     }
 
     pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.candidates
-            .extend(addresses.into_iter().map(|addr| addr.into()));
+        self.add_candidates_with_context(
+            addresses
+                .into_iter()
+                .zip(std::iter::repeat(ContextSet::new())),
+        );
+    }
+
+    pub fn add_candidates_with_context(
+        &mut self,
+        candidates: impl IntoIterator<Item = (impl Into<Address>, ContextSet)>,
+    ) {
+        self.candidates.extend(
+            candidates
+                .into_iter()
+                .map(|(addr, context)| (addr.into(), context)),
+        );
     }
 
     pub fn add_local_target(
@@ -126,7 +162,12 @@ impl FunctionBuilder {
         self.global_targets.clear();
     }
 
-    pub fn analyse(&mut self, project: &mut Project, address: impl Into<Address>) {
+    pub fn analyse(
+        &mut self,
+        project: &mut Project,
+        address: impl Into<Address>,
+        context: ContextSet,
+    ) {
         let candidate = address.into();
 
         tracing::debug!("exploring from {candidate}");
@@ -134,24 +175,32 @@ impl FunctionBuilder {
         self.clear();
         self.entry = candidate;
 
-        self.candidates.push_back(candidate);
+        self.candidates.push_back((candidate, context));
 
         let mut insns = BTreeMap::<Address, _>::new();
         let mut bytes = [0u8; 32];
 
         'pass: loop {
             // This is the stage where we build blocks by collecting instructions and marking them.
-            'outer: while let Some(block) = self.candidates.pop_front() {
+            'outer: while let Some((block, context)) = self.candidates.pop_front() {
                 if !project.storage.contains_segment(block) {
                     tracing::trace!("skipping {block}: not mapped");
                     continue 'outer;
                 }
+
+                // TODO: apply architecture-specific alignment check and context derivation
+                // for the address.
+                //
+                // For example, on ARM/Thumb we need to check the LSB of the address and mask
+                // it out, while returning a context that ensures the Thumb mode is set.
 
                 if insns.contains_key(&block) {
                     continue;
                 }
 
                 let mut offset = 0usize;
+
+                context.apply(block, project.lifter.context_mut());
 
                 '_inner: loop {
                     let address = block + offset;
@@ -195,7 +244,8 @@ impl FunctionBuilder {
                                         };
 
                                         if self.local_targets.insert(target) {
-                                            self.candidates.push_back(addr);
+                                            // TODO: derive the context from the address via the architecture
+                                            self.candidates.push_back((addr, ContextSet::new()));
                                         }
                                     } else {
                                         self.global_targets.insert(addr);

@@ -344,6 +344,12 @@ impl Address {
         let upper = *self + size;
         *self <= upper && self.in_space_bounds(language) && upper.in_space_bounds(language)
     }
+
+    pub fn wrap_and_align(&self, language: &Language) -> Address {
+        let alignment = language.address_alignment() as u64;
+        let offset = self.offset() & !(alignment - 1);
+        Address(offset).wrap(language)
+    }
 }
 
 pub trait ToAddress {

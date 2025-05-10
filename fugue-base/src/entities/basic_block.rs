@@ -5,6 +5,7 @@ use crate::types::Address;
 pub struct BasicBlock {
     start: Address,
     len: usize,
+    properties: BasicBlockProperties,
     context: ContextSet,
 }
 
@@ -20,7 +21,7 @@ bitflags::bitflags! {
         const NON_RETURNING = 0x0000_0004;
         /// The block ends in a call to another function.
         const CALL          = 0x0000_0008;
-        /// The block ends in a tail call.
+        /// The block ends in a tail call to another function.
         const TAIL_CALL     = 0x0000_0010;
         /// The block has unresolved control flow.
         const UNRESOLVED    = 0x0000_0020;
@@ -36,6 +37,7 @@ impl BasicBlock {
         BasicBlock {
             start,
             len,
+            properties: BasicBlockProperties::NONE,
             context,
         }
     }
@@ -46,6 +48,55 @@ impl BasicBlock {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn mark_entry(&mut self) {
+        self.properties.insert(BasicBlockProperties::ENTRY);
+    }
+
+    pub fn mark_exit(&mut self) {
+        self.properties.insert(BasicBlockProperties::EXIT);
+    }
+
+    pub fn mark_non_returning(&mut self) {
+        self.properties.insert(BasicBlockProperties::NON_RETURNING);
+    }
+
+    pub fn mark_call(&mut self) {
+        self.properties.insert(BasicBlockProperties::CALL);
+    }
+
+    pub fn mark_tail_call(&mut self) {
+        self.properties
+            .insert(BasicBlockProperties::TAIL_CALL | BasicBlockProperties::CALL);
+    }
+
+    pub fn mark_unresolved(&mut self) {
+        self.properties.insert(BasicBlockProperties::UNRESOLVED);
+    }
+
+    pub fn is_entry(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::ENTRY)
+    }
+
+    pub fn is_exit(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::EXIT)
+    }
+
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::NON_RETURNING)
+    }
+
+    pub fn is_call(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::CALL)
+    }
+
+    pub fn is_tail_call(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::TAIL_CALL)
+    }
+
+    pub fn has_unresolved(&self) -> bool {
+        self.properties.contains(BasicBlockProperties::UNRESOLVED)
     }
 
     pub fn context(&self) -> &ContextSet {
