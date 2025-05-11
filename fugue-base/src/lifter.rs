@@ -51,6 +51,11 @@ impl ContextSet {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
     pub fn single(bits: ContextBitRange, value: u32) -> Self {
         ContextUpdate::new(bits, value).into()
     }
@@ -58,6 +63,24 @@ impl ContextSet {
     #[inline]
     pub fn push(&mut self, value: ContextUpdate) {
         self.0.push(value);
+    }
+
+    #[inline]
+    pub fn merge(&mut self, other: Self) {
+        if other.is_empty() {
+            return;
+        }
+
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+
+        for update in other.0 {
+            if !self.0.iter().any(|existing| existing.bits == update.bits) {
+                self.0.push(update);
+            }
+        }
     }
 
     #[inline]

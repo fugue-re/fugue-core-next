@@ -224,10 +224,8 @@ pub fn elf_symbols<'a>(
     // NOTE: this template is used to create a stub for the external symbols, such that
     // if we were to consider the external address as a function, and call to it, we would
     // hit valid code, and return.
-    let mut externs = ExternSymbols::new(aligned_base, arch.external_thunk_template());
-    let template_size = externs.template().len();
-    let aligned_template_size = (template_size + addr_size.wrapping_sub(1) as usize)
-        & !(addr_size as usize).wrapping_sub(1);
+    let mut externs = ExternSymbols::new(aligned_base, addr_size, arch.external_thunk_template());
+    let aligned_template_size = externs.aligned_template_size();
 
     for (index, addr, sym, kind) in syms
         .enumerate()
@@ -457,6 +455,7 @@ where
             return Ok(None);
         };
         let extern_size = externs.size() as usize;
+        let extern_padding = externs.aligned_template_size() - externs.template().len();
 
         let address = externs.base();
         let last_address = externs.base() + (extern_size as u64 - 1);
@@ -465,6 +464,7 @@ where
 
         for _ in 0..externs.len() {
             bytes.extend_from_slice(externs.template().bytes());
+            bytes.resize(bytes.len() + extern_padding, 0);
         }
 
         self.covered
@@ -846,6 +846,9 @@ where
         for (off, rel) in drels.filter(|(off, _)| *off >= offset && *off <= last_offset) {
             tracing::trace!("applying dynamic relocation at {}", Address::from(off));
 
+            // Compute offset in the segment
+            let off = off - offset;
+
             match rel.kind() {
                 RelocationKind::Unknown => {
                     let RelocationFlags::Elf { r_type } = rel.flags() else {
@@ -912,6 +915,8 @@ where
 
     pub(crate) fn mark_function_symbol(&self, address: impl Into<Address>) {
         let address = address.into();
+
+        tracing::trace!("marking symbol {address} as function");
 
         if self.externs.as_ref().map_or(false, |externs| {
             externs.update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION)

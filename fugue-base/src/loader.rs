@@ -157,6 +157,7 @@ impl<'a> LoadableSegment<'a> {
     pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
         let is_le = self.properties.is_little_endian();
         let range = self.view_bytes_mut(offset, T::SIZEOF)?;
+
         Some(if is_le {
             value.into_bytes::<LE>(range)
         } else {

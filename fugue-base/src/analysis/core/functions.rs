@@ -16,7 +16,9 @@ pub struct FunctionRecoveryConfig {
 
 impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
-        FunctionRecoveryConfig { max_blocks: 0x10000 }
+        FunctionRecoveryConfig {
+            max_blocks: 0x10000,
+        }
     }
 }
 
@@ -28,8 +30,9 @@ pub struct FunctionRecovery {
 pub struct FunctionBuilder {
     entry: Address,
     candidates: VecDeque<(Address, ContextSet)>,
+    contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
-    global_targets: BTreeSet<Address>,
+    global_targets: BTreeSet<(Address, ContextSet)>,
 }
 
 impl FunctionRecovery {
@@ -81,9 +84,18 @@ impl AnalysisPass<'_> for FunctionRecovery {
             self.add_candidate(entry);
         }
 
-        for symbol in project.iter_local_symbols() {
+        for symbol in project.iter_local_symbols().filter(|s| s.is_function()) {
             tracing::debug!(
                 "local function: {} (name: {:?})",
+                symbol.address(),
+                symbol.symbol()
+            );
+            self.add_candidate(symbol.address());
+        }
+
+        for symbol in project.iter_extern_symbols().filter(|s| s.is_function()) {
+            tracing::debug!(
+                "external function: {} (name: {:?})",
                 symbol.address(),
                 symbol.symbol()
             );
@@ -93,11 +105,12 @@ impl AnalysisPass<'_> for FunctionRecovery {
         while let Some((address, context)) = self.candidates.pop_front() {
             if !project.storage.contains_segment(address) {
                 tracing::trace!("skipping {address}: not mapped");
+                continue;
             }
 
             let _f = builder.analyse(project, address, context);
 
-            self.add_candidates(builder.global_targets.iter().copied());
+            self.add_candidates_with_context(builder.global_targets.iter().cloned());
         }
 
         Ok(())
@@ -109,6 +122,7 @@ impl FunctionBuilder {
         FunctionBuilder {
             entry: Address::zero(),
             candidates: VecDeque::new(),
+            contexts: BTreeMap::new(),
             local_targets: BTreeSet::new(),
             global_targets: BTreeSet::new(),
         }
@@ -158,6 +172,7 @@ impl FunctionBuilder {
     pub fn clear(&mut self) {
         self.entry = Address::zero();
         self.candidates.clear();
+        self.contexts.clear();
         self.local_targets.clear();
         self.global_targets.clear();
     }
@@ -182,17 +197,19 @@ impl FunctionBuilder {
 
         'pass: loop {
             // This is the stage where we build blocks by collecting instructions and marking them.
-            'outer: while let Some((block, context)) = self.candidates.pop_front() {
+            'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
+                // This ensures correct alignment, to address is correctly wrapped with respect to
+                // the address space, and also extracts context updates indicated by the address,
+                // e.g., if we are in Thumb context or not for ARM.
+                let Some((block, ncontext)) = project.arch.canonicalise_address(block) else {
+                    tracing::trace!("skipping {block}: not a viable block start address");
+                    continue 'outer;
+                };
+
                 if !project.storage.contains_segment(block) {
                     tracing::trace!("skipping {block}: not mapped");
                     continue 'outer;
                 }
-
-                // TODO: apply architecture-specific alignment check and context derivation
-                // for the address.
-                //
-                // For example, on ARM/Thumb we need to check the LSB of the address and mask
-                // it out, while returning a context that ensures the Thumb mode is set.
 
                 if insns.contains_key(&block) {
                     continue;
@@ -200,7 +217,14 @@ impl FunctionBuilder {
 
                 let mut offset = 0usize;
 
+                // Merge the context updates with the specified context taking precedence.
+                context.merge(ncontext);
+
+                // Applies the context updates to the lifter context.
                 context.apply(block, project.lifter.context_mut());
+
+                // Save the context so we can associate it with a block later.
+                self.contexts.insert(block, context);
 
                 '_inner: loop {
                     let address = block + offset;
@@ -214,8 +238,8 @@ impl FunctionBuilder {
                     };
 
                     let Ok(size) = project.storage.read_bytes(address, &mut bytes) else {
-                        tracing::trace!("skipping {block}: not mapped");
-                        continue;
+                        tracing::trace!("skipping {address}: not mapped");
+                        continue 'outer;
                     };
 
                     tracing::debug!("lifting {address}: {:?} ({size})", bytes);
@@ -236,6 +260,12 @@ impl FunctionBuilder {
                                 // the instruction's PCode branch operations--we will miss things
                                 // like PC relative jumps.
                                 for (target, kind, addr) in insn.iter_targets() {
+                                    let Some((addr, context)) =
+                                        project.arch.canonicalise_address(addr)
+                                    else {
+                                        continue;
+                                    };
+
                                     if kind.is_local() {
                                         let Some(target) =
                                             FlowTarget::from_insn_target(insn, target, addr)
@@ -244,13 +274,14 @@ impl FunctionBuilder {
                                         };
 
                                         if self.local_targets.insert(target) {
-                                            // TODO: derive the context from the address via the architecture
-                                            self.candidates.push_back((addr, ContextSet::new()));
+                                            self.candidates.push_back((addr, context));
                                         }
                                     } else {
-                                        self.global_targets.insert(addr);
+                                        self.global_targets.insert((addr, context));
                                     }
                                 }
+
+                                continue 'outer;
                             }
 
                             // Implicit control-flow (it is a halt, etc.)
@@ -263,7 +294,6 @@ impl FunctionBuilder {
                         }
                         Err(e) => {
                             // flows into bad data??
-                            // self.local_targets.remove(&address);
                             tracing::debug!("skipping {address}; lifting failed: {e}");
                             continue 'outer;
                         }
@@ -273,16 +303,28 @@ impl FunctionBuilder {
 
             tracing::debug!("{:?}", self.local_targets);
 
+            if insns.is_empty() {
+                tracing::debug!("no instructions lifted; invalid function");
+                break;
+            }
+
             // Structure the blocks
             let iinsns = &mut itertools::put_back(insns.iter());
+
+            // Valid contexts contain all cut points
             let mut iblocks = self
-                .local_targets
+                .contexts
                 .iter()
-                .map(|target| target.from())
+                .filter_map(|(addr, _context)| {
+                    if insns.contains_key(addr) {
+                        Some(*addr)
+                    } else {
+                        None
+                    }
+                })
                 .skip(1)
                 .chain(std::iter::once(Address::MAX));
 
-            // Targets may contain invalid addresses...
             let mut blocks = Vec::new();
 
             while let Some(next_block_start) = iblocks.next() {
@@ -313,7 +355,7 @@ mod test {
 
     use crate::analysis::AnalysisPass;
     use crate::attributes;
-    use crate::storage::MemoryMappedStorage;
+    use crate::storage::InMemoryStorage;
     use crate::types::attributes::*;
 
     #[test]
@@ -326,7 +368,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = Project::from_file_with::<MemoryMappedStorage>(
+            let mut project = Project::from_file_with::<InMemoryStorage>(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
@@ -334,6 +376,7 @@ mod test {
             )?;
             let mut cfr = FunctionRecovery::new();
 
+            cfr.add_candidate(0x6dd0u64);
             cfr.analyse(&mut project)?;
 
             Ok(())

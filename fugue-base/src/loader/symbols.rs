@@ -90,6 +90,22 @@ impl SymbolEntry {
     pub fn properties(&self) -> SymbolProperties {
         self.properties
     }
+
+    pub fn is_extern(&self) -> bool {
+        self.properties.is_extern()
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.properties.is_local()
+    }
+
+    pub fn is_function(&self) -> bool {
+        self.properties.is_function()
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.properties.is_data()
+    }
 }
 
 bitflags::bitflags! {
@@ -302,6 +318,7 @@ impl LocalSymbols {
 #[derive(Debug, Clone)]
 pub struct ExternSymbols {
     base: Address,
+    alignment: usize,
     indices: BTreeMap<usize, Address>,
     sym_to_addr: UstrMap<Address>,
     addr_to_sym: BTreeMap<Address, (Option<Ustr>, Cell<SymbolProperties>)>,
@@ -309,9 +326,10 @@ pub struct ExternSymbols {
 }
 
 impl ExternSymbols {
-    pub fn new(base: impl Into<Address>, template: ExternFunctionTemplate) -> Self {
+    pub fn new(base: impl Into<Address>, alignment: usize, template: ExternFunctionTemplate) -> Self {
         Self {
             base: base.into(),
+            alignment,
             indices: BTreeMap::new(),
             sym_to_addr: UstrMap::default(),
             addr_to_sym: BTreeMap::new(),
@@ -354,6 +372,10 @@ impl ExternSymbols {
 
     pub fn base(&self) -> Address {
         self.base
+    }
+
+    pub fn alignment(&self) -> usize {
+        self.alignment
     }
 
     pub fn last_address(&self) -> Address {
@@ -457,8 +479,13 @@ impl ExternSymbols {
         &self.template
     }
 
+    pub fn aligned_template_size(&self) -> usize {
+        let template_size = self.template.len();
+        (template_size + self.alignment.wrapping_sub(1)) & !self.alignment().wrapping_sub(1)
+    }
+
     pub fn size(&self) -> usize {
-        self.indices.len() * self.template.len()
+        self.indices.len() * self.aligned_template_size()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 

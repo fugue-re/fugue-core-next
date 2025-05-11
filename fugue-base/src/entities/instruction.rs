@@ -46,6 +46,10 @@ impl Insn {
         self.address
     }
 
+    pub fn next_address(&self) -> Address {
+        self.address + self.length
+    }
+
     pub fn properties(&self) -> InsnProperties {
         self.properties
     }
@@ -56,10 +60,6 @@ impl Insn {
 
     pub fn has_fall(&self) -> bool {
         self.properties().contains(InsnProperties::FALL)
-    }
-
-    pub fn is_lifted(&self) -> bool {
-        self.properties().contains(InsnProperties::LIFTED)
     }
 
     pub fn len(&self) -> usize {
@@ -144,8 +144,6 @@ bitflags::bitflags! {
         const NONSENSE    = 0b0010_0000_0000_0000;
 
         const HALT        = 0b0100_0000_0000_0000;
-
-        const LIFTED      = 0b1000_0000_0000_0000;
 
         const UNVIABLE    = Self::TRAP.bits() | Self::INVALID.bits();
 
@@ -300,8 +298,7 @@ impl InsnTarget {
                     nfall(i, next, targets);
                 }
                 Op::IBranch => {
-                    let locn = inputs[0].to_address(language).map(Location::from);
-                    nbranch(i, locn, targets);
+                    nbranch(i, None, targets);
                 }
                 Op::Call => {
                     let locn = Location::absolute_from(language, address, inputs[0], i);
@@ -309,8 +306,7 @@ impl InsnTarget {
                     nfall(i, next, targets);
                 }
                 Op::ICall => {
-                    let locn = inputs[0].to_address(language).map(Location::from);
-                    ncall(i, locn, targets);
+                    ncall(i, None, targets);
                     nfall(i, next, targets);
                 }
                 Op::Return => {
