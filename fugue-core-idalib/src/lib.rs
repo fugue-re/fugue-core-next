@@ -4,7 +4,8 @@ use fugue_base::analysis::core::functions::{FunctionBuilder, FunctionRecovery};
 use fugue_base::analysis::{AnalysisError, AnalysisPass};
 use fugue_base::arch::Arch;
 use fugue_base::entities::flow_graph::FlowKind;
-use fugue_base::lifter::{Language, Lifter, LifterBuilder};
+use fugue_base::lifter::arm::le::context::T_MODE;
+use fugue_base::lifter::{ContextSet, Language, Lifter, LifterBuilder};
 use fugue_base::loader::symbols::SymbolProperties;
 use fugue_base::loader::{
     ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
@@ -21,6 +22,7 @@ pub struct IDABinary {
     lifter: Lifter,
     local_symbols: LocalSymbols,
     extern_symbols: Option<ExternSymbols>,
+    mark_thumb: bool,
     attributes: AttributeMap,
 }
 
@@ -30,7 +32,10 @@ fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
         let addr = segm.start_address();
         let templ = arch.external_thunk_template();
         let bounds = addr..segm.end_address();
-        (ExternSymbols::new(addr, templ), bounds)
+        (
+            ExternSymbols::new(addr, arch.language().address_alignment(), templ),
+            bounds,
+        )
     });
 
     // TODO: implement names API for globals
@@ -66,6 +71,18 @@ impl IDABinary {
     pub fn externs(&self) -> Option<&ExternSymbols> {
         self.extern_symbols.as_ref()
     }
+
+    pub fn function_recovery_pass(
+        &self,
+    ) -> IDAFunctionRecovery {
+        IDAFunctionRecovery::new(&self.database, self.mark_thumb)
+    }
+
+    pub fn function_builder_pass(
+        &self,
+    ) -> IDAFunctionBuilder {
+        IDAFunctionBuilder::new(&self.database)
+    }
 }
 
 impl LoadableFromFile for IDABinary {
@@ -98,6 +115,8 @@ impl LoadableFromFile for IDABinary {
             return Err(LoaderError::UnsupportedArch);
         }
 
+        let mark_thumb = processor.family().is_arm() && !is_64;
+
         let builder = if processor.family().is_arm() {
             if is_64 {
                 LifterBuilder::new("AARCH64").bits(64)
@@ -128,6 +147,7 @@ impl LoadableFromFile for IDABinary {
             lifter,
             local_symbols,
             extern_symbols,
+            mark_thumb,
             attributes,
         })
     }
@@ -239,11 +259,15 @@ impl Loadable for IDABinary {
 
 pub struct IDAFunctionRecovery<'a> {
     database: &'a IDB,
+    mark_thumb: bool,
 }
 
 impl<'a> IDAFunctionRecovery<'a> {
-    pub fn new(database: &'a IDB) -> Self {
-        IDAFunctionRecovery { database }
+    pub fn new(database: &'a IDB, mark_thumb: bool) -> Self {
+        IDAFunctionRecovery {
+            database,
+            mark_thumb,
+        }
     }
 }
 
@@ -259,7 +283,18 @@ impl<'a> AnalysisPass<'a, FunctionRecovery> for IDAFunctionRecovery<'a> {
             if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
                 continue;
             }
-            state.add_candidate(addr);
+
+            if self.mark_thumb {
+                let context = if self.database.processor().is_thumb_at(f.start_address()) {
+                    ContextSet::single(T_MODE, 1)
+                } else {
+                    ContextSet::single(T_MODE, 0)
+                };
+
+                state.add_candidate_with_context(addr, context);
+            } else {
+                state.add_candidate(addr);
+            }
         }
         Ok(())
     }
@@ -313,6 +348,7 @@ impl<'a> AnalysisPass<'a, FunctionBuilder> for IDAFunctionBuilder<'a> {
                 // TODO: classify edges correctly
                 builder.add_local_target(last_insn, succ.start_address(), FlowKind::Branch);
             }
+
             builder.add_candidate(block.start_address());
         }
 

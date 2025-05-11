@@ -1,11 +1,9 @@
-use fugue_lifter::arm::le::context::T_MODE;
-use fugue_lifter::arm::le::register::{
+use crate::arch::{Arch, ArchImpl};
+use crate::lifter::arm::le::context::T_MODE;
+use crate::lifter::arm::le::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use fugue_lifter::{Language, Varnode};
-
-use crate::arch::{Arch, ArchImpl};
-use crate::lifter::ContextSet;
+use crate::lifter::{ContextSet, Language, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 

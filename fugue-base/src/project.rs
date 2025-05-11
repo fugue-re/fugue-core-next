@@ -9,7 +9,7 @@ use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, LoadableSegment, Loader, LoaderError, LocalSymbols,
     SymbolEntry,
 };
-use crate::storage::{InMemoryStorage, StorageError, StorageProvider, StorageProviderFromLoadable};
+use crate::storage::{StorageError, StorageProvider, StorageProviderFromLoadable};
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 use crate::types::{Address, AttributeMap};
 
@@ -233,6 +233,8 @@ impl StorageProvider for Project {
 
 #[cfg(test)]
 mod test {
+    use crate::storage::InMemoryStorage;
+
     use super::*;
 
     #[test]

@@ -1,11 +1,10 @@
-use fugue_lifter::x86_64::register::{
+use crate::arch::{Arch, ArchImpl, Flag};
+use crate::lifter::x86_64::register::{
     AF, CF, DF, OF, PF, R10, R11, R12, R13, R14, R15, R8, R9, RAX, RBP, RBX, RCX, RDI, RDX, RSI,
     RSP, SF, ZF,
 };
-use fugue_lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use fugue_lifter::{Language, Varnode};
-
-use crate::arch::{Arch, ArchImpl, Flag};
+use crate::lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+use crate::lifter::{Language, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[

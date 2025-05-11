@@ -2,6 +2,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use itertools::Itertools;
+use thiserror::Error;
 
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
@@ -33,6 +34,12 @@ pub struct FunctionBuilder {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<(Address, ContextSet)>,
+}
+
+#[derive(Debug, Error)]
+pub enum FunctionBuilderError {
+    #[error("failed to lift any instructions")]
+    NoInstructions,
 }
 
 impl FunctionRecovery {
@@ -102,15 +109,40 @@ impl AnalysisPass<'_> for FunctionRecovery {
             self.add_candidate(symbol.address());
         }
 
+        let mut functions = BTreeSet::new();
+        let mut failures = BTreeSet::new();
+
         while let Some((address, context)) = self.candidates.pop_front() {
             if !project.storage.contains_segment(address) {
                 tracing::trace!("skipping {address}: not mapped");
                 continue;
             }
 
-            let _f = builder.analyse(project, address, context);
+            if failures.contains(&address) {
+                tracing::trace!("skipping {address}: already failed");
+                continue;
+            }
 
-            self.add_candidates_with_context(builder.global_targets.iter().cloned());
+            if functions.contains(&address) {
+                tracing::trace!("skipping {address}: already analysed");
+                continue;
+            }
+
+            if let Err(e) = builder.analyse(project, address, context) {
+                failures.insert(address);
+                tracing::debug!("failed to analyse {address}: {e}");
+                continue;
+            }
+
+            functions.insert(address);
+
+            self.add_candidates_with_context(
+                builder
+                    .global_targets
+                    .iter()
+                    .filter(|(start, _)| !functions.contains(start) && !failures.contains(start))
+                    .cloned(),
+            );
         }
 
         Ok(())
@@ -182,7 +214,7 @@ impl FunctionBuilder {
         project: &mut Project,
         address: impl Into<Address>,
         context: ContextSet,
-    ) {
+    ) -> Result<(), FunctionBuilderError> {
         let candidate = address.into();
 
         tracing::debug!("exploring from {candidate}");
@@ -195,7 +227,7 @@ impl FunctionBuilder {
         let mut insns = BTreeMap::<Address, _>::new();
         let mut bytes = [0u8; 32];
 
-        'pass: loop {
+        loop {
             // This is the stage where we build blocks by collecting instructions and marking them.
             'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
                 // This ensures correct alignment, to address is correctly wrapped with respect to
@@ -301,12 +333,12 @@ impl FunctionBuilder {
                 }
             }
 
-            tracing::debug!("{:?}", self.local_targets);
-
             if insns.is_empty() {
                 tracing::debug!("no instructions lifted; invalid function");
-                break;
+                return Err(FunctionBuilderError::NoInstructions);
             }
+
+            tracing::debug!("{:?}", self.local_targets);
 
             // Structure the blocks
             let iinsns = &mut itertools::put_back(insns.iter());
@@ -346,6 +378,8 @@ impl FunctionBuilder {
             // due to jump table resolution.
             break;
         }
+
+        Ok(())
     }
 }
 
@@ -376,6 +410,7 @@ mod test {
             )?;
             let mut cfr = FunctionRecovery::new();
 
+            cfr.add_candidate(0x4da0u64);
             cfr.add_candidate(0x6dd0u64);
             cfr.analyse(&mut project)?;
 

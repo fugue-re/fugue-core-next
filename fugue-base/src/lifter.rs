@@ -1,8 +1,8 @@
 use arrayvec::ArrayVec;
 
 pub use fugue_lifter::{
-    ContextBitRange, Language, Lifter, LifterBuilder, LifterBuilderError, LiftingContext, Op,
-    PCodeOp,
+    aarch64, arm, x86, x86_64, ContextBitRange, Language, Lifter, LifterBuilder,
+    LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode,
 };
 
 use thiserror::Error;

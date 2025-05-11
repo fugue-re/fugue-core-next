@@ -1,10 +1,9 @@
-use fugue_lifter::x86::register::{
+use crate::arch::{Arch, ArchImpl, Flag};
+use crate::lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
-use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use fugue_lifter::{Language, Varnode};
-
-use crate::arch::{Arch, ArchImpl, Flag};
+use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+use crate::lifter::{Language, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[

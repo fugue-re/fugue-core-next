@@ -127,6 +127,7 @@ pub fn elf_symbols<'a>(
 
     let is_object = elf.kind() == ObjectKind::Relocatable;
     let addr_size = lifter.address_size();
+    let addr_align = lifter.address_alignment();
 
     let mut section_map = Vec::new();
 
@@ -169,7 +170,7 @@ pub fn elf_symbols<'a>(
     };
 
     let aligned_base =
-        (base + addr_size.wrapping_sub(1) as u64) & !(addr_size as u64).wrapping_sub(1);
+        (base + addr_align.wrapping_sub(1) as u64) & !(addr_align as u64).wrapping_sub(1);
 
     let mut locals = LocalSymbols::new();
 
@@ -224,7 +225,7 @@ pub fn elf_symbols<'a>(
     // NOTE: this template is used to create a stub for the external symbols, such that
     // if we were to consider the external address as a function, and call to it, we would
     // hit valid code, and return.
-    let mut externs = ExternSymbols::new(aligned_base, addr_size, arch.external_thunk_template());
+    let mut externs = ExternSymbols::new(aligned_base, addr_align, arch.external_thunk_template());
     let aligned_template_size = externs.aligned_template_size();
 
     for (index, addr, sym, kind) in syms
