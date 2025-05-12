@@ -1,6 +1,6 @@
 use fallible_iterator::FallibleIterator;
 
-use fugue_base::analysis::core::functions::{FunctionBuilder, FunctionRecovery};
+use fugue_base::analysis::core::functions::{FunctionBuilderContext, FunctionRecovery};
 use fugue_base::analysis::{AnalysisError, AnalysisPass};
 use fugue_base::arch::Arch;
 use fugue_base::entities::flow_graph::FlowKind;
@@ -72,15 +72,11 @@ impl IDABinary {
         self.extern_symbols.as_ref()
     }
 
-    pub fn function_recovery_pass(
-        &self,
-    ) -> IDAFunctionRecovery {
+    pub fn function_recovery_pass(&self) -> IDAFunctionRecovery {
         IDAFunctionRecovery::new(&self.database, self.mark_thumb)
     }
 
-    pub fn function_builder_pass(
-        &self,
-    ) -> IDAFunctionBuilder {
+    pub fn function_builder_pass(&self) -> IDAFunctionBuilder {
         IDAFunctionBuilder::new(&self.database)
     }
 }
@@ -271,7 +267,7 @@ impl<'a> IDAFunctionRecovery<'a> {
     }
 }
 
-impl<'a> AnalysisPass<'a, FunctionRecovery> for IDAFunctionRecovery<'a> {
+impl<'a> AnalysisPass<'a, FunctionRecovery<'a>> for IDAFunctionRecovery<'a> {
     fn analyse_with(
         &mut self,
         project: &mut Project,
@@ -310,11 +306,11 @@ impl<'a> IDAFunctionBuilder<'a> {
     }
 }
 
-impl<'a> AnalysisPass<'a, FunctionBuilder> for IDAFunctionBuilder<'a> {
+impl<'a> AnalysisPass<'a, FunctionBuilderContext> for IDAFunctionBuilder<'a> {
     fn analyse_with(
         &mut self,
         _project: &mut Project,
-        builder: &mut FunctionBuilder,
+        builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();
         let Some(f) = self.database.function_at(entry.into()) else {

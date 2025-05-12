@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use itertools::Itertools;
 use thiserror::Error;
 
-use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
 use crate::lifter::{ContextSet, LifterExt as _};
 use crate::project::Project;
@@ -23,12 +23,13 @@ impl Default for FunctionRecoveryConfig {
     }
 }
 
-pub struct FunctionRecovery {
+pub struct FunctionRecovery<'a> {
     config: FunctionRecoveryConfig,
     candidates: VecDeque<(Address, ContextSet)>,
+    builder: FunctionBuilder<'a>,
 }
 
-pub struct FunctionBuilder {
+pub struct FunctionBuilderContext {
     entry: Address,
     candidates: VecDeque<(Address, ContextSet)>,
     contexts: BTreeMap<Address, ContextSet>,
@@ -36,13 +37,28 @@ pub struct FunctionBuilder {
     global_targets: BTreeSet<(Address, ContextSet)>,
 }
 
+pub struct FunctionBuilder<'a> {
+    // The context of the function being built.
+    context: FunctionBuilderContext,
+    // These passes run once per function prior to the main lifting loop.
+    initialisation_passes: AnalysisGroup<'a, FunctionBuilderContext>,
+    // These passes run each iteration of the main lifting loop after all candidates within the
+    // pass have been lifted and the function's control-flow has been structured based on the
+    // identified blocks and flows.
+    post_lifting_passes: AnalysisGroup<'a, FunctionBuilderContext>,
+}
+
 #[derive(Debug, Error)]
 pub enum FunctionBuilderError {
+    #[error("initialisation pass failed: {0}")]
+    InitialisationPass(AnalysisError),
+    #[error("post-lifting pass failed: {0}")]
+    PostLiftingPass(AnalysisError),
     #[error("failed to lift any instructions")]
     NoInstructions,
 }
 
-impl FunctionRecovery {
+impl<'a> FunctionRecovery<'a> {
     pub fn new() -> Self {
         FunctionRecovery::new_with(FunctionRecoveryConfig::default())
     }
@@ -51,6 +67,7 @@ impl FunctionRecovery {
         FunctionRecovery {
             config,
             candidates: VecDeque::new(),
+            builder: FunctionBuilder::new(),
         }
     }
 
@@ -82,10 +99,8 @@ impl FunctionRecovery {
     }
 }
 
-impl AnalysisPass<'_> for FunctionRecovery {
+impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
-        let mut builder = FunctionBuilder::new();
-
         if let Some(entry) = project.entry() {
             tracing::debug!("entry point: {entry}");
             self.add_candidate(entry);
@@ -128,7 +143,7 @@ impl AnalysisPass<'_> for FunctionRecovery {
                 continue;
             }
 
-            if let Err(e) = builder.analyse(project, address, context) {
+            if let Err(e) = self.builder.analyse(project, address, context) {
                 failures.insert(address);
                 tracing::debug!("failed to analyse {address}: {e}");
                 continue;
@@ -136,9 +151,9 @@ impl AnalysisPass<'_> for FunctionRecovery {
 
             functions.insert(address);
 
-            self.add_candidates_with_context(
-                builder
-                    .global_targets
+            self.candidates.extend(
+                self.builder
+                    .global_targets()
                     .iter()
                     .filter(|(start, _)| !functions.contains(start) && !failures.contains(start))
                     .cloned(),
@@ -149,9 +164,82 @@ impl AnalysisPass<'_> for FunctionRecovery {
     }
 }
 
-impl FunctionBuilder {
+impl<'a> FunctionBuilder<'a> {
     pub fn new() -> Self {
         FunctionBuilder {
+            context: FunctionBuilderContext::new(),
+            initialisation_passes: AnalysisGroup::new(),
+            post_lifting_passes: AnalysisGroup::new(),
+        }
+    }
+
+    pub fn initialisation_passes(&self) -> &AnalysisGroup<'a, FunctionBuilderContext> {
+        &self.initialisation_passes
+    }
+
+    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<'a, FunctionBuilderContext> {
+        &mut self.initialisation_passes
+    }
+
+    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, FunctionBuilderContext> {
+        &self.post_lifting_passes
+    }
+
+    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<'a, FunctionBuilderContext> {
+        &mut self.post_lifting_passes
+    }
+
+    pub fn context(&self) -> &FunctionBuilderContext {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut FunctionBuilderContext {
+        &mut self.context
+    }
+
+    pub fn add_initialisation_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+    ) {
+        self.initialisation_passes.add_pass(name, pass);
+    }
+
+    pub fn add_post_lifting_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+    ) {
+        self.post_lifting_passes.add_pass(name, pass);
+    }
+
+    pub fn analyse(
+        &mut self,
+        project: &mut Project,
+        address: impl Into<Address>,
+        context: ContextSet,
+    ) -> Result<(), FunctionBuilderError> {
+        self.context.analyse(
+            project,
+            address,
+            context,
+            &mut self.initialisation_passes,
+            &mut self.post_lifting_passes,
+        )
+    }
+
+    pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
+        &self.context.local_targets
+    }
+
+    pub fn global_targets(&self) -> &BTreeSet<(Address, ContextSet)> {
+        &self.context.global_targets
+    }
+}
+
+impl FunctionBuilderContext {
+    pub fn new() -> Self {
+        Self {
             entry: Address::zero(),
             candidates: VecDeque::new(),
             contexts: BTreeMap::new(),
@@ -214,7 +302,25 @@ impl FunctionBuilder {
         project: &mut Project,
         address: impl Into<Address>,
         context: ContextSet,
+        initialisation_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
+        post_lifting_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
     ) -> Result<(), FunctionBuilderError> {
+        // We have three main stages:
+        //
+        // 1. We first initialise the function builder with the entry point and the context
+        //    of the entry block.
+        // 2. We enter the main loop where we lift instructions block by block, and add newly
+        //    discovered blocks (and edges) to the candidates queue.
+        // 3. We structure the blocks into a basic function-like structure; we use this
+        //    structure as input to resolve jump tables, indirect jumps, etc. this part of
+        //    the analysis provides new candidates and new edges.
+        //
+        // Stage 1 and 3 are hookable; we may register analysis passes to be run prior to the
+        // main loop and after each block discovery pass has completed within the main loop.
+        //
+        // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
+        // initialisation.
+
         let candidate = address.into();
 
         tracing::debug!("exploring from {candidate}");
@@ -223,6 +329,11 @@ impl FunctionBuilder {
         self.entry = candidate;
 
         self.candidates.push_back((candidate, context));
+
+        // Run the initialisation passes
+        initialisation_passes
+            .analyse_with(project, self)
+            .map_err(FunctionBuilderError::InitialisationPass)?;
 
         let mut insns = BTreeMap::<Address, _>::new();
         let mut bytes = [0u8; 32];
@@ -374,9 +485,19 @@ impl FunctionBuilder {
                 }
             }
 
-            // In this stage we attempt to recover function control-flow and schedule more blocks
-            // due to jump table resolution.
-            break;
+            // Run the post-lifting passes
+            let num_local_targets = self.local_targets.len();
+
+            post_lifting_passes
+                .analyse_with(project, self)
+                .map_err(FunctionBuilderError::PostLiftingPass)?;
+
+            if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
+                // No new candidates were added, and no new local targets were discovered.
+                // We can stop here.
+                tracing::debug!("no new candidates or local targets; stopping");
+                break;
+            }
         }
 
         Ok(())
