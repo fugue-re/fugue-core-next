@@ -16,6 +16,8 @@ use fugue_base::types::{Address, AttributeMap};
 
 use idalib::idb::{IDBOpenOptions, IDB};
 
+pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida/database:path";
+
 pub struct IDABinary {
     database: IDB,
     architecture: Arch,
@@ -33,7 +35,7 @@ fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
         let templ = arch.external_thunk_template();
         let bounds = addr..segm.end_address();
         (
-            ExternSymbols::new(addr, arch.language().address_alignment(), templ),
+            ExternSymbols::new(addr, arch.language().address_size(), templ),
             bounds,
         )
     });
@@ -97,7 +99,7 @@ impl LoadableFromFile for IDABinary {
         database_opts.save(false);
         database_opts.auto_analyse(true);
 
-        if let Some(idb) = attributes.get_attr::<String>("idb.path") {
+        if let Some(idb) = attributes.get_attr::<String>(ATTRIBUTE_IDA_DATABASE_PATH) {
             database_opts.idb(idb);
         }
 
@@ -198,7 +200,7 @@ impl Loadable for IDABinary {
         // which amounts to a return instruction, and hence fits in the space available
         // for all architectures we support.
 
-        let address_size = self.lifter.address_size();
+        let address_size = self.architecture.language().address_size();
 
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
             let start = Address::from(segm.start_address());
@@ -241,14 +243,14 @@ impl Loadable for IDABinary {
                 if aligned_template_len > address_size {
                     tracing::warn!("external thunk template is larger than available space in extern segment; skipping");
                 } else {
-                    tracing::trace!("patching extern segment with external thunk template");
+                    tracing::trace!("patching extern segment with external thunk template ({} bytes)", aligned_template_len);
                     for chunk in bytes.chunks_exact_mut(aligned_template_len) {
                         chunk[..template_len].copy_from_slice(template.bytes());
                     }
                 }
             }
 
-            Ok(LoadableSegment::from_parts(name, start, properties, segm.bytes()))
+            Ok(LoadableSegment::from_parts(name, start, properties, bytes))
         }))
     }
 }
