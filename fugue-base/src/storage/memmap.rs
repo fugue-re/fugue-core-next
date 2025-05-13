@@ -188,13 +188,15 @@ impl MemoryMappedStorage {
         }
 
         let first = self.position(addr)?;
-        let last = self.position(last_addr)?;
+        let last = self
+            .position(last_addr)
+            .unwrap_or_else(|| self.segments.len() - 1);
 
         let view = &self.segments[first..last + 1];
 
         for i in 0..view.len() - 1usize {
             if view[i].next_address() != view[i + 1].address() {
-                return None;
+                return Some(view[..=i].iter());
             }
         }
 

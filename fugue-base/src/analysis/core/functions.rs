@@ -97,6 +97,22 @@ impl<'a> FunctionRecovery<'a> {
                 .map(|(addr, context)| (addr.into(), context)),
         );
     }
+
+    pub fn add_function_builder_initialisation_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+    ) {
+        self.builder.add_initialisation_pass(name, pass);
+    }
+
+    pub fn add_function_builder_post_lifting_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+    ) {
+        self.builder.add_post_lifting_pass(name, pass);
+    }
 }
 
 impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
@@ -158,6 +174,10 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
                     .filter(|(start, _)| !functions.contains(start) && !failures.contains(start))
                     .cloned(),
             );
+        }
+
+        for f in functions {
+            tracing::debug!("function: {f}");
         }
 
         Ok(())

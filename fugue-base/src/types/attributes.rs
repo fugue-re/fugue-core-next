@@ -2,8 +2,8 @@ use std::borrow::Borrow;
 
 use rustc_hash::FxHashMap;
 
-pub const ATTRIBUTE_FILE_PATH: &str = "file.path";
-pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
+pub const ATTRIBUTE_FILE_PATH: &str = "project/input:path";
+pub const ATTRIBUTE_PROJECT_PATH: &str = "project:path";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(transparent)]

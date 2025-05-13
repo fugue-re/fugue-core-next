@@ -133,11 +133,7 @@ impl StorageProvider for Box<dyn StorageProvider> {
         self.as_ref().read_bytes(addr, bytes)
     }
 
-    fn read_bytes_exact(
-        &self,
-        addr: Address,
-        bytes: &mut [u8],
-    ) -> Result<(), StorageError> {
+    fn read_bytes_exact(&self, addr: Address, bytes: &mut [u8]) -> Result<(), StorageError> {
         self.as_ref().read_bytes_exact(addr, bytes)
     }
 
@@ -145,11 +141,7 @@ impl StorageProvider for Box<dyn StorageProvider> {
         self.as_mut().write_bytes(addr, bytes)
     }
 
-    fn write_bytes_exact(
-        &mut self,
-        addr: Address,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    fn write_bytes_exact(&mut self, addr: Address, bytes: &[u8]) -> Result<(), StorageError> {
         self.as_mut().write_bytes_exact(addr, bytes)
     }
 
@@ -204,13 +196,19 @@ impl InMemoryStorage {
         }
 
         let first = self.position(addr)?;
-        let last = self.position(last_addr)?;
+
+        // This allows us to have partial reads, e.g., when we'd read past the end of the last
+        // segment.
+        let last = self
+            .position(last_addr)
+            .unwrap_or_else(|| self.segments.len() - 1);
 
         let view = &self.segments[first..last + 1];
 
         for i in 0..view.len() - 1usize {
             if view[i].next_address() != view[i + 1].address() {
-                return None;
+                // limit the view to this segment to allow partial reads
+                return Some(view[..=i].iter());
             }
         }
 
@@ -229,13 +227,15 @@ impl InMemoryStorage {
         }
 
         let first = self.position(addr)?;
-        let last = self.position(last_addr)?;
+        let last = self
+            .position(last_addr)
+            .unwrap_or_else(|| self.segments.len() - 1);
 
         let view = &mut self.segments[first..last + 1];
 
         for i in 0..view.len() - 1usize {
             if view[i].next_address() != view[i + 1].address() {
-                return None;
+                return Some(view[..=i].iter_mut());
             }
         }
 
