@@ -1,10 +1,11 @@
 use crate::lifter::ContextSet;
 use crate::types::Address;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BasicBlock {
     start: Address,
     len: usize,
+    instructions: Vec<usize>,
     properties: BasicBlockProperties,
     context: ContextSet,
 }
@@ -29,14 +30,20 @@ bitflags::bitflags! {
 }
 
 impl BasicBlock {
-    pub fn new(start: Address, len: usize) -> Self {
-        Self::new_with(start, len, ContextSet::default())
+    pub fn new(start: Address, len: usize, instructions: Vec<usize>) -> Self {
+        Self::new_with(start, len, instructions, ContextSet::default())
     }
 
-    pub fn new_with(start: Address, len: usize, context: ContextSet) -> Self {
+    pub fn new_with(
+        start: Address,
+        len: usize,
+        instructions: Vec<usize>,
+        context: ContextSet,
+    ) -> Self {
         BasicBlock {
             start,
             len,
+            instructions,
             properties: BasicBlockProperties::NONE,
             context,
         }
@@ -48,6 +55,10 @@ impl BasicBlock {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn instructions(&self) -> &[usize] {
+        &self.instructions
     }
 
     pub fn mark_entry(&mut self) {
@@ -84,7 +95,8 @@ impl BasicBlock {
     }
 
     pub fn is_non_returning(&self) -> bool {
-        self.properties.contains(BasicBlockProperties::NON_RETURNING)
+        self.properties
+            .contains(BasicBlockProperties::NON_RETURNING)
     }
 
     pub fn is_call(&self) -> bool {

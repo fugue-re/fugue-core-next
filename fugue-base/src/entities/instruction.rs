@@ -54,6 +54,98 @@ impl Insn {
         self.properties
     }
 
+    pub fn mark_branch_dest(&mut self) {
+        self.properties |= InsnProperties::BRANCH_DEST;
+    }
+
+    pub fn mark_call_dest(&mut self) {
+        self.properties |= InsnProperties::CALL_DEST;
+    }
+
+    pub fn mark_maybe_taken(&mut self) {
+        self.properties |= InsnProperties::MAYBE_TAKEN;
+    }
+
+    pub fn mark_in_function(&mut self) {
+        self.properties |= InsnProperties::IN_FUNCTION;
+    }
+
+    pub fn mark_in_table(&mut self) {
+        self.properties |= InsnProperties::IN_TABLE;
+    }
+
+    pub fn mark_nonsense(&mut self) {
+        self.properties |= InsnProperties::NONSENSE;
+    }
+
+    pub fn mark_halt(&mut self) {
+        self.properties |= InsnProperties::HALT;
+    }
+
+    pub fn mark_trap(&mut self) {
+        self.properties |= InsnProperties::TRAP;
+    }
+
+    pub fn mark_invalid(&mut self) {
+        self.properties |= InsnProperties::INVALID;
+    }
+
+    pub fn is_taken(&self) -> bool {
+        self.properties().intersects(InsnProperties::TAKEN)
+    }
+
+    pub fn is_nonsense(&self) -> bool {
+        self.properties().intersects(InsnProperties::NONSENSE)
+    }
+
+    pub fn is_nop(&self) -> bool {
+        self.properties().intersects(InsnProperties::NOP)
+    }
+
+    pub fn is_trap(&self) -> bool {
+        self.properties().intersects(InsnProperties::TRAP)
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.properties().intersects(InsnProperties::INVALID)
+    }
+
+    pub fn is_halt(&self) -> bool {
+        self.properties().intersects(InsnProperties::HALT)
+    }
+
+    pub fn is_in_function(&self) -> bool {
+        self.properties().intersects(InsnProperties::IN_FUNCTION)
+    }
+
+    pub fn is_in_table(&self) -> bool {
+        self.properties().intersects(InsnProperties::IN_TABLE)
+    }
+
+    pub fn is_branch(&self) -> bool {
+        self.properties().intersects(InsnProperties::BRANCH)
+    }
+
+    pub fn is_call(&self) -> bool {
+        self.properties().intersects(InsnProperties::CALL)
+    }
+
+    pub fn is_return(&self) -> bool {
+        self.properties().intersects(InsnProperties::RETURN)
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        self.properties().intersects(InsnProperties::INDIRECT)
+    }
+
+    pub fn is_branch_dest(&self) -> bool {
+        self.properties().intersects(InsnProperties::BRANCH_DEST)
+    }
+
+    pub fn is_call_dest(&self) -> bool {
+        self.properties().intersects(InsnProperties::CALL_DEST)
+    }
+
     pub fn is_flow(&self) -> bool {
         self.properties().intersects(InsnProperties::FLOW)
     }
@@ -123,6 +215,8 @@ bitflags::bitflags! {
         // 1. instruction's address referenced as an immediate
         //    on the rhs of an assignment
         // 2. the instruction is a fall from padding
+        // 3. the instruction is an implicit fall target of two
+        //    or more overlapping blocks
         const MAYBE_TAKEN = 0b0000_0000_1000_0000;
 
         // instruction is a semantic NO-OP

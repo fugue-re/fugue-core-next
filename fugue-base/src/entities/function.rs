@@ -1,16 +1,17 @@
 use ustr::Ustr;
 
-use crate::entities::BasicBlock;
+use crate::entities::{BasicBlock, Insn};
 use crate::types::Address;
 
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     name: Option<Ustr>,
     entry: Address,
     blocks: Vec<BasicBlock>,
+    instructions: Vec<Insn>,
     frame: FunctionFrame,
     properties: FunctionProperties,
 }
@@ -39,6 +40,7 @@ impl Function {
             name: name.into(),
             entry,
             blocks: Vec::new(),
+            instructions: Vec::new(),
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,
         }

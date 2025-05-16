@@ -1,11 +1,11 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use itertools::Itertools;
 use thiserror::Error;
 
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
+use crate::entities::{BasicBlock, Insn};
 use crate::lifter::{ContextSet, LifterExt as _};
 use crate::project::Project;
 use crate::storage::StorageProvider;
@@ -35,6 +35,7 @@ pub struct FunctionBuilderContext {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<(Address, ContextSet)>,
+    blocks: Vec<BasicBlock>,
 }
 
 pub struct FunctionBuilder<'a> {
@@ -265,6 +266,7 @@ impl FunctionBuilderContext {
             contexts: BTreeMap::new(),
             local_targets: BTreeSet::new(),
             global_targets: BTreeSet::new(),
+            blocks: Vec::new(),
         }
     }
 
@@ -315,6 +317,7 @@ impl FunctionBuilderContext {
         self.contexts.clear();
         self.local_targets.clear();
         self.global_targets.clear();
+        self.blocks.clear();
     }
 
     pub fn analyse(
@@ -355,8 +358,12 @@ impl FunctionBuilderContext {
             .analyse_with(project, self)
             .map_err(FunctionBuilderError::InitialisationPass)?;
 
-        let mut insns = BTreeMap::<Address, _>::new();
+        let mut insns = BTreeMap::<Address, Insn>::new();
         let mut bytes = [0u8; 32];
+
+        // NOTE: as opposed to reading bytes from the storage, for all existing backends
+        // we can create a cheap view over the containing segment and use that to avoid
+        // lookups for each address read from.
 
         loop {
             // This is the stage where we build blocks by collecting instructions and marking them.
@@ -396,8 +403,17 @@ impl FunctionBuilderContext {
 
                     // If we've already disassembled this instruction select the next candidate,
                     // otherwise get the entry ready for update.
-                    let Entry::Vacant(entry) = insns.entry(address) else {
-                        continue 'outer;
+                    let entry = match insns.entry(address) {
+                        Entry::Vacant(entry) => entry,
+                        Entry::Occupied(mut entry) => {
+                            // If two blocks overlap, then they may share a common prefix, we mark
+                            // instructions that appear in multiple blocks as start.
+                            entry.get_mut().mark_maybe_taken();
+                            self.contexts
+                                .entry(address)
+                                .or_insert_with(ContextSet::default);
+                            continue 'outer;
+                        }
                     };
 
                     let Ok(size) = project.storage.read_bytes(address, &mut bytes) else {
@@ -471,37 +487,89 @@ impl FunctionBuilderContext {
 
             tracing::debug!("{:?}", self.local_targets);
 
+            // NOTE: this block structuring algorithm assumes that we do not have any
+            // overlaping blocks. This is a reasonable assumption, however, it may not
+            // be correct. For example, for x86, we may have a jump into the middle of
+            // an instruction, which then leads to two blocks overlapping.
+            //
+
             // Structure the blocks
-            let iinsns = &mut itertools::put_back(insns.iter());
 
             // Valid contexts contain all cut points
-            let mut iblocks = self
-                .contexts
-                .iter()
-                .filter_map(|(addr, _context)| {
-                    if insns.contains_key(addr) {
-                        Some(*addr)
-                    } else {
-                        None
-                    }
-                })
-                .skip(1)
-                .chain(std::iter::once(Address::MAX));
+            let mut cuts = Vec::new();
+            let mut instructions = Vec::with_capacity(insns.len());
 
-            let mut blocks = Vec::new();
-
-            while let Some(next_block_start) = iblocks.next() {
-                blocks.push(
-                    iinsns
-                        .peeking_take_while(|(start, _)| **start < next_block_start)
-                        .collect::<Vec<_>>(),
-                );
+            for (i, (addr, insn)) in insns.iter().enumerate() {
+                if self.contexts.contains_key(&addr) {
+                    cuts.push(i);
+                }
+                instructions.push(insn);
             }
 
-            for block in blocks {
-                tracing::debug!("blk@{}", block[0].0);
-                for (addr, insn) in block {
-                    tracing::debug!("{addr}: {}", insn.display(project.language));
+            for (cut_idx, cut) in cuts.iter().enumerate() {
+                let start = *cut;
+                let mut next_cut_idx = cut_idx + 1;
+                let mut next_cut = cuts
+                    .get(next_cut_idx)
+                    .copied()
+                    .unwrap_or(instructions.len());
+
+                let address = instructions[start].address();
+                let mut expected = instructions[start].address();
+                let mut length = 0usize;
+
+                let mut points = Vec::new();
+
+                tracing::trace!("structuring block at {address}; start: {start}");
+
+                for curr in start..instructions.len() {
+                    let insn = &instructions[curr];
+                    let next = curr + 1;
+
+                    if curr == next_cut {
+                        // potential end of block
+                        if !insn.is_flow()
+                            && matches!(instructions.get(next), Some(insn) if expected > insn.address())
+                        {
+                            next_cut_idx += 1;
+                            next_cut = cuts
+                                .get(next_cut_idx)
+                                .copied()
+                                .unwrap_or(instructions.len());
+                        } else {
+                            let context = self
+                                .contexts
+                                .get(&insn.address())
+                                .cloned()
+                                .unwrap_or_default();
+                            let block = BasicBlock::new_with(address, length, points, context);
+                            self.blocks.push(block);
+                            break;
+                        }
+                    }
+
+                    if insn.address() == expected {
+                        tracing::trace!(
+                            "adding instruction at {} to block: {} (id: {curr})",
+                            insn.address(),
+                            address
+                        );
+                        points.push(curr);
+                        expected = insn.next_address();
+                        length += insn.len();
+                    }
+                }
+            }
+
+            for block in self.blocks.iter() {
+                tracing::debug!("blk@{}", block.start());
+                for insn in block
+                    .instructions()
+                    .iter()
+                    .copied()
+                    .map(|i| &instructions[i])
+                {
+                    tracing::debug!("{}: {}", insn.address(), insn.display(project.language));
                 }
             }
 
@@ -530,6 +598,7 @@ mod test {
 
     use crate::analysis::AnalysisPass;
     use crate::attributes;
+    use crate::loader::Shellcode;
     use crate::storage::InMemoryStorage;
     use crate::types::attributes::*;
 
@@ -553,6 +622,41 @@ mod test {
 
             cfr.add_candidate(0x4da0u64);
             cfr.add_candidate(0x6dd0u64);
+            cfr.analyse(&mut project)?;
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_control_flow_recovery_overlap() -> Result<(), Box<dyn std::error::Error>> {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_line_number(true)
+            .with_file(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let shellcode = [
+                0x55, 0x8B, 0xEC, 0x51, 0x51, 0x56, 0x8B, 0x75, 0x0C, 0x57, 0x33, 0xFF, 0x39, 0x3D,
+                0x6C, 0x50, 0x40, 0x00, 0x75, 0x26, 0x56, 0xFF, 0x75, 0x08, 0x68, 0x18, 0x12, 0x40,
+                0x00, 0xFF, 0x15, 0xF0, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x74, 0x13, 0x68, 0xE0, 0x12,
+                0x40, 0x00, 0xFF, 0x75, 0x08, 0xFF, 0x15, 0xEC, 0x10, 0x40, 0x00, 0x33, 0xC0, 0x40,
+                0xEB, 0x43, 0x8D, 0x45, 0x0C, 0x50, 0x68, 0x28, 0x13, 0x40, 0x00, 0x68, 0x02, 0x00,
+                0x00, 0x80, 0xFF, 0x15, 0x08, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x75, 0x29, 0x8D, 0x45,
+                0xFC, 0x50, 0xFF, 0x75, 0x08, 0x8D, 0x45, 0xF8, 0x50, 0x57, 0x57, 0xFF, 0x75, 0x0C,
+                0x89, 0x75, 0xFC, 0xFF, 0x15, 0x00, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x75, 0x03, 0x33,
+                0xFF, 0x47, 0xFF, 0x75, 0x0C, 0xFF, 0x15, 0x24, 0x10, 0x40, 0x00, 0x8B, 0xC7, 0x5F,
+                0x5E, 0xC9, 0xC2, 0x08, 0x00,
+            ];
+
+            let mut project = Project::new::<InMemoryStorage>(
+                &Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?,
+            )?;
+            let mut cfr = FunctionRecovery::new();
+
+            cfr.add_candidate(0x4EB14u64);
             cfr.analyse(&mut project)?;
 
             Ok(())
