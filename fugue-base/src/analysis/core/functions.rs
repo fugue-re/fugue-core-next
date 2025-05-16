@@ -381,11 +381,7 @@ impl FunctionBuilderContext {
                     continue 'outer;
                 }
 
-                if insns.contains_key(&block) {
-                    continue;
-                }
-
-                let mut offset = 0usize;
+                tracing::trace!("lifting new block {block}");
 
                 // Merge the context updates with the specified context taking precedence.
                 context.merge(ncontext);
@@ -394,7 +390,9 @@ impl FunctionBuilderContext {
                 context.apply(block, project.lifter.context_mut());
 
                 // Save the context so we can associate it with a block later.
-                self.contexts.insert(block, context);
+                self.contexts.entry(block).or_insert(context);
+
+                let mut offset = 0usize;
 
                 '_inner: loop {
                     let address = block + offset;
@@ -500,13 +498,15 @@ impl FunctionBuilderContext {
             let mut instructions = Vec::with_capacity(insns.len());
 
             for (i, (addr, insn)) in insns.iter().enumerate() {
+                tracing::trace!("checking insn {i}: {addr}");
                 if self.contexts.contains_key(&addr) {
+                    tracing::trace!("found cut at {addr} ({i})");
                     cuts.push(i);
                 }
                 instructions.push(insn);
             }
 
-            for (cut_idx, cut) in cuts.iter().enumerate() {
+            'cuts: for (cut_idx, cut) in cuts.iter().enumerate() {
                 let start = *cut;
                 let mut next_cut_idx = cut_idx + 1;
                 let mut next_cut = cuts
@@ -544,7 +544,7 @@ impl FunctionBuilderContext {
                                 .unwrap_or_default();
                             let block = BasicBlock::new_with(address, length, points, context);
                             self.blocks.push(block);
-                            break;
+                            continue 'cuts;
                         }
                     }
 
@@ -559,6 +559,16 @@ impl FunctionBuilderContext {
                         length += insn.len();
                     }
                 }
+
+                self.blocks.push(BasicBlock::new_with(
+                    address,
+                    length,
+                    points,
+                    self.contexts
+                        .get(&instructions[start].address())
+                        .cloned()
+                        .unwrap_or_default(),
+                ));
             }
 
             for block in self.blocks.iter() {
