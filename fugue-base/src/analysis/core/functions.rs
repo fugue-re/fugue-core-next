@@ -320,16 +320,12 @@ impl FunctionBuilderContext {
         self.blocks.clear();
     }
 
-    fn lift_instructions(
-        &mut self,
-        project: &mut Project,
-        insns: &mut BTreeMap<Address, Insn>,
-    ) {
+    fn lift_instructions(&mut self, project: &mut Project, insns: &mut BTreeMap<Address, Insn>) {
         let mut bytes = [0u8; 32];
 
-        // NOTE: as opposed to reading bytes from the storage, for all existing backends
-        // we can create a cheap view over the containing segment and use that to avoid
-        // lookups for each address read from.
+        // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
+        // create a "cheap" view over the containing segment and use that to avoid lookups for each
+        // address read from.
 
         // This is the stage where we build blocks by collecting instructions and marking them.
         'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
@@ -369,8 +365,9 @@ impl FunctionBuilderContext {
                 let entry = match insns.entry(address) {
                     Entry::Vacant(entry) => entry,
                     Entry::Occupied(mut entry) => {
-                        // If two blocks overlap, then they may share a common prefix, we mark
-                        // instructions that appear in multiple blocks as start.
+                        // If two blocks overlap, then they may share a common suffix to account
+                        // for this we mark instructions that appear in multiple blocks as starts
+                        // so they're considered cut points when performing block structuring.
                         entry.get_mut().mark_maybe_taken();
                         self.contexts
                             .entry(address)
@@ -396,9 +393,10 @@ impl FunctionBuilderContext {
                         if insn.is_flow() {
                             // We're done with this block; we schedule the next bit of work
 
-                            // These targets are what we can statically compute by scanning
-                            // the instruction's PCode branch operations--we will miss things
-                            // like PC relative jumps.
+                            // These targets are what we can statically compute by scanning the
+                            // instruction's PCode branch operations--we will miss things like PC
+                            // relative jumps; these constructs will be handled in post lifting
+                            // passes.
                             for (target, kind, addr) in insn.iter_targets() {
                                 let Some((addr, context)) = project.arch.canonicalise_address(addr)
                                 else {
@@ -425,15 +423,16 @@ impl FunctionBuilderContext {
 
                         // Implicit control-flow (it is a halt, etc.)
                         if !insn.has_fall() {
-                            // we're done with this block
+                            // We're done with this block
                             continue 'outer;
                         }
 
                         offset += insn.len();
                     }
                     Err(e) => {
-                        // flows into bad data??
+                        // Flows into bad data; we skip this block and remove its context
                         tracing::debug!("skipping {address}; lifting failed: {e}");
+                        self.contexts.remove(&address);
                         continue 'outer;
                     }
                 }
@@ -441,31 +440,43 @@ impl FunctionBuilderContext {
         }
     }
 
+    fn emit_block(&mut self, address: Address, length: usize, points: Vec<usize>) {
+        let context = self.contexts.get(&address).cloned().unwrap_or_default();
+        let block = BasicBlock::new_with(address, length, points, context);
+        self.blocks.push(block);
+    }
+
     fn structure_blocks<'b>(&mut self, insns: &'b mut BTreeMap<Address, Insn>) -> Vec<&'b Insn> {
         let mut cuts = Vec::new();
         let mut instructions = Vec::with_capacity(insns.len());
 
-        // Valid contexts contain all cut points
+        // Clear old blocks
+        self.blocks.clear();
+
+        // Valid contexts contain all cut points; we mark all instructions that
+        // are flow targets as maybe taken.
         for (i, (addr, insn)) in insns.iter_mut().enumerate() {
             tracing::trace!("checking insn {i}: {addr}");
+
             if self.contexts.contains_key(addr) {
                 tracing::trace!("found cut at {addr} ({i})");
                 cuts.push(i);
             }
+
             insn.mark_maybe_taken();
             instructions.push(&*insn);
         }
 
+        let get_next_cut = |idx: usize| cuts.get(idx).copied().unwrap_or(instructions.len());
+
         'cuts: for (cut_idx, cut) in cuts.iter().enumerate() {
             let start = *cut;
-            let mut next_cut_idx = cut_idx + 1;
-            let mut next_cut = cuts
-                .get(next_cut_idx)
-                .copied()
-                .unwrap_or(instructions.len());
-
             let address = instructions[start].address();
-            let mut expected = instructions[start].address();
+
+            let mut next_cut_idx = cut_idx + 1;
+            let mut next_cut = get_next_cut(next_cut_idx);
+
+            let mut expected = address;
             let mut length = 0usize;
 
             let mut points = Vec::new();
@@ -482,18 +493,9 @@ impl FunctionBuilderContext {
                         && matches!(instructions.get(next), Some(insn) if expected > insn.address())
                     {
                         next_cut_idx += 1;
-                        next_cut = cuts
-                            .get(next_cut_idx)
-                            .copied()
-                            .unwrap_or(instructions.len());
+                        next_cut = get_next_cut(next_cut_idx);
                     } else {
-                        let context = self
-                            .contexts
-                            .get(&insn.address())
-                            .cloned()
-                            .unwrap_or_default();
-                        let block = BasicBlock::new_with(address, length, points, context);
-                        self.blocks.push(block);
+                        self.emit_block(address, length, points);
                         continue 'cuts;
                     }
                 }
@@ -510,15 +512,7 @@ impl FunctionBuilderContext {
                 }
             }
 
-            self.blocks.push(BasicBlock::new_with(
-                address,
-                length,
-                points,
-                self.contexts
-                    .get(&instructions[start].address())
-                    .cloned()
-                    .unwrap_or_default(),
-            ));
+            self.emit_block(address, length, points);
         }
 
         instructions
@@ -589,6 +583,7 @@ impl FunctionBuilderContext {
 
             let num_local_targets = self.local_targets.len();
 
+            // Run post-lifting passes
             post_lifting_passes
                 .analyse_with(project, self)
                 .map_err(FunctionBuilderError::PostLiftingPass)?;
