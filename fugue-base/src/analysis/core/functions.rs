@@ -35,7 +35,41 @@ pub struct FunctionBuilderContext {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<(Address, ContextSet)>,
+}
+
+pub struct PartialFunction<'a> {
     blocks: Vec<BasicBlock>,
+    instructions: Vec<&'a mut Insn>,
+}
+
+impl<'a> PartialFunction<'a> {
+    pub fn new() -> Self {
+        PartialFunction {
+            blocks: Vec::new(),
+            instructions: Vec::new(),
+        }
+    }
+
+    pub fn push_block(&mut self, block: BasicBlock) {
+        self.blocks.push(block);
+    }
+
+    pub fn blocks(&self) -> &[BasicBlock] {
+        &self.blocks
+    }
+
+    pub fn blocks_mut(&mut self) -> &mut Vec<BasicBlock> {
+        &mut self.blocks
+    }
+
+    pub fn instructions(&self) -> &[&'a mut Insn] {
+        &self.instructions
+    }
+}
+
+pub struct PartialFunctionWithContext<'ctxt, 'insns> {
+    pub context: &'ctxt mut FunctionBuilderContext,
+    pub function: PartialFunction<'insns>,
 }
 
 pub struct FunctionBuilder<'a> {
@@ -266,7 +300,6 @@ impl FunctionBuilderContext {
             contexts: BTreeMap::new(),
             local_targets: BTreeSet::new(),
             global_targets: BTreeSet::new(),
-            blocks: Vec::new(),
         }
     }
 
@@ -317,7 +350,6 @@ impl FunctionBuilderContext {
         self.contexts.clear();
         self.local_targets.clear();
         self.global_targets.clear();
-        self.blocks.clear();
     }
 
     fn lift_instructions(&mut self, project: &mut Project, insns: &mut BTreeMap<Address, Insn>) {
@@ -440,18 +472,12 @@ impl FunctionBuilderContext {
         }
     }
 
-    fn emit_block(&mut self, address: Address, length: usize, points: Vec<usize>) {
-        let context = self.contexts.get(&address).cloned().unwrap_or_default();
-        let block = BasicBlock::new_with(address, length, points, context);
-        self.blocks.push(block);
-    }
-
-    fn structure_blocks<'b>(&mut self, insns: &'b mut BTreeMap<Address, Insn>) -> Vec<&'b Insn> {
+    fn structure_blocks<'b>(
+        &mut self,
+        insns: &'b mut BTreeMap<Address, Insn>,
+    ) -> PartialFunction<'b> {
         let mut cuts = Vec::new();
-        let mut instructions = Vec::with_capacity(insns.len());
-
-        // Clear old blocks
-        self.blocks.clear();
+        let mut f = PartialFunction::new();
 
         // Valid contexts contain all cut points; we mark all instructions that
         // are flow targets as maybe taken.
@@ -464,14 +490,20 @@ impl FunctionBuilderContext {
             }
 
             insn.mark_maybe_taken();
-            instructions.push(&*insn);
+            f.instructions.push(insn);
         }
 
-        let get_next_cut = |idx: usize| cuts.get(idx).copied().unwrap_or(instructions.len());
+        let num_insns = f.instructions.len();
+
+        let get_next_cut = |idx: usize| cuts.get(idx).copied().unwrap_or(num_insns);
+        let emit_block = |address, length, points| {
+            let context = self.contexts.get(&address).cloned().unwrap_or_default();
+            BasicBlock::new_with(address, length, points, context)
+        };
 
         'cuts: for (cut_idx, cut) in cuts.iter().enumerate() {
             let start = *cut;
-            let address = instructions[start].address();
+            let address = f.instructions[start].address();
 
             let mut next_cut_idx = cut_idx + 1;
             let mut next_cut = get_next_cut(next_cut_idx);
@@ -483,19 +515,19 @@ impl FunctionBuilderContext {
 
             tracing::trace!("structuring block at {address}; start: {start}");
 
-            for curr in start..instructions.len() {
-                let insn = &instructions[curr];
+            for curr in start..num_insns {
+                let insn = &f.instructions[curr];
                 let next = curr + 1;
 
                 if curr == next_cut {
                     // potential end of block
                     if !insn.is_flow()
-                        && matches!(instructions.get(next), Some(insn) if expected > insn.address())
+                        && matches!(f.instructions.get(next), Some(insn) if expected > insn.address())
                     {
                         next_cut_idx += 1;
                         next_cut = get_next_cut(next_cut_idx);
                     } else {
-                        self.emit_block(address, length, points);
+                        f.push_block(emit_block(address, length, points));
                         continue 'cuts;
                     }
                 }
@@ -512,10 +544,10 @@ impl FunctionBuilderContext {
                 }
             }
 
-            self.emit_block(address, length, points);
+            f.push_block(emit_block(address, length, points));
         }
 
-        instructions
+        f
     }
 
     pub fn analyse(
@@ -567,15 +599,16 @@ impl FunctionBuilderContext {
 
             tracing::trace!("{:?}", self.local_targets);
 
-            let instructions = self.structure_blocks(&mut insns);
+            // TODO: pass this to the post-lifting passes...
+            let partial = self.structure_blocks(&mut insns);
 
-            for block in self.blocks.iter() {
+            for block in partial.blocks.iter() {
                 tracing::debug!("blk@{}", block.start());
                 for insn in block
                     .instructions()
                     .iter()
                     .copied()
-                    .map(|i| &instructions[i])
+                    .map(|i| &partial.instructions[i])
                 {
                     tracing::debug!("{}: {}", insn.address(), insn.display(project.language));
                 }

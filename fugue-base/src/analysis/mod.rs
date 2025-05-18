@@ -21,14 +21,11 @@ pub enum AnalysisError {
 pub type NoState = ();
 pub type BoxedAnalysisPass<'a, S = NoState> = Box<dyn AnalysisPass<'a, S> + 'a>;
 
-pub struct AnalysisManager<'a, S: 'a = NoState> {
+pub struct AnalysisManager<'a, S = NoState> {
     passes: IndexMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
-impl<'a, S> AnalysisManager<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisManager<'a, S> {
     pub fn new() -> Self {
         AnalysisManager {
             passes: IndexMap::new(),
@@ -120,7 +117,7 @@ impl<'a> AnalysisManager<'a> {
     }
 }
 
-pub trait AnalysisPass<'a, S: 'a = NoState> {
+pub trait AnalysisPass<'a, S = NoState> {
     fn analyse(&mut self, #[allow(unused)] project: &mut Project) -> Result<(), AnalysisError> {
         unimplemented!(
             "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
@@ -154,27 +151,20 @@ where
     }
 }
 
-pub trait AnalysisCondition<'a, S>
-where
-    S: 'a,
-{
+pub trait AnalysisCondition<'a, S> {
     fn evaluate(&mut self, state: &mut S) -> bool;
 }
 
 impl<'a, F, S> AnalysisCondition<'a, S> for F
 where
     F: FnMut(&mut S) -> bool + 'a,
-    S: 'a,
 {
     fn evaluate(&mut self, state: &mut S) -> bool {
         self(state)
     }
 }
 
-impl<'a, S> AnalysisCondition<'a, S> for usize
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisCondition<'a, S> for usize {
     fn evaluate(&mut self, _state: &mut S) -> bool {
         if let Some(nself) = self.checked_sub(1) {
             *self = nself;
@@ -185,7 +175,7 @@ where
     }
 }
 
-pub struct AnalysisGroup<'a, S: 'a = NoState> {
+pub struct AnalysisGroup<'a, S = NoState> {
     passes: IndexMap<String, Box<dyn AnalysisPass<'a, S> + 'a>>,
 }
 
@@ -200,10 +190,7 @@ where
     }
 }
 
-impl<'a, S> AnalysisGroup<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisGroup<'a, S> {
     pub fn new() -> Self {
         AnalysisGroup {
             passes: IndexMap::new(),
@@ -287,10 +274,7 @@ where
     }
 }
 
-impl<'a, S> AnalysisPass<'a, S> for AnalysisGroup<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisPass<'a, S> for AnalysisGroup<'a, S> {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         for pass in self.passes.values_mut() {
             pass.analyse_with(project, state)?;
@@ -307,15 +291,12 @@ where
     }
 }
 
-pub struct IteratedAnalysis<'a, S: 'a = NoState> {
+pub struct IteratedAnalysis<'a, S = NoState> {
     pass: Box<dyn AnalysisPass<'a, S> + 'a>,
     condition: Box<dyn AnalysisCondition<'a, S> + 'a>,
 }
 
-impl<'a, S> IteratedAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> IteratedAnalysis<'a, S> {
     pub fn new(
         pass: impl AnalysisPass<'a, S> + 'a,
         condition: impl AnalysisCondition<'a, S> + 'a,
@@ -327,10 +308,7 @@ where
     }
 }
 
-impl<'a, S> AnalysisPass<'a, S> for IteratedAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisPass<'a, S> for IteratedAnalysis<'a, S> {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         while self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
@@ -347,15 +325,12 @@ where
     }
 }
 
-pub struct ConditionalAnalysis<'a, S: 'a = NoState> {
+pub struct ConditionalAnalysis<'a, S = NoState> {
     pass: Box<dyn AnalysisPass<'a, S> + 'a>,
     condition: Box<dyn AnalysisCondition<'a, S> + 'a>,
 }
 
-impl<'a, S> ConditionalAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> ConditionalAnalysis<'a, S> {
     pub fn new(
         pass: impl AnalysisPass<'a, S> + 'a,
         condition: impl AnalysisCondition<'a, S> + 'a,
@@ -367,10 +342,7 @@ where
     }
 }
 
-impl<'a, S> AnalysisPass<'a, S> for ConditionalAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisPass<'a, S> for ConditionalAnalysis<'a, S> {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         if self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
@@ -387,15 +359,12 @@ where
     }
 }
 
-pub struct StatefulAnalysis<'a, S: 'a = NoState> {
+pub struct StatefulAnalysis<'a, S = NoState> {
     pass: Box<dyn AnalysisPass<'a, S> + 'a>,
     state: S,
 }
 
-impl<'a, S> StatefulAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> StatefulAnalysis<'a, S> {
     pub fn new(pass: impl AnalysisPass<'a, S> + 'a, state: S) -> Self {
         StatefulAnalysis {
             pass: Box::new(pass),
@@ -407,16 +376,13 @@ where
 // NOTE: AnalysisPass here will always be AnalysisPass<NoState>; this means that we
 // cannot implement `as_group` or `as_group_mut` for `StatefulAnalysis` as it would
 // require `S` to be `NoState` as well.
-impl<'a, S> AnalysisPass<'a> for StatefulAnalysis<'a, S>
-where
-    S: 'a,
-{
+impl<'a, S> AnalysisPass<'a> for StatefulAnalysis<'a, S> {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         self.pass.analyse_with(project, &mut self.state)
     }
 }
 
-pub trait AnalysisPassExt<'a, S: 'a> {
+pub trait AnalysisPassExt<'a, S> {
     fn conditional(
         self,
         condition: impl AnalysisCondition<'a, S> + 'a,
@@ -442,12 +408,7 @@ pub trait AnalysisPassExt<'a, S: 'a> {
     }
 }
 
-impl<'a, S, P> AnalysisPassExt<'a, S> for P
-where
-    P: AnalysisPass<'a, S> + Sized + 'a,
-    S: 'a,
-{
-}
+impl<'a, S, P> AnalysisPassExt<'a, S> for P where P: AnalysisPass<'a, S> + Sized + 'a {}
 
 #[cfg(test)]
 mod test {
@@ -566,10 +527,7 @@ mod test {
             println!("pass: {name}");
         }
 
-        let g2 = analyses
-            .get_pass("cond-hello-world")
-            .unwrap()
-            .as_group();
+        let g2 = analyses.get_pass("cond-hello-world").unwrap().as_group();
 
         // NOTE: here g2 will be None, because with_state erases the inner state type.
 
