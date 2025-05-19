@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 use fugue_lifter::{Language, Varnode};
 
-use crate::lifter::{ContextSet, Disassembler, Lifter};
+use crate::lifter::{ContextSet, Disassembler, LanguageVariant, Lifter};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::{Address, Endian};
 
@@ -212,14 +212,21 @@ impl From<Box<dyn ArchImpl>> for Arch {
 
 impl Arch {
     pub fn new(language: &'static Language) -> Self {
+        Self::new_with(language, None)
+    }
+
+    pub fn new_with(
+        language: &'static Language,
+        variant: impl Into<Option<LanguageVariant>>,
+    ) -> Self {
         match language.processor() {
-            "ARM" => arm::Arm::new(language),
-            "AARCH64" => aarch64::AArch64::new(language),
+            "ARM" => arm::Arm::new_with(language, variant),
+            "AARCH64" => aarch64::AArch64::new_with(language, variant),
             "x86" => {
                 if language.address_bits() == 32 {
-                    x86::X86::new(language)
+                    x86::X86::new_with(language, variant)
                 } else {
-                    x86_64::X86_64::new(language)
+                    x86_64::X86_64::new_with(language, variant)
                 }
             }
             _ => {

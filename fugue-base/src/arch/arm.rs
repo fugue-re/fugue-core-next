@@ -3,7 +3,9 @@ use crate::lifter::arm::le::context::T_MODE;
 use crate::lifter::arm::le::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use crate::lifter::{ContextSet, Disassembler, Language, Lifter, LifterBuilder, Varnode};
+use crate::lifter::{
+    ContextSet, Disassembler, Language, LanguageVariant, Lifter, LifterBuilder, Varnode,
+};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 
@@ -14,6 +16,7 @@ const GPRS: &[Varnode] = &[
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Arm {
     language: &'static Language,
+    variant: Option<LanguageVariant>,
 }
 
 impl ArchImpl for Arm {
@@ -51,6 +54,16 @@ impl ArchImpl for Arm {
 
 impl Arm {
     pub(crate) fn new(language: &'static Language) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Self::new_with(language, None)
+    }
+
+    pub(crate) fn new_with(
+        language: &'static Language,
+        variant: impl Into<Option<LanguageVariant>>,
+    ) -> Arch {
+        Arch::from(Box::new(Self {
+            language,
+            variant: variant.into(),
+        }) as Box<dyn ArchImpl>)
     }
 }

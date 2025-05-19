@@ -143,3 +143,6 @@ impl Lifter {
             .lift(address, bytes, &mut self.context, operations)
     }
 }
+
+pub type LifterFactory = fn() -> Lifter;
+pub type LiftingContextFactory = fn() -> LiftingContext;

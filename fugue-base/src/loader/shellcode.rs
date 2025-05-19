@@ -50,7 +50,7 @@ impl<'a> Shellcode<'a> {
         bytes: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let language = parse_language(language)?;
+        let (language, variant) = parse_language(language)?;
 
         let bytes = bytes.into();
         if bytes.is_empty() {
@@ -60,7 +60,7 @@ impl<'a> Shellcode<'a> {
         let address = address.into();
         let size = bytes.len();
 
-        let arch = Arch::new(language);
+        let arch = Arch::new_with(language, variant);
 
         if !address.range_in_space_bounds(language, size) {
             return Err(LoaderError::format(ShellcodeError::AddressOverflow(

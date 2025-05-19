@@ -3,7 +3,7 @@ use crate::lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
 use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Disassembler, Language, Lifter, LifterBuilder, Varnode};
+use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter, LifterBuilder, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
@@ -21,6 +21,7 @@ const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct X86 {
     language: &'static Language,
+    variant: Option<LanguageVariant>,
 }
 
 impl ArchImpl for X86 {
@@ -69,6 +70,16 @@ impl ArchImpl for X86 {
 
 impl X86 {
     pub(crate) fn new(language: &'static Language) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Self::new_with(language, None)
+    }
+
+    pub(crate) fn new_with(
+        language: &'static Language,
+        variant: impl Into<Option<LanguageVariant>>,
+    ) -> Arch {
+        Arch::from(Box::new(Self {
+            language,
+            variant: variant.into(),
+        }) as Box<dyn ArchImpl>)
     }
 }

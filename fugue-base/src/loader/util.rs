@@ -1,7 +1,9 @@
-use crate::lifter::{Language, LanguageId};
+use crate::lifter::{Language, LanguageId, LanguageVariant};
 use crate::loader::LoaderError;
 
-pub fn parse_language(language: impl AsRef<str>) -> Result<&'static Language, LoaderError> {
+pub fn parse_language(
+    language: impl AsRef<str>,
+) -> Result<(&'static Language, Option<LanguageVariant>), LoaderError> {
     let language = language
         .as_ref()
         .parse::<LanguageId>()
@@ -24,5 +26,5 @@ pub fn parse_language(language: impl AsRef<str>) -> Result<&'static Language, Lo
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
-    Ok(language)
+    Ok((language, None))
 }

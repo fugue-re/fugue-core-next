@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{Language, Lifter};
+use fugue_lifter_runtime::{Language, LanguageVariant, Lifter, LiftingContext};
 
 mod __impl {
     #![allow(unused)]
@@ -19,4 +19,23 @@ impl LifterFactory {
     pub fn language(&self) -> &'static Language {
         &__impl::LANGUAGE
     }
+}
+
+pub struct LiftingContextFactory;
+
+impl LiftingContextFactory {
+    pub fn new() -> LiftingContext {
+        Self::new_v8a()
+    }
+
+    pub fn new_v8a() -> LiftingContext {
+        __impl::lifter_with(2, __impl::default_context())
+    }
+}
+
+pub mod variants {
+    use super::*;
+
+    pub const DEFAULT: LanguageVariant = V8A;
+    pub const V8A: LanguageVariant = LanguageVariant::new("v8A", LiftingContextFactory::new_v8a);
 }

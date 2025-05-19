@@ -3,8 +3,8 @@ use std::fmt::{Debug, Display};
 use arrayvec::ArrayVec;
 
 pub use fugue_lifter::{
-    aarch64, arm, x86, x86_64, ContextBitRange, Language, LanguageId, Lifter, LifterBuilder,
-    LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode,
+    aarch64, arm, x86, x86_64, ContextBitRange, Language, LanguageId, LanguageVariant, Lifter,
+    LifterBuilder, LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode,
 };
 
 use thiserror::Error;

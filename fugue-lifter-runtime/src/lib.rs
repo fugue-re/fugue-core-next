@@ -16,7 +16,7 @@ pub use constructor::{
 };
 pub use context::ContextDatabase;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
-pub use language::{Language, LanguageId};
+pub use language::{Language, LanguageId, LanguageVariant};
 pub use lifter::Lifter;
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,

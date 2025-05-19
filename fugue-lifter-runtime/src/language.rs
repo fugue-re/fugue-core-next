@@ -5,8 +5,43 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::context::ContextBitRange;
+use crate::lifter::LiftingContextFactory;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::wrap_offset;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LanguageVariant {
+    variant: &'static str,
+    context: LiftingContextFactory,
+}
+
+impl LanguageVariant {
+    pub const fn new(variant: &'static str, context: LiftingContextFactory) -> Self {
+        Self { variant, context }
+    }
+
+    pub fn variant(&self) -> &str {
+        &self.variant
+    }
+
+    pub fn context(&self) -> LiftingContextFactory {
+        self.context
+    }
+}
+
+impl Debug for LanguageVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LanguageVariant")
+            .field("variant", &self.variant)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Display for LanguageVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.variant)
+    }
+}
 
 pub struct LanguageId {
     processor: String,
