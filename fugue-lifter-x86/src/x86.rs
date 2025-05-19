@@ -41,5 +41,5 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", LiftingContextFactory::new_default);
+        LanguageVariant::new("default", LANGUAGE, LiftingContextFactory::new_default);
 }

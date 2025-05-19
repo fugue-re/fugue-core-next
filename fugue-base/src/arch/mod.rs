@@ -211,27 +211,21 @@ impl From<Box<dyn ArchImpl>> for Arch {
 }
 
 impl Arch {
-    pub fn new(language: &'static Language) -> Self {
-        Self::new_with(language, None)
-    }
-
-    pub fn new_with(
-        language: &'static Language,
-        variant: impl Into<Option<LanguageVariant>>,
-    ) -> Self {
+    pub fn new(variant: LanguageVariant) -> Self {
+        let language = variant.language();
         match language.processor() {
-            "ARM" => arm::Arm::new_with(language, variant),
-            "AARCH64" => aarch64::AArch64::new_with(language, variant),
+            "ARM" => arm::Arm::new(variant),
+            "AARCH64" => aarch64::AArch64::new(variant),
             "x86" => {
                 if language.address_bits() == 32 {
-                    x86::X86::new_with(language, variant)
+                    x86::X86::new(variant)
                 } else {
-                    x86_64::X86_64::new_with(language, variant)
+                    x86_64::X86_64::new(variant)
                 }
             }
             _ => {
                 // NOTE: should be unreachable
-                panic!("unsupported language: {}", language.id())
+                panic!("unsupported language: {variant}");
             }
         }
     }

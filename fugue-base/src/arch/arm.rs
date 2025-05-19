@@ -3,9 +3,7 @@ use crate::lifter::arm::le::context::T_MODE;
 use crate::lifter::arm::le::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use crate::lifter::{
-    ContextSet, Disassembler, Language, LanguageVariant, Lifter, LifterBuilder, Varnode,
-};
+use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 
@@ -15,8 +13,7 @@ const GPRS: &[Varnode] = &[
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Arm {
-    language: &'static Language,
-    variant: Option<LanguageVariant>,
+    language: LanguageVariant,
 }
 
 impl ArchImpl for Arm {
@@ -25,7 +22,7 @@ impl ArchImpl for Arm {
     }
 
     fn lifter(&self) -> Lifter {
-        LifterBuilder::build_str(self.language.id()).expect("supported language")
+        Lifter::new(self.language.language(), self.language.context()())
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
@@ -37,7 +34,7 @@ impl ArchImpl for Arm {
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
         let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
-        if self.language.is_big_endian() {
+        if self.language().is_big_endian() {
             bytes.reverse();
         }
         ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 0))
@@ -48,22 +45,12 @@ impl ArchImpl for Arm {
     }
 
     fn language(&self) -> &'static Language {
-        self.language
+        self.language.language()
     }
 }
 
 impl Arm {
-    pub(crate) fn new(language: &'static Language) -> Arch {
-        Self::new_with(language, None)
-    }
-
-    pub(crate) fn new_with(
-        language: &'static Language,
-        variant: impl Into<Option<LanguageVariant>>,
-    ) -> Arch {
-        Arch::from(Box::new(Self {
-            language,
-            variant: variant.into(),
-        }) as Box<dyn ArchImpl>)
+    pub(crate) fn new(language: LanguageVariant) -> Arch {
+        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
     }
 }

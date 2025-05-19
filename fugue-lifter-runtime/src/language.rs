@@ -11,16 +11,29 @@ use crate::wrap_offset;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LanguageVariant {
-    variant: &'static str,
+    language: &'static Language,
     context: LiftingContextFactory,
+    variant: &'static str,
 }
 
 impl LanguageVariant {
-    pub const fn new(variant: &'static str, context: LiftingContextFactory) -> Self {
-        Self { variant, context }
+    pub const fn new(
+        variant: &'static str,
+        language: &'static Language,
+        context: LiftingContextFactory,
+    ) -> Self {
+        Self {
+            language,
+            context,
+            variant,
+        }
     }
 
-    pub fn variant(&self) -> &str {
+    pub fn language(&self) -> &'static Language {
+        self.language
+    }
+
+    pub fn variant(&self) -> &'static str {
         &self.variant
     }
 
@@ -39,7 +52,14 @@ impl Debug for LanguageVariant {
 
 impl Display for LanguageVariant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.variant)
+        write!(
+            f,
+            "{}:{}:{}:{}",
+            self.language.processor(),
+            if self.language.is_big_endian() { "BE" } else { "LE" },
+            self.language.address_bits(),
+            self.variant
+        )
     }
 }
 

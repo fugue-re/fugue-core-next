@@ -37,5 +37,6 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant = V8A;
-    pub const V8A: LanguageVariant = LanguageVariant::new("v8A", LiftingContextFactory::new_v8a);
+    pub const V8A: LanguageVariant =
+        LanguageVariant::new("v8A", LANGUAGE, LiftingContextFactory::new_v8a);
 }

@@ -6,7 +6,7 @@ use fallible_iterator::FallibleIterator;
 use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::Arch;
-use crate::lifter::Language;
+use crate::lifter::LanguageVariant;
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
@@ -25,23 +25,23 @@ pub struct Object<'a> {
     attributes: AttributeMap,
 }
 
-pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<&'static Language, LoaderError> {
+pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
     use object::Architecture as A;
 
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
 
-    let triple = match object.architecture() {
-        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::LANGUAGE,
-        A::Arm if is_64 => crate::lifter::aarch64::be::LANGUAGE,
-        A::Arm if is_le => crate::lifter::arm::le::LANGUAGE,
-        A::Arm => crate::lifter::arm::be::LANGUAGE,
-        A::I386 => crate::lifter::x86::LANGUAGE,
-        A::X86_64 => crate::lifter::x86_64::LANGUAGE,
+    let language = match object.architecture() {
+        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
+        A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
+        A::Arm if is_le => crate::lifter::arm::le::variants::DEFAULT,
+        A::Arm => crate::lifter::arm::be::variants::DEFAULT,
+        A::I386 => crate::lifter::x86::variants::DEFAULT,
+        A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
-    Ok(triple)
+    Ok(language)
 }
 
 impl<'a> Object<'a> {
@@ -92,7 +92,7 @@ impl<'a> LoadableFromBytes<'a> for Object<'a> {
 
 impl LoadableFromFile for Object<'_> {
     fn from_file_with(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where

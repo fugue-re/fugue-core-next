@@ -67,7 +67,7 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", LiftingContextFactory::new_default);
+        LanguageVariant::new("default", LANGUAGE, LiftingContextFactory::new_default);
     pub const COMPAT32: LanguageVariant =
-        LanguageVariant::new("compat32", LiftingContextFactory::new_compat32);
+        LanguageVariant::new("compat32", LANGUAGE, LiftingContextFactory::new_compat32);
 }

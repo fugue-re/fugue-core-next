@@ -4,7 +4,7 @@ use crate::lifter::x86_64::register::{
     RSP, SF, ZF,
 };
 use crate::lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter, LifterBuilder, Varnode};
+use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
@@ -22,8 +22,7 @@ const GPRS: &[Varnode] = &[
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct X86_64 {
-    language: &'static Language,
-    variant: Option<LanguageVariant>,
+    language: LanguageVariant,
 }
 
 impl ArchImpl for X86_64 {
@@ -32,7 +31,7 @@ impl ArchImpl for X86_64 {
     }
 
     fn lifter(&self) -> Lifter {
-        LifterBuilder::build_str(self.language.id()).expect("supported language")
+        Lifter::new(self.language.language(), self.language.context()())
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -67,22 +66,14 @@ impl ArchImpl for X86_64 {
     }
 
     fn language(&self) -> &'static Language {
-        self.language
+        self.language.language()
     }
 }
 
 impl X86_64 {
-    pub(crate) fn new(language: &'static Language) -> Arch {
-        Self::new_with(language, None)
-    }
-
-    pub(crate) fn new_with(
-        language: &'static Language,
-        variant: impl Into<Option<LanguageVariant>>,
-    ) -> Arch {
+    pub(crate) fn new(language: LanguageVariant) -> Arch {
         Arch::from(Box::new(Self {
             language,
-            variant: variant.into(),
         }) as Box<dyn ArchImpl>)
     }
 }
