@@ -33,11 +33,27 @@ impl Insn {
             properties |= InsnProperties::NOP;
         }
 
+        properties |= InsnProperties::LIFTED;
+
         Self {
             address,
             properties,
             operations,
             targets,
+            length,
+        }
+    }
+
+    pub(crate) fn from_disassembly(
+        address: Address,
+        length: usize,
+        properties: InsnProperties,
+    ) -> Self {
+        Self {
+            address,
+            properties,
+            operations: Vec::new(),
+            targets: SmallVec::new(),
             length,
         }
     }
@@ -66,14 +82,6 @@ impl Insn {
         self.properties |= InsnProperties::MAYBE_TAKEN;
     }
 
-    pub fn mark_in_function(&mut self) {
-        self.properties |= InsnProperties::IN_FUNCTION;
-    }
-
-    pub fn mark_in_table(&mut self) {
-        self.properties |= InsnProperties::IN_TABLE;
-    }
-
     pub fn mark_nonsense(&mut self) {
         self.properties |= InsnProperties::NONSENSE;
     }
@@ -88,6 +96,14 @@ impl Insn {
 
     pub fn mark_invalid(&mut self) {
         self.properties |= InsnProperties::INVALID;
+    }
+
+    pub fn mark_lifted(&mut self) {
+        self.properties |= InsnProperties::LIFTED;
+    }
+
+    pub fn mark_needs_lifting(&mut self) {
+        self.properties |= InsnProperties::NEEDS_LIFTING;
     }
 
     pub fn is_taken(&self) -> bool {
@@ -112,14 +128,6 @@ impl Insn {
 
     pub fn is_halt(&self) -> bool {
         self.properties().intersects(InsnProperties::HALT)
-    }
-
-    pub fn is_in_function(&self) -> bool {
-        self.properties().intersects(InsnProperties::IN_FUNCTION)
-    }
-
-    pub fn is_in_table(&self) -> bool {
-        self.properties().intersects(InsnProperties::IN_TABLE)
     }
 
     pub fn is_branch(&self) -> bool {
@@ -152,6 +160,14 @@ impl Insn {
 
     pub fn has_fall(&self) -> bool {
         self.properties().contains(InsnProperties::FALL)
+    }
+
+    pub fn is_lifted(&self) -> bool {
+        self.properties().intersects(InsnProperties::LIFTED)
+    }
+
+    pub fn needs_lifting(&self) -> bool {
+        self.properties().intersects(InsnProperties::NEEDS_LIFTING)
     }
 
     pub fn len(&self) -> usize {
@@ -202,49 +218,50 @@ impl fmt::Display for InsnFormatter<'_> {
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct InsnProperties: u16 {
-        const FALL        = 0b0000_0000_0000_0001;
-        const BRANCH      = 0b0000_0000_0000_0010;
-        const CALL        = 0b0000_0000_0000_0100;
-        const RETURN      = 0b0000_0000_0000_1000;
+        const FALL          = 0b0000_0000_0000_0001;
+        const BRANCH        = 0b0000_0000_0000_0010;
+        const CALL          = 0b0000_0000_0000_0100;
+        const RETURN        = 0b0000_0000_0000_1000;
 
-        const INDIRECT    = 0b0000_0000_0001_0000;
+        const INDIRECT      = 0b0000_0000_0001_0000;
 
-        const BRANCH_DEST = 0b0000_0000_0010_0000;
-        const CALL_DEST   = 0b0000_0000_0100_0000;
+        const BRANCH_DEST   = 0b0000_0000_0010_0000;
+        const CALL_DEST     = 0b0000_0000_0100_0000;
 
         // 1. instruction's address referenced as an immediate
         //    on the rhs of an assignment
         // 2. the instruction is a fall from padding
         // 3. the instruction is an implicit fall target of two
         //    or more overlapping blocks
-        const MAYBE_TAKEN = 0b0000_0000_1000_0000;
+        const MAYBE_TAKEN   = 0b0000_0000_1000_0000;
 
         // instruction is a semantic NO-OP
-        const NOP         = 0b0000_0001_0000_0000;
+        const NOP           = 0b0000_0001_0000_0000;
 
         // instruction is a trap (e.g., UD2)
-        const TRAP        = 0b0000_0010_0000_0000;
+        const TRAP          = 0b0000_0010_0000_0000;
 
         // instruction falls into invalid
-        const INVALID     = 0b0000_0100_0000_0000;
-
-        // is contained within a function
-        const IN_FUNCTION = 0b0000_1000_0000_0000;
-
-        // is jump table target
-        const IN_TABLE    = 0b0001_0000_0000_0000;
+        const INVALID       = 0b0000_0100_0000_0000;
 
         // treat as invalid if repeated
-        const NONSENSE    = 0b0010_0000_0000_0000;
+        const NONSENSE      = 0b0000_1000_0000_0000;
 
-        const HALT        = 0b0100_0000_0000_0000;
+        // instruction is a halt (e.g., HLT)
+        const HALT          = 0b0001_0000_0000_0000;
 
-        const UNVIABLE    = Self::TRAP.bits() | Self::INVALID.bits();
+        // instruction has been lifted
+        const LIFTED        = 0b0010_0000_0000_0000;
 
-        const DEST        = Self::BRANCH_DEST.bits() | Self::CALL_DEST.bits();
-        const FLOW        = Self::BRANCH.bits() | Self::CALL.bits() | Self::RETURN.bits();
+        // instruction needs to be lifted
+        const NEEDS_LIFTING = 0b0100_0000_0000_0000;
 
-        const TAKEN       = Self::DEST.bits() | Self::MAYBE_TAKEN.bits();
+        const UNVIABLE      = Self::TRAP.bits() | Self::INVALID.bits();
+
+        const DEST          = Self::BRANCH_DEST.bits() | Self::CALL_DEST.bits();
+        const FLOW          = Self::BRANCH.bits() | Self::CALL.bits() | Self::RETURN.bits();
+
+        const TAKEN         = Self::DEST.bits() | Self::MAYBE_TAKEN.bits();
     }
 }
 

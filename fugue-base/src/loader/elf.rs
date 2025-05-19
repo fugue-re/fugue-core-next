@@ -19,8 +19,7 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
-use crate::lifter::{Language, Lifter};
-use crate::loader::object::object_lifter;
+use crate::loader::object::object_language;
 use crate::loader::symbols::{ExternSymbols, LocalSymbols, SymbolProperties};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
 use crate::memory::SegmentProperties;
@@ -68,7 +67,6 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
 pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,
-    lifter: Lifter,
     locals: LocalSymbols,
     externs: ExternSymbols,
     attributes: AttributeMap,
@@ -86,15 +84,14 @@ impl<'a> Elf<'a> {
         let object = ElfInner::try_new(data.into(), |data| ElfFileRepr::parse(data))?;
 
         let view = object.borrow_view();
-        let lifter = with_elf!(view, elf | object_lifter(elf))?;
-        let architecture = Arch::new(lifter.language());
+        let language = with_elf!(view, elf | object_language(elf))?;
+        let architecture = Arch::new(language);
 
-        let (locals, externs) = with_elf!(view, elf | elf_symbols(elf, &architecture, &lifter));
+        let (locals, externs) = with_elf!(view, elf | elf_symbols(elf, &architecture));
 
         Ok(Self {
             object,
             architecture,
-            lifter,
             locals,
             externs,
             attributes: attributes.into(),
@@ -120,14 +117,13 @@ impl<'a> Elf<'a> {
 pub fn elf_symbols<'a>(
     elf: &'a impl Object<'a>,
     arch: &Arch,
-    lifter: &Lifter,
 ) -> (LocalSymbols, ExternSymbols) {
     // TODO:
     // - base address should be configurable.
 
     let is_object = elf.kind() == ObjectKind::Relocatable;
-    let addr_size = lifter.address_size();
-    let addr_align = lifter.address_alignment();
+    let addr_size = arch.language().address_size();
+    let addr_align = arch.language().address_alignment();
 
     let mut section_map = Vec::new();
 
@@ -1186,14 +1182,6 @@ impl Loadable for Elf<'_> {
 
     fn architecture(&self) -> Arch {
         self.architecture.clone()
-    }
-
-    fn language(&self) -> &'static Language {
-        self.lifter.language()
-    }
-
-    fn lifter(&self) -> Lifter {
-        self.lifter.clone()
     }
 
     fn local_symbols(&self) -> Option<&LocalSymbols> {

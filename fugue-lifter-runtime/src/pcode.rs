@@ -8,7 +8,7 @@ use crate::calculate_mask;
 use crate::constructor::{Constructor, ConstructorResolver};
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
-use crate::lifter::{Language, LanguageFormatter};
+use crate::language::{Language, LanguageFormatter};
 
 pub const MAX_LABELS: usize = 192;
 pub const MAX_INPUTS_SPILL: usize = 8;
@@ -88,11 +88,13 @@ impl LiftingContext {
     }
 
     pub fn get_variable_by_bits(&self, bits: impl AsRef<ContextBitRange>, address: u64) -> u32 {
-        self.parsing_context.get_variable_by_bits(bits.as_ref(), address)
+        self.parsing_context
+            .get_variable_by_bits(bits.as_ref(), address)
     }
 
     pub fn set_variable(&mut self, name: impl AsRef<str>, address: u64, value: u32) -> Option<()> {
-        self.parsing_context.set_variable(name.as_ref(), address, value)
+        self.parsing_context
+            .set_variable(name.as_ref(), address, value)
     }
 
     pub fn set_variable_by_bits(
@@ -106,7 +108,8 @@ impl LiftingContext {
     }
 
     pub fn set_variable_default(&mut self, name: impl AsRef<str>, value: u32) -> Option<()> {
-        self.parsing_context.set_variable_default(name.as_ref(), value)
+        self.parsing_context
+            .set_variable_default(name.as_ref(), value)
     }
 
     pub fn set_variable_default_by_bits(&mut self, bits: impl AsRef<ContextBitRange>, value: u32) {
@@ -120,7 +123,8 @@ impl LiftingContext {
         start_bit: usize,
         end_bit: usize,
     ) -> Option<()> {
-        self.parsing_context.register_variable(name, start_bit, end_bit)
+        self.parsing_context
+            .register_variable(name, start_bit, end_bit)
     }
 
     pub fn get_context(&self, address: u64) -> &[u32] {
@@ -131,14 +135,9 @@ impl LiftingContext {
         self.parsing_context.get_context_bounds(address)
     }
 
-    pub fn set_context_change_point(
-        &mut self,
-        address: u64,
-        num: usize,
-        mask: u32,
-        value: u32,
-    ) {
-        self.parsing_context.set_context_change_point(address, num, mask, value);
+    pub fn set_context_change_point(&mut self, address: u64, num: usize, mask: u32, value: u32) {
+        self.parsing_context
+            .set_context_change_point(address, num, mask, value);
     }
 
     pub fn set_context_region(
@@ -149,7 +148,8 @@ impl LiftingContext {
         mask: u32,
         value: u32,
     ) {
-        self.parsing_context.set_context_region(addr1, addr2, num, mask, value);
+        self.parsing_context
+            .set_context_region(addr1, addr2, num, mask, value);
     }
 
     pub fn set_variable_region(
@@ -661,7 +661,12 @@ impl<'a> Display for LanguageFormatter<'a, Varnode> {
             .space_name(self.value.space())
             .expect("valid space");
 
-        write!(f, "*[{space}]{:#x}:{}", self.value.offset(), self.value.size())
+        write!(
+            f,
+            "*[{space}]{:#x}:{}",
+            self.value.offset(),
+            self.value.size()
+        )
     }
 }
 

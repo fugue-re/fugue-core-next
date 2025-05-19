@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::lifter::{Language, Lifter};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]

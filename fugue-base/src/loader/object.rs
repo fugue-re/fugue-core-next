@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 use std::path::Path;
-use std::str::FromStr;
 
 use fallible_iterator::FallibleIterator;
 
 use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::lifter::{Language, Lifter, LifterBuilder};
+use crate::arch::Arch;
+use crate::lifter::Language;
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
@@ -21,32 +21,27 @@ struct ObjectInner<'a> {
 
 pub struct Object<'a> {
     object: ObjectInner<'a>,
-    lifter: Lifter,
+    arch: Arch,
     attributes: AttributeMap,
 }
 
-pub fn object_lifter<'a>(object: &impl ObjectT<'a>) -> Result<Lifter, LoaderError> {
+pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<&'static Language, LoaderError> {
     use object::Architecture as A;
 
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
-    let is_tmode = object.entry() & 1 == 1;
 
     let triple = match object.architecture() {
-        A::Arm if is_64 && is_le => "AARCH64:LE:64",
-        A::Arm if is_64 => "AARCH64:BE:64",
-        A::Arm if is_le && is_tmode => "ARM:LE:32:v8T",
-        A::Arm if is_le => "ARM:LE:32",
-        A::Arm if is_tmode => "ARM:BE:32:v8T",
-        A::Arm => "ARM:BE:32",
-        A::I386 => "x86:LE:32",
-        A::X86_64 => "x86:LE:64",
+        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::LANGUAGE,
+        A::Arm if is_64 => crate::lifter::aarch64::be::LANGUAGE,
+        A::Arm if is_le => crate::lifter::arm::le::LANGUAGE,
+        A::Arm => crate::lifter::arm::be::LANGUAGE,
+        A::I386 => crate::lifter::x86::LANGUAGE,
+        A::X86_64 => crate::lifter::x86_64::LANGUAGE,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
-    LifterBuilder::from_str(triple)?
-        .build()
-        .map_err(LoaderError::Lifter)
+    Ok(triple)
 }
 
 impl<'a> Object<'a> {
@@ -63,11 +58,12 @@ impl<'a> Object<'a> {
         })?;
 
         let view = object.borrow_view();
-        let lifter = object_lifter(view)?;
+        let language = object_language(view)?;
+        let arch = Arch::new(language);
 
         Ok(Self {
             object,
-            lifter,
+            arch,
             attributes: attributes.into(),
         })
     }
@@ -119,12 +115,8 @@ impl Loadable for Object<'_> {
         &mut self.attributes
     }
 
-    fn language(&self) -> &'static Language {
-        self.lifter.language()
-    }
-
-    fn lifter(&self) -> Lifter {
-        self.lifter.clone()
+    fn architecture(&self) -> Arch {
+        self.arch.clone()
     }
 
     fn segments<'a>(

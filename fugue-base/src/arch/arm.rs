@@ -3,7 +3,7 @@ use crate::lifter::arm::le::context::T_MODE;
 use crate::lifter::arm::le::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use crate::lifter::{ContextSet, Language, Varnode};
+use crate::lifter::{ContextSet, Disassembler, Language, Lifter, LifterBuilder, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 
@@ -17,6 +17,14 @@ pub struct Arm {
 }
 
 impl ArchImpl for Arm {
+    fn dissassembler(&self) -> Disassembler {
+        todo!()
+    }
+
+    fn lifter(&self) -> Lifter {
+        LifterBuilder::build_str(self.language.id()).expect("supported language")
+    }
+
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 0x1) as u32;
         // TODO: check if ARM ldef will remove the LSB.
@@ -25,19 +33,11 @@ impl ArchImpl for Arm {
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
-        if self.language.variant().ends_with("T") {
-            let mut bytes = [0x70, 0x47];
-            if self.language.is_big_endian() {
-                bytes.reverse();
-            }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 1))
-        } else {
-            let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
-            if self.language.is_big_endian() {
-                bytes.reverse();
-            }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 0))
+        let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
+        if self.language.is_big_endian() {
+            bytes.reverse();
         }
+        ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 0))
     }
 
     fn gprs(&self) -> &[Varnode] {

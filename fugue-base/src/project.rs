@@ -57,8 +57,8 @@ impl Project {
         P: StorageProviderFromLoadable,
     {
         let arch = loadable.architecture();
-        let lifter = loadable.lifter();
-        let language = loadable.language();
+        let lifter = arch.lifter();
+        let language = arch.language();
         let storage = Box::new(P::from_loadable(loadable)?);
 
         // FIXME: ideally we should not clone these, since we could consume the loadable, but I

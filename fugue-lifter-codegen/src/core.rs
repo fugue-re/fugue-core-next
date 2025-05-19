@@ -1053,7 +1053,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
 
             struct L;
-            impl fugue_lifter_runtime::lifter::LanguageImpl for L {
+            impl fugue_lifter_runtime::language::LanguageImpl for L {
                 const ID: &'static str = LANGUAGE_ID;
 
                 const PROCESSOR: &'static str = #processor;
@@ -1092,7 +1092,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const DISASSEMBLE: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut String) -> Option<usize> = disassemble_to_string;
                 const LIFT: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut Vec<fugue_lifter_runtime::pcode::PCodeOp>) -> Option<usize> = lift;
             }
-            pub static LANGUAGE: &'static fugue_lifter_runtime::lifter::Language = &fugue_lifter_runtime::lifter::Language::new::<L>();
+            pub static LANGUAGE: &'static fugue_lifter_runtime::language::Language = &fugue_lifter_runtime::language::Language::new::<L>();
         });
 
         tokens.append_all(&self.symbols);

@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 use std::fmt;
-use std::str::FromStr;
 
 use fallible_iterator::FallibleIterator;
 
 use thiserror::Error;
 
-use crate::lifter::{Language, Lifter, LifterBuilder};
+use crate::arch::Arch;
+use crate::loader::util::parse_language;
 use crate::loader::{Loadable, LoadableSegment, LoaderError};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
@@ -14,7 +14,7 @@ use crate::types::{Address, AttributeMap, BytesOrMapping};
 pub struct Shellcode<'a> {
     address: Address,
     bytes: BytesOrMapping<'a>,
-    lifter: Lifter,
+    arch: Arch,
     attributes: AttributeMap,
 }
 
@@ -50,8 +50,7 @@ impl<'a> Shellcode<'a> {
         bytes: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let language = language.as_ref();
-        let lifter = LifterBuilder::from_str(language).and_then(|builder| builder.build())?;
+        let language = parse_language(language)?;
 
         let bytes = bytes.into();
         if bytes.is_empty() {
@@ -61,7 +60,8 @@ impl<'a> Shellcode<'a> {
         let address = address.into();
         let size = bytes.len();
 
-        let language = lifter.language();
+        let arch = Arch::new(language);
+
         if !address.range_in_space_bounds(language, size) {
             return Err(LoaderError::format(ShellcodeError::AddressOverflow(
                 address, size,
@@ -71,7 +71,7 @@ impl<'a> Shellcode<'a> {
         Ok(Self {
             address: address.into(),
             bytes: bytes.into(),
-            lifter,
+            arch,
             attributes: attributes.into(),
         })
     }
@@ -86,6 +86,10 @@ impl<'a> Shellcode<'a> {
 }
 
 impl Loadable for Shellcode<'_> {
+    fn architecture(&self) -> Arch {
+        self.arch.clone()
+    }
+
     fn entry(&self) -> Option<Address> {
         Some(self.address())
     }
@@ -103,14 +107,6 @@ impl Loadable for Shellcode<'_> {
 
     fn segment_range(&self) -> (Address, Address) {
         (self.address, self.address + self.bytes.len() - 1usize)
-    }
-
-    fn language(&self) -> &'static Language {
-        self.lifter.language()
-    }
-
-    fn lifter(&self) -> Lifter {
-        self.lifter.clone()
     }
 
     fn attributes(&self) -> &AttributeMap {
@@ -151,7 +147,7 @@ mod test {
         let region = &regions[0];
         assert_eq!(region.address, Address::from(0x1000u32));
 
-        let mut lifter = shellcode.lifter();
+        let mut lifter = shellcode.architecture().lifter();
         let mut offset = 0usize;
         let mut output = String::new();
 

@@ -5,7 +5,7 @@ use std::iter::repeat;
 use std::mem::take;
 use std::ops::{Index, Range};
 
-use fugue_lifter::runtime::lifter::Language;
+use fugue_lifter::runtime::language::Language;
 use fugue_lifter::runtime::pcode::{Op, PCodeBuilderContext, PCodeOp, Varnode};
 
 use once_cell::sync::Lazy;

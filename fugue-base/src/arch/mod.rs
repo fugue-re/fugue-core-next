@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 use fugue_lifter::{Language, Varnode};
 
-use crate::lifter::ContextSet;
+use crate::lifter::{ContextSet, Disassembler, Lifter};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::{Address, Endian};
 
@@ -96,6 +96,10 @@ impl Flag {
 
 #[clone_dyn]
 pub trait ArchImpl: Send + Sync + 'static {
+    fn dissassembler(&self) -> Disassembler;
+
+    fn lifter(&self) -> Lifter;
+
     fn endian(&self) -> Endian {
         if self.language().is_little_endian() {
             Endian::Little
@@ -223,6 +227,14 @@ impl Arch {
                 panic!("unsupported language: {}", language.id())
             }
         }
+    }
+
+    pub fn disassembler(&self) -> Disassembler {
+        self.0.dissassembler()
+    }
+
+    pub fn lifter(&self) -> Lifter {
+        self.0.lifter()
     }
 
     pub fn endian(&self) -> Endian {

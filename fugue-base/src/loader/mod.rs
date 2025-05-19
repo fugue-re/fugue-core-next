@@ -10,7 +10,7 @@ use fugue_bytes::{BE, LE};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::lifter::{Language, Lifter, LifterBuilderError};
+use crate::lifter::LifterBuilderError;
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
 
@@ -31,6 +31,8 @@ pub use shellcode::Shellcode;
 
 pub mod symbols;
 pub use symbols::{ExternSymbols, LocalSymbols, SymbolEntry};
+
+pub mod util;
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
@@ -266,13 +268,7 @@ pub trait Loadable {
 
     fn entry(&self) -> Option<Address>;
 
-    fn architecture(&self) -> Arch {
-        Arch::new(self.language())
-    }
-
-    fn language(&self) -> &'static Language;
-
-    fn lifter(&self) -> Lifter;
+    fn architecture(&self) -> Arch;
 
     fn local_symbols(&self) -> Option<&LocalSymbols> {
         None
@@ -365,20 +361,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.architecture(),
             Self::Object(object) => object.architecture(),
-        }
-    }
-
-    fn language(&self) -> &'static Language {
-        match self {
-            Self::Elf(elf) => elf.language(),
-            Self::Object(object) => object.language(),
-        }
-    }
-
-    fn lifter(&self) -> Lifter {
-        match self {
-            Self::Elf(elf) => elf.lifter(),
-            Self::Object(object) => object.lifter(),
         }
     }
 

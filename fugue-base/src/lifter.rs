@@ -1,7 +1,9 @@
+use std::fmt::{Debug, Display};
+
 use arrayvec::ArrayVec;
 
 pub use fugue_lifter::{
-    aarch64, arm, x86, x86_64, ContextBitRange, Language, Lifter, LifterBuilder,
+    aarch64, arm, x86, x86_64, ContextBitRange, Language, LanguageId, Lifter, LifterBuilder,
     LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode,
 };
 
@@ -14,6 +16,42 @@ use crate::types::Address;
 pub enum LifterError {
     #[error("invalid instruction at {0}")]
     InvalidInstruction(Address),
+}
+
+#[derive(Debug, Error)]
+pub enum DisassemblerError {
+    #[error(transparent)]
+    Disassembler(anyhow::Error),
+    #[error("invalid instruction at {0}")]
+    InvalidInstruction(Address),
+}
+
+impl From<LifterError> for DisassemblerError {
+    fn from(value: LifterError) -> Self {
+        match value {
+            LifterError::InvalidInstruction(address) => Self::InvalidInstruction(address),
+        }
+    }
+}
+
+impl DisassemblerError {
+    pub fn invalid_instruction(address: Address) -> Self {
+        Self::InvalidInstruction(address)
+    }
+
+    pub fn disassembler<E>(error: E) -> Self
+    where
+        E: std::error::Error + Debug + Display + Send + Sync + 'static,
+    {
+        Self::Disassembler(anyhow::Error::new(error))
+    }
+
+    pub fn disassembler_with<M>(msg: M) -> Self
+    where
+        M: Display + Debug + Send + Sync + 'static,
+    {
+        Self::Disassembler(anyhow::Error::msg(msg))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,6 +138,17 @@ impl ContextSet {
     }
 }
 
+pub trait DisassemblerImpl {
+    fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError>;
+}
+
+pub type Disassembler = Box<dyn DisassemblerImpl>;
+
 pub trait LifterExt {
     fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError>;
 }
@@ -117,5 +166,40 @@ impl LifterExt for Lifter {
             length,
             operations,
         ))
+    }
+}
+
+pub struct HybridLifter {
+    disassembler: Disassembler,
+    lifter: Lifter,
+}
+
+impl HybridLifter {
+    pub fn new(disassembler: Disassembler, lifter: Lifter) -> Self {
+        Self {
+            disassembler,
+            lifter,
+        }
+    }
+
+    pub fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+    ) -> Result<Insn, DisassemblerError> {
+        let insn = self
+            .disassembler
+            .disassemble_insn(address, bytes, self.lifter.context_mut())
+            .map_err(DisassemblerError::disassembler)?;
+
+        if !insn.needs_lifting() {
+            return Ok(insn);
+        }
+
+        Ok(self.lifter.lift_insn(address, bytes)?)
+    }
+
+    pub fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
+        self.lifter.lift_insn(address, bytes)
     }
 }

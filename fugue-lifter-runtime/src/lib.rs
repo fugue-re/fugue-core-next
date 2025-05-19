@@ -3,6 +3,7 @@ pub extern crate phf;
 pub mod constructor;
 pub mod context;
 pub mod input;
+pub mod language;
 pub mod lifter;
 pub mod partmap;
 pub mod pattern;
@@ -15,7 +16,8 @@ pub use constructor::{
 };
 pub use context::ContextDatabase;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
-pub use lifter::{Language, Lifter};
+pub use language::{Language, LanguageId};
+pub use lifter::Lifter;
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,
 };

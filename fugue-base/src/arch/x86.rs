@@ -3,7 +3,7 @@ use crate::lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
 use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Language, Varnode};
+use crate::lifter::{Disassembler, Language, Lifter, LifterBuilder, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
@@ -24,6 +24,14 @@ pub struct X86 {
 }
 
 impl ArchImpl for X86 {
+    fn dissassembler(&self) -> Disassembler {
+        todo!()
+    }
+
+    fn lifter(&self) -> Lifter {
+        LifterBuilder::build_str(self.language.id()).expect("supported language")
+    }
+
     fn external_function_template(&self) -> ExternFunctionTemplate {
         ExternFunctionTemplate::new([0xc3])
     }

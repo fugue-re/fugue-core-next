@@ -4,7 +4,7 @@ use crate::lifter::x86_64::register::{
     RSP, SF, ZF,
 };
 use crate::lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Language, Varnode};
+use crate::lifter::{Disassembler, Language, Lifter, LifterBuilder, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
@@ -26,6 +26,14 @@ pub struct X86_64 {
 }
 
 impl ArchImpl for X86_64 {
+    fn dissassembler(&self) -> Disassembler {
+        todo!()
+    }
+
+    fn lifter(&self) -> Lifter {
+        LifterBuilder::build_str(self.language.id()).expect("supported language")
+    }
+
     fn external_function_template(&self) -> ExternFunctionTemplate {
         ExternFunctionTemplate::new([0xc3])
     }

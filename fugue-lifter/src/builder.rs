@@ -3,7 +3,8 @@ use std::str::FromStr;
 use fugue_bytes::Endian;
 use thiserror::Error;
 
-use crate::runtime::Lifter;
+use crate::runtime::language::LanguageParseError;
+use crate::runtime::{LanguageId, Lifter};
 
 pub struct LifterBuilder {
     processor: String,
@@ -14,64 +15,43 @@ pub struct LifterBuilder {
 
 #[derive(Debug, Error)]
 pub enum LifterBuilderError {
-    #[error("invalid language format")]
-    ParseFormat,
+    #[error("could not parse processor name")]
+    ParseProcessor,
     #[error("invalid language bits; must be: 8, 16, 32, or 64")]
     ParseBits,
     #[error("invalid endian; must be BE or LE")]
     ParseEndian,
+    #[error("could not parse processor variant")]
+    ParseVariant,
+    #[error("invalid language format")]
+    ParseFormat,
     #[error("unsupported architecture")]
     Unsupported,
+}
+
+impl From<LanguageParseError> for LifterBuilderError {
+    fn from(e: LanguageParseError) -> Self {
+        match e {
+            LanguageParseError::ParseBits => Self::ParseBits,
+            LanguageParseError::ParseEndian => Self::ParseEndian,
+            LanguageParseError::ParseProcessor => Self::ParseProcessor,
+            LanguageParseError::ParseVariant => Self::ParseVariant,
+            LanguageParseError::ParseFormat => Self::ParseFormat,
+        }
+    }
 }
 
 impl FromStr for LifterBuilder {
     type Err = LifterBuilderError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut parts = s.split(':');
-
-        let Some(processor) = parts.next().map(str::trim) else {
-            return Err(LifterBuilderError::ParseFormat);
-        };
-
-        if processor.is_empty() {
-            return Err(LifterBuilderError::ParseFormat);
-        }
-
-        let Some(endian) = parts.next().map(str::trim) else {
-            return Err(LifterBuilderError::ParseFormat);
-        };
-
-        let is_big = match endian {
-            "le" | "LE" => false,
-            "be" | "BE" => true,
-            _ => {
-                return Err(LifterBuilderError::ParseEndian);
-            }
-        };
-
-        let Some(bits) = parts.next().map(str::trim) else {
-            return Err(LifterBuilderError::ParseFormat);
-        };
-
-        let bits = match bits.parse::<u32>() {
-            Ok(bits) if [8, 16, 32, 64].contains(&bits) => bits,
-            _ => {
-                return Err(LifterBuilderError::ParseBits);
-            }
-        };
-
-        let variant = parts
-            .next()
-            .map(str::trim)
-            .and_then(|v| (!v.is_empty()).then_some(v))
-            .map(ToOwned::to_owned);
+        let language = LanguageId::from_str(s)?;
 
         Ok(Self {
-            processor: processor.to_owned(),
-            is_big,
-            bits: Some(bits),
-            variant,
+            processor: language.processor().to_owned(),
+            is_big: language.is_big_endian(),
+            bits: Some(language.bits()),
+            variant: language.variant().map(ToOwned::to_owned),
         })
     }
 }
