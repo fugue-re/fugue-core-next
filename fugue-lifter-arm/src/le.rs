@@ -62,6 +62,8 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant = V8;
+    pub const DEFAULT_THUMB: LanguageVariant = V8T;
+
     pub const V8: LanguageVariant =
         LanguageVariant::new("v8", LANGUAGE, LiftingContextFactory::new_v8);
     pub const V8T: LanguageVariant =

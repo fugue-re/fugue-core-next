@@ -15,12 +15,66 @@ pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, Load
     let is_le = language.is_little_endian();
 
     let language = match language.processor() {
-        "ARM" if is_le && bits == 32 => crate::lifter::arm::le::variants::DEFAULT,
-        "ARM" if bits == 32 => crate::lifter::arm::be::variants::DEFAULT,
-        "AARCH64" if is_le && bits == 64 => crate::lifter::aarch64::le::variants::DEFAULT,
-        "AARCH64" if bits == 64 => crate::lifter::aarch64::be::variants::DEFAULT,
-        "x86" if bits == 32 => crate::lifter::x86::variants::DEFAULT,
-        "x86" if bits == 64 => crate::lifter::x86_64::variants::DEFAULT,
+        "ARM" if bits == 32 => parse_arm(is_le, language.variant())?,
+        "AARCH64" if bits == 64 => parse_aarch64(is_le, language.variant())?,
+        "x86" if bits == 32 => parse_x86(language.variant())?,
+        "x86" if bits == 64 => parse_x86_64(language.variant())?,
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+fn parse_arm(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+    let language = match variant {
+        None | Some("v8") => {
+            if is_le {
+                crate::lifter::arm::le::variants::V8
+            } else {
+                crate::lifter::arm::be::variants::V8
+            }
+        }
+        Some("v8T") => {
+            if is_le {
+                crate::lifter::arm::le::variants::V8T
+            } else {
+                crate::lifter::arm::be::variants::V8T
+            }
+        }
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+fn parse_aarch64(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+    let language = match variant {
+        None | Some("v8A") => {
+            if is_le {
+                crate::lifter::aarch64::le::variants::V8A
+            } else {
+                crate::lifter::aarch64::be::variants::V8A
+            }
+        }
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+fn parse_x86(variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+    let language = match variant {
+        None | Some("default") => crate::lifter::x86::variants::DEFAULT,
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+fn parse_x86_64(variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+    let language = match variant {
+        None | Some("default") => crate::lifter::x86_64::variants::DEFAULT,
+        Some("compat32") => crate::lifter::x86_64::variants::COMPAT32,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 

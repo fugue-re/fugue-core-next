@@ -31,11 +31,21 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
 
+    let is_thumb = object.entry() & 1 == 1;
+
     let language = match object.architecture() {
         A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
         A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
-        A::Arm if is_le => crate::lifter::arm::le::variants::DEFAULT,
-        A::Arm => crate::lifter::arm::be::variants::DEFAULT,
+        A::Arm if is_le => if is_thumb {
+            crate::lifter::arm::le::variants::DEFAULT_THUMB
+        } else {
+            crate::lifter::arm::le::variants::DEFAULT
+        }
+        A::Arm => if is_thumb {
+            crate::lifter::arm::be::variants::DEFAULT_THUMB
+        } else {
+            crate::lifter::arm::be::variants::DEFAULT
+        }
         A::I386 => crate::lifter::x86::variants::DEFAULT,
         A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),

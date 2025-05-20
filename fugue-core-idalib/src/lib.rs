@@ -4,8 +4,8 @@ use fugue_base::analysis::core::functions::{FunctionBuilderContext, FunctionReco
 use fugue_base::analysis::{AnalysisError, AnalysisPass};
 use fugue_base::arch::Arch;
 use fugue_base::entities::flow_graph::FlowKind;
-use fugue_base::lifter::arm::le::context::T_MODE;
-use fugue_base::lifter::{ContextSet, Language, Lifter, LifterBuilder};
+use fugue_base::lifter::arm::context::T_MODE;
+use fugue_base::lifter::{ContextSet, LanguageVariant};
 use fugue_base::loader::symbols::SymbolProperties;
 use fugue_base::loader::{
     ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
@@ -21,7 +21,6 @@ pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida/database:path";
 pub struct IDABinary {
     database: IDB,
     architecture: Arch,
-    lifter: Lifter,
     local_symbols: LocalSymbols,
     extern_symbols: Option<ExternSymbols>,
     mark_thumb: bool,
@@ -59,6 +58,53 @@ fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
     }
 
     (locals, externs.map(|(symbols, _)| symbols))
+}
+
+fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
+    let processor = database.processor();
+    let is_32 = database.meta().is_32bit_exactly();
+    let is_64 = database.meta().is_64bit();
+    let is_be = database.meta().is_be();
+
+    if processor.family().is_arm() && is_64 {
+        return Ok(if is_be {
+            fugue_base::lifter::aarch64::be::variants::DEFAULT
+        } else {
+            fugue_base::lifter::aarch64::le::variants::DEFAULT
+        });
+    }
+
+    if processor.family().is_arm() && is_32 {
+        let is_thumb =
+            matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
+        return Ok(if is_be {
+            if is_thumb {
+                fugue_base::lifter::arm::be::variants::DEFAULT_THUMB
+            } else {
+                fugue_base::lifter::arm::be::variants::DEFAULT
+            }
+        } else {
+            if is_thumb {
+                fugue_base::lifter::arm::le::variants::DEFAULT_THUMB
+            } else {
+                fugue_base::lifter::arm::le::variants::DEFAULT
+            }
+        });
+    }
+
+    if processor.family().is_386() {
+        return Ok(if is_32 {
+            fugue_base::lifter::x86::variants::DEFAULT
+        } else {
+            fugue_base::lifter::x86_64::variants::DEFAULT
+        });
+    }
+
+    if processor.family().is_386() && is_64 {
+        return Ok(fugue_base::lifter::x86_64::variants::DEFAULT);
+    }
+
+    Err(LoaderError::UnsupportedArch)
 }
 
 impl IDABinary {
@@ -113,36 +159,16 @@ impl LoadableFromFile for IDABinary {
             return Err(LoaderError::UnsupportedArch);
         }
 
-        let mark_thumb = processor.family().is_arm() && !is_64;
+        let mark_thumb = processor.family().is_arm() && is_32;
 
-        let builder = if processor.family().is_arm() {
-            if is_64 {
-                LifterBuilder::new("AARCH64").bits(64)
-            } else if matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr))
-            {
-                LifterBuilder::new("ARM").bits(32).variant("v8T")
-            } else {
-                LifterBuilder::new("ARM").bits(32)
-            }
-        } else if processor.family().is_386() {
-            if is_64 {
-                LifterBuilder::new("x86").bits(64)
-            } else {
-                LifterBuilder::new("x86").bits(32)
-            }
-        } else {
-            return Err(LoaderError::UnsupportedArch);
-        };
-
-        let lifter = builder.build().map_err(LoaderError::other)?;
-        let architecture = Arch::new(lifter.language());
+        let language = ida_language(&database)?;
+        let architecture = Arch::new(language);
 
         let (local_symbols, extern_symbols) = ida_symbols(&architecture, &database);
 
         Ok(IDABinary {
             database,
             architecture,
-            lifter,
             local_symbols,
             extern_symbols,
             mark_thumb,
@@ -152,6 +178,10 @@ impl LoadableFromFile for IDABinary {
 }
 
 impl Loadable for IDABinary {
+    fn architecture(&self) -> Arch {
+        self.architecture.clone()
+    }
+
     fn attributes(&self) -> &AttributeMap {
         &self.attributes
     }
@@ -162,14 +192,6 @@ impl Loadable for IDABinary {
 
     fn entry(&self) -> Option<Address> {
         self.database.meta().start_address().map(Address::from)
-    }
-
-    fn language(&self) -> &'static Language {
-        self.lifter.language()
-    }
-
-    fn lifter(&self) -> Lifter {
-        self.lifter.clone()
     }
 
     fn local_symbols(&self) -> Option<&LocalSymbols> {
