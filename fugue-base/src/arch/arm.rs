@@ -3,7 +3,7 @@ use crate::lifter::arm::context::T_MODE;
 use crate::lifter::arm::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, Varnode};
+use crate::lifter::{ContextSet, Disassembler, LanguageVariant, Lifter, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 
@@ -34,7 +34,7 @@ impl ArchImpl for Arm {
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
-        if self.language.variant().ends_with("T") {
+        if self.is_thumb {
             let mut bytes = [0x70, 0x47];
             if self.language().is_big_endian() {
                 bytes.reverse();
@@ -53,8 +53,8 @@ impl ArchImpl for Arm {
         GPRS
     }
 
-    fn language(&self) -> &'static Language {
-        self.language.language()
+    fn language_variant(&self) -> LanguageVariant {
+        self.language
     }
 }
 

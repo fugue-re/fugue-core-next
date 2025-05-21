@@ -157,7 +157,11 @@ pub trait ArchImpl: Send + Sync + 'static {
         false
     }
 
-    fn language(&self) -> &'static Language;
+    fn language(&self) -> &'static Language {
+        self.language_variant().language()
+    }
+
+    fn language_variant(&self) -> LanguageVariant;
 }
 
 #[derive(Clone)]
@@ -288,5 +292,9 @@ impl Arch {
 
     pub fn language(&self) -> &'static Language {
         self.0.language()
+    }
+
+    pub fn language_variant(&self) -> LanguageVariant {
+        self.0.language_variant()
     }
 }

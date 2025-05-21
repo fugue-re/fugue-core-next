@@ -3,7 +3,7 @@ use crate::lifter::aarch64::register::{
     X0, X1, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X2, X20, X21, X22, X23, X24, X25,
     X26, X27, X28, X29, X3, X30, X4, X5, X6, X7, X8, X9,
 };
-use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter, Varnode};
+use crate::lifter::{Disassembler, LanguageVariant, Lifter, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const GPRS: &[Varnode] = &[
@@ -37,8 +37,8 @@ impl ArchImpl for AArch64 {
         GPRS
     }
 
-    fn language(&self) -> &'static Language {
-        self.language.language()
+    fn language_variant(&self) -> LanguageVariant {
+        self.language
     }
 }
 

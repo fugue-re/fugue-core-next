@@ -3,7 +3,7 @@ use crate::lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
 use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter, Varnode};
+use crate::lifter::{Disassembler, LanguageVariant, Lifter, Varnode};
 use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
@@ -62,8 +62,8 @@ impl ArchImpl for X86 {
             || op == INVALID_INSTRUCTION_EXCEPTION // ud2
     }
 
-    fn language(&self) -> &'static Language {
-        self.language.language()
+    fn language_variant(&self) -> LanguageVariant {
+        self.language
     }
 }
 
