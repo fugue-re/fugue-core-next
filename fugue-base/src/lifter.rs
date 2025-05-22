@@ -147,7 +147,22 @@ pub trait DisassemblerImpl {
     ) -> Result<Insn, DisassemblerError>;
 }
 
-pub type Disassembler = Box<dyn DisassemblerImpl>;
+pub struct Disassembler(Box<dyn DisassemblerImpl>);
+
+impl Disassembler {
+    pub fn new(disassembler: impl DisassemblerImpl + 'static) -> Self {
+        Self(Box::new(disassembler))
+    }
+
+    fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        self.0.disassemble_insn(address, bytes, context)
+    }
+}
 
 pub trait LifterExt {
     fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError>;
@@ -192,7 +207,7 @@ impl HybridLifter {
             .disassemble_insn(address, bytes, self.lifter.context_mut())
             .map_err(DisassemblerError::disassembler)?;
 
-        if !insn.needs_lifting() {
+        if !insn.needs_lifting() && insn.len() != 0 {
             return Ok(insn);
         }
 

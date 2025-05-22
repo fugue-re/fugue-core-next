@@ -7,12 +7,12 @@ edition = "2021"
 [dependencies]
 fallible-iterator = "0.3"
 fugue-base = { version = "0.3", path = "../fugue-base" }
-idalib = { version = "0.5", git = "ssh://git@github.com/binarly-io/idalib.git", branch = "feature/processor-metadata-apis" }
-thiserror = "1"
+idalib = "0.6"
+thiserror = "2"
 tracing = "0.1"
 
 [build-dependencies]
-idalib-build = { version = "0.5", git = "ssh://git@github.com/binarly-io/idalib.git", branch = "feature/processor-metadata-apis" }
+idalib-build = "0.6"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

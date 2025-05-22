@@ -1,10 +1,18 @@
+use yaxpeax_arch::*;
+use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
+
 use crate::arch::{Arch, ArchImpl, Flag};
+use crate::entities::{Insn, InsnProperties};
 use crate::lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
 use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{Disassembler, LanguageVariant, Lifter, Varnode};
+use crate::lifter::{
+    Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
+    Varnode,
+};
 use crate::loader::symbols::ExternFunctionTemplate;
+use crate::types::Address;
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),
@@ -25,7 +33,7 @@ pub struct X86 {
 
 impl ArchImpl for X86 {
     fn dissassembler(&self) -> Disassembler {
-        todo!()
+        X86Disassembler::new()
     }
 
     fn lifter(&self) -> Lifter {
@@ -70,5 +78,82 @@ impl ArchImpl for X86 {
 impl X86 {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+    }
+}
+
+struct X86Disassembler {
+    decoder: InstDecoder,
+}
+
+impl X86Disassembler {
+    fn new() -> Disassembler {
+        Disassembler::new(Self {
+            decoder: InstDecoder::default(),
+        })
+    }
+
+    fn should_lift(&self, insn: &Instruction) -> bool {
+        matches!(
+            insn.opcode(),
+            Opcode::JO
+                | Opcode::JB
+                | Opcode::JZ
+                | Opcode::JA
+                | Opcode::JS
+                | Opcode::JP
+                | Opcode::JL
+                | Opcode::JG
+                | Opcode::JMP
+                | Opcode::JNO
+                | Opcode::JNB
+                | Opcode::JNZ
+                | Opcode::JNA
+                | Opcode::JNS
+                | Opcode::JNP
+                | Opcode::JGE
+                | Opcode::JLE
+                | Opcode::JMPF
+                | Opcode::JMPE
+                | Opcode::JECXZ
+                | Opcode::CALL
+                | Opcode::CALLF
+                | Opcode::RETF
+                | Opcode::RETURN
+                | Opcode::HLT
+                | Opcode::INT
+                | Opcode::UD2
+        )
+    }
+}
+
+impl DisassemblerImpl for X86Disassembler {
+    fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        _context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let insn = match self.decoder.decode(&mut reader) {
+            Ok(insn) => {
+                let size = insn.len().to_const() as usize;
+                Insn::from_disassembly(
+                    address,
+                    size,
+                    if self.should_lift(&insn) {
+                        InsnProperties::NEEDS_LIFTING
+                    } else {
+                        InsnProperties::FALL
+                    },
+                )
+            }
+            Err(DecodeError::IncompleteDecoder) => {
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+            }
+            Err(e) => {
+                return Err(DisassemblerError::disassembler(e));
+            }
+        };
+        Ok(insn)
     }
 }

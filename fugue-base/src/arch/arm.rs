@@ -1,9 +1,16 @@
+use yaxpeax_arch::*;
+use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
+
 use crate::arch::{Arch, ArchImpl};
+use crate::entities::{Insn, InsnProperties};
 use crate::lifter::arm::context::T_MODE;
 use crate::lifter::arm::register::{
     LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
-use crate::lifter::{ContextSet, Disassembler, LanguageVariant, Lifter, Varnode};
+use crate::lifter::{
+    ContextSet, Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter,
+    LiftingContext, Varnode,
+};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::Address;
 
@@ -19,7 +26,7 @@ pub struct Arm {
 
 impl ArchImpl for Arm {
     fn dissassembler(&self) -> Disassembler {
-        todo!()
+        ArmDisassembler::new(self.is_thumb)
     }
 
     fn lifter(&self) -> Lifter {
@@ -62,5 +69,80 @@ impl Arm {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
         Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchImpl>)
+    }
+}
+
+struct ArmDisassembler {
+    decoder: InstDecoder,
+}
+
+impl ArmDisassembler {
+    fn new(thumb: bool) -> Disassembler {
+        Disassembler::new(Self {
+            decoder: if thumb {
+                InstDecoder::default_thumb()
+            } else {
+                InstDecoder::default()
+            },
+        })
+    }
+
+    fn should_lift(&self, insn: &Instruction) -> bool {
+        let pc = Reg::from_u8(15);
+
+        match insn.opcode {
+            Opcode::B
+            | Opcode::BL
+            | Opcode::BLX
+            | Opcode::BX
+            | Opcode::BXJ
+            | Opcode::BKPT
+            | Opcode::CBZ
+            | Opcode::CBNZ
+            | Opcode::ERET
+            | Opcode::HVC
+            | Opcode::IT
+            | Opcode::RFE(_, _)
+            | Opcode::SVC
+            | Opcode::SMC
+            | Opcode::UDF => true,
+            Opcode::MVN | Opcode::MOV => insn.operands[0] == Operand::Reg(pc),
+            _ => false,
+        }
+    }
+}
+
+impl DisassemblerImpl for ArmDisassembler {
+    fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        self.decoder
+            .set_thumb_mode(context.get_variable_by_bits(T_MODE, address.into()) == 1);
+
+        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let insn = match self.decoder.decode(&mut reader) {
+            Ok(insn) => {
+                let size = insn.len().to_const() as usize;
+                Insn::from_disassembly(
+                    address,
+                    size,
+                    if self.should_lift(&insn) {
+                        InsnProperties::NEEDS_LIFTING
+                    } else {
+                        InsnProperties::FALL
+                    },
+                )
+            }
+            Err(DecodeError::Incomplete) => {
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+            }
+            Err(e) => {
+                return Err(DisassemblerError::disassembler(e));
+            }
+        };
+        Ok(insn)
     }
 }

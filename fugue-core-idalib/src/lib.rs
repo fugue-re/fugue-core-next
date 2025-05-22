@@ -355,7 +355,7 @@ impl<'a> AnalysisPass<'a, FunctionBuilderContext> for IDAFunctionBuilder<'a> {
                         .insn_at(addr.into())
                         .expect("valid instruction");
                     if insn.is_basic_block_end(false) {
-                        return insn.address();
+                        return (insn.address(), insn.is_indirect_jump());
                     }
                     addr += insn.len() as u64;
                 }
@@ -363,10 +363,15 @@ impl<'a> AnalysisPass<'a, FunctionBuilderContext> for IDAFunctionBuilder<'a> {
             .collect::<Vec<_>>();
 
         for (i, block) in cfg.blocks().enumerate() {
-            let last_insn = last_insns[i];
-            for succ in block.succs_with(&cfg) {
-                // TODO: classify edges correctly
-                builder.add_local_target(last_insn, succ.start_address(), FlowKind::Branch);
+            let (last_insn, is_indirect) = last_insns[i];
+
+            // NOTE: concrete edges will be automatically resolved, so we only use IDA's
+            // edges to hint at indirect flows, e.g., jump tables, etc.
+            if is_indirect {
+                for succ in block.succs_with(&cfg) {
+                    // TODO: classify edges correctly
+                    builder.add_local_target(last_insn, succ.start_address(), FlowKind::IBranch);
+                }
             }
 
             builder.add_candidate(block.start_address());
