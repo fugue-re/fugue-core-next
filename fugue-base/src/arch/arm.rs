@@ -119,22 +119,25 @@ impl DisassemblerImpl for ArmDisassembler {
         bytes: &[u8],
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        self.decoder
-            .set_thumb_mode(context.get_variable_by_bits(T_MODE, address.into()) == 1);
+        let in_thumb = context.get_variable_by_bits(T_MODE, address.into());
+
+        self.decoder.set_thumb_mode(in_thumb == 1);
 
         let mut reader = yaxpeax_arch::U8Reader::new(bytes);
         let insn = match self.decoder.decode(&mut reader) {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;
-                Insn::from_disassembly(
-                    address,
-                    size,
-                    if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
-                    } else {
-                        InsnProperties::FALL
-                    },
-                )
+                let properties = if self.should_lift(&insn) {
+                    InsnProperties::NEEDS_LIFTING
+                } else {
+                    // NOTE: we propagate the T_MODE variable to the next instruction
+                    // mimicking the behaviour of the language spec.
+                    let naddress = address + size;
+                    context.set_variable_by_bits(T_MODE, naddress.into(), in_thumb);
+                    InsnProperties::FALL
+                };
+
+                Insn::from_disassembly(address, size, properties)
             }
             Err(DecodeError::Incomplete) => {
                 Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
