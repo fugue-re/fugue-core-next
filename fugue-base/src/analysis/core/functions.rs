@@ -417,7 +417,7 @@ impl FunctionBuilderContext {
 
                 let bytes = &bytes[..size];
 
-                match project.lifter.lift_insn(address, bytes) {
+                match project.lifter.disassemble_insn(address, bytes) {
                     Ok(insn) => {
                         let insn = entry.insert(insn);
 

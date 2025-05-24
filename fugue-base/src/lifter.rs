@@ -217,4 +217,12 @@ impl HybridLifter {
     pub fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
         self.lifter.lift_insn(address, bytes)
     }
+
+    pub fn context(&self) -> &LiftingContext {
+        self.lifter.context()
+    }
+
+    pub fn context_mut(&mut self) -> &mut LiftingContext {
+        self.lifter.context_mut()
+    }
 }

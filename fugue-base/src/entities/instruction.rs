@@ -209,6 +209,10 @@ impl fmt::Display for InsnFormatter<'_> {
         let lifted = self.lifted;
         let language = self.language;
 
+        if !lifted.is_lifted() {
+            return write!(f, "<not lifted; length: {}>", lifted.len());
+        }
+
         write!(f, "{}", language.display(&lifted.operations))?;
 
         Ok(())

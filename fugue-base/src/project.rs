@@ -4,7 +4,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::lifter::{Language, Lifter};
+use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, LoadableSegment, Loader, LoaderError, LocalSymbols,
     SymbolEntry,
@@ -15,7 +15,7 @@ use crate::types::{Address, AttributeMap};
 
 pub struct Project {
     pub(crate) arch: Arch,
-    pub(crate) lifter: Lifter,
+    pub(crate) lifter: HybridLifter,
     pub(crate) language: &'static Language,
     pub(crate) entry: Option<Address>,
     pub(crate) local_symbols: Option<LocalSymbols>,
@@ -25,7 +25,7 @@ pub struct Project {
 
 pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
-    pub lifter: &'a Lifter,
+    pub lifter: &'a HybridLifter,
     pub language: &'static Language,
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a LocalSymbols>,
@@ -35,7 +35,7 @@ pub struct ProjectRef<'a> {
 
 pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
-    pub lifter: &'a mut Lifter,
+    pub lifter: &'a mut HybridLifter,
     pub language: &'static Language,
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a mut LocalSymbols>,
@@ -57,7 +57,7 @@ impl Project {
         P: StorageProviderFromLoadable,
     {
         let arch = loadable.architecture();
-        let lifter = arch.lifter();
+        let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
         let storage = Box::new(P::from_loadable(loadable)?);
 
@@ -131,11 +131,11 @@ impl Project {
         &self.arch
     }
 
-    pub fn lifter(&self) -> &Lifter {
+    pub fn lifter(&self) -> &HybridLifter {
         &self.lifter
     }
 
-    pub fn lifter_mut(&mut self) -> &mut Lifter {
+    pub fn lifter_mut(&mut self) -> &mut HybridLifter {
         &mut self.lifter
     }
 
