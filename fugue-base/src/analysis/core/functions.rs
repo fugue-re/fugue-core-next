@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
 use crate::entities::{BasicBlock, Insn};
-use crate::lifter::{ContextSet, LifterExt as _};
+use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::StorageProvider;
 use crate::types::Address;
