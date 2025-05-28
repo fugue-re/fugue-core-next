@@ -5,9 +5,10 @@ use std::hash::{Hash, Hasher};
 
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
-use fugue_lifter::{Language, Varnode};
 
-use crate::lifter::{ContextSet, Disassembler, LanguageVariant, Lifter};
+use crate::lifter::{
+    ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext, Varnode,
+};
 use crate::loader::symbols::ExternFunctionTemplate;
 use crate::types::{Address, Endian};
 
@@ -109,8 +110,18 @@ pub trait ArchImpl: Send + Sync + 'static {
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        let naddr = addr.wrap(self.language());
+        let naddr = addr.wrap_and_align(self.language());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
+    }
+
+    fn canonicalise_address_with(
+        &self,
+        addr: Address,
+        context: &LiftingContext,
+    ) -> Option<(Address, ContextSet)> {
+        // NOTE: this supresses the warning about unused `context` parameter,
+        let _ = context;
+        self.canonicalise_address(addr)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate;
@@ -248,6 +259,14 @@ impl Arch {
 
     pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         self.0.canonicalise_address(addr)
+    }
+
+    pub fn canonicalise_address_with(
+        &self,
+        addr: Address,
+        context: &LiftingContext,
+    ) -> Option<(Address, ContextSet)> {
+        self.0.canonicalise_address_with(addr, context)
     }
 
     pub fn external_thunk_template(&self) -> ExternFunctionTemplate {

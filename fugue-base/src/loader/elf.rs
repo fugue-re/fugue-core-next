@@ -123,7 +123,10 @@ pub fn elf_symbols<'a>(
 
     let is_object = elf.kind() == ObjectKind::Relocatable;
     let addr_size = arch.language().address_size();
-    let addr_align = arch.language().address_alignment();
+
+    // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
+    // which is only applicable for Thumb.
+    let addr_align = arch.language().address_alignment().max(addr_size);
 
     let mut section_map = Vec::new();
 

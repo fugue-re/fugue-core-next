@@ -1,5 +1,6 @@
-use std::collections::btree_map::Entry;
+use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::mem;
 
 use thiserror::Error;
 
@@ -29,6 +30,7 @@ pub struct FunctionRecovery<'a> {
     builder: FunctionBuilder<'a>,
 }
 
+#[derive(Default)]
 pub struct FunctionBuilderContext {
     entry: Address,
     candidates: VecDeque<(Address, ContextSet)>,
@@ -37,16 +39,19 @@ pub struct FunctionBuilderContext {
     global_targets: BTreeSet<(Address, ContextSet)>,
 }
 
-pub struct PartialFunction<'a> {
+#[derive(Default)]
+pub struct PartialFunction {
     blocks: Vec<BasicBlock>,
-    instructions: Vec<&'a mut Insn>,
+    instructions: Vec<Insn>,
+    instructions_map: BTreeMap<Address, usize>,
 }
 
-impl<'a> PartialFunction<'a> {
+impl PartialFunction {
     pub fn new() -> Self {
         PartialFunction {
             blocks: Vec::new(),
             instructions: Vec::new(),
+            instructions_map: BTreeMap::new(),
         }
     }
 
@@ -62,14 +67,89 @@ impl<'a> PartialFunction<'a> {
         &mut self.blocks
     }
 
-    pub fn instructions(&self) -> &[&'a mut Insn] {
-        &self.instructions
+    pub fn clear_blocks(&mut self) {
+        self.blocks.clear();
+    }
+
+    pub fn contains_instruction(&self, address: Address) -> bool {
+        self.instructions_map.contains_key(&address)
+    }
+
+    pub fn instruction_entry(&mut self, address: Address) -> InsnEntry {
+        match self.instructions_map.entry(address) {
+            Entry::Vacant(entry) => InsnEntry::Vacant(VacantInsnEntry {
+                entry,
+                insns: &mut self.instructions,
+            }),
+            Entry::Occupied(entry) => InsnEntry::Occupied(OccupiedInsnEntry {
+                entry,
+                insns: &mut self.instructions,
+            }),
+        }
+    }
+
+    pub fn insert_instruction(&mut self, insn: Insn) -> usize {
+        *self
+            .instructions_map
+            .entry(insn.address())
+            .or_insert_with(|| {
+                let id = self.instructions.len();
+                self.instructions.push(insn);
+                id
+            })
+    }
+
+    pub fn instruction(&self, address: Address) -> Option<&Insn> {
+        self.instructions_map
+            .get(&address)
+            .and_then(|&id| self.instructions.get(id))
+    }
+
+    pub fn instruction_mut(&mut self, address: Address) -> Option<&mut Insn> {
+        self.instructions_map
+            .get(&address)
+            .and_then(|&id| self.instructions.get_mut(id))
+    }
+
+    pub fn has_instructions(&self) -> bool {
+        !self.instructions.is_empty()
     }
 }
 
-pub struct PartialFunctionWithContext<'ctxt, 'insns> {
-    pub context: &'ctxt mut FunctionBuilderContext,
-    pub function: PartialFunction<'insns>,
+pub struct VacantInsnEntry<'a> {
+    entry: VacantEntry<'a, Address, usize>,
+    insns: &'a mut Vec<Insn>,
+}
+
+impl<'a> VacantInsnEntry<'a> {
+    pub fn insert(self, insn: Insn) -> &'a mut Insn {
+        let id = self.insns.len();
+        self.insns.push(insn);
+        let id = self.entry.insert(id);
+        &mut self.insns[*id]
+    }
+}
+
+pub struct OccupiedInsnEntry<'a> {
+    entry: OccupiedEntry<'a, Address, usize>,
+    insns: &'a mut Vec<Insn>,
+}
+
+impl<'a> OccupiedInsnEntry<'a> {
+    pub fn get_mut(&mut self) -> &mut Insn {
+        let id = *self.entry.get();
+        self.insns.get_mut(id).expect("instruction must exist")
+    }
+}
+
+pub enum InsnEntry<'a> {
+    Vacant(VacantInsnEntry<'a>),
+    Occupied(OccupiedInsnEntry<'a>),
+}
+
+pub struct PartialFunctionWithContext {
+    pub context: FunctionBuilderContext,
+    pub function: PartialFunction,
 }
 
 pub struct FunctionBuilder<'a> {
@@ -80,7 +160,7 @@ pub struct FunctionBuilder<'a> {
     // These passes run each iteration of the main lifting loop after all candidates within the
     // pass have been lifted and the function's control-flow has been structured based on the
     // identified blocks and flows.
-    post_lifting_passes: AnalysisGroup<'a, FunctionBuilderContext>,
+    post_lifting_passes: AnalysisGroup<'a, PartialFunctionWithContext>,
 }
 
 #[derive(Debug, Error)]
@@ -144,7 +224,7 @@ impl<'a> FunctionRecovery<'a> {
     pub fn add_function_builder_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+        pass: impl AnalysisPass<'a, PartialFunctionWithContext> + 'a,
     ) {
         self.builder.add_post_lifting_pass(name, pass);
     }
@@ -236,11 +316,11 @@ impl<'a> FunctionBuilder<'a> {
         &mut self.initialisation_passes
     }
 
-    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, FunctionBuilderContext> {
+    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, PartialFunctionWithContext> {
         &self.post_lifting_passes
     }
 
-    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<'a, FunctionBuilderContext> {
+    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<'a, PartialFunctionWithContext> {
         &mut self.post_lifting_passes
     }
 
@@ -263,7 +343,7 @@ impl<'a> FunctionBuilder<'a> {
     pub fn add_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+        pass: impl AnalysisPass<'a, PartialFunctionWithContext> + 'a,
     ) {
         self.post_lifting_passes.add_pass(name, pass);
     }
@@ -352,7 +432,7 @@ impl FunctionBuilderContext {
         self.global_targets.clear();
     }
 
-    fn lift_instructions(&mut self, project: &mut Project, insns: &mut BTreeMap<Address, Insn>) {
+    fn lift_instructions(&mut self, project: &mut Project, f: &mut PartialFunction) {
         let mut bytes = [0u8; 32];
 
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
@@ -364,7 +444,10 @@ impl FunctionBuilderContext {
             // This ensures correct alignment, to address is correctly wrapped with respect to
             // the address space, and also extracts context updates indicated by the address,
             // e.g., if we are in Thumb context or not for ARM.
-            let Some((block, ncontext)) = project.arch.canonicalise_address(block) else {
+            let Some((block, ncontext)) = project
+                .arch
+                .canonicalise_address_with(block, project.lifter.context())
+            else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
             };
@@ -394,9 +477,9 @@ impl FunctionBuilderContext {
 
                 // If we've already disassembled this instruction select the next candidate,
                 // otherwise get the entry ready for update.
-                let entry = match insns.entry(address) {
-                    Entry::Vacant(entry) => entry,
-                    Entry::Occupied(mut entry) => {
+                let entry = match f.instruction_entry(address) {
+                    InsnEntry::Vacant(entry) => entry,
+                    InsnEntry::Occupied(mut entry) => {
                         // If two blocks overlap, then they may share a common suffix to account
                         // for this we mark instructions that appear in multiple blocks as starts
                         // so they're considered cut points when performing block structuring.
@@ -472,25 +555,28 @@ impl FunctionBuilderContext {
         }
     }
 
-    fn structure_blocks<'b>(
-        &mut self,
-        insns: &'b mut BTreeMap<Address, Insn>,
-    ) -> PartialFunction<'b> {
+    fn structure_blocks(&mut self, f: &mut PartialFunction) {
         let mut cuts = Vec::new();
-        let mut f = PartialFunction::new();
 
         // Valid contexts contain all cut points; we mark all instructions that
         // are flow targets as maybe taken.
-        for (i, (addr, insn)) in insns.iter_mut().enumerate() {
+
+        f.instructions.sort_by_key(|insn| insn.address());
+        f.instructions_map.clear();
+
+        for (i, insn) in f.instructions.iter_mut().enumerate() {
+            let addr = insn.address();
+
             tracing::trace!("checking insn {i}: {addr}");
 
-            if self.contexts.contains_key(addr) {
+            f.instructions_map.insert(addr, i);
+
+            if self.contexts.contains_key(&addr) {
                 tracing::trace!("found cut at {addr} ({i})");
                 cuts.push(i);
             }
 
             insn.mark_maybe_taken();
-            f.instructions.push(insn);
         }
 
         let num_insns = f.instructions.len();
@@ -546,8 +632,6 @@ impl FunctionBuilderContext {
 
             f.push_block(emit_block(address, length, points));
         }
-
-        f
     }
 
     pub fn analyse(
@@ -556,7 +640,7 @@ impl FunctionBuilderContext {
         address: impl Into<Address>,
         context: ContextSet,
         initialisation_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
-        post_lifting_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
+        post_lifting_passes: &mut AnalysisGroup<'_, PartialFunctionWithContext>,
     ) -> Result<(), FunctionBuilderError> {
         // We have three main stages:
         //
@@ -587,12 +671,12 @@ impl FunctionBuilderContext {
             .analyse_with(project, self)
             .map_err(FunctionBuilderError::InitialisationPass)?;
 
-        let mut insns = BTreeMap::<Address, Insn>::new();
+        let mut partial = PartialFunction::new();
 
         loop {
-            self.lift_instructions(project, &mut insns);
+            self.lift_instructions(project, &mut partial);
 
-            if insns.is_empty() {
+            if !partial.has_instructions() {
                 tracing::debug!("no instructions lifted; invalid function");
                 return Err(FunctionBuilderError::NoInstructions);
             }
@@ -600,7 +684,7 @@ impl FunctionBuilderContext {
             tracing::trace!("{:?}", self.local_targets);
 
             // TODO: pass this to the post-lifting passes...
-            let partial = self.structure_blocks(&mut insns);
+            self.structure_blocks(&mut partial);
 
             for block in partial.blocks.iter() {
                 tracing::debug!("blk@{}", block.start());
@@ -616,10 +700,20 @@ impl FunctionBuilderContext {
 
             let num_local_targets = self.local_targets.len();
 
+            let mut function_with_context = PartialFunctionWithContext {
+                context: mem::take(self),
+                function: mem::take(&mut partial),
+            };
+
             // Run post-lifting passes
-            post_lifting_passes
-                .analyse_with(project, self)
-                .map_err(FunctionBuilderError::PostLiftingPass)?;
+            let result = post_lifting_passes
+                .analyse_with(project, &mut function_with_context);
+
+
+            *self = function_with_context.context;
+            partial = function_with_context.function;
+
+            result.map_err(FunctionBuilderError::PostLiftingPass)?;
 
             if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
                 // No new candidates were added, and no new local targets were discovered.

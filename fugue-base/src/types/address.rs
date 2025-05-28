@@ -332,8 +332,22 @@ impl Address {
         self.0
     }
 
+    pub fn align(&self, alignment: usize) -> Address {
+        let offset =
+            (*self + alignment.wrapping_sub(1)).offset() & !(alignment as u64).wrapping_sub(1);
+        Address(offset)
+    }
+
     pub fn wrap(&self, language: &Language) -> Address {
         language.wrap_offset_in_default_space(self.offset()).into()
+    }
+
+    pub fn wrap_and_align(&self, language: &Language) -> Address {
+        self.wrap_and_align_with(language, language.address_alignment())
+    }
+
+    pub fn wrap_and_align_with(&self, language: &Language, alignment: usize) -> Address {
+        self.align(alignment).wrap(language)
     }
 
     pub fn in_space_bounds(&self, language: &Language) -> bool {
@@ -343,12 +357,6 @@ impl Address {
     pub fn range_in_space_bounds(&self, language: &Language, size: usize) -> bool {
         let upper = *self + size;
         *self <= upper && self.in_space_bounds(language) && upper.in_space_bounds(language)
-    }
-
-    pub fn wrap_and_align(&self, language: &Language) -> Address {
-        let alignment = language.address_alignment() as u64;
-        let offset = self.offset() & !(alignment - 1);
-        Address(offset).wrap(language)
     }
 }
 

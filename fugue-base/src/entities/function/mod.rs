@@ -16,7 +16,6 @@ pub struct Function {
     properties: FunctionProperties,
 }
 
-
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FunctionProperties: u32 {

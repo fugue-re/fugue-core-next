@@ -34,10 +34,21 @@ impl ArchImpl for Arm {
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        let t_mode = (addr.offset() & 0x1) as u32;
-        // TODO: check if ARM ldef will remove the LSB.
-        let naddr = addr.wrap(self.language());
+        let t_mode = (addr.offset() & 1) as u32;
+        let naddr = addr.wrap_and_align(self.language());
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
+    }
+
+    fn canonicalise_address_with(
+        &self,
+        addr: Address,
+        context: &LiftingContext,
+    ) -> Option<(Address, ContextSet)> {
+        let t_mode =
+            addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.into()) == 1;
+        let alignment = if t_mode { 2 } else { 4 };
+        let naddr = addr.wrap_and_align_with(self.language(), alignment);
+        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode as u32)))
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
