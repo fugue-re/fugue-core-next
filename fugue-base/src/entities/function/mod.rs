@@ -6,7 +6,7 @@ use crate::types::Address;
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: Option<Ustr>,
     entry: Address,

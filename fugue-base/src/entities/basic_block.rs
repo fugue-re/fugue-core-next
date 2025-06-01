@@ -1,11 +1,15 @@
+use tinyset::SetUsize;
+
 use crate::lifter::ContextSet;
 use crate::types::Address;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlock {
     start: Address,
     len: usize,
     instructions: Vec<usize>,
+    successors: SetUsize,
+    predecessors: SetUsize,
     properties: BasicBlockProperties,
     context: ContextSet,
 }
@@ -45,6 +49,8 @@ impl BasicBlock {
             len,
             instructions,
             properties: BasicBlockProperties::NONE,
+            successors: SetUsize::new(),
+            predecessors: SetUsize::new(),
             context,
         }
     }
@@ -113,5 +119,21 @@ impl BasicBlock {
 
     pub fn context(&self) -> &ContextSet {
         &self.context
+    }
+
+    pub fn add_successor(&mut self, target: usize) {
+        self.successors.insert(target);
+    }
+
+    pub fn add_predecessor(&mut self, source: usize) {
+        self.predecessors.insert(source);
+    }
+
+    pub fn successors(&self) -> &SetUsize {
+        &self.successors
+    }
+
+    pub fn predecessors(&self) -> &SetUsize {
+        &self.predecessors
     }
 }

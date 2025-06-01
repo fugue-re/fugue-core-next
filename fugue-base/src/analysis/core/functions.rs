@@ -25,7 +25,6 @@ impl Default for FunctionRecoveryConfig {
 }
 
 pub struct FunctionRecovery<'a> {
-    config: FunctionRecoveryConfig,
     candidates: VecDeque<(Address, ContextSet)>,
     builder: FunctionBuilder<'a>,
 }
@@ -55,7 +54,7 @@ impl PartialFunction {
         }
     }
 
-    pub fn push_block(&mut self, block: BasicBlock) {
+    pub(crate) fn push_block(&mut self, block: BasicBlock) {
         self.blocks.push(block);
     }
 
@@ -63,19 +62,11 @@ impl PartialFunction {
         &self.blocks
     }
 
-    pub fn blocks_mut(&mut self) -> &mut Vec<BasicBlock> {
-        &mut self.blocks
-    }
-
-    pub fn clear_blocks(&mut self) {
-        self.blocks.clear();
-    }
-
     pub fn contains_instruction(&self, address: Address) -> bool {
         self.instructions_map.contains_key(&address)
     }
 
-    pub fn instruction_entry(&mut self, address: Address) -> InsnEntry {
+    pub(crate) fn instruction_entry(&mut self, address: Address) -> InsnEntry {
         match self.instructions_map.entry(address) {
             Entry::Vacant(entry) => InsnEntry::Vacant(VacantInsnEntry {
                 entry,
@@ -153,6 +144,8 @@ pub struct PartialFunctionWithContext {
 }
 
 pub struct FunctionBuilder<'a> {
+    // The configuration for the function recovery process.
+    config: FunctionRecoveryConfig,
     // The context of the function being built.
     context: FunctionBuilderContext,
     // These passes run once per function prior to the main lifting loop.
@@ -171,6 +164,8 @@ pub enum FunctionBuilderError {
     PostLiftingPass(AnalysisError),
     #[error("failed to lift any instructions")]
     NoInstructions,
+    #[error("failed to create function; number of blocks ({0}) exceeds limit ({1})")]
+    ExceededBlockLimit(usize, usize),
 }
 
 impl<'a> FunctionRecovery<'a> {
@@ -180,9 +175,8 @@ impl<'a> FunctionRecovery<'a> {
 
     pub fn new_with(config: FunctionRecoveryConfig) -> Self {
         FunctionRecovery {
-            config,
             candidates: VecDeque::new(),
-            builder: FunctionBuilder::new(),
+            builder: FunctionBuilder::new(config),
         }
     }
 
@@ -300,8 +294,9 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
 }
 
 impl<'a> FunctionBuilder<'a> {
-    pub fn new() -> Self {
+    pub fn new(config: FunctionRecoveryConfig) -> Self {
         FunctionBuilder {
+            config,
             context: FunctionBuilderContext::new(),
             initialisation_passes: AnalysisGroup::new(),
             post_lifting_passes: AnalysisGroup::new(),
@@ -320,7 +315,9 @@ impl<'a> FunctionBuilder<'a> {
         &self.post_lifting_passes
     }
 
-    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<'a, PartialFunctionWithContext> {
+    pub fn post_lifting_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, PartialFunctionWithContext> {
         &mut self.post_lifting_passes
     }
 
@@ -358,6 +355,7 @@ impl<'a> FunctionBuilder<'a> {
             project,
             address,
             context,
+            &self.config,
             &mut self.initialisation_passes,
             &mut self.post_lifting_passes,
         )
@@ -555,7 +553,11 @@ impl FunctionBuilderContext {
         }
     }
 
-    fn structure_blocks(&mut self, f: &mut PartialFunction) {
+    fn structure_blocks(
+        &mut self,
+        config: &FunctionRecoveryConfig,
+        f: &mut PartialFunction,
+    ) -> Result<(), FunctionBuilderError> {
         let mut cuts = Vec::new();
 
         // Valid contexts contain all cut points; we mark all instructions that
@@ -579,6 +581,18 @@ impl FunctionBuilderContext {
             insn.mark_maybe_taken();
         }
 
+        let num_blocks = cuts.len();
+        let max_blocks = config.max_blocks;
+
+        if num_blocks > max_blocks {
+            tracing::debug!(
+                "number of blocks ({num_blocks}) exceeds limit ({max_blocks}); skipping",
+            );
+            return Err(FunctionBuilderError::ExceededBlockLimit(
+                num_blocks, max_blocks,
+            ));
+        }
+
         let num_insns = f.instructions.len();
 
         let get_next_cut = |idx: usize| cuts.get(idx).copied().unwrap_or(num_insns);
@@ -587,9 +601,13 @@ impl FunctionBuilderContext {
             BasicBlock::new_with(address, length, points, context)
         };
 
+        let mut block_starts = BTreeMap::new();
+        let mut block_ends = BTreeMap::new();
+
         'cuts: for (cut_idx, cut) in cuts.iter().enumerate() {
             let start = *cut;
             let address = f.instructions[start].address();
+            let block_idx = f.blocks.len();
 
             let mut next_cut_idx = cut_idx + 1;
             let mut next_cut = get_next_cut(next_cut_idx);
@@ -597,7 +615,7 @@ impl FunctionBuilderContext {
             let mut expected = address;
             let mut length = 0usize;
 
-            let mut points = Vec::new();
+            let mut points = Vec::<usize>::new();
 
             tracing::trace!("structuring block at {address}; start: {start}");
 
@@ -613,6 +631,13 @@ impl FunctionBuilderContext {
                         next_cut_idx += 1;
                         next_cut = get_next_cut(next_cut_idx);
                     } else {
+                        let last_insn = &f.instructions
+                            [points.last().copied().expect("points must not be empty")];
+                        let last_address = last_insn.address();
+
+                        block_starts.insert(address, block_idx);
+                        block_ends.insert(last_address, block_idx);
+
                         f.push_block(emit_block(address, length, points));
                         continue 'cuts;
                     }
@@ -630,8 +655,46 @@ impl FunctionBuilderContext {
                 }
             }
 
+            // NOTE: we should refactor this--we have a bit of duplication and we can
+            // probably reduce lookups.
+            let last_insn =
+                &f.instructions[points.last().copied().expect("points must not be empty")];
+            let last_address = last_insn.address();
+
+            block_starts.insert(address, block_idx);
+            block_ends.insert(last_address, block_idx);
+
             f.push_block(emit_block(address, length, points));
         }
+
+        for target in self.local_targets.iter() {
+            let Some(from) = block_ends.get(&target.from()).copied() else {
+                tracing::trace!(
+                    "skipping local target: {} -> {} ({:?}): no block end",
+                    target.from(),
+                    target.to(),
+                    target.kind()
+                );
+                continue;
+            };
+
+            let Some(to) = block_starts.get(&target.to()).copied() else {
+                tracing::trace!(
+                    "skipping local target: {} -> {} ({:?}): no block start",
+                    target.from(),
+                    target.to(),
+                    target.kind()
+                );
+                continue;
+            };
+
+            tracing::trace!("adding local target: {from} -> {to} ({:?})", target.kind());
+
+            f.blocks[from].add_successor(to);
+            f.blocks[to].add_predecessor(from);
+        }
+
+        Ok(())
     }
 
     pub fn analyse(
@@ -639,6 +702,7 @@ impl FunctionBuilderContext {
         project: &mut Project,
         address: impl Into<Address>,
         context: ContextSet,
+        config: &FunctionRecoveryConfig,
         initialisation_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
         post_lifting_passes: &mut AnalysisGroup<'_, PartialFunctionWithContext>,
     ) -> Result<(), FunctionBuilderError> {
@@ -683,8 +747,7 @@ impl FunctionBuilderContext {
 
             tracing::trace!("{:?}", self.local_targets);
 
-            // TODO: pass this to the post-lifting passes...
-            self.structure_blocks(&mut partial);
+            self.structure_blocks(config, &mut partial)?;
 
             for block in partial.blocks.iter() {
                 tracing::debug!("blk@{}", block.start());
@@ -706,9 +769,7 @@ impl FunctionBuilderContext {
             };
 
             // Run post-lifting passes
-            let result = post_lifting_passes
-                .analyse_with(project, &mut function_with_context);
-
+            let result = post_lifting_passes.analyse_with(project, &mut function_with_context);
 
             *self = function_with_context.context;
             partial = function_with_context.function;
