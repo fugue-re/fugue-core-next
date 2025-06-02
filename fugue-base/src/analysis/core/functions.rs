@@ -6,10 +6,12 @@ use thiserror::Error;
 
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
+use crate::entities::instruction::InsnList;
 use crate::entities::{BasicBlock, Insn};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::StorageProvider;
+use crate::types::address::AddressMap;
 use crate::types::Address;
 
 pub struct FunctionRecoveryConfig {
@@ -36,6 +38,12 @@ pub struct FunctionBuilderContext {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<(Address, ContextSet)>,
+    // These are used to structure the blocks after lifting; we keep them here
+    // to avoid having to reallocate on each function analysis. They refer to
+    // the partial function being constructed.
+    block_starts: AddressMap<usize>,
+    block_ends: AddressMap<usize>,
+    cuts: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -378,6 +386,11 @@ impl FunctionBuilderContext {
             contexts: BTreeMap::new(),
             local_targets: BTreeSet::new(),
             global_targets: BTreeSet::new(),
+            // These are used to structure the blocks after lifting; we keep them here
+            // to avoid having to reallocate on each function analysis.
+            block_starts: AddressMap::new(),
+            block_ends: AddressMap::new(),
+            cuts: Vec::new(),
         }
     }
 
@@ -558,14 +571,15 @@ impl FunctionBuilderContext {
         config: &FunctionRecoveryConfig,
         f: &mut PartialFunction,
     ) -> Result<(), FunctionBuilderError> {
-        let mut cuts = Vec::new();
-
-        // Valid contexts contain all cut points; we mark all instructions that
-        // are flow targets as maybe taken.
+        self.block_starts.clear();
+        self.block_ends.clear();
+        self.cuts.clear();
 
         f.instructions.sort_by_key(|insn| insn.address());
         f.instructions_map.clear();
 
+        // Valid contexts contain all cut points; we mark all instructions that
+        // are flow targets as maybe taken.
         for (i, insn) in f.instructions.iter_mut().enumerate() {
             let addr = insn.address();
 
@@ -575,13 +589,13 @@ impl FunctionBuilderContext {
 
             if self.contexts.contains_key(&addr) {
                 tracing::trace!("found cut at {addr} ({i})");
-                cuts.push(i);
+                self.cuts.push(i);
             }
 
             insn.mark_maybe_taken();
         }
 
-        let num_blocks = cuts.len();
+        let num_blocks = self.cuts.len();
         let max_blocks = config.max_blocks;
 
         if num_blocks > max_blocks {
@@ -595,16 +609,13 @@ impl FunctionBuilderContext {
 
         let num_insns = f.instructions.len();
 
-        let get_next_cut = |idx: usize| cuts.get(idx).copied().unwrap_or(num_insns);
+        let get_next_cut = |idx: usize| self.cuts.get(idx).copied().unwrap_or(num_insns);
         let emit_block = |address, length, points| {
             let context = self.contexts.get(&address).cloned().unwrap_or_default();
             BasicBlock::new_with(address, length, points, context)
         };
 
-        let mut block_starts = BTreeMap::new();
-        let mut block_ends = BTreeMap::new();
-
-        'cuts: for (cut_idx, cut) in cuts.iter().enumerate() {
+        'cuts: for (cut_idx, cut) in self.cuts.iter().enumerate() {
             let start = *cut;
             let address = f.instructions[start].address();
             let block_idx = f.blocks.len();
@@ -615,7 +626,7 @@ impl FunctionBuilderContext {
             let mut expected = address;
             let mut length = 0usize;
 
-            let mut points = Vec::<usize>::new();
+            let mut points = InsnList::new();
 
             tracing::trace!("structuring block at {address}; start: {start}");
 
@@ -631,12 +642,12 @@ impl FunctionBuilderContext {
                         next_cut_idx += 1;
                         next_cut = get_next_cut(next_cut_idx);
                     } else {
-                        let last_insn = &f.instructions
-                            [points.last().copied().expect("points must not be empty")];
+                        let last_insn =
+                            &f.instructions[points.last().expect("points must not be empty")];
                         let last_address = last_insn.address();
 
-                        block_starts.insert(address, block_idx);
-                        block_ends.insert(last_address, block_idx);
+                        debug_assert!(self.block_starts.insert(address, block_idx).is_none());
+                        debug_assert!(self.block_ends.insert(last_address, block_idx).is_none());
 
                         f.push_block(emit_block(address, length, points));
                         continue 'cuts;
@@ -649,7 +660,7 @@ impl FunctionBuilderContext {
                         insn.address(),
                         address
                     );
-                    points.push(curr);
+                    points.insert(curr);
                     expected = insn.next_address();
                     length += insn.len();
                 }
@@ -657,18 +668,17 @@ impl FunctionBuilderContext {
 
             // NOTE: we should refactor this--we have a bit of duplication and we can
             // probably reduce lookups.
-            let last_insn =
-                &f.instructions[points.last().copied().expect("points must not be empty")];
+            let last_insn = &f.instructions[points.last().expect("points must not be empty")];
             let last_address = last_insn.address();
 
-            block_starts.insert(address, block_idx);
-            block_ends.insert(last_address, block_idx);
+            debug_assert!(self.block_starts.insert(address, block_idx).is_none());
+            debug_assert!(self.block_ends.insert(last_address, block_idx).is_none());
 
             f.push_block(emit_block(address, length, points));
         }
 
         for target in self.local_targets.iter() {
-            let Some(from) = block_ends.get(&target.from()).copied() else {
+            let Some(from) = self.block_ends.get(target.from()).copied() else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block end",
                     target.from(),
@@ -678,7 +688,7 @@ impl FunctionBuilderContext {
                 continue;
             };
 
-            let Some(to) = block_starts.get(&target.to()).copied() else {
+            let Some(to) = self.block_starts.get(target.to()).copied() else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block start",
                     target.from(),
@@ -754,7 +764,6 @@ impl FunctionBuilderContext {
                 for insn in block
                     .instructions()
                     .iter()
-                    .copied()
                     .map(|i| &partial.instructions[i])
                 {
                     tracing::debug!("{}: {}", insn.address(), insn.display(project.language));

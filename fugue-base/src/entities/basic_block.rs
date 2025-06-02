@@ -1,5 +1,6 @@
 use tinyset::SetUsize;
 
+use crate::entities::instruction::InsnList;
 use crate::lifter::ContextSet;
 use crate::types::Address;
 
@@ -7,7 +8,7 @@ use crate::types::Address;
 pub struct BasicBlock {
     start: Address,
     len: usize,
-    instructions: Vec<usize>,
+    instructions: InsnList,
     successors: SetUsize,
     predecessors: SetUsize,
     properties: BasicBlockProperties,
@@ -34,14 +35,14 @@ bitflags::bitflags! {
 }
 
 impl BasicBlock {
-    pub fn new(start: Address, len: usize, instructions: Vec<usize>) -> Self {
+    pub fn new(start: Address, len: usize, instructions: InsnList) -> Self {
         Self::new_with(start, len, instructions, ContextSet::default())
     }
 
     pub fn new_with(
         start: Address,
         len: usize,
-        instructions: Vec<usize>,
+        instructions: InsnList,
         context: ContextSet,
     ) -> Self {
         BasicBlock {
@@ -63,7 +64,7 @@ impl BasicBlock {
         self.len
     }
 
-    pub fn instructions(&self) -> &[usize] {
+    pub fn instructions(&self) -> &InsnList {
         &self.instructions
     }
 

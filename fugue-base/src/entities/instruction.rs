@@ -4,6 +4,7 @@ pub use fugue_lifter::{
     ContextBitRange, Language, Lifter, LifterBuilder, LifterBuilderError, LiftingContext, Op,
     PCodeOp,
 };
+use range_set_blaze::RangeSetBlaze;
 use smallvec::SmallVec;
 
 use crate::types::{Address, Location, ToAddress};
@@ -459,5 +460,42 @@ impl fmt::Display for InsnTarget {
             Self::Intrinsic => write!(f, "intrinsic flow"),
             Self::Unresolved => write!(f, "unresolved"),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InsnList(RangeSetBlaze<usize>);
+
+impl InsnList {
+    pub fn new() -> Self {
+        Self(RangeSetBlaze::new())
+    }
+
+    pub fn insert(&mut self, idx: usize) {
+        self.0.insert(idx);
+    }
+
+    pub fn remove(&mut self, idx: usize) {
+        self.0.remove(idx);
+    }
+
+    pub fn contains(&self, idx: usize) -> bool {
+        self.0.contains(idx)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn first(&self) -> Option<usize> {
+        self.0.first()
+    }
+
+    pub fn last(&self) -> Option<usize> {
+        self.0.last()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = usize> + use<'_> {
+        self.0.iter()
     }
 }

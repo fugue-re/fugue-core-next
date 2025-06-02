@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 use fugue_lifter::{Language, Varnode};
+use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -371,5 +372,80 @@ impl ToAddress for Varnode {
         } else {
             None
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct AddressSet(RangeSetBlaze<u64>);
+
+impl AddressSet {
+    pub fn new() -> Self {
+        Self(RangeSetBlaze::new())
+    }
+
+    pub fn insert(&mut self, address: impl Into<Address>) -> bool {
+        self.0.insert(address.into().offset())
+    }
+
+    pub fn remove(&mut self, address: impl Into<Address>) {
+        self.0.remove(address.into().offset());
+    }
+
+    pub fn contains(&self, address: impl Into<Address>) -> bool {
+        self.0.contains(address.into().offset())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Address> + use<'_> {
+        self.0.iter().map(Address::from)
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct AddressMap<V>(RangeMapBlaze<u64, V>)
+where
+    V: Clone + Eq;
+
+impl<V> AddressMap<V>
+where
+    V: Clone + Eq,
+{
+    pub fn new() -> Self {
+        Self(RangeMapBlaze::new())
+    }
+
+    pub fn insert(&mut self, address: impl Into<Address>, value: V) -> Option<V> {
+        self.0.insert(address.into().offset(), value)
+    }
+
+    pub fn remove(&mut self, address: impl Into<Address>) -> Option<V> {
+        self.0.remove(address.into().offset())
+    }
+
+    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
+        self.0.contains_key(address.into().offset())
+    }
+
+    pub fn get(&self, address: impl Into<Address>) -> Option<&V> {
+        self.0.get(address.into().offset())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Address, &V)> {
+        self.0.iter().map(|(k, v)| (Address::from(k), v))
     }
 }
