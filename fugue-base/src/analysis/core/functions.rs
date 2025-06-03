@@ -8,7 +8,7 @@ use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
 use crate::entities::instruction::InsnList;
 use crate::entities::{BasicBlock, Insn};
-use crate::lifter::ContextSet;
+use crate::lifter::{ContextSet, LifterError};
 use crate::project::Project;
 use crate::storage::StorageProvider;
 use crate::types::address::AddressMap;
@@ -70,11 +70,11 @@ impl PartialFunction {
         &self.blocks
     }
 
-    pub fn contains_instruction(&self, address: Address) -> bool {
+    pub fn contains_insn(&self, address: Address) -> bool {
         self.instructions_map.contains_key(&address)
     }
 
-    pub(crate) fn instruction_entry(&mut self, address: Address) -> InsnEntry {
+    pub(crate) fn insn_entry(&mut self, address: Address) -> InsnEntry {
         match self.instructions_map.entry(address) {
             Entry::Vacant(entry) => InsnEntry::Vacant(VacantInsnEntry {
                 entry,
@@ -87,7 +87,7 @@ impl PartialFunction {
         }
     }
 
-    pub fn insert_instruction(&mut self, insn: Insn) -> usize {
+    pub fn insert_insn(&mut self, insn: Insn) -> usize {
         *self
             .instructions_map
             .entry(insn.address())
@@ -98,19 +98,83 @@ impl PartialFunction {
             })
     }
 
-    pub fn instruction(&self, address: Address) -> Option<&Insn> {
+    pub fn lift_block(
+        &mut self,
+        id: usize,
+        project: &mut Project,
+    ) -> Result<(), FunctionBuilderError> {
+        let block = self
+            .blocks
+            .get(id)
+            .ok_or_else(|| FunctionBuilderError::InvalidBlockId(id))?;
+
+        let start = block.start();
+        let bytes = project
+            .storage
+            .view_segment_bytes_from(block.start())
+            .map_err(FunctionBuilderError::Storage)?;
+
+        for insn_id in block.instructions().iter() {
+            let insn = &mut self.instructions[insn_id];
+
+            if insn.is_lifted() {
+                continue;
+            }
+
+            let offset = usize::from(insn.address() - start);
+
+            let view = bytes
+                .get(offset..)
+                .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
+
+            *insn = project.lifter.lift_insn(insn.address(), view)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn lift_insn(
+        &mut self,
+        id: usize,
+        project: &mut Project,
+    ) -> Result<Option<&mut Insn>, FunctionBuilderError> {
+        let insn = self
+            .instructions
+            .get_mut(id)
+            .ok_or_else(|| FunctionBuilderError::InvalidInstructionId(id))?;
+
+        if insn.is_lifted() {
+            return Ok(Some(insn));
+        }
+
+        let address = insn.address();
+        let mut bytes = [0u8; 32];
+
+        project
+            .storage
+            .read_bytes(address, &mut bytes)
+            .expect("storage should be consistent");
+
+        // TODO: should we use Rc<RefCell<...>>/Arc for Insn?
+
+        *insn = project.lifter_mut().lift_insn(address, bytes)?;
+
+        Ok(Some(insn))
+    }
+
+    pub fn insn(&self, address: Address) -> Option<&Insn> {
         self.instructions_map
             .get(&address)
             .and_then(|&id| self.instructions.get(id))
     }
 
-    pub fn instruction_mut(&mut self, address: Address) -> Option<&mut Insn> {
+    pub fn insn_mut(&mut self, address: Address) -> Option<&mut Insn> {
         self.instructions_map
             .get(&address)
             .and_then(|&id| self.instructions.get_mut(id))
     }
 
-    pub fn has_instructions(&self) -> bool {
+    pub fn has_insns(&self) -> bool {
         !self.instructions.is_empty()
     }
 }
@@ -174,6 +238,15 @@ pub enum FunctionBuilderError {
     NoInstructions,
     #[error("failed to create function; number of blocks ({0}) exceeds limit ({1})")]
     ExceededBlockLimit(usize, usize),
+    #[error(transparent)]
+    Lifter(#[from] LifterError),
+    #[error(transparent)]
+    Storage(#[from] crate::storage::StorageError),
+
+    #[error("invalid block index: {0}")]
+    InvalidBlockId(usize),
+    #[error("invalid instruction index: {0}")]
+    InvalidInstructionId(usize),
 }
 
 impl<'a> FunctionRecovery<'a> {
@@ -443,7 +516,7 @@ impl FunctionBuilderContext {
         self.global_targets.clear();
     }
 
-    fn lift_instructions(&mut self, project: &mut Project, f: &mut PartialFunction) {
+    fn lift_insns(&mut self, project: &mut Project, f: &mut PartialFunction) {
         let mut bytes = [0u8; 32];
 
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
@@ -488,7 +561,7 @@ impl FunctionBuilderContext {
 
                 // If we've already disassembled this instruction select the next candidate,
                 // otherwise get the entry ready for update.
-                let entry = match f.instruction_entry(address) {
+                let entry = match f.insn_entry(address) {
                     InsnEntry::Vacant(entry) => entry,
                     InsnEntry::Occupied(mut entry) => {
                         // If two blocks overlap, then they may share a common suffix to account
@@ -748,9 +821,9 @@ impl FunctionBuilderContext {
         let mut partial = PartialFunction::new();
 
         loop {
-            self.lift_instructions(project, &mut partial);
+            self.lift_insns(project, &mut partial);
 
-            if !partial.has_instructions() {
+            if !partial.has_insns() {
                 tracing::debug!("no instructions lifted; invalid function");
                 return Err(FunctionBuilderError::NoInstructions);
             }

@@ -200,8 +200,9 @@ impl HybridLifter {
     pub fn disassemble_insn(
         &mut self,
         address: Address,
-        bytes: &[u8],
+        bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, DisassemblerError> {
+        let bytes = bytes.as_ref();
         let insn = self
             .disassembler
             .disassemble_insn(address, bytes, self.lifter.context_mut())
@@ -214,8 +215,8 @@ impl HybridLifter {
         Ok(self.lifter.lift_insn(address, bytes)?)
     }
 
-    pub fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
-        self.lifter.lift_insn(address, bytes)
+    pub fn lift_insn(&mut self, address: Address, bytes: impl AsRef<[u8]>) -> Result<Insn, LifterError> {
+        self.lifter.lift_insn(address, bytes.as_ref())
     }
 
     pub fn context(&self) -> &LiftingContext {
