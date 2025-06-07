@@ -517,11 +517,13 @@ impl FunctionBuilderContext {
     }
 
     fn lift_insns(&mut self, project: &mut Project, f: &mut PartialFunction) {
-        let mut bytes = [0u8; 32];
-
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
         // create a "cheap" view over the containing segment and use that to avoid lookups for each
         // address read from.
+        let segment = project
+            .storage
+            .find_segment_containing(self.entry())
+            .expect("function entry is valid");
 
         // This is the stage where we build blocks by collecting instructions and marking them.
         'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
@@ -536,8 +538,8 @@ impl FunctionBuilderContext {
                 continue 'outer;
             };
 
-            if !project.storage.contains_segment(block) {
-                tracing::trace!("skipping {block}: not mapped");
+            if !segment.contains_address(block) {
+                tracing::trace!("skipping {block}: not mapped in segment");
                 continue 'outer;
             }
 
@@ -575,14 +577,14 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                let Ok(size) = project.storage.read_bytes(address, &mut bytes) else {
-                    tracing::trace!("skipping {address}: not mapped");
+                let Some(bytes) = segment.view_bytes_from_address(address) else {
+                    tracing::trace!("skipping {address}: not mapped in segment");
                     continue 'outer;
                 };
 
-                tracing::trace!("lifting {address}: {:?} ({size})", bytes);
+                let size = bytes.len();
 
-                let bytes = &bytes[..size];
+                tracing::trace!("lifting {address} ({size} bytes available)");
 
                 match project.lifter.disassemble_insn(address, bytes) {
                     Ok(insn) => {
@@ -651,7 +653,7 @@ impl FunctionBuilderContext {
         f.instructions.sort_by_key(|insn| insn.address());
         f.instructions_map.clear();
 
-        // Valid contexts contain all cut points; we mark all instructions that
+        // valid contexts contain all cut points; we mark all instructions that
         // are flow targets as maybe taken.
         for (i, insn) in f.instructions.iter_mut().enumerate() {
             let addr = insn.address();

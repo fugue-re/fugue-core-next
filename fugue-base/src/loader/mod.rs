@@ -133,8 +133,19 @@ impl<'a> LoadableSegment<'a> {
         self.bytes.is_empty()
     }
 
+    pub fn offset_of(&self, address: Address) -> Option<usize> {
+        if address < self.address || address > self.last_address() {
+            return None;
+        }
+        Some(usize::from(address - self.address))
+    }
+
+    pub fn contains_address(&self, address: Address) -> bool {
+        address >= self.address && address <= self.last_address()
+    }
+
     pub fn read_value<T: ByteCast>(&self, offset: usize) -> Option<T> {
-        let range = self.view_bytes(offset, T::SIZEOF)?;
+        let range = self.view_bytes_at(offset, T::SIZEOF)?;
         Some(if self.properties.is_little_endian() {
             T::from_bytes::<LE>(range)
         } else {
@@ -148,7 +159,7 @@ impl<'a> LoadableSegment<'a> {
         f: impl FnOnce(T) -> T,
     ) -> Option<()> {
         let is_le = self.properties.is_little_endian();
-        let range = self.view_bytes_mut(offset, T::SIZEOF)?;
+        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
         Some(if is_le {
             f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range)
         } else {
@@ -158,7 +169,7 @@ impl<'a> LoadableSegment<'a> {
 
     pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
         let is_le = self.properties.is_little_endian();
-        let range = self.view_bytes_mut(offset, T::SIZEOF)?;
+        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
 
         Some(if is_le {
             value.into_bytes::<LE>(range)
@@ -167,7 +178,7 @@ impl<'a> LoadableSegment<'a> {
         })
     }
 
-    pub fn view_bytes(&self, offset: usize, count: usize) -> Option<&[u8]> {
+    pub fn view_bytes_at(&self, offset: usize, count: usize) -> Option<&[u8]> {
         let len = self.bytes.len();
         if offset >= len {
             return None;
@@ -184,6 +195,11 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
+    pub fn view_bytes_at_address(&self, address: Address, count: usize) -> Option<&[u8]> {
+        let offset = self.offset_of(address)?;
+        self.view_bytes_at(offset, count)
+    }
+
     pub fn view_bytes_from(&self, offset: usize) -> Option<&[u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -193,7 +209,12 @@ impl<'a> LoadableSegment<'a> {
         Some(&self.bytes[offset..])
     }
 
-    pub fn view_bytes_mut(&mut self, offset: usize, count: usize) -> Option<&mut [u8]> {
+    pub fn view_bytes_from_address(&self, address: Address) -> Option<&[u8]> {
+        let offset = self.offset_of(address)?;
+        self.view_bytes_from(offset)
+    }
+
+    pub fn view_bytes_at_mut(&mut self, offset: usize, count: usize) -> Option<&mut [u8]> {
         let len = self.bytes.len();
         if offset >= len {
             return None;
@@ -210,6 +231,15 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
+    pub fn view_bytes_at_address_mut(
+        &mut self,
+        address: Address,
+        count: usize,
+    ) -> Option<&mut [u8]> {
+        let offset = self.offset_of(address)?;
+        self.view_bytes_at_mut(offset, count)
+    }
+
     pub fn view_bytes_from_mut(&mut self, offset: usize) -> Option<&mut [u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -217,6 +247,11 @@ impl<'a> LoadableSegment<'a> {
         }
 
         Some(&mut self.bytes.to_mut()[offset..])
+    }
+
+    pub fn view_bytes_from_address_mut(&mut self, address: Address) -> Option<&mut [u8]> {
+        let offset = self.offset_of(address)?;
+        self.view_bytes_from_mut(offset)
     }
 
     pub fn into_owned(self) -> LoadableSegment<'static> {

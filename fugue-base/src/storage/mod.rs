@@ -92,11 +92,11 @@ pub trait StorageProvider {
         let offset = usize::from(addr - segm.address());
         let bytes = match segm {
             Cow::Borrowed(segm) => Cow::Borrowed(
-                segm.view_bytes(offset, size)
+                segm.view_bytes_at(offset, size)
                     .ok_or(StorageError::InvalidSize)?,
             ),
             Cow::Owned(segm) => Cow::Owned(
-                segm.view_bytes(offset, size)
+                segm.view_bytes_at(offset, size)
                     .ok_or(StorageError::InvalidSize)?
                     .to_owned(),
             ),
@@ -293,7 +293,7 @@ impl StorageProvider for InMemoryStorage {
             let read_size = size.min(usize::from(segm_last_addr - read_addr) + 1);
 
             let segm_bytes = segm
-                .view_bytes(read_offset, read_size)
+                .view_bytes_at(read_offset, read_size)
                 .ok_or(StorageError::InvalidAddress)?;
 
             bytes[offset..offset + read_size].copy_from_slice(segm_bytes);
@@ -331,7 +331,7 @@ impl StorageProvider for InMemoryStorage {
             let write_size = size.min(usize::from(segm_last_addr - write_addr) + 1);
 
             let segm_bytes = segm
-                .view_bytes_mut(write_offset, write_size)
+                .view_bytes_at_mut(write_offset, write_size)
                 .ok_or(StorageError::InvalidAddress)?;
 
             segm_bytes.copy_from_slice(&bytes[offset..offset + write_size]);
