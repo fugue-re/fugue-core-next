@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
 use thiserror::Error;
+use ustr::Ustr;
 
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
+use crate::entities::function::FunctionProperties;
 use crate::entities::instruction::InsnList;
 use crate::entities::{BasicBlock, Insn};
 use crate::lifter::{ContextSet, LifterError};
@@ -48,26 +50,68 @@ pub struct FunctionBuilderContext {
 
 #[derive(Default)]
 pub struct PartialFunction {
+    name: Option<Ustr>,
+    entry: Address,
     blocks: Vec<BasicBlock>,
     instructions: Vec<Insn>,
     instructions_map: BTreeMap<Address, usize>,
+    properties: FunctionProperties,
 }
 
 impl PartialFunction {
-    pub fn new() -> Self {
-        PartialFunction {
+    fn new(entry: Address) -> Self {
+        Self::new_with(None, entry)
+    }
+
+    fn new_with(name: impl Into<Option<Ustr>>, entry: Address) -> Self {
+        Self {
+            name: name.into(),
+            entry,
             blocks: Vec::new(),
             instructions: Vec::new(),
             instructions_map: BTreeMap::new(),
+            properties: FunctionProperties::NONE,
         }
     }
 
+    pub fn update_name(&mut self, name: impl Into<Ustr>) {
+        self.name = Some(name.into());
+    }
+
+    pub fn clear_name(&mut self) {
+        self.name = None;
+    }
+
+    pub fn name(&self) -> Option<Ustr> {
+        self.name
+    }
+
+    pub fn entry(&self) -> Address {
+        self.entry
+    }
+
+    pub fn entry_block(&self) -> &BasicBlock {
+        self.block_at(self.entry)
+            .expect("entry block should always exist")
+    }
+
     pub(crate) fn push_block(&mut self, block: BasicBlock) {
+        debug_assert!(
+            self.blocks.is_empty() || self.blocks.last().unwrap().start() < block.start(),
+            "blocks must be inserted in order",
+        );
         self.blocks.push(block);
     }
 
     pub fn blocks(&self) -> &[BasicBlock] {
         &self.blocks
+    }
+
+    pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
+        self.blocks
+            .binary_search_by_key(&address, |blk| blk.start())
+            .ok()
+            .map(|idx| &self.blocks[idx])
     }
 
     pub fn contains_insn(&self, address: Address) -> bool {
@@ -85,17 +129,6 @@ impl PartialFunction {
                 insns: &mut self.instructions,
             }),
         }
-    }
-
-    pub fn insert_insn(&mut self, insn: Insn) -> usize {
-        *self
-            .instructions_map
-            .entry(insn.address())
-            .or_insert_with(|| {
-                let id = self.instructions.len();
-                self.instructions.push(insn);
-                id
-            })
     }
 
     pub fn lift_block(
@@ -176,6 +209,30 @@ impl PartialFunction {
 
     pub fn has_insns(&self) -> bool {
         !self.instructions.is_empty()
+    }
+
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.contains(FunctionProperties::NON_RETURNING)
+    }
+
+    pub fn mark_non_returning(&mut self) {
+        self.properties.insert(FunctionProperties::NON_RETURNING);
+    }
+
+    pub fn is_thunk(&self) -> bool {
+        self.properties.contains(FunctionProperties::THUNK)
+    }
+
+    pub fn mark_thunk(&mut self) {
+        self.properties.insert(FunctionProperties::THUNK);
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.properties.contains(FunctionProperties::EXTERNAL)
+    }
+
+    pub fn mark_external(&mut self) {
+        self.properties.insert(FunctionProperties::EXTERNAL);
     }
 }
 
@@ -520,7 +577,9 @@ impl FunctionBuilderContext {
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
         // create a "cheap" view over the containing segment and use that to avoid lookups for each
         // address read from.
-        let segment = project
+
+        // We assume that most (all?) of a function's blocks will be in the same segment.
+        let mut segment = project
             .storage
             .find_segment_containing(self.entry())
             .expect("function entry is valid");
@@ -539,8 +598,13 @@ impl FunctionBuilderContext {
             };
 
             if !segment.contains_address(block) {
-                tracing::trace!("skipping {block}: not mapped in segment");
-                continue 'outer;
+                if let Ok(nsegment) = project.storage.find_segment_containing(block) {
+                    tracing::trace!("switching segment for {block} to segment {nsegment}");
+                    segment = nsegment;
+                } else {
+                    tracing::trace!("skipping {block}: not mapped in any segment");
+                    continue 'outer;
+                }
             }
 
             tracing::trace!("lifting new block {block}");
@@ -820,7 +884,7 @@ impl FunctionBuilderContext {
             .analyse_with(project, self)
             .map_err(FunctionBuilderError::InitialisationPass)?;
 
-        let mut partial = PartialFunction::new();
+        let mut partial = PartialFunction::new(self.entry);
 
         loop {
             self.lift_insns(project, &mut partial);

@@ -61,6 +61,10 @@ impl Function {
         self.entry
     }
 
+    pub fn entry_block(&self) -> &BasicBlock {
+        self.block_at(self.entry).expect("entry block should always exist")
+    }
+
     pub fn add_block(&mut self, block: BasicBlock) {
         self.blocks.push(block);
         self.blocks.sort_by_key(|blk| blk.start());
@@ -68,6 +72,12 @@ impl Function {
 
     pub fn blocks(&self) -> &[BasicBlock] {
         &self.blocks
+    }
+
+    pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
+        self.blocks.binary_search_by_key(&address, |blk| blk.start())
+            .ok()
+            .map(|idx| &self.blocks[idx])
     }
 
     pub fn is_non_returning(&self) -> bool {

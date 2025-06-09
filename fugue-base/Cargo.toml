@@ -7,8 +7,11 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 arrayvec = "0.7"
+bincode = { version = "2", features = ["serde"] }
 bitflags = "2"
+blake3 = "1.8"
 clone_dyn = "0.30"
+dashmap = "6.1"
 fallible-iterator = "0.3"
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bv = { version = "0.3", path = "../fugue-bv" }
@@ -23,6 +26,7 @@ itertools = "0.14"
 memmap2 = "0.9"
 object = "0.35"
 ouroboros = "0.18"
+parking_lot = "0.12"
 range-set-blaze = "0.3"
 rustc-hash = "1.1"
 sealed = "0.5"

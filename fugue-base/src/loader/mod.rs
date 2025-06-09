@@ -86,6 +86,19 @@ pub struct LoadableSegment<'a> {
     bytes: Cow<'a, [u8]>,
 }
 
+impl Display for LoadableSegment<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} with bounds {}-{} and properties {:?}",
+            self.name,
+            self.address,
+            self.last_address(),
+            self.properties
+        )
+    }
+}
+
 impl<'a> LoadableSegment<'a> {
     pub fn from_parts(
         name: impl Into<Cow<'a, str>>,
