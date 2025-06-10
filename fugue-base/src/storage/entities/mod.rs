@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -7,7 +5,18 @@ use uuid::Uuid;
 pub mod namespace;
 pub use namespace::Namespace;
 
+pub mod memory;
+pub use memory::InMemoryStorage;
+
 pub mod util;
+pub use util::BytesOrSlice;
+
+pub const ENTITY_KEY_SIZE: usize = 24;
+pub const ENTITY_PREFIX_SIZE: usize = 16;
+
+pub type EntityAddress = [u8; 8];
+pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
+pub type EntityKey = [u8; ENTITY_KEY_SIZE];
 
 #[derive(Debug, Error)]
 pub enum StorageBackendError {
@@ -37,10 +46,6 @@ impl StorageBackendError {
     }
 }
 
-pub(crate) const KEY_SIZE: usize = 24;
-pub(crate) type EntityKeyPrefix = [u8; 16];
-pub type EntityKey = [u8; KEY_SIZE];
-
 pub trait Entity: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync {
     const ID: Uuid;
 
@@ -49,58 +54,28 @@ pub trait Entity: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync {
     }
 }
 
-pub trait BulkInserter {
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), StorageBackendError>;
+pub trait StorageBulkInserter<'a> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'a>) -> Result<(), StorageBackendError>;
     fn finish(self: Box<Self>) -> Result<(), StorageBackendError>;
 }
 
-// Storage backend trait
+pub type EntityIterator<'a> =
+    Box<dyn Iterator<Item = Result<(EntityKey, BytesOrSlice<'a>), StorageBackendError>> + 'a>;
+
+pub type EntityKeyIterator<'a> =
+    Box<dyn Iterator<Item = Result<EntityKey, StorageBackendError>> + 'a>;
+
+pub type EntityBulkInserter<'a> = Box<dyn StorageBulkInserter<'a> + 'a>;
+
 pub trait StorageBackend: Send + Sync {
-    fn get(&self, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StorageBackendError>;
-    fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), StorageBackendError>;
-    fn delete(&self, key: &[u8]) -> Result<(), StorageBackendError>;
-    fn exists(&self, key: &[u8]) -> Result<bool, StorageBackendError>;
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, StorageBackendError>;
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), StorageBackendError>;
+    fn remove(&self, key: &[u8]) -> Result<(), StorageBackendError>;
+    fn contains(&self, key: &[u8]) -> Result<bool, StorageBackendError>;
 
-    fn iter_keys(
-        &self,
-        prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<EntityKey, StorageBackendError>> + '_>,
-        StorageBackendError,
-    >;
+    fn iter_prefix_keys(&self, prefix: &[u8])
+        -> Result<EntityKeyIterator<'_>, StorageBackendError>;
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityIterator<'_>, StorageBackendError>;
 
-    fn iter_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StorageBackendError>> + '_>,
-        StorageBackendError,
-    >;
-
-    fn bulk_inserter(&self) -> Result<Box<dyn BulkInserter>, StorageBackendError>;
-}
-
-pub struct StorageKeyIterator<'a> {
-    iter: Box<dyn Iterator<Item = Result<EntityKey, StorageBackendError>> + 'a>,
-}
-
-impl<'a> Iterator for StorageKeyIterator<'a> {
-    type Item = Result<EntityKey, StorageBackendError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-}
-
-pub struct StorageIterator<'a> {
-    iter:
-        Box<dyn Iterator<Item = Result<(Cow<'a, [u8]>, Cow<'a, [u8]>), StorageBackendError>> + 'a>,
-}
-
-impl<'a> Iterator for StorageIterator<'a> {
-    type Item = Result<(Cow<'a, [u8]>, Cow<'a, [u8]>), StorageBackendError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
+    fn bulk_inserter(&self) -> Result<EntityBulkInserter, StorageBackendError>;
 }
