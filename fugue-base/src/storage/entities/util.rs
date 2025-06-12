@@ -11,7 +11,7 @@ use crate::types::Address;
 
 use super::namespace::Namespace;
 use super::{
-    EntityAddress, EntityKey, EntityKeyPrefix, StorageBackendError, ENTITY_KEY_SIZE,
+    EntityAddress, EntityKey, EntityKeyPrefix, EntityStorageBackendError, ENTITY_KEY_SIZE,
     ENTITY_PREFIX_SIZE,
 };
 
@@ -154,26 +154,26 @@ pub(crate) fn make_type_prefix(
     }
 }
 
-pub(crate) fn extract_address_from_key(key: &[u8]) -> Result<Address, StorageBackendError> {
+pub(crate) fn extract_address_from_key(key: &[u8]) -> Result<Address, EntityStorageBackendError> {
     if key.len() < ENTITY_KEY_SIZE {
-        return Err(StorageBackendError::InvalidKeySize);
+        return Err(EntityStorageBackendError::InvalidKeySize);
     }
 
     let addr_bytes = EntityAddress::try_from(&key[ENTITY_PREFIX_SIZE..])
-        .map_err(|_| StorageBackendError::InvalidKeyFormat)?;
+        .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
 
     Ok(Address::from(u64::from_be_bytes(addr_bytes)))
 }
 
 pub(crate) fn extract_namespace_hash_from_key(
     key: &[u8],
-) -> Result<EntityKeyPrefix, StorageBackendError> {
+) -> Result<EntityKeyPrefix, EntityStorageBackendError> {
     if key.len() < ENTITY_PREFIX_SIZE {
-        return Err(StorageBackendError::InvalidKeySize);
+        return Err(EntityStorageBackendError::InvalidKeySize);
     }
 
     let hash_bytes = EntityKeyPrefix::try_from(&key[..ENTITY_PREFIX_SIZE])
-        .map_err(|_| StorageBackendError::InvalidKeyFormat)?;
+        .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
 
     Ok(hash_bytes)
 }
