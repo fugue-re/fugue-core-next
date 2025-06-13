@@ -10,7 +10,7 @@ use skiplist::SkipMap;
 use super::util::make_key_from_parts;
 use super::{
     BytesOrSlice, EntityAddress, EntityBulkInserter, EntityBytesIterator, EntityKey,
-    EntityKeyIterator, EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError,
+    EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError,
     EntityStorageBulkInserter, ENTITY_PREFIX_SIZE,
 };
 
@@ -92,7 +92,7 @@ impl EntityStorageBackend for InMemoryEntityStorage {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyIterator<'_>, EntityStorageBackendError> {
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageBackendError> {
         if prefix.len() != ENTITY_PREFIX_SIZE {
             return Err(EntityStorageBackendError::InvalidKeySize);
         }

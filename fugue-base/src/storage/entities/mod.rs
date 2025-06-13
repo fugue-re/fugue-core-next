@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use quick_cache::sync::Cache;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -69,11 +72,14 @@ pub trait EntityStorageBulkInserter<'a> {
 pub type EntityBytesIterator<'a> =
     Box<dyn Iterator<Item = Result<(EntityKey, BytesOrSlice<'a>), EntityStorageBackendError>> + 'a>;
 
+pub type EntityKeyBytesIterator<'a> =
+    Box<dyn Iterator<Item = Result<EntityKey, EntityStorageBackendError>> + 'a>;
+
 pub type EntityIterator<'a, E> =
     Box<dyn Iterator<Item = Result<(Address, E), EntityStorageBackendError>> + 'a>;
 
 pub type EntityKeyIterator<'a> =
-    Box<dyn Iterator<Item = Result<EntityKey, EntityStorageBackendError>> + 'a>;
+    Box<dyn Iterator<Item = Result<Address, EntityStorageBackendError>> + 'a>;
 
 pub type EntityBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
 
@@ -86,7 +92,7 @@ pub trait EntityStorageBackend: Send + Sync {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyIterator<'_>, EntityStorageBackendError>;
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageBackendError>;
     fn iter_prefix(
         &self,
         prefix: &[u8],
@@ -95,14 +101,111 @@ pub trait EntityStorageBackend: Send + Sync {
     fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageBackendError>;
 }
 
+pub struct EntityCache<T: Entity> {
+    entities: Cache<Address, Arc<T>>,
+    storage: EntityStorage,
+}
+
+impl<T> EntityCache<T>
+where
+    T: Entity,
+{
+    pub fn new(storage: EntityStorage, size: usize) -> Result<Self, EntityStorageBackendError> {
+        Ok(Self {
+            entities: Cache::new(size),
+            storage,
+        })
+    }
+
+    pub fn get(
+        &self,
+        address: impl Into<Address>,
+    ) -> Result<Option<Arc<T>>, EntityStorageBackendError> {
+        let address = address.into();
+
+        if let Some(entity) = self.entities.get(&address) {
+            return Ok(Some(entity.clone()));
+        }
+
+        if let Some(entity) = self.storage.get::<T>(address)? {
+            let entity = Arc::new(entity);
+            self.entities.insert(address, entity.clone());
+            return Ok(Some(entity));
+        }
+
+        Ok(None)
+    }
+
+    pub fn contains(&self, address: impl Into<Address>) -> Result<bool, EntityStorageBackendError> {
+        let address = address.into();
+
+        if self.entities.contains_key(&address) {
+            return Ok(true);
+        }
+
+        self.storage.contains::<T>(address)
+    }
+
+    pub fn insert(
+        &self,
+        address: impl Into<Address>,
+        entity: T,
+    ) -> Result<(), EntityStorageBackendError> {
+        let address = address.into();
+
+        self.storage.insert(address, &entity)?;
+        self.entities.insert(address.clone(), Arc::new(entity));
+
+        Ok(())
+    }
+
+    pub fn remove(&self, address: impl Into<Address>) -> Result<(), EntityStorageBackendError> {
+        let address = address.into();
+
+        self.storage.remove::<T>(address)?;
+        self.entities.remove(&address);
+
+        Ok(())
+    }
+
+    pub fn keys(&self) -> Result<EntityKeyIterator<'_>, EntityStorageBackendError> {
+        self.storage.keys::<T>()
+    }
+
+    pub fn iter(&self) -> Result<EntityIterator<'_, Arc<T>>, EntityStorageBackendError> {
+        // TODO: should we cache the elements in the iterator if the cache has capacity?
+        let pfx = make_type_prefix(None, T::ID);
+        self.storage.backend.iter_prefix(&pfx).map(|iter| {
+            Box::new(iter.map(|result| {
+                result.and_then(|(key, value)| {
+                    let key = extract_address_from_key(&key)?;
+                    if let Some(val) = self.entities.get(&key) {
+                        return Ok((key, val));
+                    }
+
+                    let val = bincode::serde::decode_from_slice::<T, _>(
+                        value.as_slice(),
+                        bincode::config::standard(),
+                    )
+                    .map(|(entity, _)| entity)
+                    .map_err(EntityStorageBackendError::decode)?;
+
+                    Ok((key, Arc::new(val)))
+                })
+            })) as EntityIterator<'_, Arc<T>>
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct EntityStorage {
-    backend: Box<dyn EntityStorageBackend>,
+    backend: Arc<dyn EntityStorageBackend>,
 }
 
 impl EntityStorage {
     pub fn new(backend: impl EntityStorageBackend + 'static) -> Self {
         Self {
-            backend: Box::new(backend),
+            backend: Arc::new(backend),
         }
     }
 
@@ -169,7 +272,17 @@ impl EntityStorage {
 
     pub fn keys<E: Entity>(&self) -> Result<EntityKeyIterator<'_>, EntityStorageBackendError> {
         let pfx = make_type_prefix(None, E::ID);
-        self.backend.iter_prefix_keys(&pfx)
+        self.backend.iter_prefix_keys(&pfx).map(|iter| {
+            Box::new(iter.map(|result| result.and_then(|key| extract_address_from_key(&key))))
+                as EntityKeyIterator<'_>
+        })
+    }
+
+    pub fn cache_for<E: Entity>(
+        &self,
+        size: usize,
+    ) -> Result<EntityCache<E>, EntityStorageBackendError> {
+        EntityCache::new(self.clone(), size)
     }
 }
 
@@ -243,10 +356,55 @@ mod test {
         let key_iter = storage.keys::<TestEntity>().unwrap();
         let mut key_count = 0;
         for key in key_iter {
-            let key = key.unwrap();
-            let address = extract_address_from_key(&key).unwrap();
+            let address = key.unwrap();
             assert_eq!(address, Address::from(key_count as u64));
             key_count += 1;
+        }
+
+        // test a cache
+        let cache = storage.cache_for::<TestEntity>(5).unwrap();
+
+        for i in 0..5 {
+            let entity = TestEntity {
+                id: i,
+                name: format!("Entity {}", i),
+            };
+            let cached = cache.get(Address::from(i as u64)).unwrap();
+
+            assert!(cached.is_some());
+            assert_eq!(*cached.unwrap(), entity);
+        }
+
+        // test cache insertion
+        for i in 50..100 {
+            let entity = TestEntity {
+                id: i,
+                name: format!("New Cached Entity {}", i),
+            };
+            cache.insert(Address::from(i as u64), entity).unwrap();
+        }
+
+        // verify cache contains new entities
+        for i in 50..100 {
+            let cached = cache.get(Address::from(i as u64)).unwrap();
+            assert!(cached.is_some());
+            assert_eq!(
+                *cached.unwrap(),
+                TestEntity {
+                    id: i,
+                    name: format!("New Cached Entity {}", i)
+                }
+            );
+        }
+
+        // verify cache does not contain old entities
+        for i in 50..60 {
+            cache.remove(Address::from(i as u64)).unwrap();
+            let cached = cache.get(Address::from(i as u64)).unwrap();
+            assert!(cached.is_none());
+
+            let direct = storage.get::<TestEntity>(Address::from(i as u64)).unwrap();
+            assert!(direct.is_none());
         }
     }
 }
