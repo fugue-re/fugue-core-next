@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use bincode::{Decode, Encode};
 use quick_cache::sync::Cache;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -52,7 +52,7 @@ impl EntityStorageBackendError {
     }
 }
 
-pub trait Entity: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync {
+pub trait Entity<Context = ()>: Encode + Decode<Context> + Clone + Send + Sync {
     const ID: Uuid;
 
     fn entity_type(&self) -> Uuid {
@@ -183,7 +183,7 @@ where
                         return Ok((key, val));
                     }
 
-                    let val = bincode::serde::decode_from_slice::<T, _>(
+                    let val = bincode::decode_from_slice::<T, _>(
                         value.as_slice(),
                         bincode::config::standard(),
                     )
@@ -218,7 +218,7 @@ impl EntityStorage {
             return Ok(None);
         };
 
-        bincode::serde::decode_from_slice::<E, _>(val.as_slice(), bincode::config::standard())
+        bincode::decode_from_slice::<E, _>(val.as_slice(), bincode::config::standard())
             .map(|(entity, _)| Some(entity))
             .map_err(EntityStorageBackendError::decode)
     }
@@ -229,7 +229,7 @@ impl EntityStorage {
         entity: &E,
     ) -> Result<(), EntityStorageBackendError> {
         let key = make_key(None, E::ID, address.into());
-        let encoded = bincode::serde::encode_to_vec(entity, bincode::config::standard())
+        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageBackendError::encode)?;
         let encoded = BytesOrSlice::from(encoded);
 
@@ -258,7 +258,7 @@ impl EntityStorage {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
                     let key = extract_address_from_key(&key)?;
-                    let val = bincode::serde::decode_from_slice::<E, _>(
+                    let val = bincode::decode_from_slice::<E, _>(
                         value.as_slice(),
                         bincode::config::standard(),
                     )
@@ -295,7 +295,7 @@ mod test {
 
     #[test]
     fn test_entity_storage() {
-        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
         struct TestEntity {
             id: u64,
             name: String,
