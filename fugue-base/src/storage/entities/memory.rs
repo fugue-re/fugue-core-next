@@ -9,7 +9,7 @@ use skiplist::SkipMap;
 
 use super::util::make_key_from_parts;
 use super::{
-    BytesOrSlice, EntityAddress, EntityBulkInserter, EntityBytesIterator, EntityKey,
+    BytesOrSlice, EntityAddress, EntityBytesBulkInserter, EntityBytesIterator, EntityKey,
     EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError,
     EntityStorageBulkInserter, ENTITY_PREFIX_SIZE,
 };
@@ -17,6 +17,7 @@ use super::{
 const BATCH_SIZE: usize = 1000;
 
 pub struct InMemoryEntityStorage {
+    // for generic entity storage we will use a SkipMap<Bytes, Bytes>
     data: DashMap<EntityKeyPrefix, SkipMap<EntityAddress, Bytes>>,
 }
 
@@ -131,7 +132,7 @@ impl EntityStorageBackend for InMemoryEntityStorage {
         })))
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageBackendError> {
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageBackendError> {
         Ok(Box::new(InMemoryEntityInserter::new(self)))
     }
 }

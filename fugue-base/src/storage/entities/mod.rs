@@ -81,7 +81,34 @@ pub type EntityIterator<'a, E> =
 pub type EntityKeyIterator<'a> =
     Box<dyn Iterator<Item = Result<Address, EntityStorageBackendError>> + 'a>;
 
-pub type EntityBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
+pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
+
+pub struct EntityBulkInserter<'a> {
+    inner: EntityBytesBulkInserter<'a>,
+}
+
+impl<'a> EntityBulkInserter<'a> {
+    pub fn new(inner: EntityBytesBulkInserter<'a>) -> Self {
+        Self { inner }
+    }
+
+    pub fn insert<E: Entity>(
+        &mut self,
+        address: Address,
+        entity: &E,
+    ) -> Result<(), EntityStorageBackendError> {
+        let key = make_key(None, E::ID, address);
+        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
+            .map_err(EntityStorageBackendError::encode)?;
+        let encoded = BytesOrSlice::from(encoded);
+
+        self.inner.insert(&key, encoded)
+    }
+
+    pub fn finish(self) -> Result<(), EntityStorageBackendError> {
+        self.inner.finish()
+    }
+}
 
 pub trait EntityStorageBackend: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageBackendError>;
@@ -98,7 +125,7 @@ pub trait EntityStorageBackend: Send + Sync {
         prefix: &[u8],
     ) -> Result<EntityBytesIterator<'_>, EntityStorageBackendError>;
 
-    fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageBackendError>;
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageBackendError>;
 }
 
 pub struct EntityCache<T: Entity> {
@@ -153,10 +180,22 @@ where
     ) -> Result<(), EntityStorageBackendError> {
         let address = address.into();
 
+        // NOTE: we could check if the entity already exists in the cache and if it is the same,
+        // then we exit early. Similarly, we could check if the entity exists in the storage
+        // backend and if it is the same, then avoid inserting it again.
+
         self.storage.insert(address, &entity)?;
         self.entities.insert(address.clone(), Arc::new(entity));
 
         Ok(())
+    }
+
+    pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageBackendError> {
+        // NOTE: this will bypass the cache and directly insert into the storage backend
+        // we therefore clear the cache to avoid inconsistencies
+
+        self.entities.clear();
+        self.storage.bulk_inserter()
     }
 
     pub fn remove(&self, address: impl Into<Address>) -> Result<(), EntityStorageBackendError> {
@@ -234,6 +273,10 @@ impl EntityStorage {
         let encoded = BytesOrSlice::from(encoded);
 
         self.backend.insert(&key, encoded)
+    }
+
+    pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageBackendError> {
+        Ok(EntityBulkInserter::new(self.backend.bulk_inserter()?))
     }
 
     pub fn remove<E: Entity>(
@@ -329,7 +372,6 @@ mod test {
         assert!(!storage.contains::<TestEntity>(address).unwrap());
 
         // add many entities
-
         for i in 0..10 {
             let entity = TestEntity {
                 id: i,
