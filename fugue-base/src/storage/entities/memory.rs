@@ -1,24 +1,22 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::mapref::one::Ref as DashMapRef;
 use dashmap::DashMap;
 use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 use skiplist::SkipMap;
 
-use super::util::make_key_from_parts;
+use super::common::ENTITY_PREFIX_SIZE;
 use super::{
-    BytesOrSlice, EntityAddress, EntityBytesBulkInserter, EntityBytesIterator, EntityKey,
-    EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError,
-    EntityStorageBulkInserter, ENTITY_PREFIX_SIZE,
+    BytesOrSlice, EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
+    EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError, EntityStorageBulkInserter,
 };
 
 const BATCH_SIZE: usize = 1000;
 
 pub struct InMemoryEntityStorage {
-    // for generic entity storage we will use a SkipMap<Bytes, Bytes>
-    data: DashMap<EntityKeyPrefix, SkipMap<EntityAddress, Bytes>>,
+    data: DashMap<EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
 }
 
 impl InMemoryEntityStorage {
@@ -28,33 +26,31 @@ impl InMemoryEntityStorage {
         }
     }
 
-    fn prefix_and_address(
-        &self,
-        key: &[u8],
-    ) -> Result<(EntityKeyPrefix, EntityAddress), EntityStorageBackendError> {
-        if key.len() < ENTITY_PREFIX_SIZE {
-            return Err(EntityStorageBackendError::InvalidKeySize);
+    fn extract_key_parts(key: &[u8]) -> Option<(EntityKeyPrefix, &[u8])> {
+        if key.len() < 2 {
+            return None;
         }
+        Some(([key[0], key[1]], &key[2..]))
+    }
 
-        let prefix = EntityKeyPrefix::try_from(&key[..ENTITY_PREFIX_SIZE])
-            .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
-
-        let address = EntityAddress::try_from(&key[ENTITY_PREFIX_SIZE..])
-            .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
-
-        Ok((prefix, address))
+    fn make_key_from_parts(prefix: EntityKeyPrefix, key: &[u8]) -> Bytes {
+        let mut full_key = BytesMut::with_capacity(key.len() + ENTITY_PREFIX_SIZE);
+        full_key.put_slice(&prefix);
+        full_key.put_slice(key);
+        full_key.freeze()
     }
 }
 
 impl EntityStorageBackend for InMemoryEntityStorage {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageBackendError> {
-        let (prefix, address) = self.prefix_and_address(key)?;
+        let (prefix, key) =
+            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(None);
         };
 
-        if let Some(value) = map.get(&address) {
+        if let Some(value) = map.get(key) {
             return Ok(Some(BytesOrSlice::from(value)));
         }
 
@@ -62,32 +58,35 @@ impl EntityStorageBackend for InMemoryEntityStorage {
     }
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageBackendError> {
-        let (prefix, address) = self.prefix_and_address(key)?;
+        let (prefix, key) =
+            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
 
         let mut map = self.data.entry(prefix).or_insert_with(SkipMap::new);
-        map.insert(address, value.into_bytes());
+        map.insert(Bytes::copy_from_slice(key), value.into_bytes());
 
         Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageBackendError> {
-        let (prefix, address) = self.prefix_and_address(key)?;
+        let (prefix, key) =
+            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
 
         if let Some(mut map) = self.data.get_mut(&prefix) {
-            map.remove(&address);
+            map.remove(key);
         }
 
         Ok(())
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageBackendError> {
-        let (prefix, address) = self.prefix_and_address(key)?;
+        let (prefix, key) =
+            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(false);
         };
 
-        Ok(map.contains_key(&address))
+        Ok(map.contains_key(key))
     }
 
     fn iter_prefix_keys(
@@ -139,43 +138,49 @@ impl EntityStorageBackend for InMemoryEntityStorage {
 
 #[ouroboros::self_referencing]
 struct InMemoryKeyIterator<'a> {
-    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<EntityAddress, Bytes>>,
+    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
     prefix: EntityKeyPrefix,
     #[covariant]
     #[borrows(entry)]
-    iter: SkipMapKeys<'this, EntityAddress, Bytes>,
+    iter: SkipMapKeys<'this, Bytes, Bytes>,
 }
 
-impl Iterator for InMemoryKeyIterator<'_> {
-    type Item = Result<EntityKey, EntityStorageBackendError>;
+impl<'a> Iterator for InMemoryKeyIterator<'a> {
+    type Item = Result<BytesOrSlice<'a>, EntityStorageBackendError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = *self.borrow_prefix();
         self.with_iter_mut(|iter| {
-            iter.next()
-                .map(|address| Ok(make_key_from_parts(prefix, *address)))
+            iter.next().map(|key| {
+                Ok(BytesOrSlice::from(
+                    InMemoryEntityStorage::make_key_from_parts(prefix, key.as_ref()),
+                ))
+            })
         })
     }
 }
 
 #[ouroboros::self_referencing]
 struct InMemoryIterator<'a> {
-    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<EntityAddress, Bytes>>,
+    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
     prefix: EntityKeyPrefix,
     #[covariant]
     #[borrows(entry)]
-    iter: SkipMapIter<'this, EntityAddress, Bytes>,
+    iter: SkipMapIter<'this, Bytes, Bytes>,
 }
 
 impl<'a> Iterator for InMemoryIterator<'a> {
-    type Item = Result<(EntityKey, BytesOrSlice<'a>), EntityStorageBackendError>;
+    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageBackendError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = *self.borrow_prefix();
         self.with_iter_mut(|iter| {
-            iter.next().map(|(address, bytes)| {
+            iter.next().map(|(key, bytes)| {
                 Ok((
-                    make_key_from_parts(prefix, *address),
+                    BytesOrSlice::from(InMemoryEntityStorage::make_key_from_parts(
+                        prefix,
+                        key.as_ref(),
+                    )),
                     BytesOrSlice::from(bytes),
                 ))
             })
@@ -184,7 +189,7 @@ impl<'a> Iterator for InMemoryIterator<'a> {
 }
 
 struct InMemoryEntityInserter<'a> {
-    batches: BTreeMap<EntityKeyPrefix, BTreeMap<EntityAddress, BytesOrSlice<'a>>>,
+    batches: BTreeMap<EntityKeyPrefix, BTreeMap<BytesOrSlice<'a>, BytesOrSlice<'a>>>,
     inner: &'a InMemoryEntityStorage,
 }
 
@@ -200,10 +205,11 @@ impl<'a> InMemoryEntityInserter<'a> {
 impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
     fn insert(
         &mut self,
-        key: &[u8],
+        key: BytesOrSlice<'a>,
         value: BytesOrSlice<'a>,
     ) -> Result<(), EntityStorageBackendError> {
-        let (prefix, address) = self.inner.prefix_and_address(key)?;
+        let (prefix, key) = InMemoryEntityStorage::extract_key_parts(key.as_slice())
+            .ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
 
         let entry = self.batches.entry(prefix).or_default();
 
@@ -212,13 +218,13 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
             dentry.extend(
                 mem::take(entry)
                     .into_iter()
-                    .map(|(k, v)| (k, v.into_bytes())),
+                    .map(|(k, v)| (Bytes::copy_from_slice(&k), v.into_bytes())),
             );
 
             return Ok(());
         }
 
-        entry.insert(address, value);
+        entry.insert(Bytes::copy_from_slice(key).into(), value);
 
         Ok(())
     }
@@ -229,7 +235,7 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
             map.extend(
                 batch
                     .into_iter()
-                    .map(|(address, value)| (address, value.into_bytes())),
+                    .map(|(key, value)| (key.into_bytes(), value.into_bytes())),
             );
         }
         Ok(())
