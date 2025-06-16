@@ -1,11 +1,12 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
+use bincode::{Decode, Encode};
 use fugue_lifter::{Language, Varnode};
 
 use crate::types::Address;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct Location {
     address: Address,
     position: u16,

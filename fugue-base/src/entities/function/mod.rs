@@ -1,3 +1,4 @@
+use bincode::{Decode, Encode};
 use ustr::Ustr;
 
 use crate::entities::{BasicBlock, Insn};
@@ -16,6 +17,48 @@ pub struct Function {
     properties: FunctionProperties,
 }
 
+impl Encode for Function {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        Compat(&self.name).encode(encoder)?;
+        self.entry.encode(encoder)?;
+        self.blocks.encode(encoder)?;
+        self.instructions.encode(encoder)?;
+        self.frame.encode(encoder)?;
+        self.properties.encode(encoder)?;
+
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for Function {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
+        let entry = Address::decode(decoder)?;
+        let blocks = Vec::<BasicBlock>::decode(decoder)?;
+        let instructions = Vec::<Insn>::decode(decoder)?;
+        let frame = FunctionFrame::decode(decoder)?;
+        let properties = FunctionProperties::decode(decoder)?;
+
+        Ok(Function {
+            name,
+            entry,
+            blocks,
+            instructions,
+            frame,
+            properties,
+        })
+    }
+}
+
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FunctionProperties: u32 {
@@ -26,6 +69,24 @@ bitflags::bitflags! {
         const THUNK         = 0x0000_0002;
         /// External (virtual function) not in the current module.
         const EXTERNAL      = 0x0000_0004;
+    }
+}
+
+impl Encode for FunctionProperties {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for FunctionProperties {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::decode(decoder)?;
+        Ok(FunctionProperties::from_bits_truncate(bits))
     }
 }
 
@@ -62,7 +123,8 @@ impl Function {
     }
 
     pub fn entry_block(&self) -> &BasicBlock {
-        self.block_at(self.entry).expect("entry block should always exist")
+        self.block_at(self.entry)
+            .expect("entry block should always exist")
     }
 
     pub fn add_block(&mut self, block: BasicBlock) {
@@ -75,7 +137,8 @@ impl Function {
     }
 
     pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
-        self.blocks.binary_search_by_key(&address, |blk| blk.start())
+        self.blocks
+            .binary_search_by_key(&address, |blk| blk.start())
             .ok()
             .map(|idx| &self.blocks[idx])
     }

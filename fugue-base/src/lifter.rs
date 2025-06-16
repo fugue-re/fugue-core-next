@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use arrayvec::ArrayVec;
+use bincode::{Decode, Encode};
 
 pub use fugue_lifter::{
     aarch64, arm, x86, x86_64, ContextBitRange, Language, LanguageId, LanguageVariant, Lifter,
@@ -54,7 +55,7 @@ impl DisassemblerError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct ContextUpdate {
     bits: ContextBitRange,
     value: u32,
@@ -75,7 +76,34 @@ impl ContextUpdate {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct ContextSet(ArrayVec<ContextUpdate, 2>);
+
+impl Encode for ContextSet {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.len().encode(encoder)?;
+        for update in self.0.iter() {
+            update.encode(encoder)?;
+        }
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for ContextSet {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = usize::decode(decoder)?;
+        let mut context = ArrayVec::new();
+        for _ in 0..len {
+            context.push(ContextUpdate::decode(decoder)?);
+        }
+        Ok(Self(context))
+    }
+}
 
 impl From<ContextUpdate> for ContextSet {
     fn from(value: ContextUpdate) -> Self {
@@ -215,7 +243,11 @@ impl HybridLifter {
         Ok(self.lifter.lift_insn(address, bytes)?)
     }
 
-    pub fn lift_insn(&mut self, address: Address, bytes: impl AsRef<[u8]>) -> Result<Insn, LifterError> {
+    pub fn lift_insn(
+        &mut self,
+        address: Address,
+        bytes: impl AsRef<[u8]>,
+    ) -> Result<Insn, LifterError> {
         self.lifter.lift_insn(address, bytes.as_ref())
     }
 

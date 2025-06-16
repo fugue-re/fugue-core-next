@@ -1,3 +1,4 @@
+use bincode::{Decode, Encode};
 use tinyset::SetUsize;
 
 use crate::entities::instruction::InsnList;
@@ -13,6 +14,71 @@ pub struct BasicBlock {
     predecessors: SetUsize,
     properties: BasicBlockProperties,
     context: ContextSet,
+}
+
+impl Encode for BasicBlock {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.start.encode(encoder)?;
+        self.len.encode(encoder)?;
+        self.instructions.encode(encoder)?;
+
+        // TODO: figure out a more optimal encoding, since this expands the whole
+        // set--defeating the purpose of using SetUsize (at least for storage).
+
+        self.successors.len().encode(encoder)?;
+        for succ in self.successors.iter() {
+            succ.encode(encoder)?;
+        }
+
+        self.predecessors.len().encode(encoder)?;
+        for pred in self.predecessors.iter() {
+            pred.encode(encoder)?;
+        }
+
+        self.properties.encode(encoder)?;
+        self.context.encode(encoder)?;
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for BasicBlock {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let start = Address::decode(decoder)?;
+        let len = usize::decode(decoder)?;
+        let instructions = InsnList::decode(decoder)?;
+
+        let successors_len = usize::decode(decoder)?;
+        let mut successors = SetUsize::new();
+        for _ in 0..successors_len {
+            let succ = usize::decode(decoder)?;
+            successors.insert(succ);
+        }
+
+        let predecessors_len = usize::decode(decoder)?;
+        let mut predecessors = SetUsize::new();
+        for _ in 0..predecessors_len {
+            let pred = usize::decode(decoder)?;
+            predecessors.insert(pred);
+        }
+
+        let properties = BasicBlockProperties::decode(decoder)?;
+        let context = ContextSet::decode(decoder)?;
+
+        Ok(BasicBlock {
+            start,
+            len,
+            instructions,
+            successors,
+            predecessors,
+            properties,
+            context,
+        })
+    }
 }
 
 bitflags::bitflags! {
@@ -31,6 +97,24 @@ bitflags::bitflags! {
         const TAIL_CALL     = 0x0000_0010;
         /// The block has unresolved control flow.
         const UNRESOLVED    = 0x0000_0020;
+    }
+}
+
+impl Encode for BasicBlockProperties {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for BasicBlockProperties {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::decode(decoder)?;
+        Ok(BasicBlockProperties::from_bits(bits).unwrap_or(BasicBlockProperties::NONE))
     }
 }
 

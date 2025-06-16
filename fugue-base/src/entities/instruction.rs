@@ -1,5 +1,7 @@
 use std::fmt;
+use std::ops::RangeInclusive;
 
+use bincode::{Decode, Encode};
 pub use fugue_lifter::{
     ContextBitRange, Language, Lifter, LifterBuilder, LifterBuilderError, LiftingContext, Op,
     PCodeOp,
@@ -16,6 +18,53 @@ pub struct Insn {
     operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
     length: usize,
+}
+
+impl Encode for Insn {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.address.encode(encoder)?;
+        self.properties.encode(encoder)?;
+        self.operations.encode(encoder)?;
+
+        self.targets.len().encode(encoder)?;
+        for target in self.targets.iter() {
+            target.encode(encoder)?;
+        }
+
+        self.length.encode(encoder)?;
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for Insn {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let address = Address::decode(decoder)?;
+        let properties = InsnProperties::decode(decoder)?;
+        let operations = Vec::<PCodeOp>::decode(decoder)?;
+
+        let targets_len = usize::decode(decoder)?;
+        let mut targets = SmallVec::with_capacity(targets_len);
+
+        for _ in 0..targets_len {
+            let target = <(u16, InsnTarget)>::decode(decoder)?;
+            targets.push(target);
+        }
+
+        let length = usize::decode(decoder)?;
+
+        Ok(Self {
+            address,
+            properties,
+            operations,
+            targets,
+            length,
+        })
+    }
 }
 
 impl Insn {
@@ -276,6 +325,24 @@ impl Default for InsnProperties {
     }
 }
 
+impl Encode for InsnProperties {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for InsnProperties {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u16::decode(decoder)?;
+        Ok(InsnProperties::from_bits_truncate(bits))
+    }
+}
+
 impl InsnProperties {
     pub(crate) fn from_targets(targets: &[(u16, InsnTarget)]) -> Self {
         let mut prop = Self::empty();
@@ -296,7 +363,7 @@ impl InsnProperties {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub enum InsnTargetKind {
     Local,
     Global,
@@ -312,7 +379,7 @@ impl InsnTargetKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub enum InsnTarget {
     IntraIns(Location, bool),
     IntraBlk(Location, bool),
@@ -465,6 +532,33 @@ impl fmt::Display for InsnTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InsnList(RangeSetBlaze<usize>);
+
+impl Encode for InsnList {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.ranges_len().encode(encoder)?;
+        for range in self.0.ranges() {
+            range.encode(encoder)?;
+        }
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for InsnList {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let n = usize::decode(decoder)?;
+        let mut ranges = RangeSetBlaze::new();
+        for _ in 0..n {
+            let range = RangeInclusive::decode(decoder)?;
+            ranges.ranges_insert(range);
+        }
+        Ok(Self(ranges))
+    }
+}
 
 impl InsnList {
     pub fn new() -> Self {

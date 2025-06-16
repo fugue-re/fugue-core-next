@@ -4,6 +4,7 @@ version = "0.3.0"
 edition = "2021"
 
 [features]
+# Features for different architectures
 arm-be = ["fugue-lifter-arm/arm-be"]
 arm-le = ["fugue-lifter-arm/arm-le"]
 arm = ["arm-be", "arm-le"]
@@ -12,6 +13,11 @@ aarch64-le = ["fugue-lifter-aarch64/aarch64-le"]
 aarch64 = ["aarch64-be", "aarch64-le"]
 x86 = ["fugue-lifter-x86/x86"]
 x86-64 = ["fugue-lifter-x86/x86-64"]
+
+# Features for serialisation
+bincode = ["fugue-lifter-runtime/bincode"]
+serde = ["fugue-lifter-runtime/serde"]
+
 default = ["arm", "aarch64", "x86", "x86-64"]
 
 [dependencies]

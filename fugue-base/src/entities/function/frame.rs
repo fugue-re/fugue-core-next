@@ -1,6 +1,8 @@
+use bincode::{Decode, Encode};
+
 use crate::types::Address;
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct StackChangePoint {
     /// The stack pointer change point.
     address: Address,
@@ -25,7 +27,7 @@ impl StackChangePoint {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct FunctionFrame {
     /// The size of local (stack) variables in bytes.
     locals_size: usize,

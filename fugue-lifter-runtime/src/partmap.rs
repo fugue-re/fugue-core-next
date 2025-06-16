@@ -35,6 +35,8 @@ impl<'a, K, V> BoundKind<'a, K, V> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PartMap<K: Ord, V> {
     mapping: Map<K, V>,
     default: V,

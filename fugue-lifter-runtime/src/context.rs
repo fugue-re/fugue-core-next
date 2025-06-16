@@ -110,6 +110,8 @@ impl ContextPostAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextBitRange {
     word: usize,
     start_bit: usize,
@@ -189,6 +191,8 @@ impl ContextBitRange {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackedContext {
     location: Varnode,
     value: u32,
@@ -205,6 +209,9 @@ impl TrackedContext {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(transparent)]
 pub struct TrackedSet(Vec<TrackedContext>);
 
 impl Default for TrackedSet {
@@ -228,6 +235,8 @@ impl DerefMut for TrackedSet {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FreeArray {
     values: Vec<u32>,
     masks: Vec<u32>,
@@ -251,6 +260,8 @@ impl Default for FreeArray {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextDatabase {
     size: usize,
     variables: Map<String, ContextBitRange>,

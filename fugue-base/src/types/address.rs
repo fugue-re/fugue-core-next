@@ -1,10 +1,11 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
+use bincode::{Decode, Encode};
 use fugue_lifter::{Language, Varnode};
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 #[repr(transparent)]
 pub struct Address(u64);
 
