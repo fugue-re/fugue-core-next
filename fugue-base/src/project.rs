@@ -4,10 +4,14 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::arch::Arch;
+use crate::entities::Function;
 use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, LoadableSegment, Loader, LoaderError, LocalSymbols,
     SymbolEntry,
+};
+use crate::storage::entities::{
+    EntityCache, EntityStorage, EntityStorageBackendError, InMemoryEntityStorage,
 };
 use crate::storage::{StorageError, StorageProvider, StorageProviderFromLoadable};
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
@@ -20,6 +24,8 @@ pub struct Project {
     pub(crate) entry: Option<Address>,
     pub(crate) local_symbols: Option<LocalSymbols>,
     pub(crate) extern_symbols: Option<ExternSymbols>,
+    pub(crate) functions: EntityCache<Address, Function>,
+    pub(crate) entity_storage: EntityStorage,
     pub(crate) storage: Box<dyn StorageProvider>,
 }
 
@@ -30,6 +36,8 @@ pub struct ProjectRef<'a> {
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a LocalSymbols>,
     pub extern_symbols: Option<&'a ExternSymbols>,
+    pub functions: &'a EntityCache<Address, Function>,
+    pub entity_storage: &'a EntityStorage,
     pub storage: &'a Box<dyn StorageProvider>,
 }
 
@@ -40,6 +48,8 @@ pub struct ProjectMut<'a> {
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a mut LocalSymbols>,
     pub extern_symbols: Option<&'a mut ExternSymbols>,
+    pub functions: &'a EntityCache<Address, Function>,
+    pub entity_storage: &'a EntityStorage,
     pub storage: &'a mut Box<dyn StorageProvider>,
 }
 
@@ -47,6 +57,8 @@ pub struct ProjectMut<'a> {
 pub enum ProjectError {
     #[error(transparent)]
     Loader(#[from] LoaderError),
+    #[error("failed to create entity cache: {0}")]
+    EntityStorage(#[from] EntityStorageBackendError),
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -67,6 +79,10 @@ impl Project {
         let local_symbols = loadable.local_symbols().cloned();
         let extern_symbols = loadable.extern_symbols().cloned();
 
+        // FIXME: generalise this (configurable cache size, storage backend, etc.).
+        let entity_storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let functions = EntityCache::new(entity_storage.clone(), 1024)?;
+
         Ok(Self {
             arch,
             lifter,
@@ -74,6 +90,8 @@ impl Project {
             entry: loadable.entry(),
             local_symbols,
             extern_symbols,
+            functions,
+            entity_storage,
             storage,
         })
     }
@@ -169,6 +187,14 @@ impl Project {
             .flat_map(|symbols| symbols.iter())
     }
 
+    pub fn functions(&self) -> &EntityCache<Address, Function> {
+        &self.functions
+    }
+
+    pub fn entity_storage(&self) -> &EntityStorage {
+        &self.entity_storage
+    }
+
     pub fn storage(&self) -> &impl StorageProvider {
         &self.storage
     }
@@ -185,6 +211,8 @@ impl Project {
             entry: self.entry,
             local_symbols: self.local_symbols.as_ref(),
             extern_symbols: self.extern_symbols.as_ref(),
+            functions: &self.functions,
+            entity_storage: &self.entity_storage,
             storage: &self.storage,
         }
     }
@@ -197,6 +225,8 @@ impl Project {
             entry: self.entry,
             local_symbols: self.local_symbols.as_mut(),
             extern_symbols: self.extern_symbols.as_mut(),
+            functions: &self.functions,
+            entity_storage: &self.entity_storage,
             storage: &mut self.storage,
         }
     }

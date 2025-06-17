@@ -2,6 +2,7 @@ use bincode::{Decode, Encode};
 use ustr::Ustr;
 
 use crate::entities::{BasicBlock, Insn};
+use crate::storage::entities::{Entity, EntityId};
 use crate::types::Address;
 
 pub mod frame;
@@ -15,6 +16,10 @@ pub struct Function {
     instructions: Vec<Insn>,
     frame: FunctionFrame,
     properties: FunctionProperties,
+}
+
+impl Entity for Function {
+    const ID: EntityId = 0x00;
 }
 
 impl Encode for Function {
@@ -106,6 +111,19 @@ impl Function {
         }
     }
 
+    pub fn set_frame(&mut self, frame: FunctionFrame) {
+        self.frame = frame;
+    }
+
+    pub fn with_frame(mut self, frame: FunctionFrame) -> Self {
+        self.set_frame(frame);
+        self
+    }
+
+    pub fn frame(&self) -> &FunctionFrame {
+        &self.frame
+    }
+
     pub fn update_name(&mut self, name: impl Into<Ustr>) {
         self.name = Some(name.into());
     }
@@ -127,9 +145,18 @@ impl Function {
             .expect("entry block should always exist")
     }
 
-    pub fn add_block(&mut self, block: BasicBlock) {
-        self.blocks.push(block);
-        self.blocks.sort_by_key(|blk| blk.start());
+    pub(crate) fn set_blocks(&mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) {
+        self.blocks = blocks;
+        self.instructions = insns;
+    }
+
+    pub(crate) fn with_blocks(
+        mut self,
+        blocks: Vec<BasicBlock>,
+        insns: Vec<Insn>,
+    ) -> Self {
+        self.set_blocks(blocks, insns);
+        self
     }
 
     pub fn blocks(&self) -> &[BasicBlock] {
@@ -165,5 +192,18 @@ impl Function {
 
     pub fn mark_external(&mut self) {
         self.properties.insert(FunctionProperties::EXTERNAL);
+    }
+
+    pub fn properties(&self) -> FunctionProperties {
+        self.properties
+    }
+
+    pub fn set_properties(&mut self, properties: FunctionProperties) {
+        self.properties = properties;
+    }
+
+    pub fn with_properties(mut self, properties: FunctionProperties) -> Self {
+        self.set_properties(properties);
+        self
     }
 }

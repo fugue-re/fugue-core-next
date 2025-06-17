@@ -9,7 +9,7 @@ use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::entities::flow_graph::{FlowKind, FlowTarget};
 use crate::entities::function::FunctionProperties;
 use crate::entities::instruction::InsnList;
-use crate::entities::{BasicBlock, Insn};
+use crate::entities::{BasicBlock, Function, Insn};
 use crate::lifter::{ContextSet, LifterError};
 use crate::project::Project;
 use crate::storage::StorageProvider;
@@ -56,6 +56,14 @@ pub struct PartialFunction {
     instructions: Vec<Insn>,
     instructions_map: BTreeMap<Address, usize>,
     properties: FunctionProperties,
+}
+
+impl From<PartialFunction> for Function {
+    fn from(partial: PartialFunction) -> Self {
+        Function::new_with(partial.name, partial.entry)
+            .with_blocks(partial.blocks, partial.instructions)
+            .with_properties(partial.properties)
+    }
 }
 
 impl PartialFunction {
@@ -406,13 +414,17 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
                 continue;
             }
 
-            if let Err(e) = self.builder.analyse(project, address, context) {
-                failures.insert(address);
-                tracing::trace!("failed to analyse {address}: {e}");
-                continue;
-            }
+            let function = match self.builder.analyse(project, address, context) {
+                Ok(f) => f,
+                Err(e) => {
+                    failures.insert(address);
+                    tracing::trace!("failed to analyse {address}: {e}");
+                    continue;
+                }
+            };
 
             functions.insert(address);
+            project.functions().insert(address, function);
 
             self.candidates.extend(
                 self.builder
@@ -488,7 +500,7 @@ impl<'a> FunctionBuilder<'a> {
         project: &mut Project,
         address: impl Into<Address>,
         context: ContextSet,
-    ) -> Result<(), FunctionBuilderError> {
+    ) -> Result<Function, FunctionBuilderError> {
         self.context.analyse(
             project,
             address,
@@ -854,7 +866,7 @@ impl FunctionBuilderContext {
         config: &FunctionRecoveryConfig,
         initialisation_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
         post_lifting_passes: &mut AnalysisGroup<'_, PartialFunctionWithContext>,
-    ) -> Result<(), FunctionBuilderError> {
+    ) -> Result<Function, FunctionBuilderError> {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context
@@ -932,7 +944,7 @@ impl FunctionBuilderContext {
             }
         }
 
-        Ok(())
+        Ok(partial.into())
     }
 }
 
