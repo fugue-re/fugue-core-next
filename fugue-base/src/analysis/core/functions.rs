@@ -305,9 +305,10 @@ pub enum FunctionBuilderError {
     ExceededBlockLimit(usize, usize),
     #[error(transparent)]
     Lifter(#[from] LifterError),
+    #[error("failed persist function: {0}")]
+    EntityStorage(#[from] crate::storage::entities::EntityStorageBackendError),
     #[error(transparent)]
     Storage(#[from] crate::storage::StorageError),
-
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
     #[error("invalid instruction index: {0}")]
@@ -424,7 +425,11 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
             };
 
             functions.insert(address);
-            project.functions().insert(address, function);
+
+            if let Err(e) = project.functions().insert(address, function) {
+                tracing::debug!("failed to persist function at {address}: {e}");
+                return Err(AnalysisError::pass_failed("function-recovery", e));
+            }
 
             self.candidates.extend(
                 self.builder

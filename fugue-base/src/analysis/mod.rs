@@ -18,6 +18,19 @@ pub enum AnalysisError {
     PassFailed(String, anyhow::Error),
 }
 
+impl AnalysisError {
+    pub fn pass_not_found(name: impl Into<String>) -> Self {
+        AnalysisError::PassNotFound(name.into())
+    }
+
+    pub fn pass_failed<E>(name: impl Into<String>, error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        AnalysisError::PassFailed(name.into(), error.into())
+    }
+}
+
 pub type NoState = ();
 pub type BoxedAnalysisPass<'a, S = NoState> = Box<dyn AnalysisPass<'a, S> + 'a>;
 
