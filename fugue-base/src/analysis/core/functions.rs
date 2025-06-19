@@ -58,14 +58,6 @@ pub struct PartialFunction {
     properties: FunctionProperties,
 }
 
-impl From<PartialFunction> for Function {
-    fn from(partial: PartialFunction) -> Self {
-        Function::new_with(partial.name, partial.entry)
-            .with_blocks(partial.blocks, partial.instructions)
-            .with_properties(partial.properties)
-    }
-}
-
 impl PartialFunction {
     fn new(entry: Address) -> Self {
         Self::new_with(None, entry)
@@ -174,6 +166,44 @@ impl PartialFunction {
         Ok(())
     }
 
+    pub fn lift_all_blocks(&mut self, project: &mut Project) -> Result<(), FunctionBuilderError> {
+        let mut segment = project
+            .storage
+            .find_segment_containing(self.entry)
+            .map_err(FunctionBuilderError::Storage)?;
+
+        for block in self.blocks.iter_mut() {
+            if !segment.contains_address(block.start()) {
+                segment = project
+                    .storage
+                    .find_segment_containing(block.start())
+                    .map_err(FunctionBuilderError::Storage)?;
+            }
+
+            let bytes = segment
+                .view_bytes_from_address(block.start())
+                .expect("block start must be in segment");
+
+            for insn_id in block.instructions().iter() {
+                let insn = &mut self.instructions[insn_id];
+
+                if insn.is_lifted() {
+                    continue;
+                }
+
+                let offset = usize::from(insn.address() - block.start());
+
+                let view = bytes
+                    .get(offset..)
+                    .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
+
+                *insn = project.lifter.lift_insn(insn.address(), view)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn lift_insn(
         &mut self,
         id: usize,
@@ -241,6 +271,16 @@ impl PartialFunction {
 
     pub fn mark_external(&mut self) {
         self.properties.insert(FunctionProperties::EXTERNAL);
+    }
+
+    pub fn into_function(
+        mut self,
+        project: &mut Project,
+    ) -> Result<Function, FunctionBuilderError> {
+        self.lift_all_blocks(project)?;
+        Ok(Function::new_with(self.name, self.entry)
+            .with_blocks(self.blocks, self.instructions)
+            .with_properties(self.properties))
     }
 }
 
@@ -616,7 +656,7 @@ impl FunctionBuilderContext {
 
             if !segment.contains_address(block) {
                 if let Ok(nsegment) = project.storage.find_segment_containing(block) {
-                    tracing::trace!("switching segment for {block} to segment {nsegment}");
+                    tracing::debug!("switching segment for {block} to segment {nsegment}");
                     segment = nsegment;
                 } else {
                     tracing::trace!("skipping {block}: not mapped in any segment");
@@ -949,7 +989,7 @@ impl FunctionBuilderContext {
             }
         }
 
-        Ok(partial.into())
+        partial.into_function(project)
     }
 }
 
