@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::path::Path;
 
 use thiserror::Error;
@@ -7,13 +6,14 @@ use crate::arch::Arch;
 use crate::entities::Function;
 use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
-    ExternSymbols, Loadable, LoadableFromBytes, LoadableSegment, Loader, LoaderError, LocalSymbols,
-    SymbolEntry,
+    ExternSymbols, Loadable, LoadableFromBytes, Loader, LoaderError, LocalSymbols, SymbolEntry,
 };
 use crate::storage::entities::{
-    EntityCache, EntityStorage, EntityStorageBackendError, InMemoryEntityStorage,
+    EntityCache, EntityStorage, EntityStorageError, InMemoryEntityStorage,
 };
-use crate::storage::{StorageError, StorageProvider, StorageProviderFromLoadable};
+use crate::storage::segments::{
+    SegmentStorage, SegmentStorageError, SegmentStorageProviderFromLoadable,
+};
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 use crate::types::{Address, AttributeMap};
 
@@ -25,8 +25,8 @@ pub struct Project {
     pub(crate) local_symbols: Option<LocalSymbols>,
     pub(crate) extern_symbols: Option<ExternSymbols>,
     pub(crate) functions: EntityCache<Address, Function>,
-    pub(crate) entity_storage: EntityStorage,
-    pub(crate) storage: Box<dyn StorageProvider>,
+    pub(crate) entities: EntityStorage,
+    pub(crate) segments: SegmentStorage,
 }
 
 pub struct ProjectRef<'a> {
@@ -37,8 +37,8 @@ pub struct ProjectRef<'a> {
     pub local_symbols: Option<&'a LocalSymbols>,
     pub extern_symbols: Option<&'a ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
-    pub entity_storage: &'a EntityStorage,
-    pub storage: &'a Box<dyn StorageProvider>,
+    pub entities: &'a EntityStorage,
+    pub segments: &'a SegmentStorage,
 }
 
 pub struct ProjectMut<'a> {
@@ -49,8 +49,8 @@ pub struct ProjectMut<'a> {
     pub local_symbols: Option<&'a mut LocalSymbols>,
     pub extern_symbols: Option<&'a mut ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
-    pub entity_storage: &'a EntityStorage,
-    pub storage: &'a mut Box<dyn StorageProvider>,
+    pub entities: &'a EntityStorage,
+    pub segments: &'a mut SegmentStorage,
 }
 
 #[derive(Debug, Error)]
@@ -58,20 +58,20 @@ pub enum ProjectError {
     #[error(transparent)]
     Loader(#[from] LoaderError),
     #[error("failed to create entity cache: {0}")]
-    EntityStorage(#[from] EntityStorageBackendError),
+    EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    SegmentStorage(#[from] SegmentStorageError),
 }
 
 impl Project {
     pub fn new<P>(loadable: &impl Loadable) -> Result<Self, ProjectError>
     where
-        P: StorageProviderFromLoadable,
+        P: SegmentStorageProviderFromLoadable,
     {
         let arch = loadable.architecture();
         let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
-        let storage = Box::new(P::from_loadable(loadable)?);
+        let segments = SegmentStorage::new(P::from_loadable(loadable)?);
 
         // FIXME: ideally we should not clone these, since we could consume the loadable, but I
         // can see scenarios where this isn't desirable.
@@ -80,8 +80,8 @@ impl Project {
         let extern_symbols = loadable.extern_symbols().cloned();
 
         // FIXME: generalise this (configurable cache size, storage backend, etc.).
-        let entity_storage = EntityStorage::new(InMemoryEntityStorage::new());
-        let functions = EntityCache::new(entity_storage.clone(), 1024)?;
+        let entities = EntityStorage::new(InMemoryEntityStorage::new());
+        let functions = EntityCache::new(entities.clone(), 1024)?;
 
         Ok(Self {
             arch,
@@ -91,14 +91,14 @@ impl Project {
             local_symbols,
             extern_symbols,
             functions,
-            entity_storage,
-            storage,
+            entities,
+            segments,
         })
     }
 
     pub fn from_bytes<P>(bytes: &[u8]) -> Result<Self, ProjectError>
     where
-        P: StorageProviderFromLoadable,
+        P: SegmentStorageProviderFromLoadable,
     {
         Self::from_bytes_with::<P>(bytes, AttributeMap::default())
     }
@@ -108,7 +108,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProviderFromLoadable,
+        P: SegmentStorageProviderFromLoadable,
     {
         Loader::from_bytes_with(bytes, attributes)
             .map_err(ProjectError::from)
@@ -117,7 +117,7 @@ impl Project {
 
     pub fn from_file<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
-        P: StorageProviderFromLoadable,
+        P: SegmentStorageProviderFromLoadable,
     {
         Self::from_file_with::<P>(path, AttributeMap::default())
     }
@@ -127,7 +127,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProviderFromLoadable,
+        P: SegmentStorageProviderFromLoadable,
     {
         let path = path.as_ref();
         let mut attributes = attributes.into();
@@ -191,16 +191,16 @@ impl Project {
         &self.functions
     }
 
-    pub fn entity_storage(&self) -> &EntityStorage {
-        &self.entity_storage
+    pub fn entities(&self) -> &EntityStorage {
+        &self.entities
     }
 
-    pub fn storage(&self) -> &impl StorageProvider {
-        &self.storage
+    pub fn segments(&self) -> &SegmentStorage {
+        &self.segments
     }
 
-    pub fn storage_mut(&mut self) -> &mut impl StorageProvider {
-        &mut self.storage
+    pub fn segments_mut(&mut self) -> &mut SegmentStorage {
+        &mut self.segments
     }
 
     pub fn fields(&self) -> ProjectRef {
@@ -212,8 +212,8 @@ impl Project {
             local_symbols: self.local_symbols.as_ref(),
             extern_symbols: self.extern_symbols.as_ref(),
             functions: &self.functions,
-            entity_storage: &self.entity_storage,
-            storage: &self.storage,
+            entities: &self.entities,
+            segments: &self.segments,
         }
     }
 
@@ -226,44 +226,15 @@ impl Project {
             local_symbols: self.local_symbols.as_mut(),
             extern_symbols: self.extern_symbols.as_mut(),
             functions: &self.functions,
-            entity_storage: &self.entity_storage,
-            storage: &mut self.storage,
+            entities: &self.entities,
+            segments: &mut self.segments,
         }
-    }
-}
-
-impl StorageProvider for Project {
-    fn read_bytes(&self, addr: Address, bytes: &mut [u8]) -> Result<usize, StorageError> {
-        self.storage.read_bytes(addr, bytes)
-    }
-
-    fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<usize, StorageError> {
-        self.storage.write_bytes(addr, bytes)
-    }
-
-    fn contains_segment(&self, at: Address) -> bool {
-        self.storage.contains_segment(at)
-    }
-
-    fn find_segment_containing(
-        &self,
-        addr: Address,
-    ) -> Result<Cow<LoadableSegment<'_>>, StorageError> {
-        self.storage.find_segment_containing(addr)
-    }
-
-    fn view_segment_bytes(&self, addr: Address, size: usize) -> Result<Cow<[u8]>, StorageError> {
-        self.storage.view_segment_bytes(addr, size)
-    }
-
-    fn view_segment_bytes_from(&self, addr: Address) -> Result<Cow<[u8]>, StorageError> {
-        self.storage.view_segment_bytes_from(addr)
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::storage::InMemoryStorage;
+    use crate::storage::segments::InMemorySegmentStorage;
 
     use super::*;
 
@@ -277,10 +248,12 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let project = Project::from_file::<InMemoryStorage>("tests/ls.elf")?;
+            let project = Project::from_file::<InMemorySegmentStorage>("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
-            project.storage().read_bytes(0x4000u32.into(), &mut bytes)?;
+            project
+                .segments()
+                .read_bytes(0x4000u32.into(), &mut bytes)?;
 
             assert_eq!(
                 &bytes,

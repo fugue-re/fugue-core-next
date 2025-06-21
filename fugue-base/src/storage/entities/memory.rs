@@ -7,10 +7,13 @@ use dashmap::DashMap;
 use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 use skiplist::SkipMap;
 
+use crate::loader::Loadable;
+
 use super::common::ENTITY_PREFIX_SIZE;
 use super::{
     BytesOrSlice, EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageBackend, EntityStorageBackendError, EntityStorageBulkInserter,
+    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable,
 };
 
 const BATCH_SIZE: usize = 1000;
@@ -41,10 +44,16 @@ impl InMemoryEntityStorage {
     }
 }
 
-impl EntityStorageBackend for InMemoryEntityStorage {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageBackendError> {
+impl EntityStorageProviderFromLoadable for InMemoryEntityStorage {
+    fn from_loadable(_loader: &impl Loadable) -> Result<Self, EntityStorageError> {
+        Ok(Self::new())
+    }
+}
+
+impl EntityStorageProvider for InMemoryEntityStorage {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(None);
@@ -57,9 +66,9 @@ impl EntityStorageBackend for InMemoryEntityStorage {
         Ok(None)
     }
 
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageBackendError> {
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let mut map = self.data.entry(prefix).or_insert_with(SkipMap::new);
         map.insert(Bytes::copy_from_slice(key), value.into_bytes());
@@ -67,9 +76,9 @@ impl EntityStorageBackend for InMemoryEntityStorage {
         Ok(())
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageBackendError> {
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         if let Some(mut map) = self.data.get_mut(&prefix) {
             map.remove(key);
@@ -78,9 +87,9 @@ impl EntityStorageBackend for InMemoryEntityStorage {
         Ok(())
     }
 
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageBackendError> {
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(false);
@@ -92,46 +101,43 @@ impl EntityStorageBackend for InMemoryEntityStorage {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageBackendError> {
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
         if prefix.len() != ENTITY_PREFIX_SIZE {
-            return Err(EntityStorageBackendError::InvalidKeySize);
+            return Err(EntityStorageError::InvalidKeySize);
         }
 
-        let prefix = EntityKeyPrefix::try_from(prefix)
-            .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
         let map = self
             .data
             .get(&prefix)
-            .ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         Ok(Box::new(InMemoryKeyIterator::new(map, prefix, |iter| {
             iter.keys()
         })))
     }
 
-    fn iter_prefix(
-        &self,
-        prefix: &[u8],
-    ) -> Result<EntityBytesIterator<'_>, EntityStorageBackendError> {
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
         if prefix.len() != ENTITY_PREFIX_SIZE {
-            return Err(EntityStorageBackendError::InvalidKeySize);
+            return Err(EntityStorageError::InvalidKeySize);
         }
 
-        let prefix = EntityKeyPrefix::try_from(prefix)
-            .map_err(|_| EntityStorageBackendError::InvalidKeyFormat)?;
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
         let map = self
             .data
             .get(&prefix)
-            .ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
             iter.iter()
         })))
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageBackendError> {
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         Ok(Box::new(InMemoryEntityInserter::new(self)))
     }
 }
@@ -146,7 +152,7 @@ struct InMemoryKeyIterator<'a> {
 }
 
 impl<'a> Iterator for InMemoryKeyIterator<'a> {
-    type Item = Result<BytesOrSlice<'a>, EntityStorageBackendError>;
+    type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = *self.borrow_prefix();
@@ -170,7 +176,7 @@ struct InMemoryIterator<'a> {
 }
 
 impl<'a> Iterator for InMemoryIterator<'a> {
-    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageBackendError>;
+    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = *self.borrow_prefix();
@@ -207,9 +213,9 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
         &mut self,
         key: BytesOrSlice<'a>,
         value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageBackendError> {
+    ) -> Result<(), EntityStorageError> {
         let (prefix, key) = InMemoryEntityStorage::extract_key_parts(key.as_slice())
-            .ok_or(EntityStorageBackendError::InvalidKeyFormat)?;
+            .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let entry = self.batches.entry(prefix).or_default();
 
@@ -229,7 +235,7 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<(), EntityStorageBackendError> {
+    fn finish(self: Box<Self>) -> Result<(), EntityStorageError> {
         for (prefix, batch) in self.batches {
             let mut map = self.inner.data.entry(prefix).or_insert_with(SkipMap::new);
             map.extend(

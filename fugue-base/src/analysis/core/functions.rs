@@ -12,7 +12,6 @@ use crate::entities::instruction::InsnList;
 use crate::entities::{BasicBlock, Function, Insn};
 use crate::lifter::{ContextSet, LifterError};
 use crate::project::Project;
-use crate::storage::StorageProvider;
 use crate::types::address::AddressMap;
 use crate::types::Address;
 
@@ -142,10 +141,7 @@ impl PartialFunction {
             .ok_or_else(|| FunctionBuilderError::InvalidBlockId(id))?;
 
         let start = block.start();
-        let bytes = project
-            .storage
-            .view_segment_bytes_from(block.start())
-            .map_err(FunctionBuilderError::Storage)?;
+        let bytes = project.segments.view_segment_bytes_from(block.start())?;
 
         for insn_id in block.instructions().iter() {
             let insn = &mut self.instructions[insn_id];
@@ -167,17 +163,11 @@ impl PartialFunction {
     }
 
     pub fn lift_all_blocks(&mut self, project: &mut Project) -> Result<(), FunctionBuilderError> {
-        let mut segment = project
-            .storage
-            .find_segment_containing(self.entry)
-            .map_err(FunctionBuilderError::Storage)?;
+        let mut segment = project.segments.find_segment_containing(self.entry)?;
 
         for block in self.blocks.iter_mut() {
             if !segment.contains_address(block.start()) {
-                segment = project
-                    .storage
-                    .find_segment_containing(block.start())
-                    .map_err(FunctionBuilderError::Storage)?;
+                segment = project.segments.find_segment_containing(block.start())?;
             }
 
             let bytes = segment
@@ -222,7 +212,7 @@ impl PartialFunction {
         let mut bytes = [0u8; 32];
 
         project
-            .storage
+            .segments
             .read_bytes(address, &mut bytes)
             .expect("storage should be consistent");
 
@@ -346,9 +336,9 @@ pub enum FunctionBuilderError {
     #[error(transparent)]
     Lifter(#[from] LifterError),
     #[error("failed persist function: {0}")]
-    EntityStorage(#[from] crate::storage::entities::EntityStorageBackendError),
+    EntityStorage(#[from] crate::storage::EntityStorageError),
     #[error(transparent)]
-    Storage(#[from] crate::storage::StorageError),
+    SegmentStorage(#[from] crate::storage::SegmentStorageError),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
     #[error("invalid instruction index: {0}")]
@@ -440,7 +430,7 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
         let mut failures = BTreeSet::new();
 
         while let Some((address, context)) = self.candidates.pop_front() {
-            if !project.storage.contains_segment(address) {
+            if !project.segments.contains_segment(address) {
                 tracing::trace!("skipping {address}: not mapped");
                 continue;
             }
@@ -637,7 +627,7 @@ impl FunctionBuilderContext {
 
         // We assume that most (all?) of a function's blocks will be in the same segment.
         let mut segment = project
-            .storage
+            .segments
             .find_segment_containing(self.entry())
             .expect("function entry is valid");
 
@@ -655,7 +645,7 @@ impl FunctionBuilderContext {
             };
 
             if !segment.contains_address(block) {
-                if let Ok(nsegment) = project.storage.find_segment_containing(block) {
+                if let Ok(nsegment) = project.segments.find_segment_containing(block) {
                     tracing::debug!("switching segment for {block} to segment {nsegment}");
                     segment = nsegment;
                 } else {
@@ -1000,7 +990,7 @@ mod test {
     use crate::analysis::AnalysisPass;
     use crate::attributes;
     use crate::loader::Shellcode;
-    use crate::storage::InMemoryStorage;
+    use crate::storage::segments::InMemorySegmentStorage;
     use crate::types::attributes::*;
 
     #[test]
@@ -1013,7 +1003,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = Project::from_file_with::<InMemoryStorage>(
+            let mut project = Project::from_file_with::<InMemorySegmentStorage>(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
@@ -1052,7 +1042,7 @@ mod test {
                 0x5E, 0xC9, 0xC2, 0x08, 0x00,
             ];
 
-            let mut project = Project::new::<InMemoryStorage>(&Shellcode::new(
+            let mut project = Project::new::<InMemorySegmentStorage>(&Shellcode::new(
                 "x86:LE:64",
                 0x4EB14u64,
                 &shellcode,

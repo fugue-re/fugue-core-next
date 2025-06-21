@@ -9,11 +9,10 @@ use thiserror::Error;
 
 use crate::loader::{Loadable, LoadableSegment};
 use crate::memory::SegmentProperties;
-use crate::storage::{
-    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
-};
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::Address;
+
+use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
 
 const PROJECT_MEMORY_MAPPING: &str = "segments.mmap";
 
