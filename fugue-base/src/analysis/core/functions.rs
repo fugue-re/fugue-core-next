@@ -990,7 +990,7 @@ mod test {
     use crate::analysis::AnalysisPass;
     use crate::attributes;
     use crate::loader::Shellcode;
-    use crate::storage::segments::InMemorySegmentStorage;
+    use crate::storage::TransientStorageProvider;
     use crate::types::attributes::*;
 
     #[test]
@@ -1003,7 +1003,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = Project::from_file_with::<InMemorySegmentStorage>(
+            let mut project = Project::from_file_with::<TransientStorageProvider>(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
@@ -1042,7 +1042,7 @@ mod test {
                 0x5E, 0xC9, 0xC2, 0x08, 0x00,
             ];
 
-            let mut project = Project::new::<InMemorySegmentStorage>(&Shellcode::new(
+            let mut project = Project::new::<TransientStorageProvider>(&Shellcode::new(
                 "x86:LE:64",
                 0x4EB14u64,
                 &shellcode,

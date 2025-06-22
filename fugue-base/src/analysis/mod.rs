@@ -425,13 +425,13 @@ impl<'a, S, P> AnalysisPassExt<'a, S> for P where P: AnalysisPass<'a, S> + Sized
 
 #[cfg(test)]
 mod test {
-    use crate::storage::InMemoryStorage;
+    use crate::storage::TransientStorageProvider;
 
     use super::*;
 
     #[test]
     fn test_analysis_passes() -> Result<(), Box<dyn std::error::Error>> {
-        let mut project = Project::from_file::<InMemoryStorage>("tests/ls.elf")?;
+        let mut project = Project::from_file::<TransientStorageProvider>("tests/ls.elf")?;
         let mut my_mut = 0;
         let mut my_beep = 2;
 

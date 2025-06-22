@@ -8,11 +8,12 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 use skiplist::SkipMap;
 
 use crate::loader::Loadable;
+use crate::types::BytesOrSlice;
 
 use super::common::ENTITY_PREFIX_SIZE;
 use super::{
-    BytesOrSlice, EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator, EntityKeyPrefix,
+    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable,
 };
 

@@ -4,12 +4,19 @@ use quick_cache::sync::Cache;
 use thiserror::Error;
 
 pub mod common;
-pub use common::{BytesOrSlice, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix};
+pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix};
 
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
 
+pub mod rocksdb;
+pub use rocksdb::RocksDbEntityStorage;
+
 use crate::loader::Loadable;
+use crate::types::BytesOrSlice;
+
+pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
+pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
 
 #[derive(Debug, Error)]
 pub enum EntityStorageError {

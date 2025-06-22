@@ -8,11 +8,10 @@ use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, Loader, LoaderError, LocalSymbols, SymbolEntry,
 };
-use crate::storage::entities::{
-    EntityCache, EntityStorage, EntityStorageError, InMemoryEntityStorage,
-};
-use crate::storage::segments::{
-    SegmentStorage, SegmentStorageError, SegmentStorageProviderFromLoadable,
+use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError};
+use crate::storage::segments::SegmentStorage;
+use crate::storage::{
+    StorageContainer, StorageContainerKind, StorageProvider, StorageProviderError,
 };
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 use crate::types::{Address, AttributeMap};
@@ -27,6 +26,8 @@ pub struct Project {
     pub(crate) functions: EntityCache<Address, Function>,
     pub(crate) entities: EntityStorage,
     pub(crate) segments: SegmentStorage,
+    // TODO: this should be a type that can be used to clean-up/pack our storage.
+    pub(crate) storage_kind: StorageContainerKind,
 }
 
 pub struct ProjectRef<'a> {
@@ -60,18 +61,21 @@ pub enum ProjectError {
     #[error("failed to create entity cache: {0}")]
     EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
-    SegmentStorage(#[from] SegmentStorageError),
+    StorageProvider(#[from] StorageProviderError),
 }
 
 impl Project {
     pub fn new<P>(loadable: &impl Loadable) -> Result<Self, ProjectError>
     where
-        P: SegmentStorageProviderFromLoadable,
+        P: StorageProvider,
     {
         let arch = loadable.architecture();
         let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
-        let segments = SegmentStorage::new(P::from_loadable(loadable)?);
+
+        let storage = StorageContainer::new::<P>(loadable)?;
+        let storage_kind = storage.kind();
+        let (entities, segments) = storage.into_parts();
 
         // FIXME: ideally we should not clone these, since we could consume the loadable, but I
         // can see scenarios where this isn't desirable.
@@ -80,7 +84,7 @@ impl Project {
         let extern_symbols = loadable.extern_symbols().cloned();
 
         // FIXME: generalise this (configurable cache size, storage backend, etc.).
-        let entities = EntityStorage::new(InMemoryEntityStorage::new());
+
         let functions = EntityCache::new(entities.clone(), 1024)?;
 
         Ok(Self {
@@ -93,12 +97,13 @@ impl Project {
             functions,
             entities,
             segments,
+            storage_kind,
         })
     }
 
     pub fn from_bytes<P>(bytes: &[u8]) -> Result<Self, ProjectError>
     where
-        P: SegmentStorageProviderFromLoadable,
+        P: StorageProvider,
     {
         Self::from_bytes_with::<P>(bytes, AttributeMap::default())
     }
@@ -108,7 +113,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: SegmentStorageProviderFromLoadable,
+        P: StorageProvider,
     {
         Loader::from_bytes_with(bytes, attributes)
             .map_err(ProjectError::from)
@@ -117,7 +122,7 @@ impl Project {
 
     pub fn from_file<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
-        P: SegmentStorageProviderFromLoadable,
+        P: StorageProvider,
     {
         Self::from_file_with::<P>(path, AttributeMap::default())
     }
@@ -127,7 +132,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: SegmentStorageProviderFromLoadable,
+        P: StorageProvider,
     {
         let path = path.as_ref();
         let mut attributes = attributes.into();
@@ -137,7 +142,7 @@ impl Project {
         }
 
         if !attributes.contains(ATTRIBUTE_PROJECT_PATH) {
-            attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fudb"));
+            attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdbz"));
         }
 
         Loader::from_file_with(path, attributes)
@@ -203,6 +208,10 @@ impl Project {
         &mut self.segments
     }
 
+    pub fn storage_kind(&self) -> StorageContainerKind {
+        self.storage_kind
+    }
+
     pub fn fields(&self) -> ProjectRef {
         ProjectRef {
             arch: &self.arch,
@@ -234,7 +243,7 @@ impl Project {
 
 #[cfg(test)]
 mod test {
-    use crate::storage::segments::InMemorySegmentStorage;
+    use crate::storage::TransientStorageProvider;
 
     use super::*;
 
@@ -248,7 +257,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let project = Project::from_file::<InMemorySegmentStorage>("tests/ls.elf")?;
+            let project = Project::from_file::<TransientStorageProvider>("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
             project
