@@ -141,7 +141,10 @@ impl PartialFunction {
             .ok_or_else(|| FunctionBuilderError::InvalidBlockId(id))?;
 
         let start = block.start();
-        let bytes = project.segments.view_segment_bytes_from(block.start())?;
+        let bytes = project
+            .storage
+            .segments
+            .view_segment_bytes_from(block.start())?;
 
         for insn_id in block.instructions().iter() {
             let insn = &mut self.instructions[insn_id];
@@ -163,11 +166,17 @@ impl PartialFunction {
     }
 
     pub fn lift_all_blocks(&mut self, project: &mut Project) -> Result<(), FunctionBuilderError> {
-        let mut segment = project.segments.find_segment_containing(self.entry)?;
+        let mut segment = project
+            .storage
+            .segments
+            .find_segment_containing(self.entry)?;
 
         for block in self.blocks.iter_mut() {
             if !segment.contains_address(block.start()) {
-                segment = project.segments.find_segment_containing(block.start())?;
+                segment = project
+                    .storage
+                    .segments
+                    .find_segment_containing(block.start())?;
             }
 
             let bytes = segment
@@ -212,6 +221,7 @@ impl PartialFunction {
         let mut bytes = [0u8; 32];
 
         project
+            .storage
             .segments
             .read_bytes(address, &mut bytes)
             .expect("storage should be consistent");
@@ -430,7 +440,7 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
         let mut failures = BTreeSet::new();
 
         while let Some((address, context)) = self.candidates.pop_front() {
-            if !project.segments.contains_segment(address) {
+            if !project.storage.segments.contains_segment(address) {
                 tracing::trace!("skipping {address}: not mapped");
                 continue;
             }
@@ -627,6 +637,7 @@ impl FunctionBuilderContext {
 
         // We assume that most (all?) of a function's blocks will be in the same segment.
         let mut segment = project
+            .storage
             .segments
             .find_segment_containing(self.entry())
             .expect("function entry is valid");
@@ -645,7 +656,7 @@ impl FunctionBuilderContext {
             };
 
             if !segment.contains_address(block) {
-                if let Ok(nsegment) = project.segments.find_segment_containing(block) {
+                if let Ok(nsegment) = project.storage.segments.find_segment_containing(block) {
                     tracing::debug!("switching segment for {block} to segment {nsegment}");
                     segment = nsegment;
                 } else {

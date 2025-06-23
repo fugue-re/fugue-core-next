@@ -10,9 +10,7 @@ use crate::loader::{
 };
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError};
 use crate::storage::segments::SegmentStorage;
-use crate::storage::{
-    StorageContainer, StorageContainerKind, StorageProvider, StorageProviderError,
-};
+use crate::storage::{StorageContainer, StorageProvider, StorageProviderError};
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 use crate::types::{Address, AttributeMap};
 
@@ -24,10 +22,8 @@ pub struct Project {
     pub(crate) local_symbols: Option<LocalSymbols>,
     pub(crate) extern_symbols: Option<ExternSymbols>,
     pub(crate) functions: EntityCache<Address, Function>,
-    pub(crate) entities: EntityStorage,
-    pub(crate) segments: SegmentStorage,
-    // TODO: this should be a type that can be used to clean-up/pack our storage.
-    pub(crate) storage_kind: StorageContainerKind,
+    // NOTE: this must be that last field, so it will be dropped last.
+    pub(crate) storage: StorageContainer,
 }
 
 pub struct ProjectRef<'a> {
@@ -38,8 +34,7 @@ pub struct ProjectRef<'a> {
     pub local_symbols: Option<&'a LocalSymbols>,
     pub extern_symbols: Option<&'a ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
-    pub entities: &'a EntityStorage,
-    pub segments: &'a SegmentStorage,
+    pub storage: &'a StorageContainer,
 }
 
 pub struct ProjectMut<'a> {
@@ -50,8 +45,7 @@ pub struct ProjectMut<'a> {
     pub local_symbols: Option<&'a mut LocalSymbols>,
     pub extern_symbols: Option<&'a mut ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
-    pub entities: &'a EntityStorage,
-    pub segments: &'a mut SegmentStorage,
+    pub storage: &'a mut StorageContainer,
 }
 
 #[derive(Debug, Error)]
@@ -74,8 +68,6 @@ impl Project {
         let language = arch.language();
 
         let storage = StorageContainer::new::<P>(loadable)?;
-        let storage_kind = storage.kind();
-        let (entities, segments) = storage.into_parts();
 
         // FIXME: ideally we should not clone these, since we could consume the loadable, but I
         // can see scenarios where this isn't desirable.
@@ -85,7 +77,7 @@ impl Project {
 
         // FIXME: generalise this (configurable cache size, storage backend, etc.).
 
-        let functions = EntityCache::new(entities.clone(), 1024)?;
+        let functions = EntityCache::new(storage.entities.clone(), 1024)?;
 
         Ok(Self {
             arch,
@@ -95,9 +87,7 @@ impl Project {
             local_symbols,
             extern_symbols,
             functions,
-            entities,
-            segments,
-            storage_kind,
+            storage,
         })
     }
 
@@ -197,19 +187,23 @@ impl Project {
     }
 
     pub fn entities(&self) -> &EntityStorage {
-        &self.entities
+        &self.storage.entities
     }
 
     pub fn segments(&self) -> &SegmentStorage {
-        &self.segments
+        &self.storage.segments
     }
 
     pub fn segments_mut(&mut self) -> &mut SegmentStorage {
-        &mut self.segments
+        &mut self.storage.segments
     }
 
-    pub fn storage_kind(&self) -> StorageContainerKind {
-        self.storage_kind
+    pub fn storage(&self) -> &StorageContainer {
+        &self.storage
+    }
+
+    pub fn storage_mut(&mut self) -> &mut StorageContainer {
+        &mut self.storage
     }
 
     pub fn fields(&self) -> ProjectRef {
@@ -221,8 +215,7 @@ impl Project {
             local_symbols: self.local_symbols.as_ref(),
             extern_symbols: self.extern_symbols.as_ref(),
             functions: &self.functions,
-            entities: &self.entities,
-            segments: &self.segments,
+            storage: &self.storage,
         }
     }
 
@@ -235,8 +228,7 @@ impl Project {
             local_symbols: self.local_symbols.as_mut(),
             extern_symbols: self.extern_symbols.as_mut(),
             functions: &self.functions,
-            entities: &self.entities,
-            segments: &mut self.segments,
+            storage: &mut self.storage,
         }
     }
 }

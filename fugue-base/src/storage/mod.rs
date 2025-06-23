@@ -26,9 +26,40 @@ pub enum StorageProviderError {
 }
 
 pub struct StorageContainer {
-    pub(crate) entities: EntityStorage,
-    pub(crate) segments: SegmentStorage,
+    pub entities: EntityStorage,
+    pub segments: SegmentStorage,
     pub(crate) kind: StorageContainerKind,
+    cleanup_handler: Option<Box<dyn StorageCleanupHandler>>,
+}
+
+impl Drop for StorageContainer {
+    fn drop(&mut self) {
+        // Ensure we only run the cleanup handler once.
+        let Some(mut handler) = self.cleanup_handler.take() else {
+            return;
+        };
+
+        if let Err(e) = handler.cleanup_storage() {
+            tracing::error!("failed to cleanup storage: {e}");
+        }
+    }
+}
+
+pub trait StorageCleanupHandler: Send + Sync + 'static {
+    /// This method is run when a Project is dropped, allowing the provider to perform cleanup
+    /// tasks such as removing temporary files or packing segments and entity storage into a single
+    /// file. Due to being called on drop, the error will be not be propagated, however, it will be
+    /// logged.
+    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError>;
+}
+
+impl<F> StorageCleanupHandler for F
+where
+    F: FnMut() -> Result<(), StorageProviderError> + Send + Sync + 'static,
+{
+    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
+        (*self)()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,7 +107,23 @@ impl StorageContainer {
             entities,
             segments,
             kind: P::KIND,
+            cleanup_handler: None,
         }
+    }
+
+    pub fn set_cleanup_handler<F>(&mut self, handler: F)
+    where
+        F: StorageCleanupHandler + 'static,
+    {
+        self.cleanup_handler = Some(Box::new(handler));
+    }
+
+    pub fn with_cleanup_handler<F>(mut self, handler: F) -> Self
+    where
+        F: StorageCleanupHandler,
+    {
+        self.set_cleanup_handler(handler);
+        self
     }
 
     pub fn entities(&self) -> &EntityStorage {
@@ -97,10 +144,6 @@ impl StorageContainer {
 
     pub fn kind(&self) -> StorageContainerKind {
         self.kind
-    }
-
-    pub fn into_parts(self) -> (EntityStorage, SegmentStorage) {
-        (self.entities, self.segments)
     }
 }
 
