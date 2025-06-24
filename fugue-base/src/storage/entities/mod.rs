@@ -3,6 +3,9 @@ use std::sync::Arc;
 use quick_cache::sync::Cache;
 use thiserror::Error;
 
+use crate::loader::Loadable;
+use crate::types::{AttributeMap, BytesOrSlice};
+
 pub mod common;
 pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix};
 
@@ -11,9 +14,6 @@ pub use memory::InMemoryEntityStorage;
 
 pub mod rocksdb;
 pub use rocksdb::RocksDbEntityStorage;
-
-use crate::loader::Loadable;
-use crate::types::BytesOrSlice;
 
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
@@ -30,6 +30,8 @@ pub enum EntityStorageError {
     InvalidKeyFormat,
     #[error("invalid key size")]
     InvalidKeySize,
+    #[error("no project path specified")]
+    NoProjectPath,
 }
 
 impl EntityStorageError {
@@ -106,7 +108,10 @@ impl<'a> EntityBulkInserter<'a> {
 
 pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
-    fn from_loadable(loader: &impl Loadable) -> Result<Self, EntityStorageError>
+    fn from_loadable(
+        loader: &impl Loadable,
+        attributes: &AttributeMap,
+    ) -> Result<Self, EntityStorageError>
     where
         Self: Sized;
 }

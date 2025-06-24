@@ -1,15 +1,30 @@
+use std::path::PathBuf;
+
 use crate::loader::Loadable;
-use crate::types::BytesOrSlice;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
-    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 
 pub struct RocksDbEntityStorage;
 
 impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
-    fn from_loadable(loadable: &impl Loadable) -> Result<Self, EntityStorageError> {
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &AttributeMap,
+    ) -> Result<Self, EntityStorageError> {
+        let _project = attributes
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .or_else(|| {
+                loadable
+                    .attributes()
+                    .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            })
+            .ok_or(EntityStorageError::NoProjectPath)?;
+
         todo!()
     }
 }

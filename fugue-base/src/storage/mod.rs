@@ -1,3 +1,7 @@
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
 use thiserror::Error;
 
 pub mod entities;
@@ -15,10 +19,18 @@ pub use segments::{
 use entities::{EntityStorageProviderFromLoadable, InMemoryEntityStorage};
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromLoadable};
 
-use crate::loader::Loadable;
+use crate::types::AttributeMap;
+use crate::{loader::Loadable, types::attributes::ATTRIBUTE_PROJECT_PATH};
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
+    #[error("failed to create or load project: {0}")]
+    CreateProject(std::io::Error),
+    #[error("failed to clean-up project: {0}")]
+    CleanupProject(std::io::Error),
+    #[error("no project path specified")]
+    NoProjectPath,
+
     #[error("failed to initialise entity storage: {0}")]
     EntityStorage(#[from] EntityStorageError),
     #[error("failed to initialise segment storage: {0}")]
@@ -28,7 +40,6 @@ pub enum StorageProviderError {
 pub struct StorageContainer {
     pub entities: EntityStorage,
     pub segments: SegmentStorage,
-    pub(crate) kind: StorageContainerKind,
     cleanup_handler: Option<Box<dyn StorageCleanupHandler>>,
 }
 
@@ -62,51 +73,18 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StorageContainerKind {
-    Transient,
-    Persistent,
-    PersistentPacked,
-}
-
-impl StorageContainerKind {
-    pub fn is_persistent(self) -> bool {
-        matches!(self, Self::Persistent | Self::PersistentPacked)
-    }
-
-    pub fn is_transient(self) -> bool {
-        matches!(self, Self::Transient)
-    }
-
-    pub fn is_packed(self) -> bool {
-        matches!(self, Self::PersistentPacked)
-    }
-}
-
 impl StorageContainer {
     pub fn new<P>(loadable: &impl Loadable) -> Result<Self, StorageProviderError>
     where
         P: StorageProvider,
     {
-        match P::KIND {
-            StorageContainerKind::Transient | StorageContainerKind::Persistent => {
-                P::from_loadable(loadable)
-            }
-            StorageContainerKind::PersistentPacked => {
-                // TODO: perform unpacking, if necessary
-                P::from_loadable(loadable)
-            }
-        }
+        P::from_loadable(loadable)
     }
 
-    pub fn from_parts<P: StorageProvider>(
-        entities: EntityStorage,
-        segments: SegmentStorage,
-    ) -> Self {
+    pub fn from_parts(entities: EntityStorage, segments: SegmentStorage) -> Self {
         Self {
             entities,
             segments,
-            kind: P::KIND,
             cleanup_handler: None,
         }
     }
@@ -141,15 +119,9 @@ impl StorageContainer {
     pub fn segments_mut(&mut self) -> &mut SegmentStorage {
         &mut self.segments
     }
-
-    pub fn kind(&self) -> StorageContainerKind {
-        self.kind
-    }
 }
 
 pub trait StorageProvider {
-    const KIND: StorageContainerKind;
-
     fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError>;
 }
 
@@ -157,12 +129,13 @@ pub trait StorageProvider {
 pub struct TransientStorageProvider;
 
 impl StorageProvider for TransientStorageProvider {
-    const KIND: StorageContainerKind = StorageContainerKind::Transient;
-
     fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let entities = EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable)?);
-        let segments = SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable)?);
-        Ok(StorageContainer::from_parts::<Self>(entities, segments))
+        let attributes = loadable.attributes();
+        let entities =
+            EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable, attributes)?);
+        let segments =
+            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?);
+        Ok(StorageContainer::from_parts(entities, segments))
     }
 }
 
@@ -171,13 +144,19 @@ impl StorageProvider for TransientStorageProvider {
 pub struct PersistentEntityStorageProvider;
 
 impl StorageProvider for PersistentEntityStorageProvider {
-    const KIND: StorageContainerKind = StorageContainerKind::Persistent;
-
     fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(loadable)?);
-        let segments =
-            SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(loadable)?);
-        Ok(StorageContainer::from_parts::<Self>(entities, segments))
+        let compressed = CompressedPersistentStorage::new(loadable)?;
+
+        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
+            loadable,
+            compressed.attributes(),
+        )?);
+        let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
+            loadable,
+            compressed.attributes(),
+        )?);
+
+        Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
 }
 
@@ -185,12 +164,122 @@ impl StorageProvider for PersistentEntityStorageProvider {
 pub struct PersistentStorageProvider;
 
 impl StorageProvider for PersistentStorageProvider {
-    const KIND: StorageContainerKind = StorageContainerKind::PersistentPacked;
-
     fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(loadable)?);
-        let segments =
-            SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(loadable)?);
-        Ok(StorageContainer::from_parts::<Self>(entities, segments))
+        let compressed = CompressedPersistentStorage::new(loadable)?;
+
+        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
+            loadable,
+            compressed.attributes(),
+        )?);
+
+        let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
+            loadable,
+            compressed.attributes(),
+        )?);
+
+        Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
+    }
+}
+
+pub struct CompressedPersistentStorage {
+    path: PathBuf,
+    attributes: AttributeMap,
+}
+
+impl StorageCleanupHandler for CompressedPersistentStorage {
+    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
+        let packed = self.path.with_extension("fdbz");
+        let unpacked = self.path.with_extension("fdb");
+
+        fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
+
+        todo!(
+            "pack/repack {} with the contents of {}",
+            packed.display(),
+            unpacked.display()
+        );
+
+        // TODO: zip the contents of the unpacked directory into the packed file
+        // and remove the unpacked directory.
+
+        Ok(())
+    }
+}
+
+impl CompressedPersistentStorage {
+    pub fn new(loadable: &impl Loadable) -> Result<Self, StorageProviderError> {
+        let path = loadable
+            .attributes()
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .ok_or(StorageProviderError::NoProjectPath)?;
+
+        Self::create_or_load(&path)?;
+
+        let mut attributes = AttributeMap::new();
+
+        // Ensure we point to the (unpacked) project path.
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
+
+        Ok(Self { path, attributes })
+    }
+
+    pub fn attributes(&self) -> &AttributeMap {
+        &self.attributes
+    }
+
+    fn create_or_load(path: &Path) -> Result<(), StorageProviderError> {
+        if path.extension() != Some("fdbz".as_ref()) {
+            return Err(StorageProviderError::CreateProject(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a project path with .fdbz extension",
+            )));
+        }
+
+        if path.is_file() {
+            // load file
+            Self::load(path)?;
+        } else if !path.exists() {
+            Self::create(path)?;
+        } else {
+            return Err(StorageProviderError::CreateProject(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "project path exists but is not a file",
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn create(path: &Path) -> Result<(), StorageProviderError> {
+        let unpacked = path.with_extension("fdb");
+        if unpacked.exists() {
+            return Err(StorageProviderError::CreateProject(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "project file already exists; potentially corrupted project",
+            )));
+        }
+
+        fs::create_dir_all(path).map_err(StorageProviderError::CreateProject)?;
+
+        Ok(())
+    }
+
+    fn load(path: &Path) -> Result<(), StorageProviderError> {
+        let unpacked = path.with_extension("fdb");
+        if unpacked.exists() {
+            return Err(StorageProviderError::CreateProject(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "project file already exists; potentially corrupted project",
+            )));
+        }
+
+        // TODO: validate the project; unpack the contents to the unpacked directory
+        todo!(
+            "load project from {} and unpack to {}",
+            path.display(),
+            unpacked.display()
+        );
+
+        Ok(())
     }
 }

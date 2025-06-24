@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use thiserror::Error;
 
 use crate::loader::{Loadable, LoadableSegment, LoaderError};
-use crate::types::Address;
+use crate::types::{Address, AttributeMap};
 
 pub mod memory;
 pub use memory::InMemorySegmentStorage;
@@ -46,7 +46,10 @@ impl SegmentStorageError {
 
 pub trait SegmentStorageProviderFromLoadable: SegmentStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
-    fn from_loadable(loader: &impl Loadable) -> Result<Self, SegmentStorageError>
+    fn from_loadable(
+        loader: &impl Loadable,
+        attributes: &AttributeMap,
+    ) -> Result<Self, SegmentStorageError>
     where
         Self: Sized;
 }

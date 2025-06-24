@@ -10,11 +10,11 @@ use thiserror::Error;
 use crate::loader::{Loadable, LoadableSegment};
 use crate::memory::SegmentProperties;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::Address;
+use crate::types::{Address, AttributeMap};
 
 use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
 
-const PROJECT_MEMORY_MAPPING: &str = "segments.mmap";
+const PROJECT_MEMORY_MAPPING: &str = "segments";
 
 pub struct MemoryMappedSegmentStorage {
     backing: MmapMut,
@@ -224,10 +224,17 @@ impl Drop for MemoryMappedSegmentStorage {
 }
 
 impl SegmentStorageProviderFromLoadable for MemoryMappedSegmentStorage {
-    fn from_loadable(loader: &impl Loadable) -> Result<Self, SegmentStorageError> {
-        let project = loader
-            .attributes()
+    fn from_loadable(
+        loader: &impl Loadable,
+        attributes: &AttributeMap,
+    ) -> Result<Self, SegmentStorageError> {
+        let project = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .or_else(|| {
+                loader
+                    .attributes()
+                    .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            })
             .ok_or_else(|| MemoryMappedSegmentStorageError::NoProjectPath)?;
 
         let res = Self::from_loadable_aux(&project, loader);

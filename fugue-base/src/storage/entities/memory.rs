@@ -8,7 +8,7 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 use skiplist::SkipMap;
 
 use crate::loader::Loadable;
-use crate::types::BytesOrSlice;
+use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::common::ENTITY_PREFIX_SIZE;
 use super::{
@@ -46,7 +46,10 @@ impl InMemoryEntityStorage {
 }
 
 impl EntityStorageProviderFromLoadable for InMemoryEntityStorage {
-    fn from_loadable(_loader: &impl Loadable) -> Result<Self, EntityStorageError> {
+    fn from_loadable(
+        _loader: &impl Loadable,
+        _attributes: &AttributeMap,
+    ) -> Result<Self, EntityStorageError> {
         Ok(Self::new())
     }
 }

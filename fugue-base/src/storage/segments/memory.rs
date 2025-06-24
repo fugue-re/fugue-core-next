@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use fallible_iterator::FallibleIterator;
 
 use crate::loader::{Loadable, LoadableSegment};
-use crate::types::Address;
+use crate::types::{Address, AttributeMap};
 
 use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
 
@@ -86,7 +86,10 @@ impl InMemorySegmentStorage {
 }
 
 impl SegmentStorageProviderFromLoadable for InMemorySegmentStorage {
-    fn from_loadable(loader: &impl Loadable) -> Result<Self, SegmentStorageError> {
+    fn from_loadable(
+        loader: &impl Loadable,
+        _attributes: &AttributeMap,
+    ) -> Result<Self, SegmentStorageError> {
         let mut segments = Vec::new();
         let mut siter = loader.segments();
 
