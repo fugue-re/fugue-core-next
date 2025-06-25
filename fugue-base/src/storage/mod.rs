@@ -1,7 +1,8 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use object::ReadCacheOps;
 use thiserror::Error;
 
 pub mod entities;
@@ -18,9 +19,13 @@ pub use segments::{
 
 use entities::{EntityStorageProviderFromLoadable, InMemoryEntityStorage};
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromLoadable};
+use walkdir::WalkDir;
+use zip::write::SimpleFileOptions;
+use zip::ZipWriter;
 
+use crate::loader::Loadable;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::AttributeMap;
-use crate::{loader::Loadable, types::attributes::ATTRIBUTE_PROJECT_PATH};
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
@@ -74,11 +79,14 @@ where
 }
 
 impl StorageContainer {
-    pub fn new<P>(loadable: &impl Loadable) -> Result<Self, StorageProviderError>
+    pub fn new<P>(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, StorageProviderError>
     where
         P: StorageProvider,
     {
-        P::from_loadable(loadable)
+        P::from_loadable(loadable, attributes)
     }
 
     pub fn from_parts(entities: EntityStorage, segments: SegmentStorage) -> Self {
@@ -122,19 +130,25 @@ impl StorageContainer {
 }
 
 pub trait StorageProvider {
-    fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError>;
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError>;
 }
 
 // This provider uses the default transient storage provider for both segments and entities.
 pub struct TransientStorageProvider;
 
 impl StorageProvider for TransientStorageProvider {
-    fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let attributes = loadable.attributes();
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
         let entities =
             EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable, attributes)?);
         let segments =
             SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?);
+
         Ok(StorageContainer::from_parts(entities, segments))
     }
 }
@@ -144,16 +158,17 @@ impl StorageProvider for TransientStorageProvider {
 pub struct PersistentEntityStorageProvider;
 
 impl StorageProvider for PersistentEntityStorageProvider {
-    fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let compressed = CompressedPersistentStorage::new(loadable)?;
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        let compressed = CompressedPersistentStorage::new(attributes)?;
 
         let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
-            loadable,
-            compressed.attributes(),
+            loadable, attributes,
         )?);
         let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
-            loadable,
-            compressed.attributes(),
+            loadable, attributes,
         )?);
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
@@ -164,17 +179,17 @@ impl StorageProvider for PersistentEntityStorageProvider {
 pub struct PersistentStorageProvider;
 
 impl StorageProvider for PersistentStorageProvider {
-    fn from_loadable(loadable: &impl Loadable) -> Result<StorageContainer, StorageProviderError> {
-        let compressed = CompressedPersistentStorage::new(loadable)?;
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        let compressed = CompressedPersistentStorage::new(attributes)?;
 
         let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
-            loadable,
-            compressed.attributes(),
+            loadable, attributes,
         )?);
-
         let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
-            loadable,
-            compressed.attributes(),
+            loadable, attributes,
         )?);
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
@@ -183,7 +198,6 @@ impl StorageProvider for PersistentStorageProvider {
 
 pub struct CompressedPersistentStorage {
     path: PathBuf,
-    attributes: AttributeMap,
 }
 
 impl StorageCleanupHandler for CompressedPersistentStorage {
@@ -191,25 +205,66 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
         let packed = self.path.with_extension("fdbz");
         let unpacked = self.path.with_extension("fdb");
 
+        let file = File::create(&packed).map_err(StorageProviderError::CleanupProject)?;
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Zstd);
+
+        let mut zip = ZipWriter::new(file);
+
+        for tracked in WalkDir::new(&unpacked)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = tracked.path();
+            let relative_path = path
+                .strip_prefix(&unpacked)
+                .expect("file/directory path should be relative to unpacked directory");
+
+            if tracked.file_type().is_dir() {
+                zip.add_directory_from_path(relative_path, options)
+                    .map_err(|e| {
+                        StorageProviderError::CleanupProject(io::Error::new(
+                            io::ErrorKind::Other,
+                            e,
+                        ))
+                    })?;
+                continue;
+            }
+
+            let mut data = File::open(path).map_err(StorageProviderError::CleanupProject)?;
+            let size = data.len().map_err(|_| {
+                StorageProviderError::CleanupProject(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "failed to get file size",
+                ))
+            })?;
+
+            // if not less than 4 GiB, use large file options
+            let options = (size > u32::MAX as u64)
+                .then(|| options.large_file(true))
+                .unwrap_or(options);
+
+            zip.start_file_from_path(relative_path, options)
+                .map_err(|e| {
+                    StorageProviderError::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
+                })?;
+
+            std::io::copy(&mut data, &mut zip).map_err(StorageProviderError::CleanupProject)?;
+        }
+
+        zip.finish().map_err(|e| {
+            StorageProviderError::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
+        })?;
+
         fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
-
-        todo!(
-            "pack/repack {} with the contents of {}",
-            packed.display(),
-            unpacked.display()
-        );
-
-        // TODO: zip the contents of the unpacked directory into the packed file
-        // and remove the unpacked directory.
 
         Ok(())
     }
 }
 
 impl CompressedPersistentStorage {
-    pub fn new(loadable: &impl Loadable) -> Result<Self, StorageProviderError> {
-        let path = loadable
-            .attributes()
+    pub fn new(attributes: &mut AttributeMap) -> Result<Self, StorageProviderError> {
+        let path = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .ok_or(StorageProviderError::NoProjectPath)?;
 
@@ -220,11 +275,7 @@ impl CompressedPersistentStorage {
         // Ensure we point to the (unpacked) project path.
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
 
-        Ok(Self { path, attributes })
-    }
-
-    pub fn attributes(&self) -> &AttributeMap {
-        &self.attributes
+        Ok(Self { path })
     }
 
     fn create_or_load(path: &Path) -> Result<(), StorageProviderError> {

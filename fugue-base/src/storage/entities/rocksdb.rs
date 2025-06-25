@@ -14,15 +14,10 @@ pub struct RocksDbEntityStorage;
 impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
     fn from_loadable(
         loadable: &impl Loadable,
-        attributes: &AttributeMap,
+        attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError> {
         let _project = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            .or_else(|| {
-                loadable
-                    .attributes()
-                    .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            })
             .ok_or(EntityStorageError::NoProjectPath)?;
 
         todo!()

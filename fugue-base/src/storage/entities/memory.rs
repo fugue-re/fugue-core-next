@@ -48,7 +48,7 @@ impl InMemoryEntityStorage {
 impl EntityStorageProviderFromLoadable for InMemoryEntityStorage {
     fn from_loadable(
         _loader: &impl Loadable,
-        _attributes: &AttributeMap,
+        _attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError> {
         Ok(Self::new())
     }

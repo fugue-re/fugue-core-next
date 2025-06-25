@@ -22,6 +22,7 @@ pub struct Project {
     pub(crate) local_symbols: Option<LocalSymbols>,
     pub(crate) extern_symbols: Option<ExternSymbols>,
     pub(crate) functions: EntityCache<Address, Function>,
+    pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
 }
@@ -34,6 +35,7 @@ pub struct ProjectRef<'a> {
     pub local_symbols: Option<&'a LocalSymbols>,
     pub extern_symbols: Option<&'a ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
+    pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
 }
 
@@ -45,6 +47,7 @@ pub struct ProjectMut<'a> {
     pub local_symbols: Option<&'a mut LocalSymbols>,
     pub extern_symbols: Option<&'a mut ExternSymbols>,
     pub functions: &'a EntityCache<Address, Function>,
+    pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
 }
 
@@ -67,7 +70,10 @@ impl Project {
         let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
 
-        let storage = StorageContainer::new::<P>(loadable)?;
+        // NOTE: we make a copy of the loader attributes, as project attributes will be a superset.
+        let mut attributes = loadable.attributes().clone();
+
+        let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
 
         // FIXME: ideally we should not clone these, since we could consume the loadable, but I
         // can see scenarios where this isn't desirable.
@@ -87,6 +93,7 @@ impl Project {
             local_symbols,
             extern_symbols,
             functions,
+            attributes,
             storage,
         })
     }
@@ -206,6 +213,14 @@ impl Project {
         &mut self.storage
     }
 
+    pub fn attributes(&self) -> &AttributeMap {
+        &self.attributes
+    }
+
+    pub fn attributes_mut(&mut self) -> &mut AttributeMap {
+        &mut self.attributes
+    }
+
     pub fn fields(&self) -> ProjectRef {
         ProjectRef {
             arch: &self.arch,
@@ -215,6 +230,7 @@ impl Project {
             local_symbols: self.local_symbols.as_ref(),
             extern_symbols: self.extern_symbols.as_ref(),
             functions: &self.functions,
+            attributes: &self.attributes,
             storage: &self.storage,
         }
     }
@@ -228,6 +244,7 @@ impl Project {
             local_symbols: self.local_symbols.as_mut(),
             extern_symbols: self.extern_symbols.as_mut(),
             functions: &self.functions,
+            attributes: &mut self.attributes,
             storage: &mut self.storage,
         }
     }

@@ -226,16 +226,11 @@ impl Drop for MemoryMappedSegmentStorage {
 impl SegmentStorageProviderFromLoadable for MemoryMappedSegmentStorage {
     fn from_loadable(
         loader: &impl Loadable,
-        attributes: &AttributeMap,
+        attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let project = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            .or_else(|| {
-                loader
-                    .attributes()
-                    .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            })
-            .ok_or_else(|| MemoryMappedSegmentStorageError::NoProjectPath)?;
+            .ok_or(MemoryMappedSegmentStorageError::NoProjectPath)?;
 
         let res = Self::from_loadable_aux(&project, loader);
 

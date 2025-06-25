@@ -48,7 +48,7 @@ pub trait SegmentStorageProviderFromLoadable: SegmentStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
         loader: &impl Loadable,
-        attributes: &AttributeMap,
+        attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
         Self: Sized;

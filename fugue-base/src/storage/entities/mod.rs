@@ -110,7 +110,7 @@ pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
         loader: &impl Loadable,
-        attributes: &AttributeMap,
+        attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where
         Self: Sized;

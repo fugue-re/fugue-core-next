@@ -88,7 +88,7 @@ impl InMemorySegmentStorage {
 impl SegmentStorageProviderFromLoadable for InMemorySegmentStorage {
     fn from_loadable(
         loader: &impl Loadable,
-        _attributes: &AttributeMap,
+        _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let mut segments = Vec::new();
         let mut siter = loader.segments();
