@@ -1,3 +1,4 @@
+use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 
 bitflags! {
@@ -15,6 +16,33 @@ bitflags! {
         const LITTLE_ENDIAN = 0b0010_0000;
 
         const EXTERNAL      = 0b0100_0000;
+    }
+}
+
+impl Encode for SegmentProperties {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for SegmentProperties {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u8::decode(decoder)?;
+        Ok(SegmentProperties::from_bits_truncate(bits))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for SegmentProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u8::borrow_decode(decoder)?;
+        Ok(SegmentProperties::from_bits_truncate(bits))
     }
 }
 

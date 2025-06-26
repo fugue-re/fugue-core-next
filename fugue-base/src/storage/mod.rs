@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 
 use object::ReadCacheOps;
@@ -21,11 +21,16 @@ use entities::{EntityStorageProviderFromLoadable, InMemoryEntityStorage};
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromLoadable};
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
+use zip::{ZipArchive, ZipWriter};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::AttributeMap;
+use crate::types::{AttributeMap, BytesOrMapping};
+
+pub const PERSISTENT: bool = true;
+pub const TRANSIENT: bool = false;
+
+pub type StoragePersistence = bool;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
@@ -40,6 +45,43 @@ pub enum StorageProviderError {
     EntityStorage(#[from] EntityStorageError),
     #[error("failed to initialise segment storage: {0}")]
     SegmentStorage(#[from] SegmentStorageError),
+}
+
+impl StorageProviderError {
+    pub fn create_project_already_exists<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::CreateProject(io::Error::new(io::ErrorKind::AlreadyExists, e))
+    }
+
+    pub fn create_project_invalid_input<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::CreateProject(io::Error::new(io::ErrorKind::InvalidInput, e))
+    }
+
+    pub fn create_project<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::CreateProject(io::Error::new(io::ErrorKind::Other, e))
+    }
+
+    pub fn cleanup_project_invalid_data<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::CleanupProject(io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn cleanup_project<E>(e: E) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        Self::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
+    }
 }
 
 pub struct StorageContainer {
@@ -200,15 +242,15 @@ pub struct CompressedPersistentStorage {
     path: PathBuf,
 }
 
-impl StorageCleanupHandler for CompressedPersistentStorage {
-    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
+impl CompressedPersistentStorage {
+    fn cleanup_storage_aux(&mut self) -> Result<(), StorageProviderError> {
         let packed = self.path.with_extension("fdbz");
         let unpacked = self.path.with_extension("fdb");
 
         let file = File::create(&packed).map_err(StorageProviderError::CleanupProject)?;
         let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Zstd);
 
-        let mut zip = ZipWriter::new(file);
+        let mut zip = ZipWriter::new(BufWriter::new(file));
 
         for tracked in WalkDir::new(&unpacked)
             .follow_links(false)
@@ -222,21 +264,13 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
 
             if tracked.file_type().is_dir() {
                 zip.add_directory_from_path(relative_path, options)
-                    .map_err(|e| {
-                        StorageProviderError::CleanupProject(io::Error::new(
-                            io::ErrorKind::Other,
-                            e,
-                        ))
-                    })?;
+                    .map_err(StorageProviderError::cleanup_project)?;
                 continue;
             }
 
             let mut data = File::open(path).map_err(StorageProviderError::CleanupProject)?;
             let size = data.len().map_err(|_| {
-                StorageProviderError::CleanupProject(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "failed to get file size",
-                ))
+                StorageProviderError::cleanup_project_invalid_data("failed to obtain file size")
             })?;
 
             // if not less than 4 GiB, use large file options
@@ -245,20 +279,29 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
                 .unwrap_or(options);
 
             zip.start_file_from_path(relative_path, options)
-                .map_err(|e| {
-                    StorageProviderError::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
-                })?;
+                .map_err(StorageProviderError::cleanup_project)?;
 
             std::io::copy(&mut data, &mut zip).map_err(StorageProviderError::CleanupProject)?;
         }
 
-        zip.finish().map_err(|e| {
-            StorageProviderError::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
-        })?;
+        zip.finish()
+            .map_err(StorageProviderError::cleanup_project)?;
 
         fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
 
         Ok(())
+    }
+}
+
+impl StorageCleanupHandler for CompressedPersistentStorage {
+    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
+        let result = self.cleanup_storage_aux();
+        if result.is_err() {
+            if let Err(e) = fs::remove_file(self.path.with_extension("fdbz")) {
+                tracing::error!("failed to remove packed project file: {e}");
+            }
+        }
+        result
     }
 }
 
@@ -272,7 +315,7 @@ impl CompressedPersistentStorage {
 
         let mut attributes = AttributeMap::new();
 
-        // Ensure we point to the (unpacked) project path.
+        // ensure we point to the (unpacked) project path
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
 
         Ok(Self { path })
@@ -280,10 +323,9 @@ impl CompressedPersistentStorage {
 
     fn create_or_load(path: &Path) -> Result<(), StorageProviderError> {
         if path.extension() != Some("fdbz".as_ref()) {
-            return Err(StorageProviderError::CreateProject(io::Error::new(
-                io::ErrorKind::InvalidInput,
+            return Err(StorageProviderError::create_project_invalid_input(
                 "expected a project path with .fdbz extension",
-            )));
+            ));
         }
 
         if path.is_file() {
@@ -292,10 +334,9 @@ impl CompressedPersistentStorage {
         } else if !path.exists() {
             Self::create(path)?;
         } else {
-            return Err(StorageProviderError::CreateProject(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "project path exists but is not a file",
-            )));
+            return Err(StorageProviderError::create_project_invalid_input(
+                "expected a file or a directory",
+            ));
         }
 
         Ok(())
@@ -304,10 +345,9 @@ impl CompressedPersistentStorage {
     fn create(path: &Path) -> Result<(), StorageProviderError> {
         let unpacked = path.with_extension("fdb");
         if unpacked.exists() {
-            return Err(StorageProviderError::CreateProject(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "project file already exists; potentially corrupted project",
-            )));
+            return Err(StorageProviderError::create_project_already_exists(
+                "unpacked project data already exists; potentially corrupted project",
+            ));
         }
 
         fs::create_dir_all(path).map_err(StorageProviderError::CreateProject)?;
@@ -315,22 +355,35 @@ impl CompressedPersistentStorage {
         Ok(())
     }
 
+    fn load_aux(path: &Path) -> Result<(), StorageProviderError> {
+        let mut zip = ZipArchive::new(Cursor::new(
+            BytesOrMapping::from_file(path).map_err(StorageProviderError::create_project)?,
+        ))
+        .map_err(StorageProviderError::create_project)?;
+
+        zip.extract(path)
+            .map_err(StorageProviderError::create_project)?;
+
+        Ok(())
+    }
+
     fn load(path: &Path) -> Result<(), StorageProviderError> {
         let unpacked = path.with_extension("fdb");
         if unpacked.exists() {
-            return Err(StorageProviderError::CreateProject(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "project file already exists; potentially corrupted project",
-            )));
+            return Err(StorageProviderError::create_project_already_exists(
+                "unpacked project data already exists; potenially corrupted project",
+            ));
         }
 
-        // TODO: validate the project; unpack the contents to the unpacked directory
-        todo!(
-            "load project from {} and unpack to {}",
-            path.display(),
-            unpacked.display()
-        );
+        fs::create_dir_all(path).map_err(StorageProviderError::CreateProject)?;
 
-        Ok(())
+        let result = Self::load_aux(path);
+
+        if result.is_err() {
+            // if we failed to load the project, we attempt to clean-up
+            fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
+        }
+
+        result
     }
 }

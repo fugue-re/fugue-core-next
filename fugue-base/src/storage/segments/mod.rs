@@ -11,7 +11,7 @@ pub use memory::InMemorySegmentStorage;
 pub mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;
 
-pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage;
+pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
 #[derive(Debug, Error)]
