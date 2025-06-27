@@ -252,7 +252,10 @@ impl Project {
 
 #[cfg(test)]
 mod test {
-    use crate::storage::TransientStorageProvider;
+    use crate::{
+        attributes,
+        storage::{PersistentStorageProvider, TransientStorageProvider},
+    };
 
     use super::*;
 
@@ -281,6 +284,29 @@ mod test {
                     0xC3, 0x00, 0x00, 0x00, 0x00, 0x00
                 ]
             );
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_project_persistent() -> Result<(), Box<dyn std::error::Error>> {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_line_number(true)
+            .with_file(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let project = Project::from_file_with::<PersistentStorageProvider>(
+                "tests/ls.elf",
+                attributes![
+                    ATTRIBUTE_PROJECT_PATH => "tests/ls.fdbz"
+                ],
+            )?;
+
+            drop(project);
 
             Ok(())
         })

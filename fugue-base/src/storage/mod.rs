@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use object::ReadCacheOps;
 use thiserror::Error;
+use walkdir::WalkDir;
+use zip::write::SimpleFileOptions;
+use zip::{ZipArchive, ZipWriter};
 
 pub mod entities;
 pub use entities::{
@@ -19,9 +22,6 @@ pub use segments::{
 
 use entities::{EntityStorageProviderFromLoadable, InMemoryEntityStorage};
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromLoadable};
-use walkdir::WalkDir;
-use zip::write::SimpleFileOptions;
-use zip::{ZipArchive, ZipWriter};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -350,18 +350,18 @@ impl CompressedPersistentStorage {
             ));
         }
 
-        fs::create_dir_all(path).map_err(StorageProviderError::CreateProject)?;
+        fs::create_dir_all(unpacked).map_err(StorageProviderError::CreateProject)?;
 
         Ok(())
     }
 
-    fn load_aux(path: &Path) -> Result<(), StorageProviderError> {
+    fn load_aux(packed: &Path, unpacked: &Path) -> Result<(), StorageProviderError> {
         let mut zip = ZipArchive::new(Cursor::new(
-            BytesOrMapping::from_file(path).map_err(StorageProviderError::create_project)?,
+            BytesOrMapping::from_file(packed).map_err(StorageProviderError::create_project)?,
         ))
         .map_err(StorageProviderError::create_project)?;
 
-        zip.extract(path)
+        zip.extract(unpacked)
             .map_err(StorageProviderError::create_project)?;
 
         Ok(())
@@ -375,9 +375,9 @@ impl CompressedPersistentStorage {
             ));
         }
 
-        fs::create_dir_all(path).map_err(StorageProviderError::CreateProject)?;
+        fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
 
-        let result = Self::load_aux(path);
+        let result = Self::load_aux(&unpacked, path);
 
         if result.is_err() {
             // if we failed to load the project, we attempt to clean-up
