@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Cursor, Write};
+use std::io::{self, BufWriter, Cursor};
 use std::path::{Path, PathBuf};
 
 use object::ReadCacheOps;
@@ -94,11 +94,7 @@ pub struct StorageContainer {
 struct StorageCleanupHandlerOneShot(Option<Box<dyn StorageCleanupHandler>>);
 
 impl StorageCleanupHandlerOneShot {
-    pub fn new(handler: impl StorageCleanupHandler) -> Self {
-        Self(Some(Box::new(handler)))
-    }
-
-    pub fn set_handler(&mut self, handler: impl StorageCleanupHandler) {
+    fn set_handler(&mut self, handler: impl StorageCleanupHandler) {
         assert!(self.0.is_none(), "cleanup handler can only be set once");
         self.0 = Some(Box::new(handler));
     }
@@ -415,8 +411,7 @@ impl CompressedPersistentStorage {
             ));
         }
 
-        tracing::trace!("creating project at `{}`", unpacked.display());
-        // fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
+        fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
 
         let result = Self::load_aux(path, &unpacked);
 
