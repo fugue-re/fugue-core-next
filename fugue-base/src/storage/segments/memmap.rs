@@ -98,7 +98,11 @@ pub struct MemoryMappedSegmentStorageMetadata {
 
 impl MemoryMappedSegmentStorageMetadata {
     pub fn expected_size(&self) -> usize {
-        self.segments.iter().map(LoadableSegmentMetadata::len).sum()
+        self.segments
+            .iter()
+            .map(|segm| segm.physical_offset + segm.size)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -253,24 +257,24 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         let mut siter = loader.segments();
 
-        let mut offset = 0;
         let mut backing = unsafe { MmapMut::map_mut(&file) }
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
 
         let mut segments = Vec::new();
 
         while let Some(segm) = siter.next()? {
+            let offset = usize::from(segm.address() - start);
+
             tracing::trace!(
-                "loading segment {} ({}-{}) into memory-mapped storage",
+                "loading segment {} ({}-{}) into memory-mapped storage at offset {offset:#x}",
                 segm.name(),
                 segm.address(),
                 segm.next_address()
             );
+
             segments.push(LoadableSegmentMetadata::new(&segm, offset));
 
             backing[offset..offset + segm.len()].copy_from_slice(segm.bytes());
-
-            offset += segm.len();
         }
 
         segments.sort_by(|a, b| a.address().cmp(&b.address()));
@@ -346,17 +350,30 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
     }
 }
 
-impl<const PERSISTENT: bool> Drop for MemoryMappedSegmentStorage<PERSISTENT> {
+impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
     fn drop(&mut self) {
-        if let Err(e) = fs::remove_dir_all(&self.project) {
+        if PERSISTENCE == storage::PERSISTENT {
+            tracing::trace!("skipping memory-mapped storage clean-up; persistence is enabled",);
+            return;
+        }
+
+        let meta = self.project.join(PROJECT_MEMORY_MAPPING_META);
+        if meta.exists()
+            && let Err(e) = fs::remove_file(&meta)
+        {
             tracing::error!(
-                "failed to clean-up memory-mapped storage at {}: {e}",
-                self.project.display()
+                "failed to clean-up memory-mapped storage metadata at {}: {e}",
+                meta.display()
             );
-        } else {
-            tracing::trace!(
-                "successfully cleaned-up memory-mapped storage at {}",
-                self.project.display()
+        }
+
+        let segments = self.project.join(PROJECT_MEMORY_MAPPING_DATA);
+        if segments.exists()
+            && let Err(e) = fs::remove_file(&segments)
+        {
+            tracing::error!(
+                "failed to clean-up memory-mapped storage backing at {}: {e}",
+                segments.display()
             );
         }
     }

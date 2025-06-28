@@ -8,7 +8,7 @@ pub enum OwnedOrRef<'a, T> {
 impl<'a, T> AsRef<T> for OwnedOrRef<'a, T> {
     fn as_ref(&self) -> &T {
         match self {
-            Self::Owned(ref t) => t,
+            Self::Owned(t) => t,
             Self::Ref(t) => t,
         }
     }

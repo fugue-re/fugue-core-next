@@ -41,8 +41,8 @@ enum ElfFileRepr<'this, 'data> {
 macro_rules! with_elf {
     ($inner:expr, $var:ident | $body:expr) => {
         match $inner {
-            ElfFileRepr::Elf32(ref $var) => $body,
-            ElfFileRepr::Elf64(ref $var) => $body,
+            ElfFileRepr::Elf32($var) => $body,
+            ElfFileRepr::Elf64($var) => $body,
         }
     };
 }

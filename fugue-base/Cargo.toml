@@ -2,7 +2,7 @@
 name = "fugue-base"
 version = "0.3.0"
 authors = ["Sam Thomas <st@xv.ax>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow = "1"

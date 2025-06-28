@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Cursor};
+use std::io::{self, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use object::ReadCacheOps;
@@ -87,13 +87,27 @@ impl StorageProviderError {
 pub struct StorageContainer {
     pub entities: EntityStorage,
     pub segments: SegmentStorage,
-    cleanup_handler: Option<Box<dyn StorageCleanupHandler>>,
+    cleanup_handler: StorageCleanupHandlerOneShot,
 }
 
-impl Drop for StorageContainer {
+#[derive(Default)]
+struct StorageCleanupHandlerOneShot(Option<Box<dyn StorageCleanupHandler>>);
+
+impl StorageCleanupHandlerOneShot {
+    pub fn new(handler: impl StorageCleanupHandler) -> Self {
+        Self(Some(Box::new(handler)))
+    }
+
+    pub fn set_handler(&mut self, handler: impl StorageCleanupHandler) {
+        assert!(self.0.is_none(), "cleanup handler can only be set once");
+        self.0 = Some(Box::new(handler));
+    }
+}
+
+impl Drop for StorageCleanupHandlerOneShot {
     fn drop(&mut self) {
         // Ensure we only run the cleanup handler once.
-        let Some(mut handler) = self.cleanup_handler.take() else {
+        let Some(mut handler) = self.0.take() else {
             return;
         };
 
@@ -135,21 +149,15 @@ impl StorageContainer {
         Self {
             entities,
             segments,
-            cleanup_handler: None,
+            cleanup_handler: StorageCleanupHandlerOneShot::default(),
         }
     }
 
-    pub fn set_cleanup_handler<F>(&mut self, handler: F)
-    where
-        F: StorageCleanupHandler + 'static,
-    {
-        self.cleanup_handler = Some(Box::new(handler));
+    pub fn set_cleanup_handler(&mut self, handler: impl StorageCleanupHandler) {
+        self.cleanup_handler.set_handler(handler);
     }
 
-    pub fn with_cleanup_handler<F>(mut self, handler: F) -> Self
-    where
-        F: StorageCleanupHandler,
-    {
+    pub fn with_cleanup_handler(mut self, handler: impl StorageCleanupHandler) -> Self {
         self.set_cleanup_handler(handler);
         self
     }
@@ -227,10 +235,10 @@ impl StorageProvider for PersistentStorageProvider {
     ) -> Result<StorageContainer, StorageProviderError> {
         let compressed = CompressedPersistentStorage::new(attributes)?;
 
-        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
+        let entities = EntityStorage::new(DefaultTransientEntityStorage::from_loadable(
             loadable, attributes,
         )?);
-        let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
+        let segments = SegmentStorage::new(DefaultPersistentSegmentStorage::from_loadable(
             loadable, attributes,
         )?);
 
@@ -262,6 +270,17 @@ impl CompressedPersistentStorage {
                 .strip_prefix(&unpacked)
                 .expect("file/directory path should be relative to unpacked directory");
 
+            if relative_path == Path::new("") {
+                // skip the root directory
+                continue;
+            }
+
+            tracing::debug!(
+                "packing `{}` into `{}`",
+                relative_path.display(),
+                packed.display()
+            );
+
             if tracked.file_type().is_dir() {
                 zip.add_directory_from_path(relative_path, options)
                     .map_err(StorageProviderError::cleanup_project)?;
@@ -271,6 +290,12 @@ impl CompressedPersistentStorage {
             let mut data = File::open(path).map_err(StorageProviderError::CleanupProject)?;
             let size = data.len().map_err(|_| {
                 StorageProviderError::cleanup_project_invalid_data("failed to obtain file size")
+            })?;
+
+            data.seek(0).map_err(|_| {
+                StorageProviderError::cleanup_project_invalid_data(
+                    "failed to seek to start of file",
+                )
             })?;
 
             // if not less than 4 GiB, use large file options
@@ -296,9 +321,15 @@ impl CompressedPersistentStorage {
 impl StorageCleanupHandler for CompressedPersistentStorage {
     fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
         let result = self.cleanup_storage_aux();
-        if result.is_err() {
-            if let Err(e) = fs::remove_file(self.path.with_extension("fdbz")) {
-                tracing::error!("failed to remove packed project file: {e}");
+        if result.is_err()
+            && let path = self.path.with_extension("fdbz")
+            && path.exists()
+        {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::error!(
+                    "failed to remove packed project file `{}`: {e}",
+                    path.display()
+                );
             }
         }
         result
@@ -312,8 +343,6 @@ impl CompressedPersistentStorage {
             .ok_or(StorageProviderError::NoProjectPath)?;
 
         Self::create_or_load(&path)?;
-
-        let mut attributes = AttributeMap::new();
 
         // ensure we point to the (unpacked) project path
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
@@ -356,10 +385,21 @@ impl CompressedPersistentStorage {
     }
 
     fn load_aux(packed: &Path, unpacked: &Path) -> Result<(), StorageProviderError> {
+        tracing::trace!("loading project from `{}`", packed.display());
+
         let mut zip = ZipArchive::new(Cursor::new(
             BytesOrMapping::from_file(packed).map_err(StorageProviderError::create_project)?,
         ))
         .map_err(StorageProviderError::create_project)?;
+
+        tracing::debug!("unpacking project to `{}`", unpacked.display());
+
+        if !unpacked.exists() {
+            tracing::debug!(
+                "unpacked project directory does not exist `{}`",
+                unpacked.display()
+            );
+        }
 
         zip.extract(unpacked)
             .map_err(StorageProviderError::create_project)?;
@@ -375,9 +415,10 @@ impl CompressedPersistentStorage {
             ));
         }
 
-        fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
+        tracing::trace!("creating project at `{}`", unpacked.display());
+        // fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
 
-        let result = Self::load_aux(&unpacked, path);
+        let result = Self::load_aux(path, &unpacked);
 
         if result.is_err() {
             // if we failed to load the project, we attempt to clean-up
