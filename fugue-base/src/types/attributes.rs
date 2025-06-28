@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
 
@@ -42,6 +43,18 @@ impl AttributeMap {
 
     pub fn set_attr(&mut self, key: impl ToString, val: impl serde::Serialize) {
         self.0.insert(key.to_string(), serde_json::json!(val));
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+
+    pub fn merge_vacant(&mut self, other: &Self) {
+        for (key, value) in other.0.iter() {
+            if let Entry::Vacant(entry) = self.0.entry(key.to_owned()) {
+                entry.insert(value.to_owned());
+            }
+        }
     }
 
     pub fn contains(&self, key: impl Borrow<str>) -> bool {

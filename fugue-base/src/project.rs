@@ -66,12 +66,24 @@ impl Project {
     where
         P: StorageProvider,
     {
+        Self::new_with::<P>(loadable, AttributeMap::default())
+    }
+
+    pub fn new_with<P>(
+        loadable: &impl Loadable,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
         let arch = loadable.architecture();
         let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
 
         // NOTE: we make a copy of the loader attributes, as project attributes will be a superset.
-        let mut attributes = loadable.attributes().clone();
+        let mut attributes = attributes.into();
+
+        attributes.merge_vacant(loadable.attributes());
 
         let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
 

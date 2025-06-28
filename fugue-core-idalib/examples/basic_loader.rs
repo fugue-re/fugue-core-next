@@ -4,9 +4,11 @@ use fugue_base::analysis::core::functions::FunctionRecovery;
 use fugue_base::analysis::AnalysisPass;
 use fugue_base::loader::{Loadable, LoadableFromFile};
 
-use fugue_base::project::Project;
-use fugue_base::storage::InMemoryStorage;
 use fugue_base::attributes;
+use fugue_base::project::Project;
+use fugue_base::storage::PersistentStorageProvider;
+use fugue_base::types::attributes::ATTRIBUTE_PROJECT_PATH;
+
 use fugue_core_idalib::{IDABinary, IDAFunctionBuilder};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,7 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("external symbol {sym}");
         }
 
-        let mut project = Project::new::<InMemoryStorage>(&binary)?;
+        let mut project = Project::new_with::<PersistentStorageProvider>(
+            &binary,
+            attributes! {
+                ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdb",
+            },
+        )?;
         let mut analyser = FunctionRecovery::new();
 
         analyser.add_function_builder_initialisation_pass(
