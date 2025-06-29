@@ -12,8 +12,7 @@ use crate::entities::instruction::InsnList;
 use crate::entities::{BasicBlock, Function, Insn};
 use crate::lifter::{ContextSet, LifterError};
 use crate::project::Project;
-use crate::types::address::AddressMap;
-use crate::types::Address;
+use crate::types::address::{Address, AddressMap};
 
 pub struct FunctionRecoveryConfig {
     pub max_blocks: usize,
@@ -278,6 +277,7 @@ impl PartialFunction {
         project: &mut Project,
     ) -> Result<Function, FunctionBuilderError> {
         self.lift_all_blocks(project)?;
+
         Ok(Function::new_with(self.name, self.entry)
             .with_blocks(self.blocks, self.instructions)
             .with_properties(self.properties))

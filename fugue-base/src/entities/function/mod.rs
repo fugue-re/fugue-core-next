@@ -2,7 +2,8 @@ use bincode::{Decode, Encode};
 use ustr::Ustr;
 
 use crate::entities::{BasicBlock, Insn};
-use crate::storage::entities::{Entity, EntityId};
+use crate::storage::entities::common::ENTITY_FUNCTION_ID;
+use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::Address;
 
 pub mod frame;
@@ -19,7 +20,13 @@ pub struct Function {
 }
 
 impl Entity for Function {
-    const ID: EntityId = 0x00;
+    const ID: EntityId = ENTITY_FUNCTION_ID;
+}
+
+impl MutableEntity<Address> for Function {
+    fn entity_key(&self) -> Address {
+        self.entry
+    }
 }
 
 impl Encode for Function {
@@ -150,11 +157,7 @@ impl Function {
         self.instructions = insns;
     }
 
-    pub(crate) fn with_blocks(
-        mut self,
-        blocks: Vec<BasicBlock>,
-        insns: Vec<Insn>,
-    ) -> Self {
+    pub(crate) fn with_blocks(mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) -> Self {
         self.set_blocks(blocks, insns);
         self
     }

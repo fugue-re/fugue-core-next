@@ -8,9 +8,12 @@ use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, Loader, LoaderError, LocalSymbols, SymbolEntry,
 };
-use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError};
+use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
 use crate::storage::segments::SegmentStorage;
-use crate::storage::{StorageContainer, StorageProvider, StorageProviderError};
+use crate::storage::{
+    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, StorageContainer, StorageProvider,
+    StorageProviderError,
+};
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 use crate::types::{Address, AttributeMap};
 
@@ -25,6 +28,14 @@ pub struct Project {
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        if let Err(e) = self.persist() {
+            tracing::error!("failed to persist project data: {e}");
+        }
+    }
 }
 
 pub struct ProjectRef<'a> {
@@ -87,15 +98,29 @@ impl Project {
 
         let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
 
-        // FIXME: ideally we should not clone these, since we could consume the loadable, but I
-        // can see scenarios where this isn't desirable.
+        if let Some(nattributes) = storage.entities.get(&ProjectEntity::Attributes)? {
+            // NOTE: we prefer the most recently set attributes, and use the persisted
+            // attributes for vacant keys.
+            attributes.merge_vacant(&nattributes);
+        }
 
-        let local_symbols = loadable.local_symbols().cloned();
-        let extern_symbols = loadable.extern_symbols().cloned();
+        let local_symbols = storage
+            .entities
+            .get(&ProjectEntity::LocalSymbols)?
+            .map(Some)
+            .unwrap_or_else(|| loadable.local_symbols().cloned());
 
-        // FIXME: generalise this (configurable cache size, storage backend, etc.).
+        let extern_symbols = storage
+            .entities
+            .get(&ProjectEntity::ExternSymbols)?
+            .map(Some)
+            .unwrap_or_else(|| loadable.extern_symbols().cloned());
 
-        let functions = EntityCache::new(storage.entities.clone(), 1024)?;
+        let function_cache_size = attributes
+            .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
+            .unwrap_or(DEFAULT_FUNCTION_CACHE_SIZE);
+
+        let functions = EntityCache::new(storage.entities.clone(), function_cache_size)?;
 
         Ok(Self {
             arch,
@@ -231,6 +256,33 @@ impl Project {
 
     pub fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    pub fn persist(&self) -> Result<(), StorageProviderError> {
+        // NOTE: the function cache is already persisted in the background, so we don't need to
+        // persist it here.
+        tracing::debug!("persisting project data");
+
+        tracing::debug!("persisting project attributes");
+        self.storage
+            .entities
+            .insert(&ProjectEntity::Attributes, &self.attributes)?;
+
+        if let Some(local_symbols) = self.local_symbols.as_ref() {
+            tracing::debug!("persisting local symbol table");
+            self.storage
+                .entities
+                .insert(&ProjectEntity::LocalSymbols, local_symbols)?;
+        }
+
+        if let Some(extern_symbols) = self.extern_symbols.as_ref() {
+            tracing::debug!("persisting external symbol table");
+            self.storage
+                .entities
+                .insert(&ProjectEntity::ExternSymbols, extern_symbols)?;
+        }
+
+        Ok(())
     }
 
     pub fn fields(&self) -> ProjectRef {

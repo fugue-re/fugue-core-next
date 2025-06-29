@@ -1,15 +1,61 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 
+use bincode::{Decode, Encode};
 use rustc_hash::FxHashMap;
 
-pub const ATTRIBUTE_FILE_PATH: &str = "project/input:path";
-pub const ATTRIBUTE_PROJECT_PATH: &str = "project:path";
+use crate::storage::entities::common::ENTITY_ATTRIBUTES_ID;
+use crate::storage::entities::{Entity, EntityId};
+
+pub const ATTRIBUTE_FILE_PATH: &str = "project.input_path";
+pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct AttributeMap(FxHashMap<String, serde_json::Value>);
+
+impl Encode for AttributeMap {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        self.0.len().encode(encoder)?;
+        for (key, value) in &self.0 {
+            key.encode(encoder)?;
+            Compat(value).encode(encoder)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for AttributeMap {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let len = usize::decode(decoder)?;
+
+        let mut map = FxHashMap::default();
+        map.reserve(len);
+
+        for _ in 0..len {
+            let key = String::decode(decoder)?;
+            let Compat(value) = Compat::<serde_json::Value>::decode(decoder)?;
+            map.insert(key, value);
+        }
+
+        Ok(Self(map))
+    }
+}
+
+impl Entity for AttributeMap {
+    const ID: EntityId = ENTITY_ATTRIBUTES_ID;
+}
 
 impl From<AttributeMap> for FxHashMap<String, serde_json::Value> {
     fn from(value: AttributeMap) -> Self {

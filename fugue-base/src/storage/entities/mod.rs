@@ -1,5 +1,9 @@
+use std::fmt::{Debug, Display};
+use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::sync::Arc;
 
+use bitflags::bitflags;
 use quick_cache::sync::Cache;
 use thiserror::Error;
 
@@ -7,7 +11,7 @@ use crate::loader::Loadable;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 pub mod common;
-pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix};
+pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
 
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
@@ -136,6 +140,234 @@ pub struct EntityCache<K: EntityKey, E: Entity> {
     storage: EntityStorage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EntityRef<E>(Arc<E>)
+where
+    E: Entity;
+
+impl<E> Display for EntityRef<E>
+where
+    E: Entity + Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<E> AsRef<E> for EntityRef<E>
+where
+    E: Entity,
+{
+    fn as_ref(&self) -> &E {
+        &self.0
+    }
+}
+
+impl<E> Deref for EntityRef<E>
+where
+    E: Entity,
+{
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<E> EntityRef<E>
+where
+    E: Entity,
+{
+    pub(crate) fn new(entity: Arc<E>) -> Self {
+        Self(entity)
+    }
+}
+
+pub trait MutableEntity<K: EntityKey>: Entity {
+    fn entity_key(&self) -> K;
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct EntityMutFlags: u8 {
+        const NONE = 0b0000_0000;
+        const CHANGED = 0b0000_0001;
+        const DROPPED = 0b0000_0010;
+    }
+}
+
+pub struct EntityMut<'a, K: EntityKey, E: Entity + MutableEntity<K>> {
+    entity: ManuallyDrop<Arc<E>>,
+    flags: EntityMutFlags,
+    cache: &'a EntityCache<K, E>,
+}
+
+impl<K, E> Debug for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K> + Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityMut")
+            .field("entity", &self.entity)
+            .field("flags", &self.flags)
+            .finish()
+    }
+}
+
+impl<K, E> Display for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K> + Display,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.entity.fmt(f)
+    }
+}
+
+impl<K, E> PartialEq<E> for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K> + PartialEq,
+{
+    fn eq(&self, other: &E) -> bool {
+        **self.entity == *other
+    }
+}
+
+impl<K, E> PartialEq for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K> + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.entity == other.entity
+    }
+}
+
+impl<K, E> Clone for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            entity: self.entity.clone(),
+            flags: EntityMutFlags::NONE,
+            cache: self.cache,
+        }
+    }
+}
+
+impl<K, E> Deref for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entity
+    }
+}
+
+impl<K, E> AsMut<E> for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    fn as_mut(&mut self) -> &mut E {
+        self.flags |= EntityMutFlags::CHANGED;
+        Arc::make_mut(&mut self.entity)
+    }
+}
+
+impl<K, E> AsRef<E> for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    fn as_ref(&self) -> &E {
+        &self.entity
+    }
+}
+
+impl<'a, K, E> EntityMut<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    pub(crate) fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
+        Self {
+            entity: ManuallyDrop::new(entity),
+            flags: EntityMutFlags::NONE,
+            cache,
+        }
+    }
+
+    /// SAFETY: Use of the entity after calling this method will lead to undefined behaviour.
+    ///
+    /// This method is used to persist the entity to the cache and mark it as dropped, it is
+    /// a separate method so we can reuse the logic for `EntityMut::drop` and
+    /// EntityCache::persist`.
+    unsafe fn persist(&mut self) -> Result<(), EntityStorageError> {
+        if self.flags.contains(EntityMutFlags::DROPPED) {
+            // If the entity was already dropped, we do not persist it again.
+            return Ok(());
+        }
+
+        // NOTE: if we were not the last reference to the entity, we do not persist it under the
+        // assumption that the final version of the entity's modifications will be take
+        // prescedence. It's unclear if we should even allow this possibility, as is, we do
+        // since EntityMut is clonable.
+        let entity_ref = unsafe { ManuallyDrop::take(&mut self.entity) };
+
+        // NOTE: we mark the entity as dropped to avoid persisting it again and potential undefined
+        // behaviour if we try to access the entity after this point.
+        self.flags.insert(EntityMutFlags::DROPPED);
+
+        if self.flags.contains(EntityMutFlags::CHANGED)
+            && let Some(entity) = Arc::into_inner(entity_ref)
+        {
+            let key = entity.entity_key();
+            self.cache.insert(key, entity)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<K, E> EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    pub fn changed(&self) -> bool {
+        self.flags.contains(EntityMutFlags::CHANGED)
+    }
+
+    pub fn mark_changed(&mut self) {
+        self.flags.insert(EntityMutFlags::CHANGED);
+    }
+
+    pub fn clear_changed(&mut self) {
+        self.flags.remove(EntityMutFlags::CHANGED);
+    }
+}
+
+impl<K, E> Drop for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity + MutableEntity<K>,
+{
+    fn drop(&mut self) {
+        if let Err(err) = unsafe { self.persist() } {
+            tracing::error!("failed to persist entity: {err}");
+        }
+    }
+}
+
 impl<K, E> EntityCache<K, E>
 where
     K: EntityKey,
@@ -148,18 +380,32 @@ where
         })
     }
 
-    pub fn get(&self, key: &K) -> Result<Option<Arc<E>>, EntityStorageError> {
+    pub fn get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
         if let Some(entity) = self.entities.get(key) {
-            return Ok(Some(entity.clone()));
+            return Ok(Some(EntityRef::new(entity)));
         }
 
         if let Some(entity) = self.storage.get::<K, E>(key)? {
             let entity = Arc::new(entity);
-            self.entities.insert(*key, entity.clone());
-            return Ok(Some(entity));
+            self.entities.insert(key.to_owned(), entity.to_owned());
+            return Ok(Some(EntityRef::new(entity)));
         }
 
         Ok(None)
+    }
+
+    pub fn get_mut(&self, key: &K) -> Result<Option<EntityMut<'_, K, E>>, EntityStorageError>
+    where
+        E: MutableEntity<K>,
+    {
+        Ok(self.get(key)?.map(|e| EntityMut::new(e.0, self)))
+    }
+
+    pub fn persist(&self, mut entity: EntityMut<'_, K, E>) -> Result<(), EntityStorageError>
+    where
+        E: MutableEntity<K>,
+    {
+        unsafe { entity.persist() }
     }
 
     pub fn contains(&self, key: &K) -> Result<bool, EntityStorageError> {
@@ -170,15 +416,18 @@ where
         self.storage.contains::<K, E>(key)
     }
 
-    pub fn insert(&self, key: K, entity: E) -> Result<(), EntityStorageError> {
+    pub fn insert(&self, key: K, entity: E) -> Result<EntityRef<E>, EntityStorageError> {
         // NOTE: we could check if the entity already exists in the cache and if it is the same,
         // then we exit early. Similarly, we could check if the entity exists in the storage
         // backing and if it is the same, then avoid inserting it again.
 
         self.storage.insert(&key, &entity)?;
-        self.entities.insert(key, Arc::new(entity));
 
-        Ok(())
+        let entity = Arc::new(entity);
+
+        self.entities.insert(key, entity.clone());
+
+        Ok(EntityRef::new(entity))
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
@@ -200,7 +449,7 @@ where
         self.storage.keys::<K, E>()
     }
 
-    pub fn iter(&self) -> Result<EntityIterator<'_, K, Arc<E>>, EntityStorageError> {
+    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
         // TODO: should we cache the elements in the iterator if the cache has capacity?
         let pfx = common::make_prefix::<K, E>();
         self.storage.backing.iter_prefix(&pfx).map(|iter| {
@@ -209,7 +458,7 @@ where
                     let key = common::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
                     if let Some(val) = self.entities.get(&key) {
-                        return Ok((key, val));
+                        return Ok((key, EntityRef::new(val)));
                     }
 
                     let val = bincode::decode_from_slice::<E, _>(
@@ -219,9 +468,9 @@ where
                     .map(|(entity, _)| entity)
                     .map_err(EntityStorageError::decode)?;
 
-                    Ok((key, Arc::new(val)))
+                    Ok((key, EntityRef::new(Arc::new(val))))
                 })
-            })) as EntityIterator<'_, K, Arc<E>>
+            })) as EntityIterator<'_, K, EntityRef<E>>
         })
     }
 }

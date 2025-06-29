@@ -3,10 +3,13 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::ops::RangeInclusive;
 
+use bincode::{Decode, Encode};
 use smallvec::SmallVec;
 use ustr::{Ustr, UstrMap};
 
 use crate::lifter::ContextSet;
+use crate::storage::entities::common::{ENTITY_EXTERN_SYMBOLS_ID, ENTITY_LOCAL_SYMBOLS_ID};
+use crate::storage::entities::{Entity, EntityId};
 use crate::types::Address;
 
 #[derive(Debug, Clone)]
@@ -21,6 +24,35 @@ where
 {
     fn from(value: T) -> Self {
         Self::new(value)
+    }
+}
+
+impl Encode for ExternFunctionTemplate {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bytes.len().encode(encoder)?;
+        for b in &self.bytes {
+            b.encode(encoder)?;
+        }
+        self.context.encode(encoder)?;
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for ExternFunctionTemplate {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bytes_len = usize::decode(decoder)?;
+        let mut bytes = SmallVec::<[u8; 16]>::with_capacity(bytes_len);
+        for _ in 0..bytes_len {
+            let b = u8::decode(decoder)?;
+            bytes.push(b);
+        }
+        let context = ContextSet::decode(decoder)?;
+        Ok(Self { bytes, context })
     }
 }
 
@@ -119,6 +151,24 @@ bitflags::bitflags! {
     }
 }
 
+impl<C> Decode<C> for SymbolProperties {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let value = u8::decode(decoder)?;
+        Ok(SymbolProperties::from_bits_truncate(value))
+    }
+}
+
+impl Encode for SymbolProperties {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
 impl Display for SymbolProperties {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut names = self.iter_names();
@@ -164,6 +214,73 @@ pub struct LocalSymbols {
     indices: BTreeMap<usize, Address>,
     sym_to_addr: UstrMap<Address>,
     addr_to_sym: BTreeMap<Address, (Option<Ustr>, Cell<SymbolProperties>)>,
+}
+
+impl<C> Decode<C> for LocalSymbols {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let indices = BTreeMap::<usize, Address>::decode(decoder)?;
+
+        let sym_len = usize::decode(decoder)?;
+        let sym_to_addr = (0..sym_len)
+            .into_iter()
+            .map(|_| {
+                let Compat(sym) = Compat::<Ustr>::decode(decoder)?;
+                let addr = Address::decode(decoder)?;
+                Ok((sym, addr))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let addr_len = usize::decode(decoder)?;
+        let addr_to_sym = (0..addr_len)
+            .into_iter()
+            .map(|_| {
+                let addr = Address::decode(decoder)?;
+                let Compat(sym) = Compat::<Option<Ustr>>::decode(decoder)?;
+                let props = Cell::new(SymbolProperties::decode(decoder)?);
+                Ok((addr, (sym, props)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            indices,
+            sym_to_addr,
+            addr_to_sym,
+        })
+    }
+}
+
+impl Encode for LocalSymbols {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        self.indices.encode(encoder)?;
+
+        self.sym_to_addr.len().encode(encoder)?;
+        for (&sym, &addr) in &self.sym_to_addr {
+            sym.encode(encoder)?;
+            addr.encode(encoder)?;
+        }
+
+        self.addr_to_sym.len().encode(encoder)?;
+        for (&addr, (sym, props)) in &self.addr_to_sym {
+            addr.encode(encoder)?;
+            Compat(sym).encode(encoder)?;
+            props.get().encode(encoder)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Entity for LocalSymbols {
+    const ID: EntityId = ENTITY_LOCAL_SYMBOLS_ID;
 }
 
 impl LocalSymbols {
@@ -325,8 +442,90 @@ pub struct ExternSymbols {
     template: ExternFunctionTemplate,
 }
 
+impl<C> Decode<C> for ExternSymbols {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let base = Address::decode(decoder)?;
+        let alignment = usize::decode(decoder)?;
+        let indices = BTreeMap::<usize, Address>::decode(decoder)?;
+
+        let sym_len = usize::decode(decoder)?;
+        let sym_to_addr = (0..sym_len)
+            .into_iter()
+            .map(|_| {
+                let Compat(sym) = Compat::<Ustr>::decode(decoder)?;
+                let addr = Address::decode(decoder)?;
+                Ok((sym, addr))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let addr_len = usize::decode(decoder)?;
+        let addr_to_sym = (0..addr_len)
+            .into_iter()
+            .map(|_| {
+                let addr = Address::decode(decoder)?;
+                let Compat(sym) = Compat::<Option<Ustr>>::decode(decoder)?;
+                let props = Cell::new(SymbolProperties::decode(decoder)?);
+                Ok((addr, (sym, props)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let template = ExternFunctionTemplate::decode(decoder)?;
+
+        Ok(Self {
+            base,
+            alignment,
+            indices,
+            sym_to_addr,
+            addr_to_sym,
+            template,
+        })
+    }
+}
+
+impl Encode for ExternSymbols {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        self.base.encode(encoder)?;
+        self.alignment.encode(encoder)?;
+        self.indices.encode(encoder)?;
+
+        self.sym_to_addr.len().encode(encoder)?;
+        for (&sym, &addr) in &self.sym_to_addr {
+            sym.encode(encoder)?;
+            addr.encode(encoder)?;
+        }
+
+        self.addr_to_sym.len().encode(encoder)?;
+        for (&addr, (sym, props)) in &self.addr_to_sym {
+            addr.encode(encoder)?;
+            Compat(sym).encode(encoder)?;
+            props.get().encode(encoder)?;
+        }
+
+        self.template.encode(encoder)?;
+
+        Ok(())
+    }
+}
+
+impl Entity for ExternSymbols {
+    const ID: EntityId = ENTITY_EXTERN_SYMBOLS_ID;
+}
+
 impl ExternSymbols {
-    pub fn new(base: impl Into<Address>, alignment: usize, template: ExternFunctionTemplate) -> Self {
+    pub fn new(
+        base: impl Into<Address>,
+        alignment: usize,
+        template: ExternFunctionTemplate,
+    ) -> Self {
         Self {
             base: base.into(),
             alignment,
