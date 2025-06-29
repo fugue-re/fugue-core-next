@@ -16,7 +16,7 @@ use fugue_base::types::{Address, AttributeMap};
 
 use idalib::idb::{IDBOpenOptions, IDB};
 
-pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida/database:path";
+pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
 
 pub struct IDABinary {
     database: IDB,

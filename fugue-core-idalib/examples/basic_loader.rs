@@ -9,7 +9,7 @@ use fugue_base::project::Project;
 use fugue_base::storage::PersistentStorageProvider;
 use fugue_base::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
-use fugue_core_idalib::{IDABinary, IDAFunctionBuilder};
+use fugue_core_idalib::{IDABinary, IDAFunctionBuilder, ATTRIBUTE_IDA_DATABASE_PATH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = tracing_subscriber::fmt()
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let binary = IDABinary::from_file_with(
             "tests/test",
             attributes! {
-                "ida/database:path" => "tests/test-non-clashing.idb",
+                ATTRIBUTE_IDA_DATABASE_PATH => "tests/test-non-clashing.idb",
             },
         )?;
         let mut segments = binary.segments();
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::new_with::<PersistentStorageProvider>(
             &binary,
             attributes! {
-                ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdb",
+                ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
             },
         )?;
         let mut analyser = FunctionRecovery::new();
