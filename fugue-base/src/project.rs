@@ -96,7 +96,11 @@ impl Project {
 
         attributes.merge_vacant(loadable.attributes());
 
+        tracing::trace!("initialising project storage layer");
+
         let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
+
+        tracing::trace!("loading project attributes");
 
         if let Some(nattributes) = storage.entities.get(&ProjectEntity::Attributes)? {
             // NOTE: we prefer the most recently set attributes, and use the persisted
@@ -104,17 +108,23 @@ impl Project {
             attributes.merge_vacant(&nattributes);
         }
 
+        tracing::trace!("loading project segments");
+
         let local_symbols = storage
             .entities
             .get(&ProjectEntity::LocalSymbols)?
             .map(Some)
             .unwrap_or_else(|| loadable.local_symbols().cloned());
 
+        tracing::trace!("loading project external symbols");
+
         let extern_symbols = storage
             .entities
             .get(&ProjectEntity::ExternSymbols)?
             .map(Some)
             .unwrap_or_else(|| loadable.extern_symbols().cloned());
+
+        tracing::trace!("loading project functions");
 
         let function_cache_size = attributes
             .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
@@ -208,6 +218,10 @@ impl Project {
         self.local_symbols.as_ref()
     }
 
+    pub fn local_symbols_mut(&mut self) -> Option<&mut LocalSymbols> {
+        self.local_symbols.as_mut()
+    }
+
     pub fn iter_local_symbols<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
         self.local_symbols
             .as_ref()
@@ -217,6 +231,10 @@ impl Project {
 
     pub fn extern_symbols(&self) -> Option<&ExternSymbols> {
         self.extern_symbols.as_ref()
+    }
+
+    pub fn extern_symbols_mut(&mut self) -> Option<&mut ExternSymbols> {
+        self.extern_symbols.as_mut()
     }
 
     pub fn iter_extern_symbols<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
