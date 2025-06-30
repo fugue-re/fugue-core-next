@@ -1,26 +1,42 @@
 use std::path::PathBuf;
 
+use rocksdb::DB;
+
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrSlice};
+
+pub mod options;
 
 use super::{
     EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 
-pub struct RocksDbEntityStorage;
+impl From<rocksdb::Error> for EntityStorageError {
+    fn from(error: rocksdb::Error) -> Self {
+        EntityStorageError::backing(error)
+    }
+}
+
+pub struct RocksDbEntityStorage {
+    database: DB,
+}
 
 impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
     fn from_loadable(
-        loadable: &impl Loadable,
+        _loadable: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError> {
-        let _project = attributes
+        let db_path = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .ok_or(EntityStorageError::NoProjectPath)?;
 
-        todo!()
+        // TODO: allow options to be passed in via attributes
+
+        Ok(Self {
+            database: DB::open_default(&db_path)?,
+        })
     }
 }
 
