@@ -118,22 +118,47 @@ impl AttributeMap {
 
 #[macro_export]
 macro_rules! attributes {
-    ( $($key:expr => $value:expr),* $(,)? ) => {
+    // Handle embedded maps with braces
+    ( $($key:expr => { $($json:tt)* }),* $(,)? ) => {
         {
             #[allow(unused_mut)]
             let mut attrs = $crate::types::attributes::AttributeMap::new();
             $(
-                attrs.set_attr($key, $value);
+                attrs.set_attr($key, serde_json::json!({ $($json)* }));
+            )*
+            attrs
+        }
+    };
+    // Handle mixed values (some with braces, some without)
+    ( $($key:expr => $value:tt),* $(,)? ) => {
+        {
+            #[allow(unused_mut)]
+            let mut attrs = $crate::types::attributes::AttributeMap::new();
+            $(
+                attrs.set_attr($key, $crate::attributes_value!($value));
             )*
             attrs
         }
     };
 }
 
+// Helper macro to handle different value types
+#[macro_export]
+macro_rules! attributes_value {
+    // If it's a braced block, treat as JSON
+    ({ $($json:tt)* }) => {
+        serde_json::json!({ $($json)* })
+    };
+    // Otherwise, use the value as-is
+    ($value:expr) => {
+        $value
+    };
+}
+
 #[cfg(test)]
 mod test {
+    use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
-
     use uuid::Uuid;
 
     #[test]
@@ -151,5 +176,44 @@ mod test {
         );
 
         assert_eq!(amap.get_attr::<Uuid>("guid"), Some(guid));
+    }
+
+    #[test]
+    fn teat_attrs_macro_with_json() {
+        let amap = attributes![
+            "project" => {
+                "name": "My Project",
+                "version": {
+                    "major": "1",
+                    "minor": "0",
+                    "patch": "0"
+                }
+            }
+        ];
+
+        #[derive(Deserialize, Serialize)]
+        struct MyProject {
+            name: String,
+            version: MyProjectVersion,
+        }
+
+        #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+        struct MyProjectVersion {
+            major: String,
+            minor: String,
+            patch: String,
+        }
+
+        let my_project = amap.get_attr::<MyProject>("project");
+
+        assert!(my_project.is_some());
+
+        let my_project = my_project.unwrap();
+        assert_eq!(my_project.name, "My Project");
+        assert_eq!(my_project.version, MyProjectVersion {
+            major: "1".to_owned(),
+            minor: "0".to_owned(),
+            patch: "0".to_owned(),
+        });
     }
 }
