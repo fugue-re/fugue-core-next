@@ -1,4 +1,4 @@
-use rug::Integer as BigInt;
+use malachite::Integer as BigInt;
 use static_init::dynamic;
 
 #[dynamic]

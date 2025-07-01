@@ -8,7 +8,9 @@ use std::ops::{
 use std::str::FromStr;
 
 use fugue_bytes::Order;
-use rug::Integer as BigInt;
+use malachite::Integer as BigInt;
+use malachite::base::num::conversion::traits::FromStringBase;
+use malachite::base::num::logic::traits::SignificantBits;
 
 use crate::error::{ParseError, TryFromBitVecError};
 use crate::{core_bigint, core_u64};
@@ -183,11 +185,11 @@ impl FromStr for BitVec {
         let (cst, sz) = s.rsplit_once(':').ok_or(ParseError::InvalidFormat)?;
 
         let val = if let Some(cstv) = cst.strip_prefix("0x") {
-            BigInt::from_str_radix(cstv, 16)
+            BigInt::from_string_base(16, cstv)
         } else {
-            BigInt::from_str_radix(cst, 10)
+            BigInt::from_string_base(10, cst)
         }
-        .map_err(|_| ParseError::InvalidConst)?;
+        .ok_or(ParseError::InvalidConst)?;
 
         let bits = u32::from_str(sz).map_err(|_| ParseError::InvalidSize)?;
 
@@ -199,7 +201,7 @@ impl BitVec {
     pub fn from_str_radix(s: &str, radix: u32) -> Result<Self, ParseError> {
         let (cst, sz) = s.rsplit_once(':').ok_or(ParseError::InvalidFormat)?;
         let val =
-            BigInt::from_str_radix(cst, radix as i32).map_err(|_| ParseError::InvalidConst)?;
+            BigInt::from_string_base(radix as u8, cst).ok_or(ParseError::InvalidConst)?;
 
         let bits = u32::from_str(sz).map_err(|_| ParseError::InvalidSize)?;
         Ok(Self::from_bigint(val, bits))
@@ -218,7 +220,7 @@ impl BitVec {
 
     #[allow(unused)]
     pub(crate) fn from_bigint_with(v: BigInt, mask: &'static BigInt) -> Self {
-        let bits = mask.count_ones().unwrap() as u32;
+        let bits = mask.significant_bits() as u32;
         if bits <= 64 {
             let v = core_bigint::BitVec::from_bigint_with(v, mask)
                 .to_u64()
