@@ -2141,4 +2141,56 @@ mod test {
         );
         assert_eq!(std::mem::size_of::<BitVec>(), 16);
     }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let v1 = BitVec::from(0x8000_0000u32);
+        let v2 = BitVec::from(0x7fff_ffffu32);
+
+        let mut bytes = [0u8; 4];
+
+        v1.to_be_bytes(&mut bytes);
+        assert_eq!(bytes, [0x80, 0x00, 0x00, 0x00]);
+
+        let v3 = BitVec::from_be_bytes(&bytes);
+        assert_eq!(v3, v1);
+
+        v2.to_le_bytes(&mut bytes);
+        assert_eq!(bytes, [0xff, 0xff, 0xff, 0x7f]);
+
+        let v4 = BitVec::from_le_bytes(&bytes);
+        assert_eq!(v4, v2);
+
+        let v5 = "0xffffffffffffffffffffffffffffffff:128"
+            .parse::<BitVec>()
+            .unwrap();
+        let v6 = "0x7fffffffffffffffffffffffffffffff:128"
+            .parse::<BitVec>()
+            .unwrap();
+
+        let mut bytes = [0u8; 16];
+        v5.to_be_bytes(&mut bytes);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff
+            ]
+        );
+
+        let v7 = BitVec::from_be_bytes(&bytes);
+        assert_eq!(v7, v5);
+
+        v6.to_le_bytes(&mut bytes);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0x7f
+            ]
+        );
+
+        let v8 = BitVec::from_le_bytes(&bytes);
+        assert_eq!(v8, v6);
+    }
 }
