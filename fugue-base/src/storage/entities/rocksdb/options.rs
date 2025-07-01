@@ -877,7 +877,7 @@ impl RocksDbOptions {
     }
 
     /// Apply these options to a rocksdb Options instance
-    pub fn apply(&self, opts: &mut rocksdb::Options) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn apply(&self, opts: &mut rocksdb::Options) {
         // Basic options
         if let Some(v) = self.create_if_missing {
             opts.create_if_missing(v);
@@ -1402,7 +1402,5 @@ impl RocksDbOptions {
                 }
             }
         }
-
-        Ok(())
     }
 }
