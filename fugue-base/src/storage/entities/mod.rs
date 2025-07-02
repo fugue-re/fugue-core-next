@@ -8,6 +8,7 @@ use quick_cache::sync::Cache;
 use thiserror::Error;
 
 use crate::loader::Loadable;
+use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 pub mod common;
@@ -120,6 +121,7 @@ pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
         Self: Sized;
 }
 
+/*
 pub trait EntityStorageProvider: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
@@ -133,6 +135,159 @@ pub trait EntityStorageProvider: Send + Sync {
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
+}
+*/
+
+pub trait EntityStorageProvider: Send + Sync {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
+    fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>;
+
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
+
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
+}
+
+pub trait ErasedEntityStorageProvider: Send + Sync {
+    fn erased_get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
+    fn erased_get_as<'a>(
+        &self,
+        key: &[u8],
+        mapper: OutMapper<'a>,
+    ) -> Result<Option<Out>, EntityStorageError>;
+    fn erased_insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
+    fn erased_remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
+    fn erased_contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
+
+    fn erased_iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
+    fn erased_iter_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+
+    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
+}
+
+impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.erased_get(key)
+    }
+
+    fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        let mapper = OutMapper::new(f);
+        let t = self
+            .erased_get_as(key, mapper)?
+            .map(|out| unsafe { out.take::<T>() });
+        Ok(t)
+    }
+
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.erased_insert(key, value)
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.erased_remove(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.erased_contains(key)
+    }
+
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+        self.erased_iter_prefix_keys(prefix)
+    }
+
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.erased_iter_prefix(prefix)
+    }
+
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+        self.erased_bulk_inserter()
+    }
+}
+
+impl<T> ErasedEntityStorageProvider for T
+where
+    T: EntityStorageProvider,
+{
+    fn erased_get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.get(key)
+    }
+
+    fn erased_get_as<'a>(
+        &self,
+        key: &[u8],
+        mut mapper: OutMapper<'a>,
+    ) -> Result<Option<Out>, EntityStorageError> {
+        self.get_as(key, move |bytes| mapper.apply(bytes))
+    }
+
+    fn erased_insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.insert(key, value)
+    }
+
+    fn erased_remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.remove(key)
+    }
+
+    fn erased_contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.contains(key)
+    }
+
+    fn erased_iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+        self.iter_prefix_keys(prefix)
+    }
+
+    fn erased_iter_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.iter_prefix(prefix)
+    }
+
+    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+        self.bulk_inserter()
+    }
+}
+
+pub struct OutMapper<'a> {
+    f: Box<dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a>,
+}
+
+impl<'a> OutMapper<'a> {
+    fn new<E, F>(mut f: F) -> Self
+    where
+        F: FnMut(&[u8]) -> Result<E, EntityStorageError> + 'a,
+    {
+        Self {
+            f: Box::new(move |bytes| f(bytes).map(|v| unsafe { Out::new(v) })),
+        }
+    }
+
+    fn apply(&mut self, bytes: &[u8]) -> Result<Out, EntityStorageError> {
+        (self.f)(bytes)
+    }
 }
 
 pub struct EntityCache<K: EntityKey, E: Entity> {
@@ -477,7 +632,7 @@ where
 
 #[derive(Clone)]
 pub struct EntityStorage {
-    backing: Arc<dyn EntityStorageProvider>,
+    backing: Arc<dyn ErasedEntityStorageProvider>,
 }
 
 impl EntityStorage {
@@ -489,13 +644,12 @@ impl EntityStorage {
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
         let key = common::make_key::<K, E>(key);
-        let Some(val) = self.backing.get(&key)? else {
-            return Ok(None);
-        };
 
-        bincode::decode_from_slice::<E, _>(val.as_slice(), bincode::config::standard())
-            .map(|(entity, _)| Some(entity))
-            .map_err(EntityStorageError::decode)
+        self.backing.get_as(&key, |bytes| {
+            bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
+                .map(|(entity, _)| entity)
+                .map_err(EntityStorageError::decode)
+        })
     }
 
     pub fn insert<K: EntityKey, E: Entity>(

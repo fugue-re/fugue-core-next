@@ -54,18 +54,34 @@ impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
 impl EntityStorageProvider for RocksDbEntityStorage {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         // TODO: add get_as so we can operate on PinnedSlice?
-        Ok(self.database
+        Ok(self
+            .database
             .get(key)
             .map_err(EntityStorageError::backing)?
             .map(BytesOrSlice::from))
     }
 
+    fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        self.database
+            .get_pinned(key)
+            .map_err(EntityStorageError::backing)?
+            .map(|pinned| f(pinned.as_ref()))
+            .transpose()
+    }
+
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        self.database.put(key, value).map_err(EntityStorageError::backing)
+        self.database
+            .put(key, value)
+            .map_err(EntityStorageError::backing)
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
-        self.database.delete(key).map_err(EntityStorageError::backing)
+        self.database
+            .delete(key)
+            .map_err(EntityStorageError::backing)
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {

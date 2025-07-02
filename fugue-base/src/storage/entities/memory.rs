@@ -70,6 +70,24 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         Ok(None)
     }
 
+    fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        let (prefix, key) =
+            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+
+        let Some(map) = self.data.get(&prefix) else {
+            return Ok(None);
+        };
+
+        if let Some(value) = map.get(key) {
+            return f(value.as_ref()).map(Some);
+        }
+
+        Ok(None)
+    }
+
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         let (prefix, key) =
             Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
