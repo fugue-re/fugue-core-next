@@ -85,25 +85,101 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        // TODO: check if there's a more efficient way to check existence
+        if !self.database.key_may_exist(key) {
+            return Ok(false);
+        }
+
+        // TODO: check if there's a more efficient way to check this without
+        // fetching the value
         self.database
             .get_pinned(key)
             .map_err(EntityStorageError::backing)
             .map(|opt| opt.is_some())
     }
 
-    fn iter_prefix_keys(
+    fn iter_prefix_keys<'a>(
         &self,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-        todo!()
+        // TODO: test if a raw iterator is more efficient than a regular iterator for
+        // keys
+        Ok(RocksDbEntityKeyBytesIterator::new(
+            self.database.raw_iterator(),
+            prefix,
+        ))
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        todo!()
+        Ok(RocksDbEntityBytesIterator::new(
+            self.database.prefix_iterator(prefix),
+        ))
     }
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         todo!()
+    }
+}
+
+struct RocksDbEntityKeyBytesIterator<'a> {
+    iter: rocksdb::DBRawIterator<'a>,
+    prefix: Box<[u8]>,
+}
+
+impl<'a> RocksDbEntityKeyBytesIterator<'a> {
+    fn new(mut iter: rocksdb::DBRawIterator<'a>, prefix: &[u8]) -> EntityKeyBytesIterator<'a> {
+        iter.seek(prefix);
+        Box::new(Self {
+            iter,
+            prefix: Box::from(prefix),
+        })
+    }
+}
+
+impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
+    type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.iter.valid() {
+            return None;
+        }
+
+        let key = self.iter.key()?;
+
+        if !key.starts_with(&self.prefix) {
+            return None;
+        }
+
+        let key = BytesOrSlice::from(key.to_vec());
+
+        self.iter.next();
+
+        Some(Ok(key))
+    }
+}
+
+#[repr(transparent)]
+struct RocksDbEntityBytesIterator<'a> {
+    iter: rocksdb::DBIterator<'a>,
+}
+
+impl<'a> RocksDbEntityBytesIterator<'a> {
+    fn new(iter: rocksdb::DBIterator<'a>) -> EntityBytesIterator<'a> {
+        Box::new(Self { iter })
+    }
+}
+
+impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
+    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|kv| {
+            kv.map(|(key, val)| {
+                (
+                    BytesOrSlice::from(key.into_vec()),
+                    BytesOrSlice::from(val.into_vec()),
+                )
+            })
+            .map_err(EntityStorageError::backing)
+        })
     }
 }
