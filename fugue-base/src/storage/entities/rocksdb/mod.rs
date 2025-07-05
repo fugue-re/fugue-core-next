@@ -1,3 +1,4 @@
+use std::mem;
 use std::path::PathBuf;
 
 use crate::loader::Loadable;
@@ -7,14 +8,20 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator, EntityStorageError,
-    EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
+    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str =
     "storage.entities.backend.rocksdb.options";
 
 const PROJECT_ROCKSDB_DATA: &str = "entities.rdb";
+
+// Maximum batch size for bulk operations
+const BATCH_SIZE: usize = 1024;
+// Maximum size of a batch in bytes
+const BATCH_MEMORY_LIMIT: usize = 4 * 1024 * 1024; // 4 MiB
 
 impl From<rocksdb::Error> for EntityStorageError {
     fn from(error: rocksdb::Error) -> Self {
@@ -101,11 +108,11 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         &self,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-        // TODO: test if a raw iterator is more efficient than a regular iterator for
-        // keys
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_range(rocksdb::PrefixRange(prefix.to_vec()));
+
         Ok(RocksDbEntityKeyBytesIterator::new(
-            self.database.raw_iterator(),
-            prefix,
+            self.database.raw_iterator_opt(opts),
         ))
     }
 
@@ -116,22 +123,18 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     }
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        todo!()
+        Ok(Box::new(RocksDbEntityInserter::new(self)))
     }
 }
 
+#[repr(transparent)]
 struct RocksDbEntityKeyBytesIterator<'a> {
     iter: rocksdb::DBRawIterator<'a>,
-    prefix: Box<[u8]>,
 }
 
 impl<'a> RocksDbEntityKeyBytesIterator<'a> {
-    fn new(mut iter: rocksdb::DBRawIterator<'a>, prefix: &[u8]) -> EntityKeyBytesIterator<'a> {
-        iter.seek(prefix);
-        Box::new(Self {
-            iter,
-            prefix: Box::from(prefix),
-        })
+    fn new(iter: rocksdb::DBRawIterator<'a>) -> EntityKeyBytesIterator<'a> {
+        Box::new(Self { iter })
     }
 }
 
@@ -143,13 +146,7 @@ impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
             return None;
         }
 
-        let key = self.iter.key()?;
-
-        if !key.starts_with(&self.prefix) {
-            return None;
-        }
-
-        let key = BytesOrSlice::from(key.to_vec());
+        let key = BytesOrSlice::from(self.iter.key()?.to_vec());
 
         self.iter.next();
 
@@ -181,5 +178,63 @@ impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
             })
             .map_err(EntityStorageError::backing)
         })
+    }
+}
+
+struct RocksDbEntityInserter<'a> {
+    storage: &'a RocksDbEntityStorage,
+    batch: rocksdb::WriteBatch,
+}
+
+impl<'a> RocksDbEntityInserter<'a> {
+    fn new(storage: &'a RocksDbEntityStorage) -> Self {
+        Self {
+            storage,
+            batch: rocksdb::WriteBatch::default(),
+        }
+    }
+}
+
+impl<'a> Drop for RocksDbEntityInserter<'a> {
+    fn drop(&mut self) {
+        // if the inserter is dropped without committing, we should still flush the batch
+        if self.batch.is_empty() {
+            return;
+        }
+
+        let batch = mem::take(&mut self.batch);
+
+        if let Err(e) = self.storage.database.write(batch) {
+            tracing::warn!("failed to flush batch to storage: {e}")
+        }
+    }
+}
+
+impl<'a> EntityStorageBulkInserter<'a> for RocksDbEntityInserter<'a> {
+    fn insert(
+        &mut self,
+        key: BytesOrSlice<'a>,
+        value: BytesOrSlice<'a>,
+    ) -> Result<(), EntityStorageError> {
+        // flush the current batch before inserting more, if it exceeds the limits
+        if self.batch.len() >= BATCH_SIZE || self.batch.size_in_bytes() >= BATCH_MEMORY_LIMIT {
+            let batch = std::mem::take(&mut self.batch);
+            self.storage
+                .database
+                .write(batch)
+                .map_err(EntityStorageError::backing)?;
+        }
+
+        self.batch.put(key, value);
+
+        Ok(())
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
+        let batch = mem::take(&mut self.batch);
+        self.storage
+            .database
+            .write(batch)
+            .map_err(EntityStorageError::backing)
     }
 }

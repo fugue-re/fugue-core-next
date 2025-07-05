@@ -234,7 +234,7 @@ impl StorageProvider for PersistentStorageProvider {
     ) -> Result<StorageContainer, StorageProviderError> {
         let compressed = CompressedPersistentStorage::new(attributes)?;
 
-        let entities = EntityStorage::new(DefaultTransientEntityStorage::from_loadable(
+        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
             loadable, attributes,
         )?);
         let segments = SegmentStorage::new(DefaultPersistentSegmentStorage::from_loadable(

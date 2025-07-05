@@ -66,7 +66,8 @@ pub trait EntityStorageBulkInserter<'a> {
         key: BytesOrSlice<'a>,
         value: BytesOrSlice<'a>,
     ) -> Result<(), EntityStorageError>;
-    fn finish(self: Box<Self>) -> Result<(), EntityStorageError>;
+
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
 }
 
 pub type EntityBytesIterator<'a> =
@@ -106,8 +107,8 @@ impl<'a> EntityBulkInserter<'a> {
         self.inner.insert(key, encoded)
     }
 
-    pub fn finish(self) -> Result<(), EntityStorageError> {
-        self.inner.finish()
+    pub fn commit(self) -> Result<(), EntityStorageError> {
+        self.inner.commit()
     }
 }
 

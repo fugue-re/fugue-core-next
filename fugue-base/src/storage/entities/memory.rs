@@ -17,6 +17,7 @@ use super::{
     EntityStorageProviderFromLoadable,
 };
 
+// Maximum batch size for bulk operations
 const BATCH_SIZE: usize = 1024;
 
 pub struct InMemoryEntityStorage {
@@ -257,7 +258,7 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<(), EntityStorageError> {
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
         for (prefix, batch) in self.batches {
             let mut map = self.inner.data.entry(prefix).or_insert_with(SkipMap::new);
             map.extend(
