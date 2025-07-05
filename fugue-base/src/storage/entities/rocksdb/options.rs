@@ -25,11 +25,17 @@ pub struct RocksDbOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub increase_parallelism: Option<i32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub optimize_level_style_compaction_memtable_memory_budget: Option<usize>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "optimize_level_style_compaction_memtable_memory_budget"
+    )]
+    pub optimise_level_style_compaction_memtable_memory_budget: Option<usize>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub optimize_universal_style_compaction_memtable_memory_budget: Option<usize>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "optimize_universal_style_compaction_memtable_memory_budget"
+    )]
+    pub optimise_universal_style_compaction_memtable_memory_budget: Option<usize>,
 
     // Compression options
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,9 +96,9 @@ pub struct RocksDbOptions {
     #[serde_as(as = "Option<FromInto<CompactionStyle>>")]
     pub compaction_style: Option<rocksdb::DBCompactionStyle>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "compaction_pri")]
     #[serde_as(as = "Option<FromInto<CompactionPriority>>")]
-    pub compaction_pri: Option<CompactionPriority>,
+    pub compaction_priority: Option<CompactionPriority>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_auto_compactions: Option<bool>,
@@ -197,8 +203,11 @@ pub struct RocksDbOptions {
     pub stats_persist_period_sec: Option<u32>,
 
     // Memory options
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub optimize_filters_for_hits: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "optimize_filters_for_hits"
+    )]
+    pub optimise_filters_for_hits: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memtable_prefix_bloom_ratio: Option<f64>,
@@ -659,8 +668,11 @@ pub struct BlockBasedTableOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whole_key_filtering: Option<bool>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub optimize_filters_for_memory: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "optimize_filters_for_memory"
+    )]
+    pub optimise_filters_for_memory: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -896,10 +908,10 @@ impl RocksDbOptions {
         if let Some(v) = self.increase_parallelism {
             opts.increase_parallelism(v);
         }
-        if let Some(v) = self.optimize_level_style_compaction_memtable_memory_budget {
+        if let Some(v) = self.optimise_level_style_compaction_memtable_memory_budget {
             opts.optimize_level_style_compaction(v);
         }
-        if let Some(v) = self.optimize_universal_style_compaction_memtable_memory_budget {
+        if let Some(v) = self.optimise_universal_style_compaction_memtable_memory_budget {
             opts.optimize_universal_style_compaction(v);
         }
 
@@ -967,7 +979,7 @@ impl RocksDbOptions {
         if let Some(v) = self.compaction_style {
             opts.set_compaction_style(v);
         }
-        if let Some(v) = self.compaction_pri {
+        if let Some(v) = self.compaction_priority {
             opts.set_compaction_pri(v.into());
         }
         if let Some(v) = self.disable_auto_compactions {
@@ -1076,7 +1088,7 @@ impl RocksDbOptions {
         }
 
         // Memory options
-        if let Some(v) = self.optimize_filters_for_hits {
+        if let Some(v) = self.optimise_filters_for_hits {
             opts.set_optimize_filters_for_hits(v);
         }
         if let Some(v) = self.memtable_prefix_bloom_ratio {
@@ -1314,8 +1326,8 @@ impl RocksDbOptions {
             if let Some(whole_key_filtering) = v.whole_key_filtering {
                 table_opts.set_whole_key_filtering(whole_key_filtering);
             }
-            if let Some(optimize_filters_for_memory) = v.optimize_filters_for_memory {
-                table_opts.set_optimize_filters_for_memory(optimize_filters_for_memory);
+            if let Some(optimise_filters_for_memory) = v.optimise_filters_for_memory {
+                table_opts.set_optimize_filters_for_memory(optimise_filters_for_memory);
             }
             opts.set_block_based_table_factory(&table_opts);
         }
