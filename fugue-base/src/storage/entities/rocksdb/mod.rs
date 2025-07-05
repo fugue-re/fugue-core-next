@@ -46,11 +46,14 @@ impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
 
         let mut options = rocksdb::Options::default();
 
+        options.create_if_missing(true);
+
         if let Some(db_options) =
             attributes.get_attr::<options::RocksDbOptions>(ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS)
         {
             db_options.apply(&mut options);
         }
+
 
         Ok(Self {
             database: rocksdb::DB::open(&options, db_path)?,

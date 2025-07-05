@@ -15,17 +15,123 @@ pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
 #[serde(transparent)]
 pub struct AttributeMap(FxHashMap<String, serde_json::Value>);
 
+struct AttributeValue<T>(T);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Decode, Encode)]
+#[repr(u8)]
+enum AttributeKind {
+    Null,
+    Bool,
+    Signed,
+    Unsigned,
+    Float,
+    String,
+    Array,
+    Object,
+}
+
+impl Encode for AttributeValue<&'_ serde_json::Value> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use serde_json::Value;
+
+        match self.0 {
+            Value::Null => {
+                AttributeKind::Null.encode(encoder)?;
+            }
+            Value::Bool(b) => {
+                AttributeKind::Bool.encode(encoder)?;
+                b.encode(encoder)?;
+            }
+            Value::Number(num) => {
+                if num.is_i64() {
+                    AttributeKind::Signed.encode(encoder)?;
+                    i64::from(num.as_i64().unwrap()).encode(encoder)?
+                } else if num.is_u64() {
+                    AttributeKind::Unsigned.encode(encoder)?;
+                    u64::from(num.as_u64().unwrap()).encode(encoder)?
+                } else {
+                    AttributeKind::Float.encode(encoder)?;
+                    f64::from(num.as_f64().unwrap()).encode(encoder)?
+                }
+            }
+            Value::String(s) => {
+                AttributeKind::String.encode(encoder)?;
+                s.encode(encoder)?
+            }
+            Value::Array(arr) => {
+                AttributeKind::Array.encode(encoder)?;
+                arr.len().encode(encoder)?;
+                for item in arr.iter() {
+                    AttributeValue(item).encode(encoder)?;
+                }
+            }
+            Value::Object(obj) => {
+                AttributeKind::Object.encode(encoder)?;
+                obj.len().encode(encoder)?;
+                for (key, value) in obj.iter() {
+                    key.encode(encoder)?;
+                    AttributeValue(value).encode(encoder)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<C> Decode<C> for AttributeValue<serde_json::Value> {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use serde_json::value::Number;
+        use serde_json::{Map, Value};
+
+        let kind = AttributeKind::decode(decoder)?;
+        let value = match kind {
+            AttributeKind::Null => Value::Null,
+            AttributeKind::Bool => Value::Bool(bool::decode(decoder)?),
+            AttributeKind::Signed => Value::Number(Number::from(i64::decode(decoder)?)),
+            AttributeKind::Unsigned => Value::Number(Number::from(u64::decode(decoder)?)),
+            AttributeKind::Float => {
+                serde_json::Value::Number(Number::from_f64(f64::decode(decoder)?).unwrap())
+            }
+            AttributeKind::String => Value::String(String::decode(decoder)?),
+            AttributeKind::Array => {
+                let len = usize::decode(decoder)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(AttributeValue::<Value>::decode(decoder)?.0);
+                }
+                Value::Array(arr)
+            }
+            AttributeKind::Object => {
+                let len = usize::decode(decoder)?;
+                let mut obj = Map::default();
+                for _ in 0..len {
+                    let key = String::decode(decoder)?;
+                    let value = AttributeValue::<Value>::decode(decoder)?.0;
+                    obj.insert(key, value);
+                }
+                Value::Object(obj)
+            }
+        };
+
+        Ok(Self(value))
+    }
+}
+
 impl Encode for AttributeMap {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
         self.0.len().encode(encoder)?;
         for (key, value) in &self.0 {
             key.encode(encoder)?;
-            Compat(value).encode(encoder)?;
+            AttributeValue(value).encode(encoder)?;
         }
 
         Ok(())
@@ -36,8 +142,6 @@ impl<C> Decode<C> for AttributeMap {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
         let len = usize::decode(decoder)?;
 
         let mut map = FxHashMap::default();
@@ -45,7 +149,7 @@ impl<C> Decode<C> for AttributeMap {
 
         for _ in 0..len {
             let key = String::decode(decoder)?;
-            let Compat(value) = Compat::<serde_json::Value>::decode(decoder)?;
+            let AttributeValue(value) = AttributeValue::<serde_json::Value>::decode(decoder)?;
             map.insert(key, value);
         }
 
@@ -210,10 +314,13 @@ mod test {
 
         let my_project = my_project.unwrap();
         assert_eq!(my_project.name, "My Project");
-        assert_eq!(my_project.version, MyProjectVersion {
-            major: "1".to_owned(),
-            minor: "0".to_owned(),
-            patch: "0".to_owned(),
-        });
+        assert_eq!(
+            my_project.version,
+            MyProjectVersion {
+                major: "1".to_owned(),
+                minor: "0".to_owned(),
+                patch: "0".to_owned(),
+            }
+        );
     }
 }
