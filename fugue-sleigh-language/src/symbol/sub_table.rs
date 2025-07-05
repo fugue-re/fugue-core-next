@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
-use fugue_ghidra_marshal::sla::*;
-use fugue_ghidra_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
+use fugue_sleigh_marshal::Decoder;
 
 use crate::construct::ConstructTpl;
 use crate::deserialise::{DeserialiseError, XmlExt};

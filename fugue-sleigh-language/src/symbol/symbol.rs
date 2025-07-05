@@ -1,5 +1,5 @@
-use fugue_ghidra_marshal::sla::*;
-use fugue_ghidra_marshal::{AddressSpaceRef, Decoder};
+use fugue_sleigh_marshal::sla::*;
+use fugue_sleigh_marshal::{AddressSpaceRef, Decoder};
 
 use ustr::Ustr;
 

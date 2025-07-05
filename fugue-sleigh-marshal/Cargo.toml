@@ -1,5 +1,5 @@
 [package]
-name = "fugue-ghidra-marshal"
+name = "fugue-sleigh-marshal"
 version = "0.3.0"
 authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2021"
@@ -9,4 +9,4 @@ homepage = "https://fugue.re"
 
 [dependencies]
 flate2 = "1.1"
-thiserror = "1"
+thiserror = "2"

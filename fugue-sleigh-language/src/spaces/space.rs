@@ -3,8 +3,8 @@ use std::ops::{Deref, DerefMut};
 
 use bitflags::bitflags;
 
-use fugue_ghidra_marshal::sla::*;
-use fugue_ghidra_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
+use fugue_sleigh_marshal::Decoder;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::util::calculate_mask;

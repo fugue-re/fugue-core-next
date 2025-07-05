@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::{ParseBoolError, Utf8Error};
 
 use fugue_bytes::Endian;
-use fugue_ghidra_marshal::MarshalError;
+use fugue_sleigh_marshal::MarshalError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
