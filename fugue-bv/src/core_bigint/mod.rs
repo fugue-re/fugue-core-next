@@ -8,8 +8,10 @@ use std::ops::{
 use std::str::FromStr;
 
 use fugue_bytes::Order;
-use rug::integer::Order as BVOrder;
-use rug::Integer as BigInt;
+use malachite::base::num::arithmetic::traits::{ExtendedGcd, Gcd, Lcm};
+use malachite::base::num::conversion::traits::FromStringBase;
+use malachite::base::num::logic::traits::{BitAccess, SignificantBits};
+use malachite::{Integer as BigInt, Natural};
 
 use crate::error::{ParseError, TryFromBitVecError};
 
@@ -56,11 +58,11 @@ impl FromStr for BitVec {
         let (cst, sz) = s.rsplit_once(':').ok_or(ParseError::InvalidFormat)?;
 
         let val = if let Some(cstv) = cst.strip_prefix("0x") {
-            BigInt::from_str_radix(cstv, 16)
+            BigInt::from_string_base(16, cstv)
         } else {
-            BigInt::from_str_radix(cst, 10)
+            BigInt::from_string_base(10, cst)
         }
-        .map_err(|_| ParseError::InvalidConst)?;
+        .ok_or(ParseError::InvalidConst)?;
 
         let bits = u32::from_str(sz).map_err(|_| ParseError::InvalidSize)?;
 
@@ -84,7 +86,7 @@ impl BitVec {
 
     pub(crate) fn from_bigint_with(v: BigInt, mask: &'static BigInt) -> Self {
         let bits = mask.significant_bits();
-        Self(Box::new(v & mask), Self::pack_meta(false, bits))
+        Self(Box::new(v & mask), Self::pack_meta(false, bits as u32))
     }
 
     pub(crate) fn mask(mut self) -> Self {
@@ -131,7 +133,7 @@ impl BitVec {
     }
 
     pub fn count_ones(&self) -> u32 {
-        self.0.count_ones().unwrap()
+        self.0.checked_count_ones().unwrap_or(0) as u32
     }
 
     pub fn count_zeros(&self) -> u32 {
@@ -199,11 +201,11 @@ impl BitVec {
     }
 
     pub fn bit(&self, index: u32) -> bool {
-        self.0.get_bit(index)
+        self.0.get_bit(index as u64)
     }
 
     pub fn set_bit(&mut self, index: u32) {
-        self.0.set_bit(index, true);
+        self.0.set_bit(index as u64);
     }
 
     pub fn leading_one(&self) -> Option<u32> {
@@ -216,7 +218,7 @@ impl BitVec {
     }
 
     pub fn msb(&self) -> bool {
-        self.0.get_bit(self.bits() as u32 - 1)
+        self.0.get_bit((self.bits() as u64) - 1)
     }
 
     pub fn lsb(&self) -> bool {
@@ -229,11 +231,31 @@ impl BitVec {
     }
 
     pub fn from_be_bytes(buf: &[u8]) -> Self {
-        Self::from_bigint(BigInt::from_digits(&buf, BVOrder::MsfBe), buf.len() as u32 * 8)
+        // Convert bytes to Natural using limbs
+        let mut limbs = Vec::new();
+        for chunk in buf.chunks(8) {
+            let mut bytes = [0u8; 8];
+            bytes[8 - chunk.len()..].copy_from_slice(chunk);
+            limbs.push(u64::from_be_bytes(bytes));
+        }
+        Self::from_bigint(
+            BigInt::from(Natural::from_limbs_desc(&limbs)),
+            buf.len() as u32 * 8,
+        )
     }
 
     pub fn from_le_bytes(buf: &[u8]) -> Self {
-        Self::from_bigint(BigInt::from_digits(&buf, BVOrder::LsfLe), buf.len() as u32 * 8)
+        // Convert bytes to Natural using limbs
+        let mut limbs = Vec::new();
+        for chunk in buf.chunks(8) {
+            let mut bytes = [0u8; 8];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            limbs.push(u64::from_le_bytes(bytes));
+        }
+        Self::from_bigint(
+            BigInt::from(Natural::from_limbs_asc(&limbs)),
+            buf.len() as u32 * 8,
+        )
     }
 
     #[inline(always)]
@@ -257,10 +279,19 @@ impl BitVec {
             buf.iter_mut().for_each(|v| *v = 0u8);
         };
 
-        self.0.write_digits(
-            &mut buf[(bits / 8 - self.0.significant_digits::<u8>())..],
-            BVOrder::MsfBe,
-        );
+        // Convert to Natural and then to bytes via limbs
+        let natural = self.0.unsigned_abs_ref();
+        let limbs = natural.to_limbs_desc();
+        let mut bytes = Vec::new();
+        for &limb in &limbs {
+            bytes.extend_from_slice(&limb.to_be_bytes());
+        }
+        // Remove leading zeros
+        while bytes.len() > 1 && bytes[0] == 0 {
+            bytes.remove(0);
+        }
+        let start_idx = buf.len().saturating_sub(bytes.len());
+        buf[start_idx..].copy_from_slice(&bytes);
     }
 
     pub fn to_le_bytes(&self, buf: &mut [u8]) {
@@ -274,10 +305,19 @@ impl BitVec {
         } else {
             buf.iter_mut().for_each(|v| *v = 0u8);
         }
-        self.0.write_digits(
-            &mut buf[..self.0.significant_digits::<u8>()],
-            BVOrder::LsfLe,
-        );
+        // Convert to Natural and then to bytes via limbs
+        let natural = self.0.unsigned_abs_ref();
+        let limbs = natural.to_limbs_asc();
+        let mut bytes = Vec::new();
+        for &limb in &limbs {
+            bytes.extend_from_slice(&limb.to_le_bytes());
+        }
+        // Remove trailing zeros
+        while bytes.len() > 1 && bytes.last() == Some(&0) {
+            bytes.pop();
+        }
+        let copy_len = bytes.len().min(buf.len());
+        buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
     }
 
     #[inline(always)]
@@ -412,7 +452,9 @@ impl BitVec {
             )
         }
 
-        Self::from_bigint(self.0.lcm_ref(&*rhs.0).into(), self.bits())
+        let self_abs = self.0.unsigned_abs_ref();
+        let rhs_abs = rhs.0.unsigned_abs_ref();
+        Self::from_bigint(BigInt::from(Lcm::lcm(self_abs, rhs_abs)), self.bits())
     }
 
     pub fn gcd(&self, rhs: &Self) -> Self {
@@ -432,7 +474,9 @@ impl BitVec {
             return self.clone();
         }
 
-        Self::from_bigint(self.0.gcd_ref(&*rhs.0).into(), self.bits())
+        let self_abs = self.0.unsigned_abs_ref();
+        let rhs_abs = rhs.0.unsigned_abs_ref();
+        Self::from_bigint(BigInt::from(Gcd::gcd(self_abs, rhs_abs)), self.bits())
     }
 
     pub fn gcd_ext(&self, rhs: &Self) -> (Self, Self, Self) {
@@ -456,10 +500,10 @@ impl BitVec {
             );
         }
 
-        let (g, a, b) = self.0.extended_gcd_ref(&*rhs.0).into();
+        let (g, a, b) = ExtendedGcd::extended_gcd(&*self.0, &*rhs.0);
         let mask = lookup_mask(self.bits());
         (
-            Self::from_bigint_with(g, mask),
+            Self::from_bigint_with(BigInt::from(g), mask),
             Self::from_bigint_with(a, mask),
             Self::from_bigint_with(b, mask),
         )
@@ -620,7 +664,7 @@ impl Neg for BitVec {
 
     fn neg(self) -> Self::Output {
         let mask = lookup_mask(self.bits());
-        BitVec::from_bigint_with((*self.0 ^ mask) + 1, mask)
+        BitVec::from_bigint_with((*self.0 ^ mask) + BigInt::from(1), mask)
     }
 }
 
@@ -629,14 +673,14 @@ impl<'a> Neg for &'a BitVec {
 
     fn neg(self) -> Self::Output {
         let mask = lookup_mask(self.bits());
-        BitVec::from_bigint_with(BigInt::from(&*self.0 ^ mask) + 1, mask)
+        BitVec::from_bigint_with(BigInt::from(&*self.0 ^ mask) + BigInt::from(1), mask)
     }
 }
 
 impl BitVec {
     pub fn neg_assign(&mut self) {
         *self.0 ^= lookup_mask(self.bits());
-        *self.0 += 1;
+        *self.0 += BigInt::from(1);
         self.mask_assign();
     }
 }
@@ -1462,7 +1506,7 @@ impl Shl for BitVec {
         if *rhs.0 >= self.bits() {
             Self::zero(self.bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 let mask = lookup_mask(self.bits());
                 Self::from_bigint_with(*self.0 << rhs, mask)
             } else {
@@ -1486,7 +1530,7 @@ impl<'a> Shl for &'a BitVec {
         if *rhs.0 >= self.bits() {
             BitVec::zero(self.bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 BitVec::from_bigint_with(BigInt::from(&*self.0 << rhs), lookup_mask(self.bits()))
             } else {
                 BitVec::zero(self.bits())
@@ -1507,7 +1551,7 @@ impl ShlAssign for BitVec {
         if *rhs.0 >= self.bits() {
             *self.0 = BigInt::from(0u32);
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 self.shl_assign(rhs);
             } else {
                 *self.0 = BigInt::from(0);
@@ -1528,7 +1572,7 @@ impl ShlAssign<&'_ BitVec> for BitVec {
         if *rhs.0 >= self.bits() {
             *self.0 = BigInt::from(0u32);
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 self.shl_assign(rhs);
             } else {
                 *self.0 = BigInt::from(0);
@@ -1551,8 +1595,7 @@ impl Shr<u32> for BitVec {
         } else if self.is_negative() {
             // perform ASR
             let smask = lookup_mask(self.bits());
-            let mask =
-                smask ^ ((BigInt::from(1) << (size - rhs as u32) as u32) - BigInt::from(1));
+            let mask = smask ^ ((BigInt::from(1) << (size - rhs as u32) as u32) - BigInt::from(1));
             Self::from_bigint_with((*self.0 >> rhs) | mask, smask)
         } else {
             let mask = lookup_mask(self.bits());
@@ -1575,8 +1618,7 @@ impl<'a> Shr<u32> for &'a BitVec {
         } else if self.is_negative() {
             // perform ASR
             let smask = lookup_mask(self.bits());
-            let mask =
-                smask ^ ((BigInt::from(1) << (size - rhs as u32) as u32) - BigInt::from(1));
+            let mask = smask ^ ((BigInt::from(1) << (size - rhs as u32) as u32) - BigInt::from(1));
             BitVec::from_bigint_with(BigInt::from(&*self.0 >> rhs) | mask, smask)
         } else {
             BitVec::from_bigint_with(BigInt::from(&*self.0 >> rhs), lookup_mask(self.bits()))
@@ -1627,7 +1669,7 @@ impl Shr for BitVec {
             }
         } else if self.is_negative() {
             // perform ASR
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 let smask = lookup_mask(self.bits());
                 let mask = smask
                     ^ ((BigInt::from(1) << (self.bits() - rhs as u32) as u32) - BigInt::from(1));
@@ -1636,7 +1678,7 @@ impl Shr for BitVec {
                 -Self::one(self.bits())
             }
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 let mask = lookup_mask(self.bits());
                 Self::from_bigint_with(*self.0 >> rhs, mask)
             } else {
@@ -1665,7 +1707,7 @@ impl<'a> Shr for &'a BitVec {
             }
         } else if self.is_negative() {
             // perform ASR
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 let smask = lookup_mask(self.bits());
                 let mask = smask
                     ^ ((BigInt::from(1) << (self.bits() - rhs as u32) as u32) - BigInt::from(1));
@@ -1674,7 +1716,7 @@ impl<'a> Shr for &'a BitVec {
                 -BitVec::one(self.bits())
             }
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 BitVec::from_bigint_with(BigInt::from(&*self.0 >> rhs), lookup_mask(self.bits()))
             } else {
                 BitVec::zero(self.bits())
@@ -1693,7 +1735,7 @@ impl ShrAssign for BitVec {
             } else {
                 *self.0 = BigInt::from(0u32);
             }
-        } else if let Some(rhs) = rhs.0.to_u32() {
+        } else if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
             self.shr_assign(rhs);
         } else {
             (*self.0).clone_from(&*lookup_mask(self.bits()));
@@ -1712,7 +1754,7 @@ impl ShrAssign<&'_ BitVec> for BitVec {
             } else {
                 *self.0 = BigInt::from(0u32);
             }
-        } else if let Some(rhs) = rhs.0.to_u32() {
+        } else if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
             self.shr_assign(rhs);
         } else {
             (*self.0).clone_from(&*lookup_mask(self.bits()));
@@ -1734,7 +1776,7 @@ impl BitVec {
             -BitVec::one(self.bits())
         } else if self.msb() {
             // perform ASR
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 let smask = lookup_mask(self.bits());
                 let mask = smask
                     ^ ((BigInt::from(1) << (self.bits() - rhs as u32) as u32) - BigInt::from(1));
@@ -1743,7 +1785,7 @@ impl BitVec {
                 -BitVec::one(self.bits())
             }
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
+            if let Some(rhs) = u32::try_from(&*rhs.0).ok() {
                 BitVec::from_bigint_with(BigInt::from(&*self.0 >> rhs), lookup_mask(self.bits()))
             } else {
                 BitVec::zero(self.bits())
@@ -1781,7 +1823,7 @@ macro_rules! impl_to_u_for {
         impl BitVec {
             ::paste::paste! {
                 pub fn [< to_u $t >](&self) -> Option<[< u $t >]> {
-                    self.0.[< to_u $t >]()
+                    [< u $t >]::try_from(&*self.0).ok()
                 }
             }
         }
@@ -1813,7 +1855,7 @@ macro_rules! impl_to_i_for {
         impl BitVec {
             ::paste::paste! {
                 pub fn [< to_i $t >](&self) -> Option<[< i $t >]> {
-                    self.0.[< to_u $t >]().map(|v| v as [< i $t >])
+                    [< u $t >]::try_from(&*self.0).ok().map(|v| v as [< i $t >])
                 }
             }
         }
@@ -2098,5 +2140,57 @@ mod test {
             std::mem::size_of::<crate::core_u64::BitVec>()
         );
         assert_eq!(std::mem::size_of::<BitVec>(), 16);
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let v1 = BitVec::from(0x8000_0000u32);
+        let v2 = BitVec::from(0x7fff_ffffu32);
+
+        let mut bytes = [0u8; 4];
+
+        v1.to_be_bytes(&mut bytes);
+        assert_eq!(bytes, [0x80, 0x00, 0x00, 0x00]);
+
+        let v3 = BitVec::from_be_bytes(&bytes);
+        assert_eq!(v3, v1);
+
+        v2.to_le_bytes(&mut bytes);
+        assert_eq!(bytes, [0xff, 0xff, 0xff, 0x7f]);
+
+        let v4 = BitVec::from_le_bytes(&bytes);
+        assert_eq!(v4, v2);
+
+        let v5 = "0xffffffffffffffffffffffffffffffff:128"
+            .parse::<BitVec>()
+            .unwrap();
+        let v6 = "0x7fffffffffffffffffffffffffffffff:128"
+            .parse::<BitVec>()
+            .unwrap();
+
+        let mut bytes = [0u8; 16];
+        v5.to_be_bytes(&mut bytes);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff
+            ]
+        );
+
+        let v7 = BitVec::from_be_bytes(&bytes);
+        assert_eq!(v7, v5);
+
+        v6.to_le_bytes(&mut bytes);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0x7f
+            ]
+        );
+
+        let v8 = BitVec::from_le_bytes(&bytes);
+        assert_eq!(v8, v6);
     }
 }
