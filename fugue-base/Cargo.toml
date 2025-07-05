@@ -31,7 +31,7 @@ ouroboros = "0.18"
 quick_cache = "0.6"
 parking_lot = "0.12"
 range-set-blaze = "0.3"
-rocksdb = { version = "0.23", features = ["serde1"] }
+rocksdb = { version = "0.23", features = ["serde1", "snappy"] }
 rustc-hash = "1.1"
 sealed = "0.5"
 serde = { version = "1", features = ["derive"] }
