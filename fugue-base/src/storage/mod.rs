@@ -275,9 +275,11 @@ impl CompressedPersistentStorage {
             }
 
             tracing::debug!(
-                "packing `{}` into `{}`",
+                "packing `{}` into `{}` ({} bytes)",
                 relative_path.display(),
-                packed.display()
+                packed.display(),
+                tracked.metadata().map_err(StorageProviderError::cleanup_project)?
+                    .len()
             );
 
             if tracked.file_type().is_dir() {

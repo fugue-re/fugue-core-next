@@ -48,12 +48,14 @@ impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
 
         options.create_if_missing(true);
 
+        options.set_recycle_log_file_num(5);
+        options.set_keep_log_file_num(5);
+
         if let Some(db_options) =
             attributes.get_attr::<options::RocksDbOptions>(ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS)
         {
             db_options.apply(&mut options);
         }
-
 
         Ok(Self {
             database: rocksdb::DB::open(&options, db_path)?,
