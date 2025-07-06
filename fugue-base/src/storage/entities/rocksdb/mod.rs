@@ -16,7 +16,7 @@ use super::{
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str =
     "storage.entities.backend.rocksdb.options";
 
-const PROJECT_ROCKSDB_DATA: &str = "entities.rdb";
+const PROJECT_ROCKSDB_DATA: &str = "entities.db";
 
 // Maximum batch size for bulk operations
 const BATCH_SIZE: usize = 1024;

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
@@ -33,6 +34,15 @@ impl<'a> From<&'_ Bytes> for BytesOrSlice<'a> {
 impl<'a> From<&'a [u8]> for BytesOrSlice<'a> {
     fn from(slice: &'a [u8]) -> Self {
         BytesOrSlice::Slice(slice)
+    }
+}
+
+impl<'a> From<Cow<'a, [u8]>> for BytesOrSlice<'a> {
+    fn from(cow: Cow<'a, [u8]>) -> Self {
+        match cow {
+            Cow::Borrowed(slice) => BytesOrSlice::Slice(slice),
+            Cow::Owned(vec) => BytesOrSlice::Bytes(Bytes::from(vec)),
+        }
     }
 }
 

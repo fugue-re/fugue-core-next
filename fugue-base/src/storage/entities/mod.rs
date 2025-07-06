@@ -17,6 +17,9 @@ pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, Proj
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
 
+pub mod mdbx;
+pub use mdbx::MdbxEntityStorage;
+
 pub mod rocksdb;
 pub use rocksdb::RocksDbEntityStorage;
 
