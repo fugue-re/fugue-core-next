@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::mem::{self, ManuallyDrop};
 use std::path::PathBuf;
 
 use libmdbx as mdbx;
@@ -7,13 +8,16 @@ use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrSlice};
 
+use super::{
+    EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityKeyBytesIterator, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, EntityStorageTransactionalReader,
+};
+
 const PROJECT_MDBX_DATA: &str = "entities.db";
 
-use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityKeyBytesIterator,
-    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable,
-};
+// Maximum batch size for bulk operations
+const BATCH_SIZE: usize = 1024;
 
 impl From<mdbx::Error> for EntityStorageError {
     fn from(error: mdbx::Error) -> Self {
@@ -97,9 +101,14 @@ impl EntityStorageProvider for MdbxEntityStorage {
         MdbxEntityBytesIterator::new(self, prefix)
     }
 
-    fn bulk_inserter(&self) -> Result<Box<dyn EntityStorageBulkInserter + '_>, EntityStorageError> {
-        todo!()
-        // Ok(Box::new(MdbxEntityBytesBulkInserter::new(self)))
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+        MdbxEntityBytesBulkInserter::new(self)
+    }
+
+    fn reader(
+        &self,
+    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+        MdbxEntityReader::new(self)
     }
 }
 
@@ -211,5 +220,113 @@ impl<'a> Iterator for MdbxEntityBytesIterator<'a> {
             self.prefix = None;
             None
         }
+    }
+}
+
+struct MdbxEntityBytesBulkInserter<'a> {
+    storage: &'a MdbxEntityStorage,
+    txn: ManuallyDrop<mdbx::Transaction<'a, mdbx::RW, mdbx::WriteMap>>,
+    batch_size: usize,
+}
+
+impl<'a> MdbxEntityBytesBulkInserter<'a> {
+    fn new(
+        storage: &'a MdbxEntityStorage,
+    ) -> Result<EntityBytesBulkInserter<'a>, EntityStorageError> {
+        let txn = storage.database.begin_rw_txn()?;
+        Ok(Box::new(Self {
+            storage,
+            txn: ManuallyDrop::new(txn),
+            batch_size: 0,
+        }))
+    }
+
+    fn force_commit(&mut self) -> Result<(), EntityStorageError> {
+        let ntxn = self.storage.database.begin_rw_txn()?;
+
+        let txn = mem::replace(&mut self.txn, ManuallyDrop::new(ntxn));
+
+        let txn = ManuallyDrop::into_inner(txn);
+        txn.commit()?;
+
+        self.batch_size = 0;
+
+        Ok(())
+    }
+}
+
+impl<'a> Drop for MdbxEntityBytesBulkInserter<'a> {
+    fn drop(&mut self) {
+        let txn = unsafe { ManuallyDrop::take(&mut self.txn) };
+
+        if self.batch_size == 0 {
+            return;
+        }
+
+        if let Err(e) = txn.commit() {
+            tracing::warn!("failed to flush batch to storage: {e}")
+        }
+    }
+}
+
+impl<'a> EntityStorageBulkInserter<'a> for MdbxEntityBytesBulkInserter<'a> {
+    fn insert(
+        &mut self,
+        key: BytesOrSlice<'_>,
+        value: BytesOrSlice<'_>,
+    ) -> Result<(), EntityStorageError> {
+        if self.batch_size >= BATCH_SIZE {
+            self.force_commit()?;
+        }
+
+        let tbl = self.txn.open_table(None)?;
+
+        self.txn
+            .put(&tbl, key, value, mdbx::WriteFlags::default())?;
+
+        Ok(())
+    }
+
+    fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
+        self.force_commit()
+    }
+}
+
+struct MdbxEntityReader<'a> {
+    storage: &'a MdbxEntityStorage,
+    txn: mdbx::Transaction<'a, mdbx::RO, mdbx::WriteMap>,
+}
+
+impl<'a> MdbxEntityReader<'a> {
+    fn new(
+        storage: &'a MdbxEntityStorage,
+    ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
+        let txn = storage.database.begin_ro_txn()?;
+        Ok(Box::new(Self { storage, txn }))
+    }
+}
+
+impl<'a> EntityStorageTransactionalReader<'a> for MdbxEntityReader<'a> {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        let tbl = self.txn.open_table(None)?;
+        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
+        Ok(val.map(BytesOrSlice::from))
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        let tbl = self.txn.open_table(None)?;
+        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
+        Ok(val.is_some())
+    }
+
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+        MdbxEntityKeyBytesIterator::new(self.storage, prefix)
+    }
+
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        MdbxEntityBytesIterator::new(self.storage, prefix)
     }
 }

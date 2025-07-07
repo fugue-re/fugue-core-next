@@ -225,21 +225,24 @@ impl StorageProvider for PersistentEntityStorageProvider {
 }
 
 // This provider uses the default persistent storage provider for both segments and entities.
-pub struct PersistentStorageProvider;
+pub struct PersistentStorageProvider<T, U>(std::marker::PhantomData<(T, U)>);
 
-impl StorageProvider for PersistentStorageProvider {
+pub type DefaultPersistentStorageProvider =
+    PersistentStorageProvider<DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage>;
+
+impl<T, U> StorageProvider for PersistentStorageProvider<T, U>
+where
+    T: EntityStorageProviderFromLoadable,
+    U: SegmentStorageProviderFromLoadable,
+{
     fn from_loadable(
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError> {
         let compressed = CompressedPersistentStorage::new(attributes)?;
 
-        let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
-            loadable, attributes,
-        )?);
-        let segments = SegmentStorage::new(DefaultPersistentSegmentStorage::from_loadable(
-            loadable, attributes,
-        )?);
+        let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
+        let segments = SegmentStorage::new(U::from_loadable(loadable, attributes)?);
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
@@ -278,7 +281,9 @@ impl CompressedPersistentStorage {
                 "packing `{}` into `{}` ({} bytes)",
                 relative_path.display(),
                 packed.display(),
-                tracked.metadata().map_err(StorageProviderError::cleanup_project)?
+                tracked
+                    .metadata()
+                    .map_err(StorageProviderError::cleanup_project)?
                     .len()
             );
 

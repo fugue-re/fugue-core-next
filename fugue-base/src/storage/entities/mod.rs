@@ -40,6 +40,8 @@ pub enum EntityStorageError {
     InvalidKeySize,
     #[error("no project path specified")]
     NoProjectPath,
+    #[error(transparent)]
+    Unsupported(anyhow::Error),
 }
 
 impl EntityStorageError {
@@ -60,6 +62,17 @@ impl EntityStorageError {
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
         Self::Backing(anyhow::Error::msg(msg))
+    }
+
+    pub fn unsupported<E: std::error::Error + Send + Sync + 'static>(err: E) -> Self {
+        Self::Unsupported(anyhow::Error::from(err))
+    }
+
+    pub fn unsupported_with<M>(msg: M) -> Self
+    where
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
+        Self::Unsupported(anyhow::Error::msg(msg))
     }
 }
 
@@ -85,6 +98,8 @@ pub type EntityIterator<'a, K, E> =
 pub type EntityKeyIterator<'a, K> = Box<dyn Iterator<Item = Result<K, EntityStorageError>> + 'a>;
 
 pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
+
+pub type EntityBytesTransactionalReader<'a> = Box<dyn EntityStorageTransactionalReader<'a> + 'a>;
 
 pub struct EntityBulkInserter<'a> {
     inner: EntityBytesBulkInserter<'a>,
@@ -142,6 +157,16 @@ pub trait EntityStorageProvider: Send + Sync {
 }
 */
 
+pub trait EntityStorageTransactionalReader<'a> {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+}
+
 pub trait EntityStorageProvider: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
@@ -159,6 +184,8 @@ pub trait EntityStorageProvider: Send + Sync {
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
+
+    fn reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
 }
 
 pub trait ErasedEntityStorageProvider: Send + Sync {
@@ -182,6 +209,8 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
 
     fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
+
+    fn erased_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
 }
 
 impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
@@ -225,6 +254,10 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         self.erased_bulk_inserter()
+    }
+
+    fn reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+        self.erased_reader()
     }
 }
 
@@ -272,6 +305,10 @@ where
 
     fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         self.bulk_inserter()
+    }
+
+    fn erased_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+        self.reader()
     }
 }
 
@@ -722,6 +759,10 @@ impl EntityStorage {
         size: usize,
     ) -> Result<EntityCache<K, E>, EntityStorageError> {
         EntityCache::new(self.clone(), size)
+    }
+
+    pub fn storage_provider(&self) -> Arc<dyn ErasedEntityStorageProvider> {
+        self.backing.clone()
     }
 }
 
