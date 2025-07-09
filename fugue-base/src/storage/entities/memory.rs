@@ -13,8 +13,9 @@ use crate::types::{AttributeMap, BytesOrSlice};
 use super::common::ENTITY_PREFIX_SIZE;
 use super::{
     EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError,
-    EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix,
+    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable,
 };
 
 // Maximum batch size for bulk operations
@@ -164,9 +165,19 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         Ok(Box::new(InMemoryEntityInserter::new(self)))
     }
 
-    fn reader(&self) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+    fn transactional_reader(
+        &self,
+    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
         Err(EntityStorageError::unsupported_with(
-            "transactions are not supported by in-memory storage provider",
+            "transactions are not supported by the in-memory storage provider",
+        ))
+    }
+
+    fn transactional_writer(
+        &self,
+    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+        Err(EntityStorageError::unsupported_with(
+            "transactions are not supported by the in-memory storage provider",
         ))
     }
 }

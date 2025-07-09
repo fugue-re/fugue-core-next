@@ -97,9 +97,148 @@ pub type EntityIterator<'a, K, E> =
 
 pub type EntityKeyIterator<'a, K> = Box<dyn Iterator<Item = Result<K, EntityStorageError>> + 'a>;
 
-pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
+pub trait EntityStorageTransactionalReader<'a> {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
+}
 
 pub type EntityBytesTransactionalReader<'a> = Box<dyn EntityStorageTransactionalReader<'a> + 'a>;
+
+pub struct EntityTransactionalReader<'a> {
+    inner: EntityBytesTransactionalReader<'a>,
+}
+
+impl<'a> EntityTransactionalReader<'a> {
+    pub fn new(inner: EntityBytesTransactionalReader<'a>) -> Self {
+        Self { inner }
+    }
+
+    pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
+        let key = common::make_key::<K, E>(key);
+        self.inner
+            .get(&key)?
+            .map(|bytes| {
+                bincode::decode_from_slice::<E, _>(bytes.as_slice(), bincode::config::standard())
+                    .map(|(entity, _)| entity)
+                    .map_err(EntityStorageError::decode)
+            })
+            .transpose()
+    }
+
+    pub fn get_as<K, E, F, T>(&self, key: &K, mut f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        let key = common::make_key::<K, E>(key);
+        self.inner
+            .get(&key)?
+            .map(|bytes| f(bytes.as_slice()))
+            .transpose()
+            .map_err(EntityStorageError::decode)
+    }
+
+    pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
+        let key = common::make_key::<K, E>(key);
+        self.inner.contains(&key)
+    }
+}
+
+pub trait EntityStorageTransactionalWriter<'a>: EntityStorageTransactionalReader<'a> {
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
+}
+
+pub type EntityBytesTransactionalWriter<'a> = Box<dyn EntityStorageTransactionalWriter<'a> + 'a>;
+
+pub struct EntityTransactionalWriter<'a> {
+    inner: ManuallyDrop<EntityBytesTransactionalWriter<'a>>,
+    flags: EntityTransactionalWriterFlags,
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct EntityTransactionalWriterFlags: u8 {
+        const NONE        = 0b0000_0000;
+        const AUTO_COMMIT = 0b0000_0001;
+        const DROPPED     = 0b0000_0010;
+    }
+}
+
+impl<'a> EntityTransactionalWriter<'a> {
+    pub fn new(inner: EntityBytesTransactionalWriter<'a>) -> Self {
+        Self {
+            inner: ManuallyDrop::new(inner),
+            flags: EntityTransactionalWriterFlags::NONE,
+        }
+    }
+
+    pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
+        let key = common::make_key::<K, E>(key);
+        self.inner
+            .get(&key)?
+            .map(|bytes| {
+                bincode::decode_from_slice::<E, _>(bytes.as_slice(), bincode::config::standard())
+                    .map(|(entity, _)| entity)
+                    .map_err(EntityStorageError::decode)
+            })
+            .transpose()
+    }
+
+    pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
+        let key = common::make_key::<K, E>(key);
+        self.inner.contains(&key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: &[u8],
+        value: BytesOrSlice<'_>,
+    ) -> Result<(), EntityStorageError> {
+        self.inner.insert(key, value)
+    }
+
+    pub fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.inner.remove(key)
+    }
+
+    pub fn enable_auto_commit(&mut self) {
+        self.flags |= EntityTransactionalWriterFlags::AUTO_COMMIT;
+    }
+
+    pub fn disable_auto_commit(&mut self) {
+        self.flags
+            .remove(EntityTransactionalWriterFlags::AUTO_COMMIT);
+    }
+
+    pub fn commit(mut self) -> Result<(), EntityStorageError> {
+        self.flags.insert(EntityTransactionalWriterFlags::DROPPED);
+        unsafe { ManuallyDrop::take(&mut self.inner) }.commit()
+    }
+}
+
+impl<'a> Drop for EntityTransactionalWriter<'a> {
+    fn drop(&mut self) {
+        if self.flags.contains(EntityTransactionalWriterFlags::DROPPED) {
+            // if the writer was already dropped, we do not need to drop/commit
+            return;
+        }
+
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+
+        if self
+            .flags
+            .contains(EntityTransactionalWriterFlags::AUTO_COMMIT)
+            && let Err(e) = inner.commit()
+        {
+            tracing::error!("failed to commit transaction: {e}");
+        }
+    }
+}
+
+pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
 
 pub struct EntityBulkInserter<'a> {
     inner: EntityBytesBulkInserter<'a>,
@@ -140,33 +279,6 @@ pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
         Self: Sized;
 }
 
-/*
-pub trait EntityStorageProvider: Send + Sync {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
-
-    fn iter_prefix_keys(
-        &self,
-        prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
-    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
-}
-*/
-
-pub trait EntityStorageTransactionalReader<'a> {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
-    fn iter_prefix_keys(
-        &self,
-        prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
-    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-}
-
 pub trait EntityStorageProvider: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
@@ -185,7 +297,8 @@ pub trait EntityStorageProvider: Send + Sync {
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
 
-    fn reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
+    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
+    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
 }
 
 pub trait ErasedEntityStorageProvider: Send + Sync {
@@ -210,7 +323,13 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
 
     fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
 
-    fn erased_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
+    fn erased_transactional_reader(
+        &self,
+    ) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
+
+    fn erased_transactional_writer(
+        &self,
+    ) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
 }
 
 impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
@@ -256,8 +375,12 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         self.erased_bulk_inserter()
     }
 
-    fn reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        self.erased_reader()
+    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+        self.erased_transactional_reader()
+    }
+
+    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+        self.erased_transactional_writer()
     }
 }
 
@@ -307,8 +430,16 @@ where
         self.bulk_inserter()
     }
 
-    fn erased_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        self.reader()
+    fn erased_transactional_reader(
+        &self,
+    ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+        self.transactional_reader()
+    }
+
+    fn erased_transactional_writer(
+        &self,
+    ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+        self.transactional_writer()
     }
 }
 
@@ -387,7 +518,7 @@ pub trait MutableEntity<K: EntityKey>: Entity {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct EntityMutFlags: u8 {
-        const NONE = 0b0000_0000;
+        const NONE    = 0b0000_0000;
         const CHANGED = 0b0000_0001;
         const DROPPED = 0b0000_0010;
     }
