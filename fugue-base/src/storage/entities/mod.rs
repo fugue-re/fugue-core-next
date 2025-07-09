@@ -187,21 +187,42 @@ impl<'a> EntityTransactionalWriter<'a> {
             .transpose()
     }
 
+    pub fn get_as<K, E, F, T>(&self, key: &K, mut f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        let key = common::make_key::<K, E>(key);
+        self.inner
+            .get(&key)?
+            .map(|bytes| f(bytes.as_slice()))
+            .transpose()
+            .map_err(EntityStorageError::decode)
+    }
+
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
         let key = common::make_key::<K, E>(key);
         self.inner.contains(&key)
     }
 
-    pub fn insert(
-        &mut self,
-        key: &[u8],
-        value: BytesOrSlice<'_>,
+    pub fn insert<K: EntityKey, E: Entity>(
+        &self,
+        key: &K,
+        entity: &E,
     ) -> Result<(), EntityStorageError> {
-        self.inner.insert(key, value)
+        let key = common::make_key::<K, E>(key);
+        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
+            .map_err(EntityStorageError::encode)?;
+
+        let encoded = BytesOrSlice::from(encoded);
+
+        self.inner.insert(&*key, encoded)
     }
 
-    pub fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
-        self.inner.remove(key)
+    pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
+        let key = common::make_key::<K, E>(key);
+        self.inner.remove(&key)
     }
 
     pub fn enable_auto_commit(&mut self) {
@@ -463,7 +484,7 @@ impl<'a> OutMapper<'a> {
 }
 
 pub struct EntityCache<K: EntityKey, E: Entity> {
-    entities: Cache<K, Arc<E>>,
+    entities: Arc<Cache<K, Arc<E>>>,
     storage: EntityStorage,
 }
 
@@ -695,6 +716,95 @@ where
     }
 }
 
+pub struct EntityTransactionalCacheWriter<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    inner: ManuallyDrop<EntityTransactionalWriter<'a>>,
+    cache: Arc<Cache<K, Arc<E>>>,
+    dropped: bool,
+}
+
+impl<'a, K, E> EntityTransactionalCacheWriter<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    fn new(inner: EntityTransactionalWriter<'a>, cache: Arc<Cache<K, Arc<E>>>) -> Self {
+        Self {
+            inner: ManuallyDrop::new(inner),
+            cache,
+            dropped: false,
+        }
+    }
+
+    pub fn get(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
+        self.inner.get::<K, E>(key)
+    }
+
+    pub fn get_as<F, T>(&self, key: &K, f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        self.inner.get_as::<K, E, F, T>(key, f)
+    }
+
+    pub fn contains(&self, key: &K) -> Result<bool, EntityStorageError> {
+        self.inner.contains::<K, E>(key)
+    }
+
+    pub fn insert(&self, key: &K, entity: &E) -> Result<(), EntityStorageError> {
+        self.inner.insert(key, entity)
+    }
+
+    pub fn remove(&self, key: &K) -> Result<(), EntityStorageError> {
+        self.inner.remove::<K, E>(key)
+    }
+
+    pub fn enable_auto_commit(&mut self) {
+        self.inner.enable_auto_commit();
+    }
+
+    pub fn disable_auto_commit(&mut self) {
+        self.inner.disable_auto_commit();
+    }
+
+    pub fn commit(mut self) -> Result<(), EntityStorageError> {
+        self.cache.clear();
+        self.dropped = true;
+
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+
+        inner.commit()?;
+
+        Ok(())
+    }
+}
+
+impl<'a, K, E> Drop for EntityTransactionalCacheWriter<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    fn drop(&mut self) {
+        if self.dropped {
+            return;
+        }
+
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+
+        // if we didn't drop, then we haven't committed (yet), check if we should clear
+        // the cache due to an auto-commit
+        if inner
+            .flags
+            .contains(EntityTransactionalWriterFlags::AUTO_COMMIT)
+        {
+            self.cache.clear();
+        }
+    }
+}
+
 impl<K, E> EntityCache<K, E>
 where
     K: EntityKey,
@@ -702,7 +812,7 @@ where
 {
     pub fn new(storage: EntityStorage, size: usize) -> Result<Self, EntityStorageError> {
         Ok(Self {
-            entities: Cache::new(size),
+            entities: Arc::new(Cache::new(size)),
             storage,
         })
     }
@@ -800,6 +910,31 @@ where
             })) as EntityIterator<'_, K, EntityRef<E>>
         })
     }
+
+    pub fn transactional_reader(
+        &self,
+    ) -> Result<EntityTransactionalReader<'_>, EntityStorageError> {
+        self.storage.transactional_reader()
+    }
+
+    pub fn transactional_writer(
+        &self,
+    ) -> Result<EntityTransactionalCacheWriter<'_, K, E>, EntityStorageError> {
+        let writer = self.storage.transactional_writer()?;
+        Ok(EntityTransactionalCacheWriter::new(
+            writer,
+            self.entities.clone(),
+        ))
+    }
+
+    pub fn clear(&mut self) -> Result<(), EntityStorageError> {
+        self.entities.clear();
+        Ok(())
+    }
+
+    pub fn storage(&self) -> &EntityStorage {
+        &self.storage
+    }
 }
 
 #[derive(Clone)]
@@ -883,6 +1018,20 @@ impl EntityStorage {
                 })
             })) as EntityKeyIterator<'_, K>
         })
+    }
+
+    pub fn transactional_reader(
+        &self,
+    ) -> Result<EntityTransactionalReader<'_>, EntityStorageError> {
+        let reader = self.backing.transactional_reader()?;
+        Ok(EntityTransactionalReader::new(reader))
+    }
+
+    pub fn transactional_writer(
+        &self,
+    ) -> Result<EntityTransactionalWriter<'_>, EntityStorageError> {
+        let writer = self.backing.transactional_writer()?;
+        Ok(EntityTransactionalWriter::new(writer))
     }
 
     pub fn cache_for<K: EntityKey, E: Entity>(
