@@ -6,7 +6,7 @@ use fugue_base::loader::{Loadable, LoadableFromFile};
 
 use fugue_base::attributes;
 use fugue_base::project::Project;
-use fugue_base::storage::PersistentStorageProvider;
+use fugue_base::storage::DefaultPersistentStorageProvider;
 use fugue_base::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 use fugue_core_idalib::{IDABinary, IDAFunctionBuilder, ATTRIBUTE_IDA_DATABASE_PATH};
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("external symbol {sym}");
         }
 
-        let mut project = Project::new_with::<PersistentStorageProvider>(
+        let mut project = Project::new_with::<DefaultPersistentStorageProvider>(
             &binary,
             attributes! {
                 ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
