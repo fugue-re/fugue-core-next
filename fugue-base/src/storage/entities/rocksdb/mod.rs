@@ -86,6 +86,11 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     }
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        tracing::trace!(
+            "inserting key: {}, value: {}",
+            BytesOrSlice::from(key),
+            value
+        );
         self.database
             .put(key, value)
             .map_err(EntityStorageError::backing)
@@ -114,18 +119,11 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         &self,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-        let mut opts = rocksdb::ReadOptions::default();
-        opts.set_iterate_range(rocksdb::PrefixRange(prefix.to_vec()));
-
-        Ok(RocksDbEntityKeyBytesIterator::new(
-            self.database.raw_iterator_opt(opts),
-        ))
+        Ok(RocksDbEntityKeyBytesIterator::new(self, prefix))
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        Ok(RocksDbEntityBytesIterator::new(
-            self.database.prefix_iterator(prefix),
-        ))
+        Ok(RocksDbEntityBytesIterator::new(self, prefix))
     }
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
@@ -142,26 +140,25 @@ impl EntityStorageProvider for RocksDbEntityStorage {
 }
 
 #[repr(transparent)]
-struct RocksDbEntityKeyBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
-    iter: rocksdb::DBRawIteratorWithThreadMode<'a, T>,
+struct RocksDbEntityKeyBytesIterator<'a> {
+    iter: rocksdb::DBRawIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
 }
 
-impl<'a, T> RocksDbEntityKeyBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
-    fn new(iter: rocksdb::DBRawIteratorWithThreadMode<'a, T>) -> EntityKeyBytesIterator<'a> {
+impl<'a> RocksDbEntityKeyBytesIterator<'a> {
+    fn new(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityKeyBytesIterator<'a> {
+        let mut opts = rocksdb::ReadOptions::default();
+
+        opts.set_prefix_same_as_start(true);
+        opts.set_iterate_range(rocksdb::PrefixRange(prefix.to_vec()));
+
+        let mut iter = storage.database.raw_iterator_opt(opts);
+        iter.seek(prefix);
+
         Box::new(Self { iter })
     }
 }
 
-impl<'a, T> Iterator for RocksDbEntityKeyBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
+impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
     type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -178,26 +175,19 @@ where
 }
 
 #[repr(transparent)]
-struct RocksDbEntityBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
-    iter: rocksdb::DBIteratorWithThreadMode<'a, T>,
+struct RocksDbEntityBytesIterator<'a> {
+    iter: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
 }
 
-impl<'a, T> RocksDbEntityBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
-    fn new(iter: rocksdb::DBIteratorWithThreadMode<'a, T>) -> EntityBytesIterator<'a> {
-        Box::new(Self { iter })
+impl<'a> RocksDbEntityBytesIterator<'a> {
+    fn new(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityBytesIterator<'a> {
+        Box::new(Self {
+            iter: storage.database.prefix_iterator(prefix),
+        })
     }
 }
 
-impl<'a, T> Iterator for RocksDbEntityBytesIterator<'a, T>
-where
-    T: rocksdb::DBAccess,
-{
+impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
     type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {

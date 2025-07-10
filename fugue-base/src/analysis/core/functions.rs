@@ -436,8 +436,18 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
             self.add_candidate(symbol.address());
         }
 
-        let mut functions = BTreeSet::new();
         let mut failures = BTreeSet::new();
+        let mut functions =
+            project
+                .functions()
+                .keys()
+                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(|e| {
+                    AnalysisError::pass_failed("function-recovery", e)
+                })?;
+
+        tracing::debug!("existing functions: {}", functions.len());
 
         while let Some((address, context)) = self.candidates.pop_front() {
             if !project.storage.segments.contains_segment(address) {
