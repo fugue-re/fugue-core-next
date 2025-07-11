@@ -173,6 +173,18 @@ impl Function {
             .map(|idx| &self.blocks[idx])
     }
 
+    pub fn instruction_at(&self, address: impl Into<Address>) -> Option<&Insn> {
+        let address = address.into();
+        self.instructions
+            .binary_search_by_key(&address, |insn| insn.address())
+            .ok()
+            .map(|idx| &self.instructions[idx])
+    }
+
+    pub fn instructions(&self) -> &[Insn] {
+        &self.instructions
+    }
+
     pub fn is_non_returning(&self) -> bool {
         self.properties.contains(FunctionProperties::NON_RETURNING)
     }

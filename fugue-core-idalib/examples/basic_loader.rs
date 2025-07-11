@@ -1,13 +1,14 @@
 use fallible_iterator::FallibleIterator;
 
-use fugue_base::analysis::core::functions::FunctionRecovery;
-use fugue_base::analysis::AnalysisPass;
-use fugue_base::loader::{Loadable, LoadableFromFile};
+use fugue_core::analysis::core::functions::FunctionRecovery;
+use fugue_core::analysis::AnalysisPass;
+use fugue_core::loader::{Loadable, LoadableFromFile};
 
-use fugue_base::attributes;
-use fugue_base::project::Project;
-use fugue_base::storage::DefaultPersistentStorageProvider;
-use fugue_base::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::attributes;
+use fugue_core::project::Project;
+use fugue_core::storage::entities::MdbxEntityStorage;
+use fugue_core::storage::{DefaultPersistentSegmentStorage, PersistentStorageProvider};
+use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 use fugue_core_idalib::{IDABinary, IDAFunctionBuilder, ATTRIBUTE_IDA_DATABASE_PATH};
 
@@ -50,7 +51,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("external symbol {sym}");
         }
 
-        let mut project = Project::new_with::<DefaultPersistentStorageProvider>(
+        let mut project = Project::new_with::<
+            PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+        >(
             &binary,
             attributes! {
                 ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",

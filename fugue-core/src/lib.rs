@@ -1,11 +1,9 @@
+pub mod analysis;
 pub mod arch;
-pub mod attributes;
-pub mod eval;
-pub mod icfg;
-pub mod ir;
-pub mod language;
-pub mod lifter;
+pub mod entities;
 pub mod loader;
-pub mod prelude;
+pub mod lifter;
+pub mod memory;
 pub mod project;
-pub mod util;
+pub mod storage;
+pub mod types;

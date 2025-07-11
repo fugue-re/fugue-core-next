@@ -1,18 +1,18 @@
 use fallible_iterator::FallibleIterator;
 
-use fugue_base::analysis::core::functions::{FunctionBuilderContext, FunctionRecovery};
-use fugue_base::analysis::{AnalysisError, AnalysisPass};
-use fugue_base::arch::Arch;
-use fugue_base::entities::flow_graph::FlowKind;
-use fugue_base::lifter::arm::context::T_MODE;
-use fugue_base::lifter::{ContextSet, LanguageVariant};
-use fugue_base::loader::symbols::SymbolProperties;
-use fugue_base::loader::{
+use fugue_core::analysis::core::functions::{FunctionBuilderContext, FunctionRecovery};
+use fugue_core::analysis::{AnalysisError, AnalysisPass};
+use fugue_core::arch::Arch;
+use fugue_core::entities::flow_graph::FlowKind;
+use fugue_core::lifter::arm::context::T_MODE;
+use fugue_core::lifter::{ContextSet, LanguageVariant};
+use fugue_core::loader::symbols::SymbolProperties;
+use fugue_core::loader::{
     ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
 };
-use fugue_base::memory::SegmentProperties;
-use fugue_base::project::Project;
-use fugue_base::types::{Address, AttributeMap};
+use fugue_core::memory::SegmentProperties;
+use fugue_core::project::Project;
+use fugue_core::types::{Address, AttributeMap};
 
 use idalib::idb::{IDBOpenOptions, IDB};
 
@@ -68,9 +68,9 @@ fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
 
     if processor.family().is_arm() && is_64 {
         return Ok(if is_be {
-            fugue_base::lifter::aarch64::be::variants::DEFAULT
+            fugue_core::lifter::aarch64::be::variants::DEFAULT
         } else {
-            fugue_base::lifter::aarch64::le::variants::DEFAULT
+            fugue_core::lifter::aarch64::le::variants::DEFAULT
         });
     }
 
@@ -79,29 +79,29 @@ fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
             matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
         return Ok(if is_be {
             if is_thumb {
-                fugue_base::lifter::arm::be::variants::DEFAULT_THUMB
+                fugue_core::lifter::arm::be::variants::DEFAULT_THUMB
             } else {
-                fugue_base::lifter::arm::be::variants::DEFAULT
+                fugue_core::lifter::arm::be::variants::DEFAULT
             }
         } else {
             if is_thumb {
-                fugue_base::lifter::arm::le::variants::DEFAULT_THUMB
+                fugue_core::lifter::arm::le::variants::DEFAULT_THUMB
             } else {
-                fugue_base::lifter::arm::le::variants::DEFAULT
+                fugue_core::lifter::arm::le::variants::DEFAULT
             }
         });
     }
 
     if processor.family().is_386() {
         return Ok(if is_32 {
-            fugue_base::lifter::x86::variants::DEFAULT
+            fugue_core::lifter::x86::variants::DEFAULT
         } else {
-            fugue_base::lifter::x86_64::variants::DEFAULT
+            fugue_core::lifter::x86_64::variants::DEFAULT
         });
     }
 
     if processor.family().is_386() && is_64 {
-        return Ok(fugue_base::lifter::x86_64::variants::DEFAULT);
+        return Ok(fugue_core::lifter::x86_64::variants::DEFAULT);
     }
 
     Err(LoaderError::UnsupportedArch)

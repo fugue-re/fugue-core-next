@@ -282,6 +282,24 @@ impl PartialFunction {
             .with_blocks(self.blocks, self.instructions)
             .with_properties(self.properties))
     }
+
+    pub fn from_function(function: &Function) -> Self {
+        let instructions = function.instructions().to_vec();
+        let instructions_map = instructions
+            .iter()
+            .enumerate()
+            .map(|(i, insn)| (insn.address(), i))
+            .collect::<BTreeMap<_, _>>();
+
+        PartialFunction {
+            name: function.name(),
+            entry: function.entry(),
+            blocks: function.blocks().to_vec(),
+            instructions,
+            instructions_map,
+            properties: function.properties(),
+        }
+    }
 }
 
 pub struct VacantInsnEntry<'a> {
@@ -437,15 +455,12 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
         }
 
         let mut failures = BTreeSet::new();
-        let mut functions =
-            project
-                .functions()
-                .keys()
-                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
-                .collect::<Result<BTreeSet<_>, _>>()
-                .map_err(|e| {
-                    AnalysisError::pass_failed("function-recovery", e)
-                })?;
+        let mut functions = project
+            .functions()
+            .keys()
+            .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
 
         tracing::debug!("existing functions: {}", functions.len());
 

@@ -2,41 +2,55 @@
 name = "fugue-core"
 version = "0.3.0"
 authors = ["Sam Thomas <st@xv.ax>"]
-edition = "2021"
-
-[workspace]
+edition = "2024"
 
 [dependencies]
 anyhow = "1"
+arrayvec = "0.7"
+bincode = { version = "2", features = ["serde"] }
 bitflags = "2"
+blake3 = "1.8"
+bytes = "1"
+clone_dyn = "0.30"
+dashmap = "6.1"
+fallible-iterator = "0.3"
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bv = { version = "0.3", path = "../fugue-bv" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
-fugue-ir = { version = "0.3", path = "../fugue-ir" }
+fugue-lifter = { version = "0.3", path = "../fugue-lifter", features = ["bincode"] }
 fugue-specs = { version = "0.3", path = "../fugue-specs" }
 gazebo = "0.8"
-heed = { version = "0.20", features = ["read-txn-no-tls", "posix-sem"] }
+hex-display = "0.3"
+indexmap = "2.9"
 iset = "0.3"
 itertools = "0.14"
-nom = "7"
+libmdbx = "0.5"
 memmap2 = "0.9"
 object = "0.35"
 ouroboros = "0.18"
-regex = "1"
-rkyv = "0.7"
+quick_cache = "0.6"
+parking_lot = "0.12"
+range-set-blaze = "0.3"
+rocksdb = { version = "0.23", features = ["serde1", "snappy"] }
 rustc-hash = "1.1"
 sealed = "0.5"
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-smallvec = "1.13"
+serde_json = "1"
+serde_with = "3.13"
+skiplist = "0.6"
+smallvec = "1.15"
 static_init = "1"
-tempfile = "3"
 thiserror = "2"
+tinyset = "0.5"
 tracing = "0.1"
-yaxpeax-arch = { version = "0.2", default-features = false }
-yaxpeax-arm = "0.2"
-yaxpeax-x86 = "1.2"
-uuid = "1"
+typeid = "1"
+uuid = { version = "1", features = ["serde", "v7"] }
+ustr = { version = "1.1", features = ["serde"] }
+walkdir = "2.5"
+yaxpeax-arch = { version = "0.3", default-features = false }
+yaxpeax-arm = "0.3"
+yaxpeax-x86 = "2.0"
+zip = { version = "4.2", default-features = false, features = ["zstd"] }
 
 [dev-dependencies]
-anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

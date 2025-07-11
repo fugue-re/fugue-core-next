@@ -6,7 +6,7 @@ edition = "2021"
 
 [dependencies]
 fallible-iterator = "0.3"
-fugue-base = { version = "0.3", path = "../fugue-base" }
+fugue-core = { version = "0.3", path = "../fugue-core" }
 idalib = "0.6"
 thiserror = "2"
 tracing = "0.1"

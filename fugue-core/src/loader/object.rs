@@ -1,125 +1,151 @@
 use std::borrow::Cow;
+use std::path::Path;
 
-use fugue_bytes::Endian;
-use fugue_ir::Address;
+use fallible_iterator::FallibleIterator;
 
-use object::{File, Object as _, ObjectKind, ObjectSegment};
+use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::attributes::common::CompilerConvention;
-use crate::attributes::{Attribute, Attributes};
-use crate::language::{Language, LanguageBuilder, LanguageBuilderError};
-use crate::loader::{Loadable, LoadableSegment, LoaderError};
-use crate::util::BytesOrMapping;
+use crate::arch::Arch;
+use crate::lifter::LanguageVariant;
+use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
+use crate::memory::SegmentProperties;
+use crate::types::{Address, AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
 struct ObjectInner<'a> {
     data: BytesOrMapping<'a>,
-    attrs: Attributes<'a>,
     #[borrows(data)]
     #[covariant]
     view: File<'this, &'this BytesOrMapping<'a>>,
 }
 
-pub struct Object<'a>(ObjectInner<'a>);
+pub struct Object<'a> {
+    object: ObjectInner<'a>,
+    arch: Arch,
+    attributes: AttributeMap,
+}
 
-impl<'a> Loadable<'a> for Object<'a> {
-    fn new(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError> {
-        ObjectInner::try_new(data.into(), Attributes::new(), |data| {
+pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
+    use object::Architecture as A;
+
+    let is_64 = object.is_64();
+    let is_le = object.is_little_endian();
+
+    let is_thumb = object.entry() & 1 == 1;
+
+    let language = match object.architecture() {
+        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
+        A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
+        A::Arm if is_le => if is_thumb {
+            crate::lifter::arm::le::variants::DEFAULT_THUMB
+        } else {
+            crate::lifter::arm::le::variants::DEFAULT
+        }
+        A::Arm => if is_thumb {
+            crate::lifter::arm::be::variants::DEFAULT_THUMB
+        } else {
+            crate::lifter::arm::be::variants::DEFAULT
+        }
+        A::I386 => crate::lifter::x86::variants::DEFAULT,
+        A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+impl<'a> Object<'a> {
+    pub fn new(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError> {
+        Self::new_with(data, AttributeMap::new())
+    }
+
+    pub fn new_with(
+        data: impl Into<BytesOrMapping<'a>>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError> {
+        let object = ObjectInner::try_new(data.into(), |data| {
             File::parse(data).map_err(LoaderError::format)
+        })?;
+
+        let view = object.borrow_view();
+        let language = object_language(view)?;
+        let arch = Arch::new(language);
+
+        Ok(Self {
+            object,
+            arch,
+            attributes: attributes.into(),
         })
-        .map(Self)
     }
 
-    fn endian(&self) -> Endian {
-        if self.0.borrow_view().is_little_endian() {
-            Endian::Little
-        } else {
-            Endian::Big
-        }
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
+        Self::from_file_with(path, AttributeMap::new())
     }
 
-    fn language(&self, builder: &LanguageBuilder) -> Result<Language, LoaderError> {
-        if let Some(convention) = self.get_attr_as::<CompilerConvention, _>() {
-            return self.language_with(builder, convention);
-        }
-
-        let convention = match self.0.borrow_view() {
-            File::Pe32(_) | File::Pe64(_) => "windows",
-            File::Elf32(_) | File::Elf64(_) => "gcc",
-            _ => "default",
-        };
-
-        self.language_with(builder, convention)
+    pub fn from_file_with(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError> {
+        let data = BytesOrMapping::from_file(path)?;
+        Self::new_with(data, attributes)
     }
+}
 
-    fn language_with(
-        &self,
-        builder: &LanguageBuilder,
-        convention: impl AsRef<str>,
-    ) -> Result<Language, LoaderError> {
-        use object::{Architecture as A, Endianness as E};
-
-        let view = self.0.borrow_view();
-        let bits = if view.is_64() { 64 } else { 32 };
-        let conv = convention.as_ref();
-
-        let language = match (view.architecture(), view.endianness(), bits) {
-            (A::Arm, E::Big, 32) => builder.build_with("ARM", Endian::Big, 32, "v7", conv)?,
-            (A::Arm, E::Little, 32) => builder.build_with("ARM", Endian::Little, 32, "v7", conv)?,
-            (A::Arm, E::Big, 64) => builder.build_with("AARCH64", Endian::Big, 64, "v8A", conv)?,
-            (A::Arm, E::Little, 64) => {
-                builder.build_with("AARCH64", Endian::Little, 64, "v8A", conv)?
-            }
-            (A::I386, E::Little, 32) => {
-                builder.build_with("x86", Endian::Little, 32, "default", conv)?
-            }
-            (A::X86_64, E::Little, 64) => {
-                builder.build_with("x86", Endian::Little, 64, "default", conv)?
-            }
-            _ => return Err(LanguageBuilderError::UnsupportedArch.into()),
-        };
-
-        Ok(language)
+impl<'a> LoadableFromBytes<'a> for Object<'a> {
+    fn from_bytes_with(
+        data: impl Into<BytesOrMapping<'a>>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError> {
+        Self::new_with(data, attributes)
     }
+}
 
-    fn get_attr<T>(&self) -> Option<&T>
+impl LoadableFromFile for Object<'_> {
+    fn from_file_with(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError>
     where
-        T: Attribute<'a>,
+        Self: Sized,
     {
-        self.0.borrow_attrs().get_attr::<T>()
+        Self::from_file_with(path, attributes)
     }
+}
 
-    fn set_attr<T>(&mut self, attr: T)
-    where
-        T: Attribute<'a>,
-    {
-        self.0.with_attrs_mut(|attrs| attrs.set_attr(attr));
-    }
-
+impl Loadable for Object<'_> {
     fn entry(&self) -> Option<Address> {
-        let view = self.0.borrow_view();
-
-        if matches!(view.kind(), ObjectKind::Dynamic | ObjectKind::Executable) {
-            Some(Address::from(view.entry()))
-        } else {
-            None
-        }
+        Some(self.object.borrow_view().entry().into())
     }
 
-    fn segments<'slf>(&'slf self) -> impl Iterator<Item = super::LoadableSegment<'slf>> {
-        let view = self.0.borrow_view();
+    fn attributes(&self) -> &AttributeMap {
+        &self.attributes
+    }
 
-        // TODO: we need to apply relocations
+    fn attributes_mut(&mut self) -> &mut AttributeMap {
+        &mut self.attributes
+    }
 
-        view.segments().into_iter().filter_map(|segm| {
+    fn architecture(&self) -> Arch {
+        self.arch.clone()
+    }
+
+    fn segments<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
+        let view = self.object.borrow_view();
+
+        // NOTE: we need to apply relocations
+        // NOTE: we need to make a mapping of externs
+
+        fallible_iterator::convert(view.segments().into_iter().filter_map(|segm| {
             if segm.size() == 0 {
                 return None;
             }
 
-            let addr = Address::from(segm.address());
+            let address = Address::from(segm.address());
             let data = segm.data().unwrap_or_default();
 
-            let data = if data.len() as u64 != segm.size() {
+            let bytes = if data.len() as u64 != segm.size() {
                 // we have some partial or fully uninitialised segment?
 
                 let mut data = data.to_owned();
@@ -130,29 +156,35 @@ impl<'a> Loadable<'a> for Object<'a> {
                 Cow::Borrowed(data)
             };
 
-            Some(LoadableSegment::new(addr, data))
-        })
+            Some(Ok(LoadableSegment {
+                name: segm
+                    .name()
+                    .ok()
+                    .flatten()
+                    .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
+                address,
+                properties: SegmentProperties::all(),
+                bytes,
+            }))
+        }))
     }
-}
 
-#[cfg(test)]
-mod test {
-    use super::Object;
+    fn segment_range(&self) -> (Address, Address) {
+        let mut start = None::<Address>;
+        let mut end = None::<Address>;
 
-    use crate::language::LanguageBuilder;
-    use crate::loader::Loadable;
-    use crate::util::BytesOrMapping;
+        for segm in self.object.borrow_view().segments() {
+            if segm.size() == 0 {
+                continue;
+            }
 
-    #[test]
-    #[ignore]
-    fn test_elf() -> Result<(), Box<dyn std::error::Error>> {
-        let lb = LanguageBuilder::new("data/processors")?;
-        let elf = Object::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
+            let nstart = Address::from(segm.address());
+            let nend = nstart + segm.size() - 1usize;
 
-        let lang = elf.language(&lb)?;
+            start = Some(start.map_or(nstart, |start| start.min(nstart)));
+            end = Some(end.map_or(nend, |end| end.max(nend)));
+        }
 
-        assert_eq!(lang.translator().architecture().processor(), "x86");
-
-        Ok(())
+        (start.unwrap_or_default(), end.unwrap_or_default())
     }
 }

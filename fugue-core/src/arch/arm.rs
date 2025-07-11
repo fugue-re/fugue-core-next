@@ -1,70 +1,162 @@
-use fugue_ir::disassembly::IRBuilderArena;
-use fugue_ir::Address;
-
 use yaxpeax_arch::*;
-use yaxpeax_arm::armv7::{Opcode, Operand, Reg};
+use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
 
-pub use yaxpeax_arm::armv7::{
-    DecodeError as ARMDecoderError, InstDecoder as ARMInstDecoder, Instruction as ARMInstruction,
+use crate::arch::{Arch, ArchImpl};
+use crate::entities::{Insn, InsnProperties};
+use crate::lifter::arm::context::T_MODE;
+use crate::lifter::arm::register::{
+    LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
 };
+use crate::lifter::{
+    ContextSet, Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter,
+    LiftingContext, Varnode,
+};
+use crate::loader::symbols::ExternFunctionTemplate;
+use crate::types::Address;
 
-use crate::lifter::{InsnLifter, LiftedInsn, Lifter, LifterError};
+const GPRS: &[Varnode] = &[
+    R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
+];
 
-pub struct ARMInsnLifter {
-    decoder: ARMInstDecoder,
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Arm {
+    language: LanguageVariant,
+    is_thumb: bool,
 }
 
-impl ARMInsnLifter {
-    pub fn new() -> Self {
-        Self::new_with(ARMInstDecoder::armv7())
+impl ArchImpl for Arm {
+    fn dissassembler(&self) -> Disassembler {
+        ArmDisassembler::new(self.is_thumb)
     }
 
-    pub fn new_with(decoder: ARMInstDecoder) -> Self {
-        Self { decoder }
+    fn lifter(&self) -> Lifter {
+        Lifter::new(self.language.language(), self.language.context()())
     }
 
-    pub fn boxed(self) -> Box<dyn InsnLifter> {
-        Box::new(self)
+    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+        let t_mode = (addr.offset() & 1) as u32;
+        let naddr = addr.wrap_and_align(self.language());
+        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
     }
-}
 
-fn should_lift(insn: &ARMInstruction) -> bool {
-    let pc = Reg::from_u8(15);
-
-    match insn.opcode {
-        Opcode::B
-        | Opcode::BL
-        | Opcode::BX
-        | Opcode::CBZ
-        | Opcode::CBNZ
-        | Opcode::SVC
-        | Opcode::BKPT => true,
-        Opcode::MOV => insn.operands[0] == Operand::Reg(pc),
-        _ => false,
+    fn canonicalise_address_with(
+        &self,
+        addr: Address,
+        context: &LiftingContext,
+    ) -> Option<(Address, ContextSet)> {
+        let t_mode =
+            addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.into()) == 1;
+        let alignment = if t_mode { 2 } else { 4 };
+        let naddr = addr.wrap_and_align_with(self.language(), alignment);
+        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode as u32)))
     }
-}
 
-impl InsnLifter for ARMInsnLifter {
-    fn properties<'input, 'lifter>(
-        &mut self,
-        lifter: &mut Lifter,
-        irb: &'lifter IRBuilderArena,
-        address: Address,
-        bytes: &'input [u8],
-    ) -> Result<LiftedInsn<'input, 'lifter>, LifterError> {
-        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
-        let insn = self
-            .decoder
-            .decode(&mut reader)
-            .map_err(LifterError::decode)?;
-        let size = insn.len().to_const() as u8;
-
-        let props = if should_lift(&insn) {
-            LiftedInsn::new_lifted(lifter, irb, address, bytes)?
+    fn external_function_template(&self) -> ExternFunctionTemplate {
+        if self.is_thumb {
+            let mut bytes = [0x70, 0x47];
+            if self.language().is_big_endian() {
+                bytes.reverse();
+            }
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 1))
         } else {
-            LiftedInsn::new_lazy(address, bytes, size)
-        };
+            let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
+            if self.language().is_big_endian() {
+                bytes.reverse();
+            }
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 0))
+        }
+    }
 
-        Ok(props)
+    fn gprs(&self) -> &[Varnode] {
+        GPRS
+    }
+
+    fn language_variant(&self) -> LanguageVariant {
+        self.language
+    }
+}
+
+impl Arm {
+    pub(crate) fn new(language: LanguageVariant) -> Arch {
+        let is_thumb = language.variant().ends_with("T");
+        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchImpl>)
+    }
+}
+
+struct ArmDisassembler {
+    decoder: InstDecoder,
+}
+
+impl ArmDisassembler {
+    fn new(thumb: bool) -> Disassembler {
+        Disassembler::new(Self {
+            decoder: if thumb {
+                InstDecoder::default_thumb()
+            } else {
+                InstDecoder::default()
+            },
+        })
+    }
+
+    fn should_lift(&self, insn: &Instruction) -> bool {
+        let pc = Reg::from_u8(15);
+
+        match insn.opcode {
+            Opcode::B
+            | Opcode::BL
+            | Opcode::BLX
+            | Opcode::BX
+            | Opcode::BXJ
+            | Opcode::BKPT
+            | Opcode::CBZ
+            | Opcode::CBNZ
+            | Opcode::ERET
+            | Opcode::HVC
+            | Opcode::IT
+            | Opcode::RFE(_, _)
+            | Opcode::SVC
+            | Opcode::SMC
+            | Opcode::UDF => true,
+            Opcode::MVN | Opcode::MOV => insn.operands[0] == Operand::Reg(pc),
+            _ => false,
+        }
+    }
+}
+
+impl DisassemblerImpl for ArmDisassembler {
+    fn disassemble_insn(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        let in_thumb = context.get_variable_by_bits(T_MODE, address.into());
+
+        self.decoder.set_thumb_mode(in_thumb == 1);
+
+        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let insn = match self.decoder.decode(&mut reader) {
+            Ok(insn) => {
+                let size = insn.len().to_const() as usize;
+                let properties = if self.should_lift(&insn) {
+                    InsnProperties::NEEDS_LIFTING
+                } else {
+                    // NOTE: we propagate the T_MODE variable to the next instruction
+                    // mimicking the behaviour of the language spec.
+                    let naddress = address + size;
+                    context.set_variable_by_bits(T_MODE, naddress.into(), in_thumb);
+                    InsnProperties::FALL
+                };
+
+                Insn::from_disassembly(address, size, properties)
+            }
+            Err(DecodeError::Incomplete) => {
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+            }
+            Err(e) => {
+                return Err(DisassemblerError::disassembler(e));
+            }
+        };
+        Ok(insn)
     }
 }
