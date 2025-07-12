@@ -10,7 +10,7 @@ use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageFormatter};
 
-pub const MAX_LABELS: usize = 192;
+pub const MAX_LABELS: usize = 256;
 pub const MAX_INPUTS_SPILL: usize = 8;
 pub const MAX_DELAY_CTXTS: usize = 8;
 

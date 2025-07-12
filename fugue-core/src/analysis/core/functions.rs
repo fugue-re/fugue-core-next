@@ -1,6 +1,7 @@
 use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
+use std::time::Instant;
 
 use thiserror::Error;
 use ustr::Ustr;
@@ -431,6 +432,10 @@ impl<'a> FunctionRecovery<'a> {
 
 impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+        tracing::debug!("starting function recovery");
+
+        let t = Instant::now();
+
         if let Some(entry) = project.entry() {
             tracing::debug!("entry point: {entry}");
             self.add_candidate(entry);
@@ -505,9 +510,20 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
             );
         }
 
+        let num_functions = functions.len();
+
         for f in functions {
             tracing::debug!("function: {f}");
         }
+
+        let elapsed = t.elapsed();
+
+        // tracing::debug!(
+        println!(
+            "function recovery completed in {}s ({}ms) with {num_functions} functions",
+            elapsed.as_secs(),
+            elapsed.as_millis(),
+        );
 
         Ok(())
     }
