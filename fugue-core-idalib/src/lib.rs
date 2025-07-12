@@ -142,7 +142,7 @@ impl LoadableFromFile for IDABinary {
 
         let mut database_opts = IDBOpenOptions::new();
 
-        database_opts.save(false);
+        database_opts.save(true);
         database_opts.auto_analyse(true);
 
         if let Some(idb) = attributes.get_attr::<String>(ATTRIBUTE_IDA_DATABASE_PATH) {
@@ -227,6 +227,7 @@ impl Loadable for IDABinary {
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
             let start = Address::from(segm.start_address());
             let end = Address::from(segm.end_address().wrapping_sub(1));
+            let size = usize::from(end - start) + 1;
 
             tracing::trace!("loading segment {start}-{end}");
 
@@ -253,6 +254,10 @@ impl Loadable for IDABinary {
             }
 
             let mut bytes = segm.bytes();
+
+            if bytes.len() < size {
+                bytes.resize(size, 0);
+            }
 
             if type_.is_extern() {
                 properties |= SegmentProperties::EXTERNAL;

@@ -14,8 +14,7 @@ use super::{
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
-pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str =
-    "storage.entities.backend.rocksdb.options";
+pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
 
 const PROJECT_ROCKSDB_DATA: &str = "entities.db";
 

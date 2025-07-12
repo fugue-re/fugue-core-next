@@ -4,6 +4,8 @@ use std::collections::hash_map::Entry;
 use bincode::{Decode, Encode};
 use rustc_hash::FxHashMap;
 
+pub extern crate serde_json;
+
 use crate::storage::entities::common::ENTITY_ATTRIBUTES_ID;
 use crate::storage::entities::{Entity, EntityId};
 
@@ -251,7 +253,7 @@ macro_rules! attributes {
 macro_rules! attributes_value {
     // If it's a braced block, treat as JSON
     ({ $($json:tt)* }) => {
-        serde_json::json!({ $($json)* })
+        $crate::types::attributes::serde_json::json!({ $($json)* })
     };
     // Otherwise, use the value as-is
     ($value:expr) => {

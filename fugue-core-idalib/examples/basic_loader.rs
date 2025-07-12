@@ -6,7 +6,7 @@ use fugue_core::loader::{Loadable, LoadableFromFile};
 
 use fugue_core::attributes;
 use fugue_core::project::Project;
-use fugue_core::storage::entities::MdbxEntityStorage;
+use fugue_core::storage::entities::RocksDbEntityStorage;
 use fugue_core::storage::{DefaultPersistentSegmentStorage, PersistentStorageProvider};
 use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
@@ -22,9 +22,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::subscriber::with_default(subscriber, || {
         let binary = IDABinary::from_file_with(
-            "tests/test",
+            "tests/dive",
             attributes! {
-                ATTRIBUTE_IDA_DATABASE_PATH => "tests/test-non-clashing.idb",
+                ATTRIBUTE_IDA_DATABASE_PATH => "tests/dive-non-clashing.idb",
             },
         )?;
         let mut segments = binary.segments();
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut project = Project::new_with::<
-            PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+            PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
         >(
             &binary,
             attributes! {
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             IDAFunctionBuilder::new(binary.database()),
         );
 
-        analyser.analyse(&mut project)?;
+        // analyser.analyse(&mut project)?;
 
         Ok(())
     })

@@ -3,6 +3,8 @@ use std::mem::{self, ManuallyDrop};
 use std::path::PathBuf;
 
 use libmdbx as mdbx;
+use serde::{Deserialize, Serialize};
+use serde_with::{FromInto, serde_as};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -15,6 +17,8 @@ use super::{
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
+pub const ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS: &str = "storage.entities.mdbx.options";
+
 const PROJECT_MDBX_DATA: &str = "entities.db";
 
 // Maximum batch size for bulk operations
@@ -23,6 +27,69 @@ const BATCH_SIZE: usize = 1024;
 impl From<mdbx::Error> for EntityStorageError {
     fn from(error: mdbx::Error) -> Self {
         EntityStorageError::backing(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MdbxSyncMode {
+    Durable,
+    NoMetaSync,
+    SafeNoSync,
+    UtterlyNoSync,
+}
+
+impl From<MdbxSyncMode> for mdbx::SyncMode {
+    fn from(mode: MdbxSyncMode) -> Self {
+        match mode {
+            MdbxSyncMode::Durable => mdbx::SyncMode::Durable,
+            MdbxSyncMode::NoMetaSync => mdbx::SyncMode::NoMetaSync,
+            MdbxSyncMode::SafeNoSync => mdbx::SyncMode::SafeNoSync,
+            MdbxSyncMode::UtterlyNoSync => mdbx::SyncMode::UtterlyNoSync,
+        }
+    }
+}
+
+impl From<mdbx::SyncMode> for MdbxSyncMode {
+    fn from(mode: mdbx::SyncMode) -> Self {
+        match mode {
+            mdbx::SyncMode::Durable => MdbxSyncMode::Durable,
+            mdbx::SyncMode::NoMetaSync => MdbxSyncMode::NoMetaSync,
+            mdbx::SyncMode::SafeNoSync => MdbxSyncMode::SafeNoSync,
+            mdbx::SyncMode::UtterlyNoSync => MdbxSyncMode::UtterlyNoSync,
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MdbxOptions {
+    #[serde_as(as = "FromInto<MdbxSyncMode>")]
+    pub sync_mode: mdbx::SyncMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_lower: Option<isize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_upper: Option<isize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub growth_step: Option<isize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shrink_threshold: Option<isize>,
+}
+
+impl From<MdbxOptions> for mdbx::DatabaseOptions {
+    fn from(options: MdbxOptions) -> Self {
+        mdbx::DatabaseOptions {
+            mode: mdbx::Mode::ReadWrite(mdbx::ReadWriteOptions {
+                sync_mode: options.sync_mode,
+                min_size: options.size_lower,
+                max_size: options.size_upper,
+                growth_step: options.growth_step,
+                shrink_threshold: options.shrink_threshold,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
     }
 }
 
@@ -40,7 +107,13 @@ impl EntityStorageProviderFromLoadable for MdbxEntityStorage {
             .ok_or(EntityStorageError::NoProjectPath)?;
 
         let db_path = project_path.join(PROJECT_MDBX_DATA);
-        let database = mdbx::Database::open(&db_path)?;
+
+        let db_options = attributes
+            .get_attr::<MdbxOptions>(ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS)
+            .map(mdbx::DatabaseOptions::from)
+            .unwrap_or_default();
+
+        let database = mdbx::Database::open_with_options(&db_path, db_options)?;
         {
             let txn = database.begin_rw_txn()?;
             txn.create_table(None, mdbx::TableFlags::default())?;
@@ -318,7 +391,6 @@ impl<'a> EntityStorageTransactionalReader<'a> for MdbxEntityReader<'a> {
         let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
         Ok(val.map(BytesOrSlice::from))
     }
-
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
         let tbl = self.txn.open_table(None)?;

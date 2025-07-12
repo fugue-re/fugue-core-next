@@ -518,8 +518,7 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
 
         let elapsed = t.elapsed();
 
-        // tracing::debug!(
-        println!(
+        tracing::debug!(
             "function recovery completed in {}s ({}ms) with {num_functions} functions",
             elapsed.as_secs(),
             elapsed.as_millis(),
