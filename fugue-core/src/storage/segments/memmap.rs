@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use fallible_iterator::FallibleIterator;
+use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
@@ -91,9 +92,8 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
 
 #[derive(Encode, Decode)]
 pub struct MemoryMappedSegmentStorageMetadata {
-    segments: Vec<LoadableSegmentMetadata>,
-    // TODO: figure out how best to get this given the current loader interface
-    // project_hash: [u8; 32],
+    digest: [u8; 32],                       // Digest provided by the loader metadata
+    segments: Vec<LoadableSegmentMetadata>, // Segment metadataa sorted by address
 }
 
 impl MemoryMappedSegmentStorageMetadata {
@@ -164,6 +164,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
         project: impl AsRef<Path>,
         meta: impl AsRef<Path>,
         segments: impl AsRef<Path>,
+        loader: &impl Loadable,
     ) -> Result<Self, SegmentStorageError> {
         let project = project.as_ref();
         let meta = meta.as_ref();
@@ -193,6 +194,17 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             "loading memory-mapped storage backing from {}",
             segments.display()
         );
+
+        if metadata.digest != loader.metadata().digest() {
+            tracing::error!(
+                "memory-mapped storage loader digest mismatch: expected {}, got {}",
+                metadata.digest.hex(),
+                loader.metadata().digest().hex(),
+            );
+            return Err(
+                MemoryMappedSegmentStorageError::create_project("corrupted storage").into(),
+            );
+        }
 
         let backing_file = OpenOptions::new()
             .read(true)
@@ -290,7 +302,10 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             let mut file = File::create(&meta)
                 .map_err(MemoryMappedSegmentStorageError::CreateProjectMetadata)?;
 
-            let metadata = MemoryMappedSegmentStorageMetadata { segments };
+            let metadata = MemoryMappedSegmentStorageMetadata {
+                digest: loader.metadata().digest(),
+                segments,
+            };
 
             bincode::encode_into_std_write(&metadata, &mut file, bincode::config::standard())
                 .map_err(MemoryMappedSegmentStorageError::create_project_metadata)?;
@@ -400,7 +415,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
                 segments.display()
             );
 
-            Self::from_existing(&project, &meta, &segments)
+            Self::from_existing(&project, &meta, &segments, loader)
         } else {
             tracing::trace!(
                 "memory-mapped storage for project {} does not exist at {}; creating",

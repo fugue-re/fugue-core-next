@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
 
@@ -7,7 +8,7 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::loader::util::parse_language;
-use crate::loader::{Loadable, LoadableSegment, LoaderError};
+use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoaderError};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
 
@@ -15,6 +16,7 @@ pub struct Shellcode<'a> {
     address: Address,
     bytes: BytesOrMapping<'a>,
     arch: Arch,
+    metadata: LoadableMetadata,
     attributes: AttributeMap,
 }
 
@@ -68,12 +70,41 @@ impl<'a> Shellcode<'a> {
             )));
         }
 
+        let metadata = LoadableMetadata::new(
+            &bytes,
+            format!("Fugue v{} Shellcode Loader", env!("CARGO_PKG_VERSION")),
+        );
+
         Ok(Self {
             address: address.into(),
             bytes: bytes.into(),
             arch,
+            metadata,
             attributes: attributes.into(),
         })
+    }
+
+    pub fn from_file(
+        language: impl AsRef<str>,
+        address: impl Into<Address>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, LoaderError> {
+        Self::from_file_with(language, address, path, AttributeMap::default())
+    }
+
+    pub fn from_file_with(
+        language: impl AsRef<str>,
+        address: impl Into<Address>,
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError> {
+        let path = path.as_ref();
+        let bytes = BytesOrMapping::from_file(path)?;
+
+        let mut loaded = Self::new_with(language, address, bytes, attributes)?;
+        loaded.metadata.set_path(path.display().to_string());
+
+        Ok(loaded)
     }
 
     pub fn address(&self) -> Address {
@@ -116,6 +147,10 @@ impl Loadable for Shellcode<'_> {
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
     }
+
+    fn metadata(&self) -> &LoadableMetadata {
+        &self.metadata
+    }
 }
 
 #[cfg(test)]
@@ -123,8 +158,8 @@ mod test {
     use fallible_iterator::FallibleIterator;
 
     use crate::attributes;
-    use crate::loader::shellcode::Shellcode;
     use crate::loader::Loadable;
+    use crate::loader::shellcode::Shellcode;
     use crate::types::Address;
 
     #[test]

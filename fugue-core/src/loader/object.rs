@@ -7,7 +7,9 @@ use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::Arch;
 use crate::lifter::LanguageVariant;
-use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
+use crate::loader::{
+    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
 
@@ -22,6 +24,7 @@ struct ObjectInner<'a> {
 pub struct Object<'a> {
     object: ObjectInner<'a>,
     arch: Arch,
+    metadata: LoadableMetadata,
     attributes: AttributeMap,
 }
 
@@ -36,15 +39,19 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let language = match object.architecture() {
         A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
         A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
-        A::Arm if is_le => if is_thumb {
-            crate::lifter::arm::le::variants::DEFAULT_THUMB
-        } else {
-            crate::lifter::arm::le::variants::DEFAULT
+        A::Arm if is_le => {
+            if is_thumb {
+                crate::lifter::arm::le::variants::DEFAULT_THUMB
+            } else {
+                crate::lifter::arm::le::variants::DEFAULT
+            }
         }
-        A::Arm => if is_thumb {
-            crate::lifter::arm::be::variants::DEFAULT_THUMB
-        } else {
-            crate::lifter::arm::be::variants::DEFAULT
+        A::Arm => {
+            if is_thumb {
+                crate::lifter::arm::be::variants::DEFAULT_THUMB
+            } else {
+                crate::lifter::arm::be::variants::DEFAULT
+            }
         }
         A::I386 => crate::lifter::x86::variants::DEFAULT,
         A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
@@ -71,9 +78,18 @@ impl<'a> Object<'a> {
         let language = object_language(view)?;
         let arch = Arch::new(language);
 
+        let metadata = LoadableMetadata::new(
+            object.borrow_data(),
+            format!(
+                "Fugue v{} Generic \"Object\" Loader",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+
         Ok(Self {
             object,
             arch,
+            metadata,
             attributes: attributes.into(),
         })
     }
@@ -86,8 +102,13 @@ impl<'a> Object<'a> {
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
+        let path = path.as_ref();
         let data = BytesOrMapping::from_file(path)?;
-        Self::new_with(data, attributes)
+
+        let mut loaded = Self::new_with(data, attributes)?;
+        loaded.metadata.set_path(path.display().to_string());
+
+        Ok(loaded)
     }
 }
 
@@ -123,6 +144,10 @@ impl Loadable for Object<'_> {
 
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    fn metadata(&self) -> &LoadableMetadata {
+        &self.metadata
     }
 
     fn architecture(&self) -> Arch {

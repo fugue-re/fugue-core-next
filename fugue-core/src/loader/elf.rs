@@ -21,7 +21,9 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 use crate::arch::Arch;
 use crate::loader::object::object_language;
 use crate::loader::symbols::{ExternSymbols, LocalSymbols, SymbolProperties};
-use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, LoadableSegment, LoaderError};
+use crate::loader::{
+    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+};
 use crate::memory::SegmentProperties;
 use crate::types::{Address, AttributeMap, BytesOrMapping};
 
@@ -67,6 +69,7 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
 pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,
+    metadata: LoadableMetadata,
     locals: LocalSymbols,
     externs: ExternSymbols,
     attributes: AttributeMap,
@@ -89,9 +92,15 @@ impl<'a> Elf<'a> {
 
         let (locals, externs) = with_elf!(view, elf | elf_symbols(elf, &architecture));
 
+        let metadata = LoadableMetadata::new(
+            object.borrow_data(),
+            format!("Fugue v{} ELF Loader", env!("CARGO_PKG_VERSION")),
+        );
+
         Ok(Self {
             object,
             architecture,
+            metadata,
             locals,
             externs,
             attributes: attributes.into(),
@@ -114,10 +123,7 @@ impl<'a> Elf<'a> {
     }
 }
 
-pub fn elf_symbols<'a>(
-    elf: &'a impl Object<'a>,
-    arch: &Arch,
-) -> (LocalSymbols, ExternSymbols) {
+pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, ExternSymbols) {
     // TODO:
     // - base address should be configurable.
 
@@ -1163,7 +1169,13 @@ impl LoadableFromFile for Elf<'_> {
     where
         Self: Sized,
     {
-        Self::new_with(BytesOrMapping::from_file(path)?, attributes)
+        let path = path.as_ref();
+
+        let mut loaded = Self::new_with(BytesOrMapping::from_file(path)?, attributes)?;
+
+        loaded.metadata.set_path(path.display().to_string());
+
+        Ok(loaded)
     }
 }
 
@@ -1181,6 +1193,10 @@ impl Loadable for Elf<'_> {
 
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    fn metadata(&self) -> &LoadableMetadata {
+        &self.metadata
     }
 
     fn architecture(&self) -> Arch {

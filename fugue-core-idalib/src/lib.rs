@@ -8,7 +8,8 @@ use fugue_core::lifter::arm::context::T_MODE;
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::symbols::SymbolProperties;
 use fugue_core::loader::{
-    ExternSymbols, Loadable, LoadableFromFile, LoadableSegment, LoaderError, LocalSymbols,
+    ExternSymbols, Loadable, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+    LocalSymbols,
 };
 use fugue_core::memory::SegmentProperties;
 use fugue_core::project::Project;
@@ -17,6 +18,8 @@ use fugue_core::types::{Address, AttributeMap};
 use idalib::idb::{IDBOpenOptions, IDB};
 
 pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
+pub const ATTRIBUTE_IDA_DATABASE_ANALYSE: &str = "ida.database.analyse";
+pub const ATTRIBUTE_IDA_DATABASE_PERSIST: &str = "ida.database.persist";
 
 pub struct IDABinary {
     database: IDB,
@@ -24,6 +27,7 @@ pub struct IDABinary {
     local_symbols: LocalSymbols,
     extern_symbols: Option<ExternSymbols>,
     mark_thumb: bool,
+    metadata: LoadableMetadata,
     attributes: AttributeMap,
 }
 
@@ -142,8 +146,17 @@ impl LoadableFromFile for IDABinary {
 
         let mut database_opts = IDBOpenOptions::new();
 
-        database_opts.save(true);
-        database_opts.auto_analyse(true);
+        let persist = attributes
+            .get_attr::<bool>(ATTRIBUTE_IDA_DATABASE_PERSIST)
+            .unwrap_or_default();
+
+        database_opts.save(persist);
+
+        let analyse = attributes
+            .get_attr::<bool>(ATTRIBUTE_IDA_DATABASE_ANALYSE)
+            .unwrap_or(true);
+
+        database_opts.auto_analyse(analyse);
 
         if let Some(idb) = attributes.get_attr::<String>(ATTRIBUTE_IDA_DATABASE_PATH) {
             database_opts.idb(idb);
@@ -166,12 +179,27 @@ impl LoadableFromFile for IDABinary {
 
         let (local_symbols, extern_symbols) = ida_symbols(&architecture, &database);
 
+        let version = idalib::version().map_err(LoaderError::other)?;
+
+        let metadata = LoadableMetadata::from_hashes_with(
+            database.meta().input_file_md5(),
+            database.meta().input_file_sha256(),
+            database.meta().input_file_path(),
+            format!(
+                "IDA Pro v{}.{}.{} Loader",
+                version.major(),
+                version.minor(),
+                version.build()
+            ),
+        );
+
         Ok(IDABinary {
             database,
             architecture,
             local_symbols,
             extern_symbols,
             mark_thumb,
+            metadata,
             attributes,
         })
     }
@@ -188,6 +216,10 @@ impl Loadable for IDABinary {
 
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    fn metadata(&self) -> &LoadableMetadata {
+        &self.metadata
     }
 
     fn entry(&self) -> Option<Address> {
