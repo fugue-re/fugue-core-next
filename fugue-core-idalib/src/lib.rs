@@ -6,7 +6,7 @@ use fugue_core::arch::Arch;
 use fugue_core::entities::flow_graph::FlowKind;
 use fugue_core::lifter::arm::context::T_MODE;
 use fugue_core::lifter::{ContextSet, LanguageVariant};
-use fugue_core::loader::symbols::SymbolProperties;
+use fugue_core::loader::symbols::{Symbol, SymbolProperties};
 use fugue_core::loader::{
     ExternSymbols, Loadable, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
     LocalSymbols,
@@ -59,6 +59,26 @@ fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
         } else {
             locals.add_symbol_with(n, addr, name, props);
         }
+    }
+
+    let next_index = locals.next_index();
+
+    for (n, name) in db.names().iter().enumerate() {
+        let addr = name.address();
+        let flags = db.flags_at(addr);
+
+        if !flags.is_data() {
+            continue;
+        }
+
+        let name = name.name();
+
+        locals.add_symbol_with(
+            n + next_index,
+            addr,
+            Symbol::from(name),
+            SymbolProperties::DATA,
+        );
     }
 
     (locals, externs.map(|(symbols, _)| symbols))
