@@ -5,7 +5,8 @@ use std::ops::RangeInclusive;
 
 use bincode::{Decode, Encode};
 use smallvec::SmallVec;
-use ustr::{Ustr, UstrMap};
+
+pub use ustr::{Ustr as Symbol, UstrMap as SymbolMap};
 
 use crate::lifter::ContextSet;
 use crate::storage::entities::common::{ENTITY_EXTERN_SYMBOLS_ID, ENTITY_LOCAL_SYMBOLS_ID};
@@ -84,7 +85,7 @@ impl ExternFunctionTemplate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {
     address: Address,
-    symbol: Option<Ustr>,
+    symbol: Option<Symbol>,
     properties: SymbolProperties,
 }
 
@@ -101,7 +102,7 @@ impl Display for SymbolEntry {
 impl SymbolEntry {
     pub fn new(
         address: Address,
-        symbol: impl Into<Option<Ustr>>,
+        symbol: impl Into<Option<Symbol>>,
         properties: SymbolProperties,
     ) -> Self {
         Self {
@@ -115,7 +116,7 @@ impl SymbolEntry {
         self.address
     }
 
-    pub fn symbol(&self) -> Option<&Ustr> {
+    pub fn symbol(&self) -> Option<&Symbol> {
         self.symbol.as_ref()
     }
 
@@ -212,8 +213,8 @@ impl SymbolProperties {
 #[derive(Debug, Clone, Default)]
 pub struct LocalSymbols {
     indices: BTreeMap<usize, Address>,
-    sym_to_addr: UstrMap<Address>,
-    addr_to_sym: BTreeMap<Address, (Option<Ustr>, Cell<SymbolProperties>)>,
+    sym_to_addr: SymbolMap<Address>,
+    addr_to_sym: BTreeMap<Address, (Option<Symbol>, Cell<SymbolProperties>)>,
 }
 
 impl<C> Decode<C> for LocalSymbols {
@@ -228,7 +229,7 @@ impl<C> Decode<C> for LocalSymbols {
         let sym_to_addr = (0..sym_len)
             .into_iter()
             .map(|_| {
-                let Compat(sym) = Compat::<Ustr>::decode(decoder)?;
+                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
                 let addr = Address::decode(decoder)?;
                 Ok((sym, addr))
             })
@@ -239,7 +240,7 @@ impl<C> Decode<C> for LocalSymbols {
             .into_iter()
             .map(|_| {
                 let addr = Address::decode(decoder)?;
-                let Compat(sym) = Compat::<Option<Ustr>>::decode(decoder)?;
+                let Compat(sym) = Compat::<Option<Symbol>>::decode(decoder)?;
                 let props = Cell::new(SymbolProperties::decode(decoder)?);
                 Ok((addr, (sym, props)))
             })
@@ -287,7 +288,7 @@ impl LocalSymbols {
     pub fn new() -> Self {
         Self {
             indices: BTreeMap::new(),
-            sym_to_addr: UstrMap::default(),
+            sym_to_addr: SymbolMap::default(),
             addr_to_sym: BTreeMap::new(),
         }
     }
@@ -296,7 +297,7 @@ impl LocalSymbols {
         &mut self,
         index: usize,
         addr: impl Into<Address>,
-        symbol: impl Into<Option<Ustr>>,
+        symbol: impl Into<Option<Symbol>>,
     ) {
         Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::LOCAL)
     }
@@ -305,7 +306,7 @@ impl LocalSymbols {
         &mut self,
         index: usize,
         addr: impl Into<Address>,
-        symbol: impl Into<Option<Ustr>>,
+        symbol: impl Into<Option<Symbol>>,
         props: SymbolProperties,
     ) {
         let addr = addr.into();
@@ -325,7 +326,7 @@ impl LocalSymbols {
         self.sym_to_addr.insert(sym, addr);
     }
 
-    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Ustr>, SymbolProperties)> {
+    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Symbol>, SymbolProperties)> {
         self.addr_to_sym
             .get(&addr.into())
             .map(|(sym, props)| (*sym, props.get()))
@@ -364,18 +365,18 @@ impl LocalSymbols {
     }
 
     pub fn address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        let sym = Ustr::from_existing(sym.as_ref())?;
+        let sym = Symbol::from_existing(sym.as_ref())?;
         self.sym_to_addr.get(&sym).copied()
     }
 
     pub fn properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        let sym = Ustr::from_existing(sym.as_ref())?;
+        let sym = Symbol::from_existing(sym.as_ref())?;
         self.sym_to_addr
             .get(&sym)
             .and_then(|addr| self.addr_to_sym.get(addr).map(|(_, props)| props.get()))
     }
 
-    pub fn get_symbol(&self, index: usize) -> Option<Ustr> {
+    pub fn get_symbol(&self, index: usize) -> Option<Symbol> {
         self.indices
             .get(&index)
             .and_then(|&addr| self.addr_to_sym.get(&addr).and_then(|(sym, _)| *sym))
@@ -394,7 +395,7 @@ impl LocalSymbols {
     pub fn get_symbol_with_properties(
         &self,
         index: usize,
-    ) -> Option<(Option<Ustr>, SymbolProperties)> {
+    ) -> Option<(Option<Symbol>, SymbolProperties)> {
         self.indices.get(&index).and_then(|&addr| {
             self.addr_to_sym
                 .get(&addr)
@@ -407,7 +408,7 @@ impl LocalSymbols {
     }
 
     pub fn contains_symbol(&self, sym: impl AsRef<str>) -> bool {
-        let Some(sym) = Ustr::from_existing(sym.as_ref()) else {
+        let Some(sym) = Symbol::from_existing(sym.as_ref()) else {
             return false;
         };
         self.sym_to_addr.contains_key(&sym)
@@ -421,6 +422,10 @@ impl LocalSymbols {
                 symbol: *sym,
                 properties: props.get(),
             })
+    }
+
+    pub fn next_index(&self) -> usize {
+        self.indices.keys().max().map_or(0, |&max| max + 1)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -437,8 +442,8 @@ pub struct ExternSymbols {
     base: Address,
     alignment: usize,
     indices: BTreeMap<usize, Address>,
-    sym_to_addr: UstrMap<Address>,
-    addr_to_sym: BTreeMap<Address, (Option<Ustr>, Cell<SymbolProperties>)>,
+    sym_to_addr: SymbolMap<Address>,
+    addr_to_sym: BTreeMap<Address, (Option<Symbol>, Cell<SymbolProperties>)>,
     template: ExternFunctionTemplate,
 }
 
@@ -456,7 +461,7 @@ impl<C> Decode<C> for ExternSymbols {
         let sym_to_addr = (0..sym_len)
             .into_iter()
             .map(|_| {
-                let Compat(sym) = Compat::<Ustr>::decode(decoder)?;
+                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
                 let addr = Address::decode(decoder)?;
                 Ok((sym, addr))
             })
@@ -467,7 +472,7 @@ impl<C> Decode<C> for ExternSymbols {
             .into_iter()
             .map(|_| {
                 let addr = Address::decode(decoder)?;
-                let Compat(sym) = Compat::<Option<Ustr>>::decode(decoder)?;
+                let Compat(sym) = Compat::<Option<Symbol>>::decode(decoder)?;
                 let props = Cell::new(SymbolProperties::decode(decoder)?);
                 Ok((addr, (sym, props)))
             })
@@ -530,7 +535,7 @@ impl ExternSymbols {
             base: base.into(),
             alignment,
             indices: BTreeMap::new(),
-            sym_to_addr: UstrMap::default(),
+            sym_to_addr: SymbolMap::default(),
             addr_to_sym: BTreeMap::new(),
             template,
         }
@@ -540,7 +545,7 @@ impl ExternSymbols {
         &mut self,
         index: usize,
         addr: impl Into<Address>,
-        symbol: impl Into<Option<Ustr>>,
+        symbol: impl Into<Option<Symbol>>,
     ) {
         Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::EXTERN)
     }
@@ -549,7 +554,7 @@ impl ExternSymbols {
         &mut self,
         index: usize,
         addr: impl Into<Address>,
-        symbol: impl Into<Option<Ustr>>,
+        symbol: impl Into<Option<Symbol>>,
         props: SymbolProperties,
     ) {
         let addr = addr.into();
@@ -589,7 +594,7 @@ impl ExternSymbols {
         self.base()..=self.last_address()
     }
 
-    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Ustr>, SymbolProperties)> {
+    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Symbol>, SymbolProperties)> {
         self.addr_to_sym
             .get(&addr.into())
             .map(|(sym, props)| (*sym, props.get()))
@@ -615,18 +620,18 @@ impl ExternSymbols {
     }
 
     pub fn address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        let sym = Ustr::from_existing(sym.as_ref())?;
+        let sym = Symbol::from_existing(sym.as_ref())?;
         self.sym_to_addr.get(&sym).copied()
     }
 
     pub fn properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        let sym = Ustr::from_existing(sym.as_ref())?;
+        let sym = Symbol::from_existing(sym.as_ref())?;
         self.sym_to_addr
             .get(&sym)
             .and_then(|addr| self.addr_to_sym.get(addr).map(|(_, props)| props.get()))
     }
 
-    pub fn get_symbol(&self, index: usize) -> Option<Ustr> {
+    pub fn get_symbol(&self, index: usize) -> Option<Symbol> {
         self.indices
             .get(&index)
             .and_then(|&addr| self.addr_to_sym.get(&addr).and_then(|(sym, _)| *sym))
@@ -645,7 +650,7 @@ impl ExternSymbols {
     pub fn get_symbol_with_properties(
         &self,
         index: usize,
-    ) -> Option<(Option<Ustr>, SymbolProperties)> {
+    ) -> Option<(Option<Symbol>, SymbolProperties)> {
         self.indices.get(&index).and_then(|&addr| {
             self.addr_to_sym
                 .get(&addr)
@@ -658,7 +663,7 @@ impl ExternSymbols {
     }
 
     pub fn contains_symbol(&self, sym: impl AsRef<str>) -> bool {
-        let Some(sym) = Ustr::from_existing(sym.as_ref()) else {
+        let Some(sym) = Symbol::from_existing(sym.as_ref()) else {
             return false;
         };
         self.sym_to_addr.contains_key(&sym)

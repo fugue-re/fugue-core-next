@@ -20,7 +20,7 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
 use crate::loader::object::object_language;
-use crate::loader::symbols::{ExternSymbols, LocalSymbols, SymbolProperties};
+use crate::loader::symbols::{ExternSymbols, LocalSymbols, Symbol, SymbolProperties};
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
@@ -209,7 +209,7 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
         locals.add_symbol_with(
             symbol.index().0,
             Address::from(address),
-            symbol.name().ok().map(ustr::ustr),
+            symbol.name().ok().map(Symbol::from),
             if st_type == STT_FUNC {
                 SymbolProperties::FUNCTION
             } else if [STT_COMMON, STT_OBJECT, STT_TLS].contains(&st_type) {
@@ -269,7 +269,7 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
             )
         })
     {
-        let sym = sym.name().ok().map(ustr::ustr);
+        let sym = sym.name().ok().map(Symbol::from);
         externs.add_symbol_with(index, addr, sym, kind);
     }
 
