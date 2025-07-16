@@ -1,8 +1,9 @@
-use byteorder::ByteOrder;
 use std::cmp::Ordering;
 
-use crate::{BE, LE};
+pub use byteorder::{ByteOrder, ReadBytesExt, WriteBytesExt};
+
 use crate::endian::Endian;
+use crate::{BE, LE};
 
 pub trait Order: ByteOrder + Send + Sync + 'static {
     const ENDIAN: Endian;
@@ -48,7 +49,6 @@ pub trait Order: ByteOrder + Send + Sync + 'static {
 impl Order for BE {
     const ENDIAN: Endian = Endian::Big;
     const NATIVE: bool = cfg!(target_endian = "big");
-
 
     #[cfg(target_pointer_width = "32")]
     fn read_isize(buf: &[u8]) -> isize {
@@ -103,7 +103,9 @@ impl Order for BE {
             Ordering::Equal => {
                 destination.copy_from_slice(&trimmed);
             }
-            Ordering::Greater => destination.copy_from_slice(&trimmed[trimmed.len() - destination.len()..]),
+            Ordering::Greater => {
+                destination.copy_from_slice(&trimmed[trimmed.len() - destination.len()..])
+            }
         }
     }
 }

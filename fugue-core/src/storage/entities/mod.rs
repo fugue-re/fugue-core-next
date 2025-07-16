@@ -1,6 +1,8 @@
 use std::fmt::{Debug, Display};
+use std::io;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
@@ -38,6 +40,8 @@ pub enum EntityStorageError {
     InvalidKeyFormat,
     #[error("invalid key size")]
     InvalidKeySize,
+    #[error("failed to load project data from `{0}`: {1}")]
+    ProjectData(PathBuf, io::ErrorKind),
     #[error("no project path specified")]
     NoProjectPath,
     #[error(transparent)]
@@ -62,6 +66,10 @@ impl EntityStorageError {
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
         Self::Backing(anyhow::Error::msg(msg))
+    }
+
+    pub fn project_data(path: impl Into<PathBuf>, kind: io::ErrorKind) -> Self {
+        Self::ProjectData(path.into(), kind)
     }
 
     pub fn unsupported<E: std::error::Error + Send + Sync + 'static>(err: E) -> Self {
@@ -294,6 +302,15 @@ pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
         loader: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError>
+    where
+        Self: Sized;
+}
+
+pub trait EntityStorageProviderFromStorage: EntityStorageProviderFromLoadable {
+    fn from_storage(
+        path: impl AsRef<Path>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where

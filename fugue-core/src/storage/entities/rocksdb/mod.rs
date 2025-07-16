@@ -1,5 +1,5 @@
-use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{io, mem};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -11,7 +11,8 @@ use super::{
     EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
     EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageBulkInserter,
     EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
+    EntityStorageProviderFromStorage, EntityStorageTransactionalReader,
+    EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
@@ -50,6 +51,40 @@ impl EntityStorageProviderFromLoadable for RocksDbEntityStorage {
 
         options.set_recycle_log_file_num(5);
         options.set_keep_log_file_num(5);
+
+        if let Some(db_options) =
+            attributes.get_attr::<options::RocksDbOptions>(ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS)
+        {
+            db_options.apply(&mut options);
+        }
+
+        Ok(Self {
+            database: rocksdb::OptimisticTransactionDB::open(&options, db_path)?,
+        })
+    }
+}
+
+impl EntityStorageProviderFromStorage for RocksDbEntityStorage {
+    fn from_storage(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError>
+    where
+        Self: Sized,
+    {
+        let project_path = path.as_ref();
+        let db_path = project_path.join(PROJECT_ROCKSDB_DATA);
+
+        if !db_path.exists() {
+            return Err(EntityStorageError::project_data(
+                db_path,
+                io::ErrorKind::NotFound,
+            ));
+        }
+
+        let mut options = rocksdb::Options::default();
+
+        options.create_if_missing(false);
 
         if let Some(db_options) =
             attributes.get_attr::<options::RocksDbOptions>(ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS)

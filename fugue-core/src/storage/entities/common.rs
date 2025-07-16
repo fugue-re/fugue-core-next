@@ -10,11 +10,12 @@ pub type EntityId = u8;
 
 pub const ENTITY_PREFIX_SIZE: usize = 2;
 
-pub const ENTITY_LOCAL_SYMBOLS_ID: EntityId = 0;
-pub const ENTITY_EXTERN_SYMBOLS_ID: EntityId = 1;
-pub const ENTITY_ATTRIBUTES_ID: EntityId = 2;
+pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
+pub const ENTITY_LOCAL_SYMBOLS_ID: EntityId = 1;
+pub const ENTITY_EXTERN_SYMBOLS_ID: EntityId = 2;
+pub const ENTITY_ATTRIBUTES_ID: EntityId = 3;
 
-pub const ENTITY_FUNCTION_ID: EntityId = 3;
+pub const ENTITY_FUNCTION_ID: EntityId = 4;
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -30,9 +31,10 @@ pub trait EntityKey: Clone + PartialEq + Eq + Hash {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 #[repr(u8)]
 pub enum ProjectEntity {
-    LocalSymbols  = 0b0000_0000,
-    ExternSymbols = 0b0000_0001,
-    Attributes    = 0b0000_0010,
+    Architecture = 0b0000_0000,
+    LocalSymbols = 0b0000_0001,
+    ExternSymbols = 0b0000_0010,
+    Attributes = 0b0000_0011,
 }
 
 impl EntityKey for ProjectEntity {
@@ -41,9 +43,10 @@ impl EntityKey for ProjectEntity {
     fn decode(buf: &[u8]) -> Option<Self> {
         if buf.len() == 1 {
             match buf[0] {
-                0b0000_0000 => Some(ProjectEntity::LocalSymbols),
-                0b0000_0001 => Some(ProjectEntity::ExternSymbols),
-                0b0000_0010 => Some(ProjectEntity::Attributes),
+                0b0000_0000 => Some(ProjectEntity::Architecture),
+                0b0000_0001 => Some(ProjectEntity::LocalSymbols),
+                0b0000_0010 => Some(ProjectEntity::ExternSymbols),
+                0b0000_0011 => Some(ProjectEntity::Attributes),
                 _ => None,
             }
         } else {

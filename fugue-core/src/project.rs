@@ -87,10 +87,6 @@ impl Project {
     where
         P: StorageProvider,
     {
-        let arch = loadable.architecture();
-        let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
-        let language = arch.language();
-
         // NOTE: we make a copy of the loader attributes, as project attributes will be a superset.
         let mut attributes = attributes.into();
 
@@ -99,6 +95,16 @@ impl Project {
         tracing::trace!("initialising project storage layer");
 
         let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
+
+        tracing::trace!("loading project architecture and lifter");
+
+        let arch = storage
+            .entities
+            .get(&ProjectEntity::Architecture)?
+            .unwrap_or_else(|| loadable.architecture());
+
+        let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
+        let language = arch.language();
 
         tracing::trace!("loading project attributes");
 
@@ -281,6 +287,11 @@ impl Project {
         // persist it here.
         tracing::debug!("persisting project data");
 
+        tracing::debug!("persisting project architecture and lifter");
+        self.storage
+            .entities
+            .insert(&ProjectEntity::Architecture, &self.arch)?;
+
         tracing::debug!("persisting project attributes");
         self.storage
             .entities
@@ -334,12 +345,11 @@ impl Project {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        attributes,
-        storage::{
-            DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
-            PersistentStorageProvider, TransientStorageProvider, entities::MdbxEntityStorage,
-        },
+    use crate::attributes;
+    use crate::storage::entities::MdbxEntityStorage;
+    use crate::storage::{
+        DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
+        PersistentStorageProvider, TransientStorageProvider,
     };
 
     use super::*;

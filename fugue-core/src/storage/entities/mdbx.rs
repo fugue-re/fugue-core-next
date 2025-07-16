@@ -1,6 +1,7 @@
 use std::borrow::Cow;
+use std::io;
 use std::mem::{self, ManuallyDrop};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use libmdbx as mdbx;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,8 @@ use super::{
     EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
     EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageBulkInserter,
     EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
+    EntityStorageProviderFromStorage, EntityStorageTransactionalReader,
+    EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS: &str = "storage.entities.mdbx.options";
@@ -117,6 +119,41 @@ impl EntityStorageProviderFromLoadable for MdbxEntityStorage {
         {
             let txn = database.begin_rw_txn()?;
             txn.create_table(None, mdbx::TableFlags::default())?;
+        }
+
+        Ok(Self { database })
+    }
+}
+
+impl EntityStorageProviderFromStorage for MdbxEntityStorage {
+    fn from_storage(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError>
+    where
+        Self: Sized,
+    {
+        let project_path = path.as_ref();
+        let db_path = project_path.join(PROJECT_MDBX_DATA);
+
+        if !project_path.exists() {
+            return Err(EntityStorageError::project_data(
+                db_path,
+                io::ErrorKind::NotFound,
+            ));
+        }
+
+        let db_options = attributes
+            .get_attr::<MdbxOptions>(ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS)
+            .map(mdbx::DatabaseOptions::from)
+            .unwrap_or_default();
+
+        let database = mdbx::Database::open_with_options(&db_path, db_options)?;
+        {
+            let txn = database.begin_ro_txn()?;
+            txn.open_table(None).map_err(|_| {
+                EntityStorageError::project_data(db_path, io::ErrorKind::InvalidData)
+            })?;
         }
 
         Ok(Self { database })

@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -26,6 +28,8 @@ pub enum SegmentStorageError {
     InvalidSize,
     #[error(transparent)]
     Loader(#[from] LoaderError),
+    #[error("failed to load project data from `{0}`: {1}")]
+    ProjectData(PathBuf, io::ErrorKind),
 }
 
 impl SegmentStorageError {
@@ -42,12 +46,25 @@ impl SegmentStorageError {
     {
         Self::Backing(anyhow::Error::msg(msg))
     }
+
+    pub fn project_data(path: impl Into<PathBuf>, kind: io::ErrorKind) -> Self {
+        Self::ProjectData(path.into(), kind)
+    }
 }
 
 pub trait SegmentStorageProviderFromLoadable: SegmentStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
         loader: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, SegmentStorageError>
+    where
+        Self: Sized;
+}
+
+pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable {
+    fn from_storage(
+        path: impl AsRef<Path>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where

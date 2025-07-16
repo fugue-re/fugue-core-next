@@ -10,13 +10,16 @@ use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
-use crate::loader::{Loadable, LoadableSegment};
+use crate::loader::{Loadable, LoadableSegment, Loader};
 use crate::memory::SegmentProperties;
-use crate::storage::{self, StoragePersistence};
+use crate::storage::{self, PERSISTENT, StoragePersistence};
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{Address, AttributeMap};
 
-use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
+use super::{
+    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
+    SegmentStorageProviderFromStorage,
+};
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
 const PROJECT_MEMORY_MAPPING_META: &str = "segment.meta.bin";
@@ -41,6 +44,8 @@ pub enum MemoryMappedSegmentStorageError {
     InvalidSize,
     #[error("no project path specified")]
     NoProjectPath,
+    #[error("failed to read project data from `{0}`")]
+    NoProjectData(PathBuf),
 }
 
 impl MemoryMappedSegmentStorageError {
@@ -73,6 +78,10 @@ impl MemoryMappedSegmentStorageError {
             e.into(),
         ))
     }
+
+    pub fn no_project_data(path: impl Into<PathBuf>) -> Self {
+        MemoryMappedSegmentStorageError::NoProjectData(path.into())
+    }
 }
 
 impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
@@ -86,6 +95,9 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
             MemoryMappedSegmentStorageError::InvalidAddress => SegmentStorageError::InvalidAddress,
             MemoryMappedSegmentStorageError::InvalidSize => SegmentStorageError::InvalidSize,
             MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::InvalidAddress,
+            MemoryMappedSegmentStorageError::NoProjectData(path) => {
+                SegmentStorageError::ProjectData(path, io::ErrorKind::NotFound)
+            }
         }
     }
 }
@@ -164,7 +176,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
         project: impl AsRef<Path>,
         meta: impl AsRef<Path>,
         segments: impl AsRef<Path>,
-        loader: &impl Loadable,
+        loader: Option<&impl Loadable>,
     ) -> Result<Self, SegmentStorageError> {
         let project = project.as_ref();
         let meta = meta.as_ref();
@@ -195,7 +207,9 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             segments.display()
         );
 
-        if metadata.digest != loader.metadata().digest() {
+        if let Some(loader) = loader
+            && metadata.digest != loader.metadata().digest()
+        {
             tracing::error!(
                 "memory-mapped storage loader digest mismatch: expected {}, got {}",
                 metadata.digest.hex(),
@@ -394,6 +408,35 @@ impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
     }
 }
 
+impl SegmentStorageProviderFromStorage for MemoryMappedSegmentStorage<{ PERSISTENT }> {
+    fn from_storage(
+        path: impl AsRef<Path>,
+        _attributes: &mut AttributeMap,
+    ) -> Result<Self, SegmentStorageError> {
+        let project = path.as_ref();
+        let meta = project.join(PROJECT_MEMORY_MAPPING_META);
+        let segments = project.join(PROJECT_MEMORY_MAPPING_DATA);
+
+        if !meta.exists() || !segments.exists() {
+            tracing::error!(
+                "memory-mapped storage for project {} does not exist at {}; cannot load",
+                project.display(),
+                segments.display()
+            );
+            return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());
+        }
+
+        tracing::trace!(
+            "loading memory-mapped storage for project {} from {}",
+            project.display(),
+            segments.display()
+        );
+
+        Self::from_existing(&project, &meta, &segments, None::<&Loader>)
+            .map_err(SegmentStorageError::from)
+    }
+}
+
 impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
@@ -415,7 +458,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
                 segments.display()
             );
 
-            Self::from_existing(&project, &meta, &segments, loader)
+            Self::from_existing(&project, &meta, &segments, Some(loader))
         } else {
             tracing::trace!(
                 "memory-mapped storage for project {} does not exist at {}; creating",
