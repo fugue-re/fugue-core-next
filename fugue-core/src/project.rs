@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -6,7 +6,8 @@ use crate::arch::Arch;
 use crate::entities::Function;
 use crate::lifter::{HybridLifter, Language};
 use crate::loader::{
-    ExternSymbols, Loadable, LoadableFromBytes, Loader, LoaderError, LocalSymbols, SymbolEntry,
+    ExternSymbols, Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError,
+    LocalSymbols, SymbolEntry,
 };
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
 use crate::storage::segments::SegmentStorage;
@@ -94,14 +95,25 @@ impl Project {
 
         tracing::trace!("initialising project storage layer");
 
-        let storage = StorageContainer::new::<P>(loadable, &mut attributes)?;
+        let storage = StorageContainer::from_loadable::<P>(loadable, &mut attributes)?;
+
+        Self::from_storage(Some(loadable), storage, attributes)
+    }
+
+    fn from_storage(
+        loadable: Option<&impl Loadable>,
+        storage: StorageContainer,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError> {
+        let mut attributes = attributes.into();
 
         tracing::trace!("loading project architecture and lifter");
 
         let arch = storage
             .entities
             .get(&ProjectEntity::Architecture)?
-            .unwrap_or_else(|| loadable.architecture());
+            .or_else(|| loadable.map(|l| l.architecture()))
+            .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
         let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
@@ -120,7 +132,8 @@ impl Project {
             .entities
             .get(&ProjectEntity::LocalSymbols)?
             .map(Some)
-            .unwrap_or_else(|| loadable.local_symbols().cloned());
+            .or_else(|| loadable.map(|l| l.local_symbols().cloned()))
+            .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
         tracing::trace!("loading project external symbols");
 
@@ -128,7 +141,8 @@ impl Project {
             .entities
             .get(&ProjectEntity::ExternSymbols)?
             .map(Some)
-            .unwrap_or_else(|| loadable.extern_symbols().cloned());
+            .or_else(|| loadable.map(|l| l.extern_symbols().cloned()))
+            .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
         tracing::trace!("loading project functions");
 
@@ -142,7 +156,8 @@ impl Project {
             arch,
             lifter,
             language,
-            entry: loadable.entry(),
+            // FIXME: we should fetch this from the storage or loadable.
+            entry: loadable.and_then(|l| l.entry()),
             local_symbols,
             extern_symbols,
             functions,
@@ -158,6 +173,17 @@ impl Project {
         Self::from_bytes_with::<P>(bytes, AttributeMap::default())
     }
 
+    pub fn try_from_bytes<'a, P, L>(
+        bytes: &'a [u8],
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+        L: LoadableFromBytes<'a>,
+    {
+        Self::try_from_bytes_with::<P, L>(bytes, attributes)
+    }
+
     pub fn from_bytes_with<P>(
         bytes: &[u8],
         attributes: impl Into<AttributeMap>,
@@ -165,11 +191,35 @@ impl Project {
     where
         P: StorageProvider,
     {
-        Loader::from_bytes_with(bytes, attributes)
+        Self::try_from_bytes_with::<P, Loader>(bytes, attributes)
+    }
+
+    pub fn try_from_bytes_with<'a, P, L>(
+        bytes: &'a [u8],
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+        L: LoadableFromBytes<'a>,
+    {
+        let mut attributes = attributes.into();
+
+        if let Some(path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+            return match P::from_storage(path, &mut attributes) {
+                Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
+                Err(e) if e.requires_loadable() => L::from_bytes_with(bytes, attributes)
+                    .map_err(ProjectError::from)
+                    .and_then(|loader| Self::new::<P>(&loader)),
+                Err(e) => Err(ProjectError::from(e)),
+            };
+        }
+
+        L::from_bytes_with(bytes, attributes)
             .map_err(ProjectError::from)
             .and_then(|loader| Self::new::<P>(&loader))
     }
 
+    /// Loads or creates a project from the given file path.
     pub fn from_file<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
         P: StorageProvider,
@@ -177,12 +227,32 @@ impl Project {
         Self::from_file_with::<P>(path, AttributeMap::default())
     }
 
+    pub fn try_from_file<P, L>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+        L: LoadableFromFile,
+    {
+        Self::try_from_file_with::<P, L>(path, AttributeMap::default())
+    }
+
+    /// Loads or creates a project from the given file path with the specified attributes.
     pub fn from_file_with<P>(
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
         P: StorageProvider,
+    {
+        Self::try_from_file_with::<P, Loader>(path, attributes).map_err(ProjectError::from)
+    }
+
+    pub fn try_from_file_with<P, L>(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+        L: LoadableFromFile,
     {
         let path = path.as_ref();
         let mut attributes = attributes.into();
@@ -195,9 +265,16 @@ impl Project {
             attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdbz"));
         }
 
-        Loader::from_file_with(path, attributes)
-            .map_err(ProjectError::from)
-            .and_then(|loader| Self::new::<P>(&loader))
+        let project_path = attributes
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH).expect("valid project path");
+
+        match P::from_storage(project_path, &mut attributes) {
+            Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
+            Err(e) if e.requires_loadable() => L::from_file_with(path, attributes)
+                .map_err(ProjectError::from)
+                .and_then(|loader| Self::new::<P>(&loader)),
+            Err(e) => Err(ProjectError::from(e)),
+        }
     }
 
     pub fn architecture(&self) -> &Arch {

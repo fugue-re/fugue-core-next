@@ -121,6 +121,11 @@ impl StorageProviderError {
     {
         Self::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
     }
+
+    pub fn requires_loadable(&self) -> bool {
+        matches!(self, Self::NotAStandaloneProject | Self::NotAValidProject)
+            || matches!(self, Self::CreateProject(e) if e.kind() == io::ErrorKind::NotFound)
+    }
 }
 
 pub struct StorageContainer {
@@ -170,7 +175,7 @@ where
 }
 
 impl StorageContainer {
-    pub fn new<P>(
+    pub fn from_loadable<P>(
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<Self, StorageProviderError>
@@ -178,6 +183,16 @@ impl StorageContainer {
         P: StorageProvider,
     {
         P::from_loadable(loadable, attributes)
+    }
+
+    pub fn from_storage<P>(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, StorageProviderError>
+    where
+        P: StorageProvider,
+    {
+        P::from_storage(path, attributes)
     }
 
     pub fn from_parts(entities: EntityStorage, segments: SegmentStorage) -> Self {
@@ -219,12 +234,24 @@ pub trait StorageProvider {
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError>;
+
+    fn from_storage(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError>;
 }
 
 // This provider uses the default transient storage provider for both segments and entities.
 pub struct TransientStorageProvider;
 
 impl StorageProvider for TransientStorageProvider {
+    fn from_storage(
+        _path: impl AsRef<Path>,
+        _attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        Err(StorageProviderError::NotAStandaloneProject)
+    }
+
     fn from_loadable(
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
@@ -243,6 +270,13 @@ impl StorageProvider for TransientStorageProvider {
 pub struct PersistentEntityStorageProvider;
 
 impl StorageProvider for PersistentEntityStorageProvider {
+    fn from_storage(
+        _path: impl AsRef<Path>,
+        _attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        Err(StorageProviderError::NotAStandaloneProject)
+    }
+
     fn from_loadable(
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
@@ -263,43 +297,26 @@ impl StorageProvider for PersistentEntityStorageProvider {
 // This provider uses the default persistent storage provider for both segments and entities.
 pub struct PersistentStorageProvider<T, U>(std::marker::PhantomData<(T, U)>);
 
-impl<T, U> PersistentStorageProvider<T, U>
+impl<T, U> StorageProvider for PersistentStorageProvider<T, U>
 where
     T: EntityStorageProviderFromStorage,
     U: SegmentStorageProviderFromStorage,
 {
-    pub fn from_attributes(
-        attributes: &mut AttributeMap,
-    ) -> Result<StorageContainer, StorageProviderError> {
-        let path = attributes
-            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            .ok_or(StorageProviderError::NoProjectPath)?;
-
-        Self::from_storage(path, attributes)
-    }
-
-    pub fn from_storage(
+    fn from_storage(
         path: impl AsRef<Path>,
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError> {
         let path = path.as_ref();
         let compressed = CompressedPersistentStorage::from_existing(path, attributes)?;
 
-        let entities = EntityStorage::new(T::from_storage(path, attributes)?);
-        let segments = SegmentStorage::new(U::from_storage(path, attributes)?);
+        let unpacked = path.with_extension("fdb");
+
+        let entities = EntityStorage::new(T::from_storage(&unpacked, attributes)?);
+        let segments = SegmentStorage::new(U::from_storage(&unpacked, attributes)?);
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
-}
 
-pub type DefaultPersistentStorageProvider =
-    PersistentStorageProvider<DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage>;
-
-impl<T, U> StorageProvider for PersistentStorageProvider<T, U>
-where
-    T: EntityStorageProviderFromLoadable,
-    U: SegmentStorageProviderFromLoadable,
-{
     fn from_loadable(
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
@@ -313,6 +330,9 @@ where
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
 }
+
+pub type DefaultPersistentStorageProvider =
+    PersistentStorageProvider<DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage>;
 
 pub struct CompressedPersistentStorage {
     header: FugueStorageHeader,
