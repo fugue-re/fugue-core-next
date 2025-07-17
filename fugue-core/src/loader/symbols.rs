@@ -280,7 +280,7 @@ impl Encode for LocalSymbols {
     }
 }
 
-impl Entity for LocalSymbols {
+impl Entity for Option<LocalSymbols> {
     const ID: EntityId = ENTITY_LOCAL_SYMBOLS_ID;
 }
 
@@ -521,7 +521,7 @@ impl Encode for ExternSymbols {
     }
 }
 
-impl Entity for ExternSymbols {
+impl Entity for Option<ExternSymbols> {
     const ID: EntityId = ENTITY_EXTERN_SYMBOLS_ID;
 }
 

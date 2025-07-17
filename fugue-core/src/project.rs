@@ -131,7 +131,6 @@ impl Project {
         let local_symbols = storage
             .entities
             .get(&ProjectEntity::LocalSymbols)?
-            .map(Some)
             .or_else(|| loadable.map(|l| l.local_symbols().cloned()))
             .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
@@ -140,7 +139,6 @@ impl Project {
         let extern_symbols = storage
             .entities
             .get(&ProjectEntity::ExternSymbols)?
-            .map(Some)
             .or_else(|| loadable.map(|l| l.extern_symbols().cloned()))
             .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
@@ -266,7 +264,8 @@ impl Project {
         }
 
         let project_path = attributes
-            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH).expect("valid project path");
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .expect("valid project path");
 
         match P::from_storage(project_path, &mut attributes) {
             Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
@@ -374,19 +373,15 @@ impl Project {
             .entities
             .insert(&ProjectEntity::Attributes, &self.attributes)?;
 
-        if let Some(local_symbols) = self.local_symbols.as_ref() {
-            tracing::debug!("persisting local symbol table");
-            self.storage
-                .entities
-                .insert(&ProjectEntity::LocalSymbols, local_symbols)?;
-        }
+        tracing::debug!("persisting local symbol table");
+        self.storage
+            .entities
+            .insert(&ProjectEntity::LocalSymbols, &self.local_symbols)?;
 
-        if let Some(extern_symbols) = self.extern_symbols.as_ref() {
-            tracing::debug!("persisting external symbol table");
-            self.storage
-                .entities
-                .insert(&ProjectEntity::ExternSymbols, extern_symbols)?;
-        }
+        tracing::debug!("persisting external symbol table");
+        self.storage
+            .entities
+            .insert(&ProjectEntity::ExternSymbols, &self.extern_symbols)?;
 
         Ok(())
     }
