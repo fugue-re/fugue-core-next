@@ -21,12 +21,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
 
     tracing::subscriber::with_default(subscriber, || {
-        let binary = IDABinary::from_file_with(
+        idalib::force_batch_mode();
+
+        let project = Project::try_from_file_with::<
+            PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+            IDABinary,
+        >(
             "tests/dive",
             attributes! {
                 ATTRIBUTE_IDA_DATABASE_PATH => "tests/dive-non-clashing.idb",
+                ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
             },
         )?;
+        /*
         let mut segments = binary.segments();
         while let Some(segm) = segments.next()? {
             tracing::info!(
@@ -59,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
             },
         )?;
+
         let mut analyser = FunctionRecovery::new();
 
         analyser.add_function_builder_initialisation_pass(
@@ -66,7 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             IDAFunctionBuilder::new(binary.database()),
         );
 
-        // analyser.analyse(&mut project)?;
+        analyser.analyse(&mut project)?;
+        */
 
         Ok(())
     })
