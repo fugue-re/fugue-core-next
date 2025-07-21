@@ -417,8 +417,10 @@ impl Project {
 
 #[cfg(test)]
 mod test {
+    use std::time::Instant;
+
     use crate::attributes;
-    use crate::storage::entities::MdbxEntityStorage;
+    use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
     use crate::storage::{
         DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
         PersistentStorageProvider, TransientStorageProvider,
@@ -499,6 +501,45 @@ mod test {
             )?;
 
             drop(project);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_line_number(true)
+            .with_file(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let project = Project::from_file::<
+                PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+            >("tests/test-project.fdbz")?;
+
+            let functions = project.functions();
+
+            let mut iter = functions.iter()?;
+
+            let t = Instant::now();
+            let mut count = 0;
+
+            while let Some(Ok((addr, f))) = iter.next() {
+                println!(
+                    "function at {addr:#x} with {} instructions and {} blocks",
+                    f.instructions().len(),
+                    f.blocks().len()
+                );
+                count += 1;
+            }
+
+            println!(
+                "iterated {count} functions in {}ms",
+                t.elapsed().as_millis()
+            );
 
             Ok(())
         })
