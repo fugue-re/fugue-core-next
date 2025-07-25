@@ -6,6 +6,7 @@ use fugue_core::loader::{Loadable, LoadableFromFile};
 
 use fugue_core::attributes;
 use fugue_core::project::Project;
+use fugue_core::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
 use fugue_core::storage::entities::RocksDbEntityStorage;
 use fugue_core::storage::{DefaultPersistentSegmentStorage, PersistentStorageProvider};
 use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -36,6 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &binary,
             attributes! {
                 ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
+                /*
+                ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS => {
+                    "size_upper": 4isize * 1024 * 1024 * 1024, // 4GB
+                },
+                */
             },
         )?;
 

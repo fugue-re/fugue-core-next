@@ -421,6 +421,7 @@ mod test {
 
     use crate::attributes;
     use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
+    use crate::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
     use crate::storage::{
         DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
         PersistentStorageProvider, TransientStorageProvider,
@@ -516,9 +517,16 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let project = Project::from_file::<
+            let project = Project::from_file_with::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
-            >("tests/test-project.fdbz")?;
+            >(
+                "tests/test-project.rdb.fdbz",
+                attributes! {
+                    ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS => {
+                        "size_upper": 4isize * 1024 * 1024 * 1024, // 4GB
+                    }
+                },
+            )?;
 
             let functions = project.functions();
 
@@ -528,6 +536,7 @@ mod test {
             let mut count = 0;
 
             while let Some(Ok((addr, f))) = iter.next() {
+                println!("function at {addr:#x}");
                 println!(
                     "function at {addr:#x} with {} instructions and {} blocks",
                     f.instructions().len(),
