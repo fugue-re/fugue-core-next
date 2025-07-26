@@ -317,6 +317,74 @@ pub trait EntityStorageProviderFromStorage: EntityStorageProviderFromLoadable {
         Self: Sized;
 }
 
+/*
+pub trait EntityStorageBytesAsIterator {
+    fn next_as<F, T>(&mut self, f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError>;
+}
+
+pub trait ErasedEntityStorageBytesAsIterator {
+    fn erased_next_as<'a>(
+        &mut self,
+        f: &mut OutMapper2<'a>,
+    ) -> Result<Option<Out>, EntityStorageError>;
+}
+
+impl EntityStorageBytesAsIterator for dyn ErasedEntityStorageBytesAsIterator {
+    fn next_as<F, T>(&mut self, f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError>,
+    {
+        let mut mapper = OutMapper2::new(f);
+        let t = self
+            .erased_next_as(&mut mapper)?
+            .map(|out| unsafe { out.take::<T>() });
+        Ok(t)
+    }
+}
+
+impl<T> ErasedEntityStorageBytesAsIterator for T
+where
+    T: EntityStorageBytesAsIterator,
+{
+    fn erased_next_as<'a>(
+        &mut self,
+        mapper: &mut OutMapper2<'a>,
+    ) -> Result<Option<Out>, EntityStorageError> {
+        self.next_as(move |kbytes, ebytes| mapper.apply(kbytes, ebytes))
+    }
+}
+
+pub struct EntityBytesAsIterator<'a, T> {
+    iter: ErasedEntityBytesAsIterator<'a>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+pub struct ErasedEntityBytesAsIterator<'a> {
+    mapper: OutMapper2<'a>,
+    inner: Box<dyn ErasedEntityStorageBytesAsIterator + 'a>,
+}
+
+impl<T> Iterator for EntityBytesAsIterator<'_, T>
+where
+    T: Entity,
+{
+    type Item = Result<T, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter
+            .inner
+            .erased_next_as(&mut self.iter.mapper)
+            .transpose()
+            .map(|out| out.map(|v| unsafe { v.take::<T>() }))
+    }
+}
+*/
+
+pub type EntityBytesAsIterator<'a, T> =
+    Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>;
+
 pub trait EntityStorageProvider: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
@@ -332,6 +400,14 @@ pub trait EntityStorageProvider: Send + Sync {
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a;
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
 
@@ -358,6 +434,11 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         &self,
         prefix: &[u8],
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+    fn erased_iter_prefix_as<'a>(
+        &'a self,
+        prefix: &[u8],
+        mapper: OutMapper2<'a>,
+    ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError>;
 
     fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
 
@@ -407,6 +488,21 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
         self.erased_iter_prefix(prefix)
+    }
+
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+    {
+        let mapper = OutMapper2::new(f);
+        let iter = self
+            .erased_iter_prefix_as(prefix, mapper)?
+            .map(|out| out.map(|v| unsafe { v.take::<T>() }));
+        Ok(Box::new(iter))
     }
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
@@ -464,6 +560,16 @@ where
         self.iter_prefix(prefix)
     }
 
+    fn erased_iter_prefix_as<'a>(
+        &'a self,
+        prefix: &[u8],
+        mut mapper: OutMapper2<'a>,
+    ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError> {
+        let iter = self
+            .iter_prefix_as(prefix, move |kbytes, ebytes| mapper.apply(kbytes, ebytes))?;
+        Ok(Box::new(iter))
+    }
+
     fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         self.bulk_inserter()
     }
@@ -497,6 +603,25 @@ impl<'a> OutMapper<'a> {
 
     fn apply(&mut self, bytes: &[u8]) -> Result<Out, EntityStorageError> {
         (self.f)(bytes)
+    }
+}
+
+pub struct OutMapper2<'a> {
+    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a>,
+}
+
+impl<'a> OutMapper2<'a> {
+    fn new<E, F>(mut f: F) -> Self
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<E, EntityStorageError> + 'a,
+    {
+        Self {
+            f: Box::new(move |kbytes, ebytes| f(kbytes, ebytes).map(|v| unsafe { Out::new(v) })),
+        }
+    }
+
+    fn apply(&mut self, kbytes: &[u8], ebytes: &[u8]) -> Result<Out, EntityStorageError> {
+        (self.f)(kbytes, ebytes)
     }
 }
 

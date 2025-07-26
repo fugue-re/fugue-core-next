@@ -2,19 +2,19 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use dashmap::DashMap;
 use dashmap::mapref::one::Ref as DashMapRef;
-use skiplist::SkipMap;
+use dashmap::DashMap;
 use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
+use skiplist::SkipMap;
 
 use crate::loader::Loadable;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::common::ENTITY_PREFIX_SIZE;
 use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix,
-    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable,
 };
 
@@ -159,6 +159,33 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
             iter.iter()
         })))
+    }
+
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        mut f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a,
+    {
+        if prefix.len() != ENTITY_PREFIX_SIZE {
+            return Err(EntityStorageError::InvalidKeySize);
+        }
+
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+
+        let map = self
+            .data
+            .get(&prefix)
+            .ok_or(EntityStorageError::InvalidKeyFormat)?;
+
+        Ok(Box::new(
+            InMemoryIterator::new(map, prefix, |iter| iter.iter())
+                .map(move |res| res.and_then(|(k, e)| f(k.as_ref(), e.as_ref()))),
+        ))
     }
 
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {

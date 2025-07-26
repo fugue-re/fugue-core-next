@@ -5,18 +5,18 @@ use std::path::{Path, PathBuf};
 
 use libmdbx as mdbx;
 use serde::{Deserialize, Serialize};
-use serde_with::{FromInto, serde_as};
+use serde_with::{serde_as, FromInto};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageBulkInserter,
-    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    EntityStorageProviderFromStorage, EntityStorageTransactionalReader,
-    EntityStorageTransactionalWriter,
+    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS: &str = "storage.entities.mdbx.options";
@@ -212,6 +212,18 @@ impl EntityStorageProvider for MdbxEntityStorage {
         MdbxEntityBytesIterator::new(self, prefix)
     }
 
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a,
+    {
+        MdbxEntityBytesAsIterator::new(self, prefix, f)
+    }
+
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         MdbxEntityBytesBulkInserter::new(self)
     }
@@ -333,6 +345,60 @@ impl<'a> Iterator for MdbxEntityBytesIterator<'a> {
                 BytesOrSlice::from(key.to_vec()),
                 BytesOrSlice::from(val.to_vec()),
             )))
+        } else {
+            self.prefix = None;
+            None
+        }
+    }
+}
+
+struct MdbxEntityBytesAsIterator<'a, T> {
+    inner: MdbxEntityBytesIteratorInner<'a>,
+    prefix: Option<Box<[u8]>>,
+    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+}
+
+impl<'a, T> MdbxEntityBytesAsIterator<'a, T>
+where
+    T: 'a,
+{
+    fn new<F>(
+        database: &'a MdbxEntityStorage,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+    {
+        let txn = database.database.begin_ro_txn()?;
+
+        let inner =
+            MdbxEntityBytesIteratorInner::try_new(txn, |txn| -> Result<_, EntityStorageError> {
+                let tbl = txn.open_table(None)?;
+                Ok(txn.cursor(&tbl)?.into_iter_from(prefix))
+            })?;
+
+        Ok(Box::new(Self {
+            inner,
+            prefix: Some(prefix.to_vec().into_boxed_slice()),
+            f: Box::new(f),
+        }))
+    }
+}
+
+impl<'a, T> Iterator for MdbxEntityBytesAsIterator<'a, T> {
+    type Item = Result<T, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let prefix = self.prefix.as_deref()?;
+
+        let Some(Ok((key, val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
+            self.prefix = None;
+            return None;
+        };
+
+        if key.starts_with(prefix) {
+            Some((self.f)(key.as_ref(), val.as_ref()))
         } else {
             self.prefix = None;
             None

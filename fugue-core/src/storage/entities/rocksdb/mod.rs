@@ -8,11 +8,11 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesBulkInserter, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageBulkInserter,
-    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    EntityStorageProviderFromStorage, EntityStorageTransactionalReader,
-    EntityStorageTransactionalWriter,
+    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
@@ -160,6 +160,18 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         Ok(RocksDbEntityBytesIterator::new(self, prefix))
     }
 
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a,
+    {
+        Ok(RocksDbEntityBytesAsIterator::new(self, prefix, f))
+    }
+
     fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
         Ok(RocksDbEntityInserter::new(self))
     }
@@ -233,6 +245,41 @@ impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
                 )
             })
             .map_err(EntityStorageError::backing)
+        })
+    }
+}
+
+struct RocksDbEntityBytesAsIterator<'a, T> {
+    iter: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
+    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+}
+
+impl<'a, T> RocksDbEntityBytesAsIterator<'a, T>
+where
+    T: 'a,
+{
+    fn new<F>(
+        storage: &'a RocksDbEntityStorage,
+        prefix: &[u8],
+        f: F,
+    ) -> EntityBytesAsIterator<'a, T>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+    {
+        Box::new(Self {
+            iter: storage.database.prefix_iterator(prefix),
+            f: Box::new(f),
+        })
+    }
+}
+
+impl<'a, T> Iterator for RocksDbEntityBytesAsIterator<'a, T> {
+    type Item = Result<T, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|kv| {
+            let kv = kv.map_err(EntityStorageError::backing);
+            kv.and_then(|(key, val)| (self.f)(key.as_ref(), val.as_ref()))
         })
     }
 }
