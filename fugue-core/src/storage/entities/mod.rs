@@ -565,8 +565,8 @@ where
         prefix: &[u8],
         mut mapper: OutMapper2<'a>,
     ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError> {
-        let iter = self
-            .iter_prefix_as(prefix, move |kbytes, ebytes| mapper.apply(kbytes, ebytes))?;
+        let iter =
+            self.iter_prefix_as(prefix, move |kbytes, ebytes| mapper.apply(kbytes, ebytes))?;
         Ok(Box::new(iter))
     }
 
@@ -1031,26 +1031,20 @@ where
     pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
         // TODO: should we cache the elements in the iterator if the cache has capacity?
         let pfx = common::make_prefix::<K, E>();
-        self.storage.backing.iter_prefix(&pfx).map(|iter| {
-            Box::new(iter.map(|result| {
-                result.and_then(|(key, value)| {
-                    let key = common::extract_key::<K, E>(key)
-                        .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    if let Some(val) = self.entities.get(&key) {
-                        return Ok((key, EntityRef::new(val)));
-                    }
+        Ok(self.storage.backing.iter_prefix_as(&pfx, |k, v| {
+            let key = common::extract_key::<K, E>(k.into())
+                .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-                    let val = bincode::decode_from_slice::<E, _>(
-                        value.as_slice(),
-                        bincode::config::standard(),
-                    )
-                    .map(|(entity, _)| entity)
-                    .map_err(EntityStorageError::decode)?;
+            if let Some(val) = self.entities.get(&key) {
+                return Ok((key, EntityRef::new(val)));
+            }
 
-                    Ok((key, EntityRef::new(Arc::new(val))))
-                })
-            })) as EntityIterator<'_, K, EntityRef<E>>
-        })
+            let val = bincode::decode_from_slice::<E, _>(v, bincode::config::standard())
+                .map(|(entity, _)| entity)
+                .map_err(EntityStorageError::decode)?;
+
+            Ok((key, EntityRef::new(Arc::new(val))))
+        })? as EntityIterator<'_, K, EntityRef<E>>)
     }
 
     pub fn transactional_reader(

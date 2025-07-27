@@ -530,6 +530,12 @@ mod test {
 
             let functions = project.functions();
 
+            // warm the cache!
+            for addr in functions.keys()? {
+                let addr = addr?;
+                let _f = functions.get(&addr)?;
+            }
+
             let mut iter = functions.iter()?;
 
             let t = Instant::now();

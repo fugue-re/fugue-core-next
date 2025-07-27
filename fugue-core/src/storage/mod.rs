@@ -58,7 +58,7 @@ pub const TRANSIENT: bool = false;
 pub type StoragePersistence = bool;
 
 pub const ATTRIBUTE_FUNCTION_CACHE_SIZE: &str = "storage.entities.function.cache_size";
-pub const DEFAULT_FUNCTION_CACHE_SIZE: usize = 1024;
+pub const DEFAULT_FUNCTION_CACHE_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
