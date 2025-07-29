@@ -109,10 +109,10 @@ impl LifterBuilder {
 
     pub fn build(&self) -> Result<Lifter, LifterBuilderError> {
         match (
-            self.processor.as_ref(),
+            self.processor.as_ref() as &str,
             self.is_big,
             self.bits,
-            self.variant.as_deref(),
+            self.variant.as_deref() as Option<&str>,
         ) {
             #[cfg(feature = "x86")]
             ("x86", false, Some(32), None | Some("default")) => {
