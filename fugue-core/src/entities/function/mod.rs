@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use ustr::Ustr;
 
-use crate::entities::{BasicBlock, Insn};
+use crate::entities::BasicBlockId;
 use crate::storage::entities::common::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::Address;
@@ -13,8 +13,7 @@ pub use frame::{FunctionFrame, StackChangePoint};
 pub struct Function {
     name: Option<Ustr>,
     entry: Address,
-    blocks: Vec<BasicBlock>,
-    instructions: Vec<Insn>,
+    blocks: Vec<(Address, BasicBlockId)>,
     frame: FunctionFrame,
     properties: FunctionProperties,
 }
@@ -39,7 +38,6 @@ impl Encode for Function {
         Compat(&self.name).encode(encoder)?;
         self.entry.encode(encoder)?;
         self.blocks.encode(encoder)?;
-        self.instructions.encode(encoder)?;
         self.frame.encode(encoder)?;
         self.properties.encode(encoder)?;
 
@@ -55,8 +53,7 @@ impl<C> Decode<C> for Function {
 
         let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
         let entry = Address::decode(decoder)?;
-        let blocks = Vec::<BasicBlock>::decode(decoder)?;
-        let instructions = Vec::<Insn>::decode(decoder)?;
+        let blocks = Vec::<(Address, BasicBlockId)>::decode(decoder)?;
         let frame = FunctionFrame::decode(decoder)?;
         let properties = FunctionProperties::decode(decoder)?;
 
@@ -64,7 +61,6 @@ impl<C> Decode<C> for Function {
             name,
             entry,
             blocks,
-            instructions,
             frame,
             properties,
         })
@@ -112,7 +108,6 @@ impl Function {
             name: name.into(),
             entry,
             blocks: Vec::new(),
-            instructions: Vec::new(),
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,
         }
@@ -147,42 +142,34 @@ impl Function {
         self.entry
     }
 
-    pub fn entry_block(&self) -> &BasicBlock {
+    pub fn entry_block(&self) -> BasicBlockId {
         self.block_at(self.entry)
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn set_blocks(&mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) {
-        self.blocks = blocks;
-        self.instructions = insns;
+    pub(crate) fn add_block(&mut self, address: Address, block: BasicBlockId) {
+        self.blocks.insert(
+            self.blocks
+                .binary_search_by_key(&address, |(addr, _)| *addr)
+                .unwrap_or_else(|idx| idx),
+            (address, block),
+        );
     }
 
-    pub(crate) fn with_blocks(mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) -> Self {
-        self.set_blocks(blocks, insns);
-        self
+    pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, BasicBlockId)>) {
+        self.blocks.extend(blocks);
+        self.blocks.sort_by_key(|(addr, _)| *addr);
     }
 
-    pub fn blocks(&self) -> &[BasicBlock] {
-        &self.blocks
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, BasicBlockId)> + '_ {
+        self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
     }
 
-    pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
+    pub fn block_at(&self, address: Address) -> Option<BasicBlockId> {
         self.blocks
-            .binary_search_by_key(&address, |blk| blk.start())
+            .binary_search_by_key(&address, |(addr, _)| *addr)
             .ok()
-            .map(|idx| &self.blocks[idx])
-    }
-
-    pub fn instruction_at(&self, address: impl Into<Address>) -> Option<&Insn> {
-        let address = address.into();
-        self.instructions
-            .binary_search_by_key(&address, |insn| insn.address())
-            .ok()
-            .map(|idx| &self.instructions[idx])
-    }
-
-    pub fn instructions(&self) -> &[Insn] {
-        &self.instructions
+            .map(|idx| self.blocks[idx].1)
     }
 
     pub fn is_non_returning(&self) -> bool {

@@ -3,6 +3,7 @@ use std::hash::Hash;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::entities::{BasicBlock, Id, Insn};
 use crate::types::{Address, BytesOrSlice};
 
 pub type EntityKeyId = u8;
@@ -16,6 +17,8 @@ pub const ENTITY_EXTERN_SYMBOLS_ID: EntityId = 2;
 pub const ENTITY_ATTRIBUTES_ID: EntityId = 3;
 
 pub const ENTITY_FUNCTION_ID: EntityId = 4;
+pub const ENTITY_BASIC_BLOCK_ID: EntityId = 5;
+pub const ENTITY_INSN_ID: EntityId = 6;
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -70,6 +73,30 @@ impl EntityKey for Address {
 
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_u64(self.offset())
+    }
+}
+
+impl EntityKey for Id<BasicBlock> {
+    const ID: EntityKeyId = 2;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<BasicBlock>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<BasicBlock>::encode_as_key(self, buf);
+    }
+}
+
+impl EntityKey for Id<Insn> {
+    const ID: EntityKeyId = 3;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<Insn>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<Insn>::encode_as_key(self, buf);
     }
 }
 

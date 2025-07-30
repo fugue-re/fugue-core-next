@@ -1,11 +1,225 @@
+use std::fmt::{Debug, LowerHex, UpperHex};
+use std::hash::Hash;
+
+use bincode::{Decode, Encode};
+use bytes::{BufMut, BytesMut};
+
 pub mod basic_block;
-pub use basic_block::BasicBlock;
+pub use basic_block::{BasicBlock, BasicBlockId};
 
 pub mod function;
 pub use function::Function;
 
 pub mod instruction;
-pub use instruction::{Insn, InsnProperties, InsnTarget, InsnTargetKind};
+pub use instruction::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
 
 pub mod call_graph;
 pub mod flow_graph;
+
+#[derive(Default)]
+pub struct Id<T> {
+    id: u32,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Debug for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <u32 as Debug>::fmt(&self.id, f)
+    }
+}
+
+impl<T> LowerHex for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <u32 as LowerHex>::fmt(&self.id, f)
+    }
+}
+
+impl<T> UpperHex for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <u32 as UpperHex>::fmt(&self.id, f)
+    }
+}
+
+impl<T> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        Id {
+            id: self.id,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+impl<T> Copy for Id<T> {}
+
+impl<T> PartialEq for Id<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl<T> Eq for Id<T> {}
+
+impl<T> PartialOrd for Id<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for Id<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl<T> Hash for Id<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl<T> Id<T> {
+    pub const fn new(id: u32) -> Self {
+        Id {
+            id,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    // Use for EntityKey::decode implementations
+    #[inline(always)]
+    pub(crate) fn decode_as_key(buf: &[u8]) -> Option<Self> {
+        if buf.len() == 4 {
+            Some(Id {
+                id: u32::from_be_bytes(buf.try_into().unwrap()),
+                _marker: std::marker::PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
+    // Use for EntityKey::encode implementations
+    #[inline(always)]
+    pub(crate) fn encode_as_key(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.id);
+    }
+}
+
+#[repr(transparent)]
+pub struct IdSet<T> {
+    set: tinyset::SetU32,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Debug for IdSet<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl<T> Default for IdSet<T> {
+    fn default() -> Self {
+        IdSet::new()
+    }
+}
+
+impl<T> Clone for IdSet<T> {
+    fn clone(&self) -> Self {
+        IdSet {
+            set: self.set.clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> PartialEq for IdSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.set == other.set
+    }
+}
+impl<T> Eq for IdSet<T> {}
+
+impl<T> IdSet<T> {
+    pub const fn new() -> Self {
+        IdSet {
+            set: tinyset::SetU32::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn insert(&mut self, id: Id<T>) -> bool {
+        self.set.insert(id.id)
+    }
+
+    pub fn contains(&self, id: Id<T>) -> bool {
+        self.set.contains(id.id)
+    }
+
+    pub fn remove(&mut self, id: Id<T>) -> bool {
+        self.set.remove(id.id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Id<T>> + '_ {
+        self.set.iter().map(|id| Id {
+            id,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+}
+
+impl<T> Encode for Id<T> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.id.encode(encoder)?;
+        Ok(())
+    }
+}
+
+impl<T, C> Decode<C> for Id<T> {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let id = u32::decode(decoder)?;
+        Ok(Id {
+            id,
+            _marker: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<T> Encode for IdSet<T> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        // TODO: figure out a more optimal encoding, since this expands the whole
+        // set--defeating the purpose of using SetU32 (at least for storage).
+        self.len().encode(encoder)?;
+        for id in self.iter() {
+            id.encode(encoder)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T, C> Decode<C> for IdSet<T> {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = usize::decode(decoder)?;
+        let mut set = IdSet::<T>::new();
+        for _ in 0..len {
+            let id = Id::<T>::decode(decoder)?;
+            set.insert(id);
+        }
+        Ok(set)
+    }
+}

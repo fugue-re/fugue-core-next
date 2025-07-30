@@ -1,19 +1,34 @@
 use bincode::{Decode, Encode};
-use tinyset::SetUsize;
 
 use crate::entities::instruction::InsnList;
+use crate::entities::{Id, IdSet};
 use crate::lifter::ContextSet;
+use crate::storage::entities::common::ENTITY_BASIC_BLOCK_ID;
+use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::Address;
+
+pub type BasicBlockId = Id<BasicBlock>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlock {
+    id: Id<Self>,
     start: Address,
-    len: usize,
+    len: u16,
     instructions: InsnList,
-    successors: SetUsize,
-    predecessors: SetUsize,
+    successors: IdSet<BasicBlock>,
+    predecessors: IdSet<BasicBlock>,
     properties: BasicBlockProperties,
     context: ContextSet,
+}
+
+impl Entity for BasicBlock {
+    const ID: EntityId = ENTITY_BASIC_BLOCK_ID;
+}
+
+impl MutableEntity<BasicBlockId> for BasicBlock {
+    fn entity_key(&self) -> BasicBlockId {
+        self.id
+    }
 }
 
 impl Encode for BasicBlock {
@@ -21,22 +36,13 @@ impl Encode for BasicBlock {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
+        self.id.encode(encoder)?;
         self.start.encode(encoder)?;
         self.len.encode(encoder)?;
         self.instructions.encode(encoder)?;
 
-        // TODO: figure out a more optimal encoding, since this expands the whole
-        // set--defeating the purpose of using SetUsize (at least for storage).
-
-        self.successors.len().encode(encoder)?;
-        for succ in self.successors.iter() {
-            succ.encode(encoder)?;
-        }
-
-        self.predecessors.len().encode(encoder)?;
-        for pred in self.predecessors.iter() {
-            pred.encode(encoder)?;
-        }
+        self.successors.encode(encoder)?;
+        self.predecessors.encode(encoder)?;
 
         self.properties.encode(encoder)?;
         self.context.encode(encoder)?;
@@ -48,21 +54,22 @@ impl<C> Decode<C> for BasicBlock {
     fn decode<D: bincode::de::Decoder<Context = C>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
+        let id = Id::<Self>::decode(decoder)?;
         let start = Address::decode(decoder)?;
-        let len = usize::decode(decoder)?;
+        let len = u16::decode(decoder)?;
         let instructions = InsnList::decode(decoder)?;
 
         let successors_len = usize::decode(decoder)?;
-        let mut successors = SetUsize::new();
+        let mut successors = IdSet::new();
         for _ in 0..successors_len {
-            let succ = usize::decode(decoder)?;
+            let succ = Id::decode(decoder)?;
             successors.insert(succ);
         }
 
         let predecessors_len = usize::decode(decoder)?;
-        let mut predecessors = SetUsize::new();
+        let mut predecessors = IdSet::new();
         for _ in 0..predecessors_len {
-            let pred = usize::decode(decoder)?;
+            let pred = Id::decode(decoder)?;
             predecessors.insert(pred);
         }
 
@@ -70,6 +77,7 @@ impl<C> Decode<C> for BasicBlock {
         let context = ContextSet::decode(decoder)?;
 
         Ok(BasicBlock {
+            id,
             start,
             len,
             instructions,
@@ -119,23 +127,27 @@ impl<C> Decode<C> for BasicBlockProperties {
 }
 
 impl BasicBlock {
-    pub fn new(start: Address, len: usize, instructions: InsnList) -> Self {
-        Self::new_with(start, len, instructions, ContextSet::default())
+    pub fn new(id: Id<Self>, start: Address, len: usize, instructions: InsnList) -> Self {
+        Self::new_with(id, start, len, instructions, ContextSet::default())
     }
 
     pub fn new_with(
+        id: Id<Self>,
         start: Address,
         len: usize,
         instructions: InsnList,
         context: ContextSet,
     ) -> Self {
-        BasicBlock {
+        Self {
+            id,
             start,
-            len,
+            len: len
+                .try_into()
+                .expect("basic block length must not exceed 65535"),
             instructions,
             properties: BasicBlockProperties::NONE,
-            successors: SetUsize::new(),
-            predecessors: SetUsize::new(),
+            successors: IdSet::new(),
+            predecessors: IdSet::new(),
             context,
         }
     }
@@ -145,7 +157,7 @@ impl BasicBlock {
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.len as _
     }
 
     pub fn instructions(&self) -> &InsnList {
@@ -206,19 +218,19 @@ impl BasicBlock {
         &self.context
     }
 
-    pub fn add_successor(&mut self, target: usize) {
+    pub fn add_successor(&mut self, target: BasicBlockId) {
         self.successors.insert(target);
     }
 
-    pub fn add_predecessor(&mut self, source: usize) {
+    pub fn add_predecessor(&mut self, source: BasicBlockId) {
         self.predecessors.insert(source);
     }
 
-    pub fn successors(&self) -> &SetUsize {
+    pub fn successors(&self) -> &IdSet<BasicBlock> {
         &self.successors
     }
 
-    pub fn predecessors(&self) -> &SetUsize {
+    pub fn predecessors(&self) -> &IdSet<BasicBlock> {
         &self.predecessors
     }
 }
