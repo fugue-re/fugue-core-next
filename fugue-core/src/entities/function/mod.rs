@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use ustr::Ustr;
 
-use crate::entities::BasicBlockId;
+use crate::entities::{Id, BasicBlockId};
 use crate::storage::entities::common::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::Address;
@@ -9,8 +9,11 @@ use crate::types::Address;
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
+pub type FunctionId = Id<Function>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
+    id: Id<Self>,
     name: Option<Ustr>,
     entry: Address,
     blocks: Vec<(Address, BasicBlockId)>,
@@ -20,6 +23,12 @@ pub struct Function {
 
 impl Entity for Function {
     const ID: EntityId = ENTITY_FUNCTION_ID;
+}
+
+impl MutableEntity<FunctionId> for Function {
+    fn entity_key(&self) -> FunctionId {
+        self.id
+    }
 }
 
 impl MutableEntity<Address> for Function {
@@ -35,6 +44,7 @@ impl Encode for Function {
     ) -> Result<(), bincode::error::EncodeError> {
         use bincode::serde::Compat;
 
+        self.id.encode(encoder)?;
         Compat(&self.name).encode(encoder)?;
         self.entry.encode(encoder)?;
         self.blocks.encode(encoder)?;
@@ -51,6 +61,7 @@ impl<C> Decode<C> for Function {
     ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::serde::Compat;
 
+        let id = Id::<Self>::decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
         let entry = Address::decode(decoder)?;
         let blocks = Vec::<(Address, BasicBlockId)>::decode(decoder)?;
@@ -58,6 +69,7 @@ impl<C> Decode<C> for Function {
         let properties = FunctionProperties::decode(decoder)?;
 
         Ok(Function {
+            id,
             name,
             entry,
             blocks,
@@ -99,14 +111,15 @@ impl<C> Decode<C> for FunctionProperties {
 }
 
 impl Function {
-    pub fn new(entry: Address) -> Self {
-        Self::new_with(None, entry)
+    pub fn new(id: FunctionId, entry: impl Into<Address>) -> Self {
+        Self::new_with(id, entry, None)
     }
 
-    pub fn new_with(name: impl Into<Option<Ustr>>, entry: Address) -> Self {
+    pub fn new_with(id: FunctionId, entry: impl Into<Address>, name: impl Into<Option<Ustr>>) -> Self {
         Function {
+            id,
             name: name.into(),
-            entry,
+            entry: entry.into(),
             blocks: Vec::new(),
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,

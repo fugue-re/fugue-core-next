@@ -8,7 +8,7 @@ pub mod basic_block;
 pub use basic_block::{BasicBlock, BasicBlockId};
 
 pub mod function;
-pub use function::Function;
+pub use function::{Function, FunctionId};
 
 pub mod instruction;
 pub use instruction::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};

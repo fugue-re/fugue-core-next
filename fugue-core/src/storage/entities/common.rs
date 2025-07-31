@@ -3,7 +3,7 @@ use std::hash::Hash;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::entities::{BasicBlock, Id, Insn};
+use crate::entities::{BasicBlock, Function, Id, Insn};
 use crate::types::{Address, BytesOrSlice};
 
 pub type EntityKeyId = u8;
@@ -76,8 +76,20 @@ impl EntityKey for Address {
     }
 }
 
-impl EntityKey for Id<BasicBlock> {
+impl EntityKey for Id<Function> {
     const ID: EntityKeyId = 2;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<Function>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<Function>::encode_as_key(self, buf);
+    }
+}
+
+impl EntityKey for Id<BasicBlock> {
+    const ID: EntityKeyId = 3;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         Id::<BasicBlock>::decode_as_key(buf)
@@ -89,7 +101,7 @@ impl EntityKey for Id<BasicBlock> {
 }
 
 impl EntityKey for Id<Insn> {
-    const ID: EntityKeyId = 3;
+    const ID: EntityKeyId = 4;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         Id::<Insn>::decode_as_key(buf)
