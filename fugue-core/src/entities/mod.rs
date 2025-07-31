@@ -16,10 +16,15 @@ pub use instruction::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
 pub mod call_graph;
 pub mod flow_graph;
 
-#[derive(Default)]
 pub struct Id<T> {
     id: u32,
     _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for Id<T> {
+    fn default() -> Self {
+        Self::INVALID
+    }
 }
 
 impl<T> Debug for Id<T> {
@@ -76,11 +81,23 @@ impl<T> Hash for Id<T> {
 }
 
 impl<T> Id<T> {
-    pub const fn new(id: u32) -> Self {
+    pub const INVALID: Self = Self::new(u32::MAX);
+
+    pub(crate) const fn new(id: u32) -> Self {
         Id {
             id,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    #[inline(always)]
+    pub const fn is_valid(&self) -> bool {
+        !self.is_invalid()
+    }
+
+    #[inline(always)]
+    pub const fn is_invalid(&self) -> bool {
+        self.id == Self::INVALID.id
     }
 
     // Use for EntityKey::decode implementations
