@@ -5,10 +5,10 @@ use bincode::{Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod basic_block;
-pub use basic_block::{BasicBlock, BasicBlockId};
+pub use basic_block::{BasicBlock, BasicBlockId, BasicBlockProperties};
 
 pub mod function;
-pub use function::{Function, FunctionId};
+pub use function::{Function, FunctionId, FunctionProperties};
 
 pub mod instruction;
 pub use instruction::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
