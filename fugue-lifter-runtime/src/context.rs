@@ -1,6 +1,9 @@
+use std::array;
+use std::cell::RefCell;
 use std::collections::BTreeMap as Map;
 use std::mem;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use itertools::Itertools;
 
@@ -259,6 +262,96 @@ impl Default for FreeArray {
     }
 }
 
+pub const CONTEXT_CACHE_BITS: usize = 8;
+pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ContextCacheEntry {
+    address: u64,
+    values: Vec<u32>,
+}
+
+impl Default for ContextCacheEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextCacheEntry {
+    pub fn new() -> Self {
+        Self {
+            address: u64::MAX,
+            values: Vec::with_capacity(2),
+        }
+    }
+
+    pub fn address(&self) -> u64 {
+        self.address
+    }
+
+    pub fn values(&self) -> &[u32] {
+        &self.values
+    }
+
+    pub fn values_mut(&mut self) -> &mut [u32] {
+        &mut self.values
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ContextCache {
+    entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
+}
+
+impl Default for ContextCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextCache {
+    pub fn new() -> Self {
+        Self {
+            entries: array::from_fn(|_| ContextCacheEntry::default()),
+        }
+    }
+
+    #[inline(always)]
+    pub fn entry(&mut self, address: u64) -> (bool, &mut ContextCacheEntry) {
+        let cache = &mut self.entries[Self::index(address)];
+        let is_hit = cache.address == address;
+        cache.address = address;
+        (is_hit, cache)
+    }
+
+    pub fn update(&mut self, address: u64, values: &[u32]) {
+        let (_, entry) = self.entry(address);
+        entry.values.copy_from_slice(values);
+    }
+
+    pub fn resize(&mut self, size: usize) {
+        for entry in &mut self.entries {
+            entry.values.resize(size, 0);
+        }
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        for entry in &mut self.entries {
+            entry.address = u64::MAX;
+        }
+    }
+
+    #[inline(always)]
+    pub fn index(address: u64) -> usize {
+        (address as usize) & CONTEXT_CACHE_SIZE.wrapping_sub(1)
+    }
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -266,6 +359,7 @@ pub struct ContextDatabase {
     size: usize,
     variables: Map<String, ContextBitRange>,
     database: PartMap<u64, FreeArray>,
+    database_cache: Rc<RefCell<ContextCache>>,
     trackbase: PartMap<u64, TrackedSet>,
     address_limit: u64,
 }
@@ -276,6 +370,7 @@ impl ContextDatabase {
             size: 0,
             variables: Map::new(),
             database: PartMap::new(Default::default()),
+            database_cache: Rc::new(RefCell::new(ContextCache::default())),
             trackbase: PartMap::new(Default::default()),
             address_limit,
         }
@@ -312,13 +407,30 @@ impl ContextDatabase {
     }
 
     pub fn get_variable(&self, name: impl AsRef<str>, address: u64) -> Option<u32> {
-        self.variable(name.as_ref())
-            .map(|context| context.get(&self.database.get_or_default(address).values))
+        self.variable(name.as_ref()).map(|context| {
+            let mut borrowed_cache = self.database_cache.borrow_mut();
+            let (hit, entry) = borrowed_cache.entry(address);
+
+            if !hit {
+                entry
+                    .values
+                    .copy_from_slice(&self.database.get_or_default(address).values)
+            }
+
+            context.get(&entry.values)
+        })
     }
 
     pub fn get_variable_by_bits(&self, bits: impl AsRef<ContextBitRange>, address: u64) -> u32 {
-        bits.as_ref()
-            .get(&self.database.get_or_default(address).values)
+        let bits = bits.as_ref();
+        let mut borrowed_cache = self.database_cache.borrow_mut();
+        let (hit, entry) = borrowed_cache.entry(address);
+        if !hit {
+            entry
+                .values
+                .copy_from_slice(&self.database.get_or_default(address).values);
+        }
+        bits.get(&entry.values)
     }
 
     pub fn set_variable(&mut self, name: impl AsRef<str>, address: u64, value: u32) -> Option<()> {
@@ -326,8 +438,13 @@ impl ContextDatabase {
         let num = context.word();
         let mask = context.mask().checked_shl(context.shift()).unwrap_or(0);
 
-        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
-            context.set(change, value)
+        let mut database_cache = self.database_cache.borrow_mut();
+
+        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
+            context.set(change, value);
+            if point - address <= CONTEXT_CACHE_SIZE as u64 {
+                database_cache.update(point, change);
+            }
         });
 
         Some(())
@@ -343,8 +460,13 @@ impl ContextDatabase {
         let num = bits.word();
         let mask = bits.mask().checked_shl(bits.shift()).unwrap_or(0);
 
-        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
-            bits.set(change, value)
+        let mut database_cache = self.database_cache.borrow_mut();
+
+        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
+            bits.set(change, value);
+            if point - address <= CONTEXT_CACHE_SIZE as u64 {
+                database_cache.update(point, change);
+            }
         });
     }
 
@@ -383,6 +505,7 @@ impl ContextDatabase {
         if size > self.size {
             self.size = size;
             self.database.default_value_mut().reset(size);
+            self.database_cache.borrow_mut().resize(size);
         }
 
         self.variables.insert(name.into(), bit_range);
@@ -407,20 +530,16 @@ impl ContextDatabase {
         }
     }
 
-    pub fn set_context_change_point(
-        &mut self,
-        // current_address: u64,
-        address: u64,
-        num: usize,
-        mask: u32,
-        value: u32,
-    ) {
-        // self.database.split(current_address);
+    pub fn set_context_change_point(&mut self, address: u64, num: usize, mask: u32, value: u32) {
+        let mut database_cache = self.database_cache.borrow_mut();
 
-        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
+        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
             let val = &mut change[num];
             *val &= !mask;
             *val |= value;
+            if point - address <= CONTEXT_CACHE_SIZE as u64 {
+                database_cache.update(point, change);
+            }
         })
     }
 
@@ -432,9 +551,21 @@ impl ContextDatabase {
         mask: u32,
         value: u32,
     ) {
-        get_region_for_set(&mut self.database, addr1, addr2, num, mask, |change| {
-            change[num] = (change[num] & !mask) | value;
-        })
+        let mut database_cache = self.database_cache.borrow_mut();
+
+        get_region_for_set(
+            &mut self.database,
+            addr1,
+            addr2,
+            num,
+            mask,
+            |point, change| {
+                change[num] = (change[num] & !mask) | value;
+                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
+                    database_cache.update(point, change);
+                }
+            },
+        )
     }
 
     pub fn set_variable_region(
@@ -445,14 +576,22 @@ impl ContextDatabase {
         value: u32,
     ) -> Option<()> {
         let context = self.variables.get(name.as_ref())?;
+        let mut database_cache = self.database_cache.borrow_mut();
+
         get_region_for_set(
             &mut self.database,
             addr1,
             addr2,
             context.word(),
             context.mask(),
-            |change| context.set(change, value),
+            |point, change| {
+                context.set(change, value);
+                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
+                    database_cache.update(point, change);
+                }
+            },
         );
+
         Some(())
     }
 
@@ -464,32 +603,39 @@ impl ContextDatabase {
         value: u32,
     ) {
         let bits = bits.as_ref();
+        let mut database_cache = self.database_cache.borrow_mut();
+
         get_region_for_set(
             &mut self.database,
             addr1,
             addr2,
             bits.word(),
             bits.mask(),
-            |change| bits.set(change, value),
+            |point, change| {
+                bits.set(change, value);
+                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
+                    database_cache.update(point, change);
+                }
+            },
         );
     }
 }
 
 #[inline(always)]
-fn get_region_to_change_point<'a, F>(
-    db: &'a mut PartMap<u64, FreeArray>,
+fn get_region_to_change_point<F>(
+    db: &mut PartMap<u64, FreeArray>,
     addr: u64,
     num: usize,
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(&mut Vec<u32>),
+    F: FnMut(u64, &mut Vec<u32>),
 {
     use itertools::Position;
 
     db.split(addr);
 
-    for change in db
+    for (point, change) in db
         .range_mut(addr..)
         .with_position()
         .take_while(move |pos| match pos {
@@ -497,14 +643,14 @@ fn get_region_to_change_point<'a, F>(
             (Position::Middle | Position::Last, (_, fa)) => fa.masks[num] & mask == 0,
         })
         .map(move |pos| match pos {
-            (Position::First | Position::Only, (_, fa)) => {
+            (Position::First | Position::Only, (p, fa)) => {
                 fa.masks[num] |= mask;
-                &mut fa.values
+                (*p, &mut fa.values)
             }
-            (Position::Middle | Position::Last, (_, fa)) => &mut fa.values,
+            (Position::Middle | Position::Last, (p, fa)) => (*p, &mut fa.values),
         })
     {
-        f(change)
+        f(point, change)
     }
 }
 
@@ -517,7 +663,7 @@ fn get_region_for_set<'a, F>(
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(&'a mut Vec<u32>),
+    F: FnMut(u64, &'a mut Vec<u32>),
 {
     db.split(addr1);
 
@@ -528,10 +674,10 @@ fn get_region_for_set<'a, F>(
         db.range_mut(addr1..)
     };
 
-    for change in ranges.map(move |(_, fa)| {
+    for (point, change) in ranges.map(move |(p, fa)| {
         fa.masks[num] |= mask;
-        &mut fa.values
+        (*p, &mut fa.values)
     }) {
-        f(change)
+        f(point, change)
     }
 }

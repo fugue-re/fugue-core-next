@@ -5,7 +5,7 @@ use crate::arch::{Arch, ArchImpl};
 use crate::entities::{Insn, InsnProperties};
 use crate::lifter::arm::context::T_MODE;
 use crate::lifter::arm::register::{
-    LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
+    LR, PC, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP,
 };
 use crate::lifter::{
     ContextSet, Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter,
@@ -35,7 +35,8 @@ impl ArchImpl for Arm {
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
-        let naddr = addr.wrap_and_align(self.language());
+        let alignment = if t_mode { 2 } else { 4 };
+        let naddr = addr.wrap_and_align_with(self.language(), alignment);
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
     }
 
