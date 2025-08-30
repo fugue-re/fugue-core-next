@@ -100,7 +100,6 @@ impl EntityStorageProviderFromStorage for RocksDbEntityStorage {
 
 impl EntityStorageProvider for RocksDbEntityStorage {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        // TODO: add get_as so we can operate on PinnedSlice?
         Ok(self
             .database
             .get(key)

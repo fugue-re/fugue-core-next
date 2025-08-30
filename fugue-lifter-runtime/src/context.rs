@@ -305,34 +305,46 @@ impl ContextCacheEntry {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCache {
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
+    shift: u32,
 }
 
 impl Default for ContextCache {
     fn default() -> Self {
-        Self::new()
+        Self::new(1)
     }
 }
 
 impl ContextCache {
-    pub fn new() -> Self {
+    pub fn new(alignment: usize) -> Self {
         Self {
             entries: array::from_fn(|_| ContextCacheEntry::default()),
+            shift: u32::try_from(alignment.wrapping_sub(1)).expect("address alignment fits in u32"),
         }
     }
 
     #[inline(always)]
     pub fn entry(&mut self, address: u64) -> (bool, &mut ContextCacheEntry) {
-        let cache = &mut self.entries[Self::index(address)];
+        let cache = &mut self.entries[self.index(address)];
         let is_hit = cache.address == address;
         cache.address = address;
         (is_hit, cache)
     }
 
+    #[inline(always)]
     pub fn update(&mut self, address: u64, values: &[u32]) {
         let (_, entry) = self.entry(address);
         entry.values.copy_from_slice(values);
     }
 
+    #[inline(always)]
+    pub fn invalidate(&mut self, address: u64) {
+        let cache = &mut self.entries[self.index(address)];
+        if cache.address == address {
+            cache.address = u64::MAX;
+        }
+    }
+
+    #[inline(always)]
     pub fn resize(&mut self, size: usize) {
         for entry in &mut self.entries {
             entry.values.resize(size, 0);
@@ -347,8 +359,8 @@ impl ContextCache {
     }
 
     #[inline(always)]
-    pub fn index(address: u64) -> usize {
-        (address as usize) & CONTEXT_CACHE_SIZE.wrapping_sub(1)
+    pub fn index(&self, address: u64) -> usize {
+        (address >> self.shift) as usize & CONTEXT_CACHE_SIZE.wrapping_sub(1)
     }
 }
 
@@ -365,12 +377,12 @@ pub struct ContextDatabase {
 }
 
 impl ContextDatabase {
-    pub fn new(address_limit: u64) -> Self {
+    pub fn new(address_limit: u64, address_alignment: usize) -> Self {
         Self {
             size: 0,
             variables: Map::new(),
             database: PartMap::new(Default::default()),
-            database_cache: Rc::new(RefCell::new(ContextCache::default())),
+            database_cache: Rc::new(RefCell::new(ContextCache::new(address_alignment))),
             trackbase: PartMap::new(Default::default()),
             address_limit,
         }
@@ -444,6 +456,8 @@ impl ContextDatabase {
             context.set(change, value);
             if point - address <= CONTEXT_CACHE_SIZE as u64 {
                 database_cache.update(point, change);
+            } else {
+                database_cache.invalidate(point);
             }
         });
 
@@ -466,6 +480,8 @@ impl ContextDatabase {
             bits.set(change, value);
             if point - address <= CONTEXT_CACHE_SIZE as u64 {
                 database_cache.update(point, change);
+            } else {
+                database_cache.invalidate(point);
             }
         });
     }
@@ -539,6 +555,8 @@ impl ContextDatabase {
             *val |= value;
             if point - address <= CONTEXT_CACHE_SIZE as u64 {
                 database_cache.update(point, change);
+            } else {
+                database_cache.invalidate(point);
             }
         })
     }
@@ -563,6 +581,8 @@ impl ContextDatabase {
                 change[num] = (change[num] & !mask) | value;
                 if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
                     database_cache.update(point, change);
+                } else {
+                    database_cache.invalidate(point);
                 }
             },
         )
@@ -588,6 +608,8 @@ impl ContextDatabase {
                 context.set(change, value);
                 if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
                     database_cache.update(point, change);
+                } else {
+                    database_cache.invalidate(point);
                 }
             },
         );
@@ -615,6 +637,8 @@ impl ContextDatabase {
                 bits.set(change, value);
                 if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
                     database_cache.update(point, change);
+                } else {
+                    database_cache.invalidate(point);
                 }
             },
         );
