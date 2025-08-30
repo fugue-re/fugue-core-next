@@ -35,7 +35,7 @@ impl ArchImpl for Arm {
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
-        let alignment = if t_mode { 2 } else { 4 };
+        let alignment = if t_mode != 0 { 2 } else { 4 };
         let naddr = addr.wrap_and_align_with(self.language(), alignment);
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
     }
