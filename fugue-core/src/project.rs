@@ -20,7 +20,6 @@ use crate::types::{Address, AttributeMap};
 
 pub struct Project {
     pub(crate) arch: Arch,
-    pub(crate) lifter: HybridLifter,
     pub(crate) language: &'static Language,
     pub(crate) entry: Option<Address>,
     pub(crate) local_symbols: Option<LocalSymbols>,
@@ -41,7 +40,6 @@ impl Drop for Project {
 
 pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
-    pub lifter: &'a HybridLifter,
     pub language: &'static Language,
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a LocalSymbols>,
@@ -53,7 +51,6 @@ pub struct ProjectRef<'a> {
 
 pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
-    pub lifter: &'a mut HybridLifter,
     pub language: &'static Language,
     pub entry: Option<Address>,
     pub local_symbols: Option<&'a mut LocalSymbols>,
@@ -115,7 +112,6 @@ impl Project {
             .or_else(|| loadable.map(|l| l.architecture()))
             .ok_or(StorageProviderError::NotAStandaloneProject)?;
 
-        let lifter = HybridLifter::new(arch.disassembler(), arch.lifter());
         let language = arch.language();
 
         tracing::trace!("loading project attributes");
@@ -152,7 +148,6 @@ impl Project {
 
         Ok(Self {
             arch,
-            lifter,
             language,
             // FIXME: we should fetch this from the storage or loadable.
             entry: loadable.and_then(|l| l.entry()),
@@ -280,12 +275,8 @@ impl Project {
         &self.arch
     }
 
-    pub fn lifter(&self) -> &HybridLifter {
-        &self.lifter
-    }
-
-    pub fn lifter_mut(&mut self) -> &mut HybridLifter {
-        &mut self.lifter
+    pub fn lifter(&self) -> HybridLifter {
+        HybridLifter::new(self.arch.disassembler(), self.arch.lifter())
     }
 
     pub fn language(&self) -> &'static Language {
@@ -389,7 +380,6 @@ impl Project {
     pub fn fields(&self) -> ProjectRef {
         ProjectRef {
             arch: &self.arch,
-            lifter: &self.lifter,
             language: self.language,
             entry: self.entry,
             local_symbols: self.local_symbols.as_ref(),
@@ -403,7 +393,6 @@ impl Project {
     pub fn fields_mut(&mut self) -> ProjectMut {
         ProjectMut {
             arch: &mut self.arch,
-            lifter: &mut self.lifter,
             language: self.language,
             entry: self.entry,
             local_symbols: self.local_symbols.as_mut(),

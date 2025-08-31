@@ -4,6 +4,7 @@ use crate::analysis::AnalysisError;
 use crate::lifter::LifterError;
 use crate::storage::{EntityStorageError, SegmentStorageError};
 
+pub mod translator;
 pub mod types;
 
 #[derive(Debug, Error)]

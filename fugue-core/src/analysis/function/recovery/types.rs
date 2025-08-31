@@ -11,6 +11,8 @@ use crate::lifter::{ContextSet, LifterError};
 use crate::project::Project;
 use crate::types::Address;
 
+use super::translator::Translator;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InsnRanges(RangeSetBlaze<usize>);
 
@@ -71,6 +73,10 @@ impl PartialBasicBlock {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn instructions(&self) -> &InsnRanges {
@@ -234,7 +240,7 @@ impl PartialFunction {
     pub fn lift_block(
         &mut self,
         id: usize,
-        project: &mut Project,
+        translator: &mut Translator,
     ) -> Result<(), FunctionBuilderError> {
         let block = self
             .blocks
@@ -260,13 +266,16 @@ impl PartialFunction {
                 .get(offset..)
                 .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
 
-            *insn = project.lifter.lift_insn(insn.address(), view)?;
+            *insn = translator.lift_insn(insn.address(), view)?;
         }
 
         Ok(())
     }
 
-    pub fn lift_all_blocks(&mut self, project: &mut Project) -> Result<(), FunctionBuilderError> {
+    pub fn lift_all_blocks(
+        &mut self,
+        translator: &mut Translator,
+    ) -> Result<(), FunctionBuilderError> {
         let mut segment = project
             .storage
             .segments
@@ -297,7 +306,7 @@ impl PartialFunction {
                     .get(offset..)
                     .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
 
-                *insn = project.lifter.lift_insn(insn.address(), view)?;
+                *insn = translator.lift_insn(insn.address(), view)?;
             }
         }
 
@@ -307,7 +316,7 @@ impl PartialFunction {
     pub fn lift_insn(
         &mut self,
         id: usize,
-        project: &mut Project,
+        translator: &mut Translator,
     ) -> Result<Option<&mut Insn>, FunctionBuilderError> {
         let insn = self
             .instructions
@@ -329,7 +338,7 @@ impl PartialFunction {
 
         // TODO: should we use Rc<RefCell<...>>/Arc for Insn?
 
-        *insn = project.lifter_mut().lift_insn(address, bytes)?;
+        *insn = translator.lift_insn(address, bytes)?;
 
         Ok(Some(insn))
     }

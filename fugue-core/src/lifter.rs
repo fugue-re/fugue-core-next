@@ -4,8 +4,8 @@ use arrayvec::ArrayVec;
 use bincode::{Decode, Encode};
 
 pub use fugue_lifter::{
-    aarch64, arm, x86, x86_64, ContextBitRange, Language, LanguageId, LanguageVariant, Lifter,
-    LifterBuilder, LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode,
+    ContextBitRange, Language, LanguageId, LanguageVariant, Lifter, LifterBuilder,
+    LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode, aarch64, arm, x86, x86_64,
 };
 
 use thiserror::Error;
@@ -192,11 +192,11 @@ impl Disassembler {
     }
 }
 
-pub trait LifterExt {
+pub trait LifterImpl {
     fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError>;
 }
 
-impl LifterExt for Lifter {
+impl LifterImpl for Lifter {
     fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
         let mut operations = Vec::new();
         let Some(length) = self.lift(address.into(), bytes, &mut operations) else {
@@ -209,53 +209,5 @@ impl LifterExt for Lifter {
             length,
             operations,
         ))
-    }
-}
-
-pub struct HybridLifter {
-    disassembler: Disassembler,
-    lifter: Lifter,
-}
-
-impl HybridLifter {
-    pub fn new(disassembler: Disassembler, lifter: Lifter) -> Self {
-        Self {
-            disassembler,
-            lifter,
-        }
-    }
-
-    pub fn disassemble_insn(
-        &mut self,
-        address: Address,
-        bytes: impl AsRef<[u8]>,
-    ) -> Result<Insn, DisassemblerError> {
-        let bytes = bytes.as_ref();
-        let insn = self
-            .disassembler
-            .disassemble_insn(address, bytes, self.lifter.context_mut())
-            .map_err(DisassemblerError::disassembler)?;
-
-        if !insn.needs_lifting() && insn.len() != 0 {
-            return Ok(insn);
-        }
-
-        Ok(self.lifter.lift_insn(address, bytes)?)
-    }
-
-    pub fn lift_insn(
-        &mut self,
-        address: Address,
-        bytes: impl AsRef<[u8]>,
-    ) -> Result<Insn, LifterError> {
-        self.lifter.lift_insn(address, bytes.as_ref())
-    }
-
-    pub fn context(&self) -> &LiftingContext {
-        self.lifter.context()
-    }
-
-    pub fn context_mut(&mut self) -> &mut LiftingContext {
-        self.lifter.context_mut()
     }
 }
