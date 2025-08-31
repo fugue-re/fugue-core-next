@@ -25,8 +25,8 @@ impl RegisterNames {
     }
 
     pub fn insert(&mut self, offset: u64, size: usize, name: Ustr) {
-        self.exact.insert((offset, size), name.clone());
-        self.reversed.insert(name.clone(), (offset, size));
+        self.exact.insert((offset, size), name);
+        self.reversed.insert(name, (offset, size));
         self.overlaps.insert(offset..offset + size as u64, name);
     }
 
@@ -38,7 +38,6 @@ impl RegisterNames {
         let range = offset..offset + size as u64;
         self.overlaps
             .iter(range.clone())
-            .into_iter()
             .find_map(|(r, v)| {
                 if r.start <= range.start && r.end >= range.end {
                     Some(v)

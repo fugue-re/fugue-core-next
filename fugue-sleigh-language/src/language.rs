@@ -102,7 +102,7 @@ impl Language {
         self.registers
             .get_by_name(name.as_ref())
             .map(|(_, offset, size)| {
-                VarnodeData::new(&self.registers.register_space(), offset, size)
+                VarnodeData::new(self.registers.register_space(), offset, size)
             })
     }
 
@@ -116,7 +116,7 @@ impl Language {
     }
 
     pub fn root_symbol(&self) -> &Symbol {
-        &*self.root
+        &self.root
     }
 
     pub fn symbol_table(&self) -> &SymbolTable {
@@ -219,7 +219,7 @@ impl Language {
                     ref size,
                     ..
                 }) => {
-                    registers.insert(*offset, *size, name.clone());
+                    registers.insert(*offset, *size, *name);
 
                     if let Some(size) = size.checked_add(*offset as usize) {
                         registers_size = registers_size.max(size);
@@ -242,7 +242,7 @@ impl Language {
                     if user_ops.len() <= *index {
                         user_ops.resize_with(index + 1, Ustr::default);
                     }
-                    user_ops[*index] = name.clone();
+                    user_ops[*index] = *name;
                 }
                 _ => (),
             }
@@ -339,21 +339,23 @@ impl Language {
         input.close_element(sleigh)?;
 
         let register_space = spaces.register_space();
-        let program_counter_vnd = VarnodeData::new(&*register_space, 0, 0);
+        let program_counter_vnd = VarnodeData::new(&register_space, 0, 0);
 
         let global_scope = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or_else(|| DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
                 .to_owned(),
         );
 
         let root = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or_else(|| DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
                 .find("instruction", &symbol_table)
-                .ok_or_else(|| DeserialiseError::Invariant("instruction root symbol not defined"))?
+                .ok_or(DeserialiseError::Invariant(
+                    "instruction root symbol not defined",
+                ))?
                 .to_owned(),
         );
 
@@ -442,32 +444,34 @@ impl Language {
         let spaces = AddressSpaces::from_xml(
             children
                 .next()
-                .ok_or_else(|| DeserialiseError::Invariant("spaces not defined"))?,
+                .ok_or(DeserialiseError::Invariant("spaces not defined"))?,
         )?;
 
         let symbol_table = SymbolTable::from_xml(
             &spaces,
             children
                 .next()
-                .ok_or_else(|| DeserialiseError::Invariant("symbol table not defined"))?,
+                .ok_or(DeserialiseError::Invariant("symbol table not defined"))?,
         )?;
 
         let register_space = spaces.register_space();
-        let program_counter_vnd = VarnodeData::new(&*register_space, 0, 0);
+        let program_counter_vnd = VarnodeData::new(&register_space, 0, 0);
 
         let global_scope = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or_else(|| DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
                 .to_owned(),
         );
 
         let root = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or_else(|| DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
                 .find("instruction", &symbol_table)
-                .ok_or_else(|| DeserialiseError::Invariant("instruction root symbol not defined"))?
+                .ok_or(DeserialiseError::Invariant(
+                    "instruction root symbol not defined",
+                ))?
                 .to_owned(),
         );
 
@@ -717,14 +721,14 @@ impl LanguageDB {
             .map(|language| LanguageDefBuilder { language })
     }
 
-    pub fn definitions<'a>(&'a self) -> impl Iterator<Item = &'a ArchitectureDef> {
+    pub fn definitions(&self) -> impl Iterator<Item = &ArchitectureDef> {
         self.db.keys()
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = LanguageDefBuilder<'a>> {
         self.db
-            .iter()
-            .map(move |(_, language)| LanguageDefBuilder { language })
+            .values()
+            .map(move |language| LanguageDefBuilder { language })
     }
 
     fn into_iter(self) -> impl Iterator<Item = (ArchitectureDef, LanguageDef)> {
@@ -733,6 +737,10 @@ impl LanguageDB {
 
     pub fn len(&self) -> usize {
         self.db.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.db.is_empty()
     }
 
     pub fn from_xml<P: AsRef<Path>>(root: P, input: xml::Node) -> Result<Self, DeserialiseError> {
@@ -825,9 +833,9 @@ impl LanguageDB {
         // Obtain the folder that the spec is in
         let root = path
             .parent()
-            .ok_or_else(|| {
-                DeserialiseError::Invariant("cannot obtain parent directory of language defintions")
-            })
+            .ok_or(DeserialiseError::Invariant(
+                "cannot obtain parent directory of language defintions",
+            ))
             .map_err(|error| LanguageError::DeserialiseFile {
                 path: path.to_owned(),
                 error,
@@ -899,8 +907,8 @@ mod test {
     use std::fs::File;
 
     use fugue_arch::ArchitectureDef;
-    use fugue_ghidra_marshal::sla::FormatDecoder;
-    use fugue_ghidra_marshal::Decoder;
+    use fugue_sleigh_marshal::sla::FormatDecoder;
+    use fugue_sleigh_marshal::Decoder;
     use tracing_subscriber::prelude::*;
 
     use super::{Language, Map};
