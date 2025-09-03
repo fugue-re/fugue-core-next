@@ -643,6 +643,16 @@ impl ContextDatabase {
             },
         );
     }
+
+    pub fn clear_cache(&mut self) {
+        self.database_cache.borrow_mut().clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.database.clear();
+        self.trackbase.clear();
+        self.clear_cache();
+    }
 }
 
 #[inline(always)]
