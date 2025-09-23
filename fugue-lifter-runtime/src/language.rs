@@ -9,7 +9,7 @@ use crate::lifter::LiftingContextFactory;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::wrap_offset;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy)]
 pub struct LanguageVariant {
     language: &'static Language,
     context: LiftingContextFactory,
