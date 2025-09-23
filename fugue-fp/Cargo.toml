@@ -12,3 +12,6 @@ fugue-bv = { path = "../fugue-bv", version = "0.3" }
 fugue-sleigh-language = { path = "../fugue-sleigh-language", version = "0.3" }
 rug = { version = "1", features = ["float"] }
 thiserror = "2"
+
+[lints]
+workspace = true

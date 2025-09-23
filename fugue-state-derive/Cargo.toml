@@ -15,3 +15,6 @@ itertools = "0.10"
 proc-macro2 = "1"
 syn = { version = "2", features = ["full"] }
 quote = "1"
+
+[lints]
+workspace = true

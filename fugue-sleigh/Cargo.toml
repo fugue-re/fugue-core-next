@@ -16,3 +16,6 @@ default = []
 fugue-sleighc = { version = "0.3", optional = true }
 fugue-sleigh-language = { version = "0.3", path = "../fugue-sleigh-language", optional = true }
 fugue-sleigh-semantics = { version = "0.3", path = "../fugue-sleigh-semantics" }
+
+[lints]
+workspace = true

@@ -21,5 +21,8 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+mismatched_lifetime_syntaxes = "allow"
+
 [profile.bench]
 debug = true

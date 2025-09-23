@@ -28,3 +28,6 @@ walkdir = "2"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
+
+[lints]
+workspace = true
