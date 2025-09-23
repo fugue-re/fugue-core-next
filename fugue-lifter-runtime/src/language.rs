@@ -16,7 +16,37 @@ pub struct LanguageVariant {
     variant: &'static str,
 }
 
+impl PartialEq for LanguageVariant {
+    fn eq(&self, other: &Self) -> bool {
+        self.language == other.language && self.variant == other.variant
+    }
+}
+
+impl Eq for LanguageVariant {}
+
+impl PartialOrd for LanguageVariant {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LanguageVariant {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.language
+            .cmp(other.language)
+            .then_with(|| self.variant.cmp(other.variant))
+    }
+}
+
+impl Hash for LanguageVariant {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.language.hash(state);
+        self.variant.hash(state);
+    }
+}
+
 impl LanguageVariant {
+    #[doc(hidden)]
     pub const fn new(
         variant: &'static str,
         language: &'static Language,
@@ -56,7 +86,11 @@ impl Display for LanguageVariant {
             f,
             "{}:{}:{}:{}",
             self.language.processor(),
-            if self.language.is_big_endian() { "BE" } else { "LE" },
+            if self.language.is_big_endian() {
+                "BE"
+            } else {
+                "LE"
+            },
             self.language.address_bits(),
             self.variant
         )

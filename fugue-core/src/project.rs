@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::entities::Function;
-use crate::lifter::{HybridLifter, Language};
+use crate::lifter::{Language, Lifter};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError,
     LocalSymbols, SymbolEntry,
@@ -275,8 +275,9 @@ impl Project {
         &self.arch
     }
 
-    pub fn lifter(&self) -> HybridLifter {
-        HybridLifter::new(self.arch.disassembler(), self.arch.lifter())
+    pub fn lifter(&self) -> Lifter {
+        // HybridLifter::new(self.arch.disassembler(), self.arch.lifter())
+        self.arch.lifter()
     }
 
     pub fn language(&self) -> &'static Language {
@@ -409,8 +410,8 @@ mod test {
     use std::time::Instant;
 
     use crate::attributes;
-    use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
     use crate::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
+    use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
     use crate::storage::{
         DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
         PersistentStorageProvider, TransientStorageProvider,
