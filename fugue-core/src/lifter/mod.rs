@@ -1,59 +1,15 @@
-use std::fmt::{Debug, Display};
-
 use arrayvec::ArrayVec;
 use bincode::{Decode, Encode};
 
-pub use fugue_lifter::{
-    ContextBitRange, Language, LanguageId, LanguageVariant, Lifter, LifterBuilder,
-    LifterBuilderError, LiftingContext, Op, PCodeOp, Varnode, aarch64, arm, x86, x86_64,
-};
+pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
 
-use thiserror::Error;
+use crate::ir::Address;
 
-use crate::entities::Insn;
-use crate::types::Address;
+pub mod disassembler;
+pub use disassembler::{Disassembler, DisassemblerError, DisassemblerImpl};
 
-#[derive(Debug, Error)]
-pub enum LifterError {
-    #[error("invalid instruction at {0}")]
-    InvalidInstruction(Address),
-}
-
-#[derive(Debug, Error)]
-pub enum DisassemblerError {
-    #[error(transparent)]
-    Disassembler(anyhow::Error),
-    #[error("invalid instruction at {0}")]
-    InvalidInstruction(Address),
-}
-
-impl From<LifterError> for DisassemblerError {
-    fn from(value: LifterError) -> Self {
-        match value {
-            LifterError::InvalidInstruction(address) => Self::InvalidInstruction(address),
-        }
-    }
-}
-
-impl DisassemblerError {
-    pub fn invalid_instruction(address: Address) -> Self {
-        Self::InvalidInstruction(address)
-    }
-
-    pub fn disassembler<E>(error: E) -> Self
-    where
-        E: std::error::Error + Debug + Display + Send + Sync + 'static,
-    {
-        Self::Disassembler(anyhow::Error::new(error))
-    }
-
-    pub fn disassembler_with<M>(msg: M) -> Self
-    where
-        M: Display + Debug + Send + Sync + 'static,
-    {
-        Self::Disassembler(anyhow::Error::msg(msg))
-    }
-}
+pub mod lifter;
+pub use lifter::{Lifter, LifterBuilder, LifterBuilderError, LifterError, LifterImpl};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct ContextUpdate {
@@ -163,51 +119,5 @@ impl ContextSet {
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
             context.set_variable_region_by_bits(bits, from.into(), to.map(Address::into), *value);
         }
-    }
-}
-
-pub trait DisassemblerImpl {
-    fn disassemble_insn(
-        &mut self,
-        address: Address,
-        bytes: &[u8],
-        context: &mut LiftingContext,
-    ) -> Result<Insn, DisassemblerError>;
-}
-
-pub struct Disassembler(Box<dyn DisassemblerImpl>);
-
-impl Disassembler {
-    pub fn new(disassembler: impl DisassemblerImpl + 'static) -> Self {
-        Self(Box::new(disassembler))
-    }
-
-    fn disassemble_insn(
-        &mut self,
-        address: Address,
-        bytes: &[u8],
-        context: &mut LiftingContext,
-    ) -> Result<Insn, DisassemblerError> {
-        self.0.disassemble_insn(address, bytes, context)
-    }
-}
-
-pub trait LifterImpl {
-    fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError>;
-}
-
-impl LifterImpl for Lifter {
-    fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
-        let mut operations = Vec::new();
-        let Some(length) = self.lift(address.into(), bytes, &mut operations) else {
-            return Err(LifterError::InvalidInstruction(address));
-        };
-
-        Ok(Insn::from_lifted(
-            self.language(),
-            address,
-            length,
-            operations,
-        ))
     }
 }

@@ -11,9 +11,9 @@ use fugue_bytes::{BE, LE};
 use thiserror::Error;
 
 use crate::arch::Arch;
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LifterBuilderError;
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
 pub use elf::Elf;

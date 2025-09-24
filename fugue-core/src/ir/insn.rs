@@ -4,8 +4,7 @@ use bincode::{Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::entities::Id;
-use crate::types::{Address, Location, ToAddress};
+use crate::ir::{Address, Id, Location, ToAddress};
 
 pub type InsnId = Id<Insn>;
 

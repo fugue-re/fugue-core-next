@@ -1,18 +1,19 @@
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 
-use crate::arch::{Arch, ArchImpl, Flag};
-use crate::entities::{Insn, InsnProperties};
-use crate::lifter::x86::register::{
+use fugue_lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
-use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+pub use fugue_lifter::x86::*;
+
+use crate::arch::{Arch, ArchImpl, Flag};
+use crate::il::pcode::Varnode;
+use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::{
     Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
-    Varnode,
 };
 use crate::loader::symbols::ExternFunctionTemplate;
-use crate::types::Address;
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),

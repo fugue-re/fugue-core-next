@@ -4,17 +4,25 @@ use std::hash::Hash;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
-pub mod basic_block;
-pub use basic_block::{BasicBlock, BasicBlockId, BasicBlockProperties};
+pub mod address;
+pub use address::{Address, ToAddress};
+
+pub mod block;
+pub use block::{BasicBlock, BasicBlockId, BasicBlockProperties};
+
+pub use fugue_bytes::Endian;
 
 pub mod function;
 pub use function::{Function, FunctionId, FunctionProperties};
 
-pub mod instruction;
-pub use instruction::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
+pub mod insn;
+pub use insn::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
 
-pub mod call_graph;
-pub mod flow_graph;
+pub mod location;
+pub use location::Location;
+
+pub mod segment;
+pub use segment::SegmentProperties;
 
 pub struct Id<T> {
     id: u32,

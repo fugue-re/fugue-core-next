@@ -1,9 +1,10 @@
 // pub mod analysis;
 pub mod arch;
-pub mod entities;
-pub mod loader;
+pub mod ir;
+pub mod il;
 pub mod lifter;
-pub mod memory;
+pub mod loader;
+pub mod platform;
 pub mod project;
 pub mod storage;
 pub mod types;

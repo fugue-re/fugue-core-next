@@ -19,13 +19,13 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
+use crate::ir::{Address, SegmentProperties};
 use crate::loader::object::object_language;
 use crate::loader::symbols::{ExternSymbols, LocalSymbols, Symbol, SymbolProperties};
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {

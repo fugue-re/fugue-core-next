@@ -7,14 +7,13 @@ use bincode::{Decode, Encode};
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
-use crate::lifter::{
-    ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext, Varnode,
-};
-use crate::loader;
+use crate::il::pcode::Varnode;
+use crate::ir::{Address, Endian};
+use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext};
 use crate::loader::symbols::ExternFunctionTemplate;
+use crate::loader::util::parse_language;
 use crate::storage::entities::common::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
-use crate::types::{Address, Endian};
 
 pub mod aarch64;
 pub mod arm;
@@ -244,7 +243,7 @@ impl<C> Decode<C> for Arch {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let variant_str = String::decode(decoder)?;
-        let variant = loader::util::parse_language(variant_str)
+        let variant = parse_language(variant_str)
             .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
 
         Ok(Self::new(variant))

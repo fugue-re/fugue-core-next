@@ -5,13 +5,13 @@ use fallible_iterator::FallibleIterator;
 
 use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::arch::Arch;
+use crate::arch::{self, Arch};
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
 struct ObjectInner<'a> {
@@ -37,24 +37,24 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_thumb = object.entry() & 1 == 1;
 
     let language = match object.architecture() {
-        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
-        A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
+        A::Arm if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
+        A::Arm if is_64 => arch::aarch64::be::variants::DEFAULT,
         A::Arm if is_le => {
             if is_thumb {
-                crate::lifter::arm::le::variants::DEFAULT_THUMB
+                arch::arm::le::variants::DEFAULT_THUMB
             } else {
-                crate::lifter::arm::le::variants::DEFAULT
+                arch::arm::le::variants::DEFAULT
             }
         }
         A::Arm => {
             if is_thumb {
-                crate::lifter::arm::be::variants::DEFAULT_THUMB
+                arch::arm::be::variants::DEFAULT_THUMB
             } else {
-                crate::lifter::arm::be::variants::DEFAULT
+                arch::arm::be::variants::DEFAULT
             }
         }
-        A::I386 => crate::lifter::x86::variants::DEFAULT,
-        A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
+        A::I386 => arch::x86::variants::DEFAULT,
+        A::X86_64 => arch::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
