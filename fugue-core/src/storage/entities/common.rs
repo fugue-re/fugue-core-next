@@ -3,8 +3,8 @@ use std::hash::Hash;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::entities::{BasicBlock, Function, Id, Insn};
-use crate::types::{Address, BytesOrSlice};
+use crate::ir::{Address, BasicBlock, Function, Id, Insn};
+use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;
 pub type EntityId = u8;

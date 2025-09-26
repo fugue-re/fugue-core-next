@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::loader::{Loadable, LoadableSegment, LoaderError};
-use crate::types::{Address, AttributeMap};
+use crate::ir::Address;
+use crate::types::AttributeMap;
 
 pub mod memory;
 pub use memory::InMemorySegmentStorage;

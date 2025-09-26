@@ -2,8 +2,9 @@ use std::borrow::Cow;
 
 use fallible_iterator::FallibleIterator;
 
+use crate::ir::Address;
 use crate::loader::{Loadable, LoadableSegment};
-use crate::types::{Address, AttributeMap};
+use crate::types::AttributeMap;
 
 use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::entities::Function;
+use crate::ir::{Address, Function};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{
     ExternSymbols, Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError,
@@ -15,8 +15,8 @@ use crate::storage::{
     ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, StorageContainer, StorageProvider,
     StorageProviderError,
 };
+use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
-use crate::types::{Address, AttributeMap};
 
 pub struct Project {
     pub(crate) arch: Arch,

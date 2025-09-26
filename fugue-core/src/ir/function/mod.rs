@@ -1,10 +1,9 @@
 use bincode::{Decode, Encode};
 use ustr::Ustr;
 
-use crate::entities::{Id, BasicBlockId};
+use crate::ir::{Address, BasicBlockId, Id};
 use crate::storage::entities::common::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
-use crate::types::Address;
 
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
@@ -115,7 +114,11 @@ impl Function {
         Self::new_with(id, entry, None)
     }
 
-    pub fn new_with(id: FunctionId, entry: impl Into<Address>, name: impl Into<Option<Ustr>>) -> Self {
+    pub fn new_with(
+        id: FunctionId,
+        entry: impl Into<Address>,
+        name: impl Into<Option<Ustr>>,
+    ) -> Self {
         Function {
             id,
             name: name.into(),

@@ -16,7 +16,7 @@ pub mod function;
 pub use function::{Function, FunctionId, FunctionProperties};
 
 pub mod insn;
-pub use insn::{Insn, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
+pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
 pub mod location;
 pub use location::Location;
@@ -61,6 +61,7 @@ impl<T> Clone for Id<T> {
         }
     }
 }
+
 impl<T> Copy for Id<T> {}
 
 impl<T> PartialEq for Id<T> {
@@ -68,6 +69,7 @@ impl<T> PartialEq for Id<T> {
         self.id == other.id
     }
 }
+
 impl<T> Eq for Id<T> {}
 
 impl<T> PartialOrd for Id<T> {
@@ -160,6 +162,7 @@ impl<T> PartialEq for IdSet<T> {
         self.set == other.set
     }
 }
+
 impl<T> Eq for IdSet<T> {}
 
 impl<T> IdSet<T> {

@@ -1,11 +1,9 @@
 use bincode::{Decode, Encode};
 
-use crate::entities::instruction::InsnList;
-use crate::entities::{Id, IdSet};
+use crate::ir::{Address, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::common::ENTITY_BASIC_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
-use crate::types::Address;
 
 pub type BasicBlockId = Id<BasicBlock>;
 
@@ -46,6 +44,7 @@ impl Encode for BasicBlock {
 
         self.properties.encode(encoder)?;
         self.context.encode(encoder)?;
+
         Ok(())
     }
 }

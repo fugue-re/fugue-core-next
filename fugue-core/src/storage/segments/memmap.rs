@@ -10,11 +10,11 @@ use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
+use crate::ir::{Address, SegmentProperties};
 use crate::loader::{Loadable, LoadableSegment, Loader};
-use crate::memory::SegmentProperties;
 use crate::storage::{self, PERSISTENT, StoragePersistence};
+use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::{Address, AttributeMap};
 
 use super::{
     SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
