@@ -8,10 +8,12 @@ use smallvec::SmallVec;
 
 pub use ustr::{Ustr as Symbol, UstrMap as SymbolMap};
 
-use crate::ir::Address;
+use crate::ir::{Address, Id};
 use crate::lifter::ContextSet;
 use crate::storage::entities::common::{ENTITY_EXTERN_SYMBOLS_ID, ENTITY_LOCAL_SYMBOLS_ID};
 use crate::storage::entities::{Entity, EntityId};
+
+pub type SymbolId = Id<Symbol>;
 
 #[derive(Debug, Clone)]
 pub struct ExternFunctionTemplate {

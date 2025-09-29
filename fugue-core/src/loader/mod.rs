@@ -11,7 +11,7 @@ use fugue_bytes::{BE, LE};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, ExternSymbols, LocalSymbols, SegmentProperties};
 use crate::lifter::LifterBuilderError;
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -29,9 +29,6 @@ pub use object::Object;
 
 pub mod shellcode;
 pub use shellcode::Shellcode;
-
-pub mod symbols;
-pub use symbols::{ExternSymbols, LocalSymbols, SymbolEntry};
 
 pub mod util;
 

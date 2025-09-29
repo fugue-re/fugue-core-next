@@ -9,11 +9,10 @@ pub use fugue_lifter::x86::*;
 
 use crate::arch::{Arch, ArchImpl, Flag};
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::{
     Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
 };
-use crate::loader::symbols::ExternFunctionTemplate;
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),

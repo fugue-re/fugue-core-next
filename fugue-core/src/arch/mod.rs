@@ -8,9 +8,8 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian};
+use crate::ir::{Address, Endian, ExternFunctionTemplate};
 use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext};
-use crate::loader::symbols::ExternFunctionTemplate;
 use crate::loader::util::parse_language;
 use crate::storage::entities::common::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};

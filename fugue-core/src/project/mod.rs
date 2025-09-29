@@ -3,12 +3,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, Function};
+use crate::ir::{Address, ExternSymbols, Function, LocalSymbols, SymbolEntry};
 use crate::lifter::{Language, Lifter};
-use crate::loader::{
-    ExternSymbols, Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError,
-    LocalSymbols, SymbolEntry,
-};
+use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
@@ -17,6 +14,8 @@ use crate::storage::{
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
+
+pub mod traits;
 
 pub struct Project {
     pub(crate) arch: Arch,

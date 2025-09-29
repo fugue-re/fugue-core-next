@@ -27,6 +27,12 @@ pub use location::Location;
 pub mod segment;
 pub use segment::SegmentProperties;
 
+pub mod symbol;
+pub use symbol::{
+    ExternFunctionTemplate, ExternSymbols, LocalSymbols, Symbol, SymbolEntry, SymbolId,
+    SymbolProperties,
+};
+
 pub struct Id<T> {
     id: u32,
     _marker: std::marker::PhantomData<T>,

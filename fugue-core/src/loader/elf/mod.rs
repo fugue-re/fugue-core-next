@@ -18,9 +18,10 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{
+    Address, ExternSymbols, LocalSymbols, SegmentProperties, Symbol, SymbolProperties,
+};
 use crate::loader::object::object_language;
-use crate::loader::symbols::{ExternSymbols, LocalSymbols, Symbol, SymbolProperties};
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };

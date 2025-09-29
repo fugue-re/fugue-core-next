@@ -4,8 +4,7 @@ use object::{
     RelocationFlags, RelocationKind, RelocationTarget,
 };
 
-use crate::ir::Address;
-use crate::loader::symbols::SymbolProperties;
+use crate::ir::{Address, SymbolProperties};
 use crate::loader::{ExternSymbols, LoadableSegment, LoaderError, LocalSymbols};
 
 pub mod generic;

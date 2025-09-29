@@ -9,11 +9,10 @@ pub use fugue_lifter::aarch64::*;
 
 use crate::arch::{Arch, ArchImpl};
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::{
     Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
 };
-use crate::loader::symbols::ExternFunctionTemplate;
 
 const GPRS: &[Varnode] = &[
     X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
