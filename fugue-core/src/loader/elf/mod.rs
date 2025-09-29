@@ -8,12 +8,11 @@ use object::elf::{
     STB_WEAK, STT_COMMON, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
 use object::read::elf::{
-    self, ElfFile, ElfSection, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
+    self, ElfFile, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
 };
 use object::{
-    Architecture, Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment,
-    ObjectSymbol, ObjectSymbolTable, ReadRef, Relocation, RelocationFlags, RelocationKind,
-    RelocationTarget, SectionFlags, SegmentFlags, SymbolFlags,
+    Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
+    SectionFlags, SegmentFlags, SymbolFlags,
 };
 
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
@@ -26,6 +25,9 @@ use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
 use crate::types::{AttributeMap, BytesOrMapping};
+
+mod relocations;
+pub use relocations::ElfSegmentRelocator;
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -412,21 +414,21 @@ where
     'file: 'data,
 {
     // reference to the ELF
-    elf: &'file ElfFile<'data, Elf, R>,
+    pub(crate) elf: &'file ElfFile<'data, Elf, R>,
     // segments iterator
-    segms: ElfSegmentIterator<'data, 'file, Elf, R>,
+    pub(crate) segms: ElfSegmentIterator<'data, 'file, Elf, R>,
     // sections iterator
-    sects: ElfSectionIterator<'data, 'file, Elf, R>,
+    pub(crate) sects: ElfSectionIterator<'data, 'file, Elf, R>,
     // ranges already covered
     covered: RangeSetBlaze<u64>,
     // split segments that span multiple unmapped ranges
     segms_split: Option<(IntoRangesIter<u64>, ElfSegment<'data, 'file, Elf, R>)>,
     // current base address
-    current_base: Address,
+    pub(crate) current_base: Address,
     // mapping of local symbols
-    locals: &'file LocalSymbols,
+    pub(crate) locals: &'file LocalSymbols,
     // virtual segment containing external symbols and their mapping
-    externs: Option<&'file ExternSymbols>,
+    pub(crate) externs: Option<&'file ExternSymbols>,
     // if we're working with an object file or not
     is_object: bool,
 }
@@ -489,6 +491,8 @@ where
     }
 
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
                 continue;
@@ -562,8 +566,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            self.apply_relocations(&mut lsegm, &sect)?;
-            self.apply_dynamic_relocations(&mut lsegm)?;
+            relocator.apply(&mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -577,6 +580,9 @@ where
         let Some((covered, segm)) = self.segms_split.as_mut() else {
             return Ok(None);
         };
+
+        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+
         while let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
 
@@ -615,7 +621,8 @@ where
             };
 
             self.covered.ranges_insert(range);
-            self.apply_dynamic_relocations(&mut lsegm)?;
+
+            relocator.apply_dynamic_relocations(&mut lsegm)?;
 
             return Ok(Some(lsegm));
         }
@@ -628,6 +635,8 @@ where
     pub(crate) fn next_linked_section(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
                 continue;
@@ -683,8 +692,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            self.apply_relocations(&mut lsegm, &sect)?;
-            self.apply_dynamic_relocations(&mut lsegm)?;
+            relocator.apply(&mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -695,6 +703,8 @@ where
     pub(crate) fn next_linked_segment(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+
         while let Some(segm) = self.segms.next() {
             let size = segm.size();
 
@@ -773,7 +783,8 @@ where
             }
 
             self.covered.ranges_insert(range);
-            self.apply_dynamic_relocations(&mut lsegm)?;
+
+            relocator.apply_dynamic_relocations(&mut lsegm)?;
 
             return Ok(Some(lsegm));
         }
@@ -795,328 +806,6 @@ where
         }
 
         self.extern_segment()
-    }
-
-    pub(crate) fn apply_relocations(
-        &mut self,
-        lsegm: &mut LoadableSegment<'data>,
-        sect: &ElfSection<'data, 'file, Elf, R>,
-    ) -> Result<(), LoaderError> {
-        for (off, rel) in sect.relocations() {
-            tracing::trace!(
-                "applying relocation {}+{off:#x} {:?} {rel:?}",
-                lsegm.address(),
-                rel.kind()
-            );
-
-            match rel.kind() {
-                RelocationKind::Unknown => {
-                    let RelocationFlags::Elf { r_type } = rel.flags() else {
-                        // NOTE: we could probably panic here
-                        continue;
-                    };
-
-                    match self.elf.architecture() {
-                        Architecture::X86_64 => {
-                            self.apply_x86_64_relocation(lsegm, off, &rel, r_type, false);
-                        }
-                        arch => {
-                            tracing::warn!(
-                                "unsupported architecture {arch:?} for relocation {:?}",
-                                rel.kind()
-                            );
-                        }
-                    }
-                }
-                kind => {
-                    self.apply_generic_relocation(lsegm, off, &rel, kind, false);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn apply_dynamic_relocations(
-        &mut self,
-        lsegm: &mut LoadableSegment<'data>,
-    ) -> Result<(), LoaderError> {
-        let Some(drels) = self.elf.dynamic_relocations() else {
-            return Ok(());
-        };
-
-        let offset = lsegm.address().offset();
-        let last_offset = lsegm.last_address().offset();
-
-        // TODO: add base address to dynamic relocations offset
-        for (off, rel) in drels.filter(|(off, _)| *off >= offset && *off <= last_offset) {
-            tracing::trace!("applying dynamic relocation at {}", Address::from(off));
-
-            // Compute offset in the segment
-            let off = off - offset;
-
-            match rel.kind() {
-                RelocationKind::Unknown => {
-                    let RelocationFlags::Elf { r_type } = rel.flags() else {
-                        // NOTE: we could probably panic here
-                        continue;
-                    };
-
-                    match self.elf.architecture() {
-                        Architecture::X86_64 => {
-                            self.apply_x86_64_relocation(lsegm, off, &rel, r_type, true);
-                        }
-                        arch => {
-                            tracing::warn!(
-                                "unsupported architecture {arch:?} for relocation {:?}",
-                                rel.kind()
-                            );
-                        }
-                    }
-                }
-                kind => {
-                    self.apply_generic_relocation(lsegm, off, &rel, kind, true);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn resolve_relocation_symbol(
-        &self,
-        reloc: &Relocation,
-        is_dynamic: bool,
-    ) -> Option<u64> {
-        let RelocationTarget::Symbol(index) = reloc.target() else {
-            tracing::warn!("unsupported relocation target {reloc:?}");
-            return None;
-        };
-
-        if let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0)) {
-            tracing::trace!("found external symbol {index:?} at {target:#x}");
-            return Some(target.offset());
-        }
-
-        if let Some(target) = self.locals.get_address(index.0) {
-            tracing::trace!("found local symbol {index:?} at {target:#x}");
-            return Some(target.offset());
-        }
-
-        // FIXME: in this case, we need to compute the address + our base
-        // for object files, this base address will be the beginning of the
-        // loaded segment containing it, probably we should save the section
-        // map computed in `elf_symbols`?
-
-        let table = if is_dynamic {
-            self.elf.dynamic_symbol_table()?
-        } else {
-            self.elf.symbol_table()?
-        };
-
-        let symbol = table.symbol_by_index(index).ok()?;
-
-        Some(symbol.address())
-    }
-
-    pub(crate) fn mark_function_symbol(&self, address: impl Into<Address>) {
-        let address = address.into();
-
-        tracing::trace!("marking symbol {address} as function");
-
-        if self.externs.as_ref().map_or(false, |externs| {
-            externs.update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION)
-        }) {
-            return;
-        }
-
-        self.locals
-            .update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION);
-    }
-
-    pub(crate) fn apply_generic_relocation(
-        &self,
-        lsegm: &mut LoadableSegment<'data>,
-        offset: u64,
-        reloc: &Relocation,
-        reloc_type: RelocationKind,
-        is_dynamic: bool,
-    ) {
-        let offset = offset as usize;
-
-        match reloc_type {
-            RelocationKind::Absolute => {
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:?} at {offset:#x}");
-                    return;
-                };
-
-                let value = value.wrapping_add_signed(reloc.addend());
-
-                tracing::trace!("applying relocation {reloc_type:?} at {offset:#x}: {value:#x}");
-
-                if reloc.size() == 32 {
-                    lsegm.write_value(offset, value as u32);
-                } else {
-                    lsegm.write_value(offset, value);
-                }
-            }
-            RelocationKind::Relative
-            | RelocationKind::GotRelative
-            | RelocationKind::PltRelative => {
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:?} at {offset:#x}");
-                    return;
-                };
-
-                if [RelocationKind::GotRelative, RelocationKind::PltRelative].contains(&reloc_type)
-                {
-                    self.mark_function_symbol(value);
-                }
-
-                let value = value
-                    .wrapping_add_signed(reloc.addend())
-                    .wrapping_sub(lsegm.address().offset().wrapping_add(offset as u64));
-
-                tracing::trace!("applying relocation {reloc_type:?} at {offset:#x}: {value:#x}");
-
-                if reloc.size() == 32 {
-                    lsegm.write_value(offset, value as u32);
-                } else {
-                    lsegm.write_value(offset, value);
-                }
-            }
-            _ => {
-                tracing::warn!("unsupported relocation kind {reloc_type:?}");
-                return;
-            }
-        }
-    }
-
-    pub(crate) fn apply_x86_64_relocation(
-        &self,
-        lsegm: &mut LoadableSegment<'data>,
-        offset: u64,
-        reloc: &Relocation,
-        reloc_type: u32,
-        is_dynamic: bool,
-    ) {
-        use object::elf::{
-            R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_GOT64,
-            R_X86_64_GOTPCREL, R_X86_64_GOTPCRELX, R_X86_64_JUMP_SLOT, R_X86_64_PC32,
-            R_X86_64_PLT32, R_X86_64_RELATIVE, R_X86_64_RELATIVE64, R_X86_64_REX_GOTPCRELX,
-        };
-
-        // TODO: allow base address to be configurable
-        let base = 0u64;
-
-        match reloc_type {
-            R_X86_64_RELATIVE | R_X86_64_RELATIVE64 => {
-                let offset = offset as usize;
-                let value = base.wrapping_add_signed(reloc.addend());
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}",);
-
-                lsegm.write_value(offset, value);
-            }
-            R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-                let offset = offset as usize;
-
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
-                    return;
-                };
-
-                if reloc_type == R_X86_64_JUMP_SLOT {
-                    self.mark_function_symbol(value);
-                }
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
-
-                lsegm.write_value(offset, value);
-            }
-            R_X86_64_64 | R_X86_64_GOT64 => {
-                let offset = offset as usize;
-
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
-                    return;
-                };
-
-                if reloc_type == R_X86_64_GOT64 {
-                    self.mark_function_symbol(value);
-                }
-
-                let value = value.wrapping_add_signed(reloc.addend());
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
-
-                lsegm.write_value(offset, value);
-            }
-            R_X86_64_32 => {
-                let offset = offset as usize;
-
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
-                    return;
-                };
-
-                let value = value.wrapping_add_signed(reloc.addend());
-
-                if value > u32::MAX as u64 {
-                    tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
-                    return;
-                }
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
-
-                lsegm.write_value(offset, value as u32);
-            }
-            R_X86_64_32S => {
-                let offset = offset as usize;
-
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
-                    return;
-                };
-
-                let value = value.wrapping_add_signed(reloc.addend());
-
-                if value > i32::MAX as u64 {
-                    tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
-                    return;
-                }
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
-
-                lsegm.write_value(offset, value as i32);
-            }
-            R_X86_64_PLT32
-            | R_X86_64_PC32
-            | R_X86_64_GOTPCREL
-            | R_X86_64_GOTPCRELX
-            | R_X86_64_REX_GOTPCRELX => {
-                let offset = offset as usize;
-                let target = lsegm.address().offset() + offset as u64;
-
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
-                    tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
-                    return;
-                };
-
-                self.mark_function_symbol(value);
-
-                let value =
-                    (value.wrapping_add_signed(reloc.addend()) as u32).wrapping_sub(target as u32);
-
-                tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
-
-                lsegm.write_value(offset, value);
-            }
-            _ => {
-                tracing::warn!("unsupported relocation type {reloc:?}");
-            }
-        }
     }
 }
 

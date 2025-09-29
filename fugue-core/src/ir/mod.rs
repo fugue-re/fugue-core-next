@@ -18,6 +18,9 @@ pub use function::{Function, FunctionId, FunctionProperties};
 pub mod insn;
 pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
+pub mod module;
+pub use module::{Module, ModuleId};
+
 pub mod location;
 pub use location::Location;
 
