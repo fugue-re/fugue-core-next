@@ -1,7 +1,7 @@
 use std::ops::RangeInclusive;
 
 use crate::ir::{Address, ExternFunctionTemplate, Symbol, SymbolProperties};
-use crate::project::traits::symbol::SymbolTable;
+use crate::ir::traits::symbol::SymbolTable;
 
 pub struct ExternSegment {
     address: Address,
@@ -11,16 +11,16 @@ pub struct ExternSegment {
 }
 
 impl ExternSegment {
-    pub fn add_symbol(
+    pub fn add_extern(
         &mut self,
         index: usize,
         addr: impl Into<Address>,
         symbol: impl Into<Option<Symbol>>,
     ) {
-        self.add_symbol_with(index, addr, symbol, SymbolProperties::EXTERN)
+        self.add_extern_with(index, addr, symbol, SymbolProperties::EXTERN)
     }
 
-    pub fn add_symbol_with(
+    pub fn add_extern_with(
         &mut self,
         index: usize,
         addr: impl Into<Address>,

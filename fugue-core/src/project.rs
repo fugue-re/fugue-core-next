@@ -15,8 +15,6 @@ use crate::storage::{
 use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 
-pub mod traits;
-
 pub struct Project {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
