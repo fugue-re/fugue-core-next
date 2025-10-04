@@ -1,4 +1,5 @@
-use crate::ir::{Address, Symbol, SymbolEntry, SymbolProperties};
+use crate::ir::{Address, SymbolEntry, SymbolProperties};
+use crate::storage::{EntityStorage, EntityStorageError};
 
 pub struct SymbolIterator<'a> {
     inner: Box<dyn Iterator<Item = SymbolEntry> + 'a>,
@@ -51,6 +52,8 @@ pub trait SymbolTableImpl {
     fn contains(&self, sym: &str) -> bool;
 
     fn iter<'a>(&'a self) -> SymbolIterator<'a>;
+
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
 }
 
 pub struct SymbolTable {

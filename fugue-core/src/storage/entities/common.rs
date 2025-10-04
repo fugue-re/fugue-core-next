@@ -11,6 +11,14 @@ pub type EntityId = u8;
 
 pub const ENTITY_PREFIX_SIZE: usize = 2;
 
+// Entity key identifiers
+pub const ENTITY_KEY_PROJECT_ENTITY_ID: EntityKeyId = 0;
+pub const ENTITY_KEY_ADDRESS_ENTITY_ID: EntityKeyId = 1;
+pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = 2;
+pub const ENTITY_KEY_BASIC_BLOCK_ENTITY_ID: EntityKeyId = 3;
+pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = 4;
+
+// Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
 pub const ENTITY_LOCAL_SYMBOLS_ID: EntityId = 1;
 pub const ENTITY_EXTERN_SYMBOLS_ID: EntityId = 2;
@@ -41,7 +49,7 @@ pub enum ProjectEntity {
 }
 
 impl EntityKey for ProjectEntity {
-    const ID: EntityKeyId = 0;
+    const ID: EntityKeyId = ENTITY_KEY_PROJECT_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         if buf.len() == 1 {
@@ -63,7 +71,7 @@ impl EntityKey for ProjectEntity {
 }
 
 impl EntityKey for Address {
-    const ID: EntityKeyId = 1;
+    const ID: EntityKeyId = ENTITY_KEY_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         <[u8; 8]>::try_from(buf)
@@ -77,7 +85,7 @@ impl EntityKey for Address {
 }
 
 impl EntityKey for Id<Function> {
-    const ID: EntityKeyId = 2;
+    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         Id::<Function>::decode_as_key(buf)
@@ -89,7 +97,7 @@ impl EntityKey for Id<Function> {
 }
 
 impl EntityKey for Id<BasicBlock> {
-    const ID: EntityKeyId = 3;
+    const ID: EntityKeyId = ENTITY_KEY_BASIC_BLOCK_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         Id::<BasicBlock>::decode_as_key(buf)
@@ -101,7 +109,7 @@ impl EntityKey for Id<BasicBlock> {
 }
 
 impl EntityKey for Id<Insn> {
-    const ID: EntityKeyId = 4;
+    const ID: EntityKeyId = ENTITY_KEY_INSN_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         Id::<Insn>::decode_as_key(buf)

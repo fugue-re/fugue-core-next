@@ -33,6 +33,8 @@ pub use symbol::{
     SymbolProperties,
 };
 
+pub mod traits;
+
 pub struct Id<T> {
     id: u32,
     _marker: std::marker::PhantomData<T>,

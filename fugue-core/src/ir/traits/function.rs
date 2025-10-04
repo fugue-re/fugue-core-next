@@ -1,4 +1,5 @@
 use crate::ir::{Address, Function, Id};
+use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type FunctionRef<'a> = &'a Function;
 pub type FunctionMut<'a> = &'a mut Function;
@@ -65,4 +66,6 @@ pub trait FunctionTableImpl {
 
     fn iter<'a>(&'a self) -> FunctionIterator<'a>;
     fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a>;
+
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
 }
