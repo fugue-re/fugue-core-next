@@ -10,9 +10,8 @@ pub use fugue_lifter::x86::*;
 use crate::arch::{Arch, ArchImpl, Flag};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
-use crate::lifter::{
-    Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
-};
+use crate::lifter::traits::Disassembler as DisassemblerT;
+use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),
@@ -126,7 +125,7 @@ impl X86Disassembler {
     }
 }
 
-impl DisassemblerImpl for X86Disassembler {
+impl DisassemblerT for X86Disassembler {
     fn disassemble_insn(
         &mut self,
         address: Address,

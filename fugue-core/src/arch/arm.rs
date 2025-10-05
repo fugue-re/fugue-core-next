@@ -10,9 +10,9 @@ pub use fugue_lifter::arm::*;
 use crate::arch::{Arch, ArchImpl};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextSet, Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter,
-    LiftingContext,
+    ContextSet, Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext,
 };
 
 const GPRS: &[Varnode] = &[
@@ -125,7 +125,7 @@ impl ArmDisassembler {
     }
 }
 
-impl DisassemblerImpl for ArmDisassembler {
+impl DisassemblerT for ArmDisassembler {
     fn disassemble_insn(
         &mut self,
         address: Address,

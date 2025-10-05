@@ -1,8 +1,10 @@
 use std::fmt::{Debug, Display};
 
-use thiserror::Error;
+use fugue_lifter::runtime::context::ContextBitRange;
+use fugue_lifter::runtime::language::Language;
+use fugue_lifter::runtime::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 
-pub use fugue_lifter::{Lifter, LifterBuilder, LifterBuilderError};
+use thiserror::Error;
 
 use crate::ir::{Address, Insn};
 
@@ -34,14 +36,113 @@ impl LifterError {
     }
 }
 
-pub trait LifterImpl {
-    fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError>;
-}
+#[derive(Clone)]
+pub struct Lifter(fugue_lifter::Lifter);
 
-impl LifterImpl for Lifter {
-    fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
+impl Lifter {
+    pub fn new(language: &'static Language, context: LiftingContext) -> Self {
+        Self(fugue_lifter::Lifter::new(language, context))
+    }
+
+    pub fn language(&self) -> &'static Language {
+        self.0.language()
+    }
+
+    pub fn context(&self) -> &LiftingContext {
+        self.0.context()
+    }
+
+    pub fn context_mut(&mut self) -> &mut LiftingContext {
+        self.0.context_mut()
+    }
+
+    pub fn address_alignment(&self) -> usize {
+        self.0.address_alignment()
+    }
+
+    pub fn address_bits(&self) -> u32 {
+        self.0.address_bits()
+    }
+
+    pub fn address_size(&self) -> usize {
+        self.0.address_size()
+    }
+
+    pub fn address_upper_bound(&self) -> u64 {
+        self.0.address_upper_bound()
+    }
+
+    pub fn constant_space(&self) -> u8 {
+        self.0.constant_space()
+    }
+
+    pub fn default_space(&self) -> u8 {
+        self.0.default_space()
+    }
+
+    pub fn register_space(&self) -> u8 {
+        self.0.register_space()
+    }
+
+    pub fn register_space_size(&self) -> usize {
+        self.0.register_space_size()
+    }
+
+    pub fn unique_mask(&self) -> u64 {
+        self.0.unique_mask()
+    }
+
+    pub fn unique_space(&self) -> u8 {
+        self.0.unique_space()
+    }
+
+    pub fn unique_space_size(&self) -> usize {
+        self.0.unique_space_size()
+    }
+
+    pub fn space_name(&self, space: u8) -> Option<&'static str> {
+        self.0.space_name(space)
+    }
+
+    pub fn space_by_name(&self, name: impl AsRef<str>) -> Option<u8> {
+        self.0.space_by_name(name)
+    }
+
+    pub fn space_word_size(&self, space: u8) -> Option<usize> {
+        self.0.space_word_size(space)
+    }
+
+    pub fn space_upper_bound(&self, space: u8) -> Option<u64> {
+        self.0.space_upper_bound(space)
+    }
+
+    pub fn wrap_offset(&self, space: u8, offset: u64) -> Option<u64> {
+        self.0.wrap_offset(space, offset)
+    }
+
+    pub fn context_variable_by_name(&self, name: impl AsRef<str>) -> Option<ContextBitRange> {
+        self.0.context_variable_by_name(name)
+    }
+
+    pub fn register_by_name(&self, name: impl AsRef<str>) -> Option<Varnode> {
+        self.0.register_by_name(name)
+    }
+
+    pub fn register_name(&self, vnd: &Varnode) -> Option<&'static str> {
+        self.0.register_name(vnd)
+    }
+
+    pub fn user_op_by_name(&self, name: impl AsRef<str>) -> Option<u16> {
+        self.0.user_op_by_name(name)
+    }
+
+    pub fn user_op_by_id(&self, id: u16) -> Option<&'static str> {
+        self.0.user_op_by_id(id)
+    }
+
+    pub fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
         let mut operations = Vec::new();
-        let Some(length) = self.lift(address.into(), bytes, &mut operations) else {
+        let Some(length) = self.0.lift(address.into(), bytes, &mut operations) else {
             return Err(LifterError::InvalidInstruction(address));
         };
 

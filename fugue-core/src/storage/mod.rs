@@ -20,15 +20,14 @@ pub use entities::{
     DefaultPersistentEntityStorage, DefaultTransientEntityStorage, EntityStorage,
     EntityStorageError, EntityStorageProvider,
 };
+use entities::{
+    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
+};
 
 pub mod segments;
 pub use segments::{
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentStorage,
     SegmentStorageError, SegmentStorageProvider,
-};
-
-use entities::{
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
 };
 use segments::{
     InMemorySegmentStorage, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,

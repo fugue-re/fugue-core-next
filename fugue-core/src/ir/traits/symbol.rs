@@ -1,4 +1,4 @@
-use crate::ir::{Address, SymbolEntry, SymbolProperties};
+use crate::ir::{Address, Symbol, SymbolEntry, SymbolProperties};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub struct SymbolIterator<'a> {

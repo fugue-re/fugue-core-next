@@ -6,10 +6,12 @@ pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, L
 use crate::ir::Address;
 
 pub mod disassembler;
-pub use disassembler::{Disassembler, DisassemblerError, DisassemblerImpl};
+pub use disassembler::{Disassembler, DisassemblerError};
 
 pub mod lifter;
-pub use lifter::{Lifter, LifterBuilder, LifterBuilderError, LifterError, LifterImpl};
+pub use lifter::{Lifter, LifterError};
+
+pub mod traits;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct ContextUpdate {

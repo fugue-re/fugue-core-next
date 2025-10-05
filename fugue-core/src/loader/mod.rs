@@ -12,7 +12,6 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::ir::{Address, ExternSymbols, LocalSymbols, SegmentProperties};
-use crate::lifter::LifterBuilderError;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -38,8 +37,6 @@ pub enum LoaderError {
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Lifter(#[from] LifterBuilderError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
     #[error("cannot load object; unsupported architecture")]

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::ir::{Address, Insn};
 use crate::lifter::LiftingContext;
+use crate::lifter::traits::Disassembler as DisassemblerT;
 
 #[derive(Debug, Error)]
 pub enum DisassemblerError {
@@ -33,23 +34,14 @@ impl DisassemblerError {
     }
 }
 
-pub trait DisassemblerImpl {
-    fn disassemble_insn(
-        &mut self,
-        address: Address,
-        bytes: &[u8],
-        context: &mut LiftingContext,
-    ) -> Result<Insn, DisassemblerError>;
-}
-
-pub struct Disassembler(Box<dyn DisassemblerImpl>);
+pub struct Disassembler(Box<dyn DisassemblerT>);
 
 impl Disassembler {
-    pub fn new(disassembler: impl DisassemblerImpl + 'static) -> Self {
+    pub fn new(disassembler: impl DisassemblerT + 'static) -> Self {
         Self(Box::new(disassembler))
     }
 
-    fn disassemble_insn(
+    pub fn disassemble_insn(
         &mut self,
         address: Address,
         bytes: &[u8],
