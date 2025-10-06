@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use fugue_lifter::runtime::context::ContextBitRange;
 use fugue_lifter::runtime::language::Language;
-use fugue_lifter::runtime::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
+use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 
 use thiserror::Error;
 

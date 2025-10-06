@@ -13,7 +13,7 @@ pub use block::{BasicBlock, BasicBlockId, BasicBlockProperties};
 pub use fugue_bytes::Endian;
 
 pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties};
+pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
 
 pub mod insn;
 pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
@@ -30,7 +30,7 @@ pub use segment::SegmentProperties;
 pub mod symbol;
 pub use symbol::{
     ExternFunctionTemplate, ExternSymbols, LocalSymbols, Symbol, SymbolEntry, SymbolId,
-    SymbolProperties,
+    SymbolProperties, SymbolTable,
 };
 
 pub mod traits;

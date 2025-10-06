@@ -52,7 +52,7 @@ impl<'a> Iterator for FunctionIteratorMut<'a> {
     }
 }
 
-pub trait FunctionTableImpl {
+pub trait FunctionTable {
     fn insert(&mut self, func: Function);
 
     fn is_empty(&self) -> bool;

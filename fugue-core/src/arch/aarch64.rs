@@ -7,7 +7,8 @@ use fugue_lifter::aarch64::register::{
 };
 pub use fugue_lifter::aarch64::*;
 
-use crate::arch::{Arch, ArchImpl};
+use crate::arch::Arch;
+use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
@@ -23,7 +24,7 @@ pub struct AArch64 {
     language: LanguageVariant,
 }
 
-impl ArchImpl for AArch64 {
+impl ArchT for AArch64 {
     fn dissassembler(&self) -> Disassembler {
         AArch64Disassembler::new()
     }
@@ -51,7 +52,7 @@ impl ArchImpl for AArch64 {
 
 impl AArch64 {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
     }
 }
 

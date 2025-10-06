@@ -8,6 +8,9 @@ use crate::storage::entities::{Entity, EntityId, MutableEntity};
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
+pub mod table;
+pub use table::FunctionTable;
+
 pub type FunctionId = Id<Function>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

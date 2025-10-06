@@ -1,7 +1,6 @@
 use std::ops::RangeInclusive;
 
-use crate::ir::traits::symbol::SymbolTable;
-use crate::ir::{Address, ExternFunctionTemplate, Symbol, SymbolProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Symbol, SymbolProperties, SymbolTable};
 
 pub struct ExternSegment {
     address: Address,

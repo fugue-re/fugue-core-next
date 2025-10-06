@@ -7,7 +7,8 @@ use fugue_lifter::arm::register::{
 };
 pub use fugue_lifter::arm::*;
 
-use crate::arch::{Arch, ArchImpl};
+use crate::arch::Arch;
+use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
@@ -25,7 +26,7 @@ pub struct Arm {
     is_thumb: bool,
 }
 
-impl ArchImpl for Arm {
+impl ArchT for Arm {
     fn dissassembler(&self) -> Disassembler {
         ArmDisassembler::new(self.is_thumb)
     }
@@ -81,7 +82,7 @@ impl ArchImpl for Arm {
 impl Arm {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
-        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchT>)
     }
 }
 

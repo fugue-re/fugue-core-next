@@ -25,7 +25,7 @@ impl<'a> Iterator for SymbolIterator<'a> {
     }
 }
 
-pub trait SymbolTableImpl {
+pub trait SymbolTable {
     fn insert(
         &mut self,
         index: usize,
@@ -54,78 +54,4 @@ pub trait SymbolTableImpl {
     fn iter<'a>(&'a self) -> SymbolIterator<'a>;
 
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
-}
-
-pub struct SymbolTable {
-    inner: Box<dyn SymbolTableImpl>,
-}
-
-impl SymbolTable {
-    pub fn new(inner: impl SymbolTableImpl + 'static) -> Self {
-        Self {
-            inner: Box::new(inner),
-        }
-    }
-
-    pub fn insert(
-        &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-        props: SymbolProperties,
-    ) {
-        self.inner.insert(index, addr.into(), symbol.into(), props);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn get_at(&self, addr: impl Into<Address>) -> Option<SymbolEntry> {
-        self.inner.get_at(addr.into())
-    }
-
-    pub fn get_properties_at(&self, addr: impl Into<Address>) -> Option<SymbolProperties> {
-        self.inner.get_properties_at(addr.into())
-    }
-
-    pub fn get_address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        self.inner.get_address(sym.as_ref())
-    }
-
-    pub fn get(&self, sym: impl AsRef<str>) -> Option<SymbolEntry> {
-        self.inner.get(sym.as_ref())
-    }
-
-    pub fn get_properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        self.inner.get_properties(sym.as_ref())
-    }
-
-    pub fn get_by_index(&self, index: usize) -> Option<SymbolEntry> {
-        self.inner.get_by_index(index)
-    }
-
-    pub fn get_address_by_index(&self, index: usize) -> Option<Address> {
-        self.inner.get_address_by_index(index)
-    }
-
-    pub fn get_properties_by_index(&self, index: usize) -> Option<SymbolProperties> {
-        self.inner.get_properties_by_index(index)
-    }
-
-    pub fn contains_address(&self, addr: impl Into<Address>) -> bool {
-        self.inner.contains_address(addr.into())
-    }
-
-    pub fn contains(&self, sym: impl AsRef<str>) -> bool {
-        self.inner.contains(sym.as_ref())
-    }
-
-    pub fn iter<'a>(&'a self) -> SymbolIterator<'a> {
-        self.inner.iter()
-    }
 }

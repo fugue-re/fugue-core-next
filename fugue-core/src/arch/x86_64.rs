@@ -8,7 +8,8 @@ use fugue_lifter::x86_64::register::{
 use fugue_lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 pub use fugue_lifter::x86_64::*;
 
-use crate::arch::{Arch, ArchImpl, Flag};
+use crate::arch::traits::Arch as ArchT;
+use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
@@ -32,7 +33,7 @@ pub struct X86_64 {
     language: LanguageVariant,
 }
 
-impl ArchImpl for X86_64 {
+impl ArchT for X86_64 {
     fn dissassembler(&self) -> Disassembler {
         X86_64Disassembler::new()
     }
@@ -79,7 +80,7 @@ impl ArchImpl for X86_64 {
 
 impl X86_64 {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
     }
 }
 
