@@ -46,6 +46,7 @@ pub enum ProjectEntity {
     LocalSymbols = 0b0000_0001,
     ExternSymbols = 0b0000_0010,
     Attributes = 0b0000_0011,
+    FunctionTable = 0b0000_0100,
 }
 
 impl EntityKey for ProjectEntity {
@@ -58,6 +59,7 @@ impl EntityKey for ProjectEntity {
                 0b0000_0001 => Some(ProjectEntity::LocalSymbols),
                 0b0000_0010 => Some(ProjectEntity::ExternSymbols),
                 0b0000_0011 => Some(ProjectEntity::Attributes),
+                0b0000_0100 => Some(ProjectEntity::FunctionTable),
                 _ => None,
             }
         } else {
