@@ -1,5 +1,4 @@
-use crate::entities::{Insn, InsnTarget};
-use crate::types::Address;
+use crate::ir::{Address, Insn, InsnTarget};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FlowKind {

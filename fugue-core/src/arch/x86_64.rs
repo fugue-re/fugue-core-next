@@ -130,7 +130,7 @@ impl X86_64Disassembler {
 }
 
 impl DisassemblerT for X86_64Disassembler {
-    fn disassemble_insn(
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],

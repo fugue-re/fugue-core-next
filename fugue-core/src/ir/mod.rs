@@ -10,6 +10,9 @@ pub use address::{Address, ToAddress};
 pub mod block;
 pub use block::{BasicBlock, BasicBlockId, BasicBlockProperties};
 
+pub mod cfg;
+pub use cfg::{FlowKind, FlowTarget};
+
 pub use fugue_bytes::Endian;
 
 pub mod function;

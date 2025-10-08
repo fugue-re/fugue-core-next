@@ -41,12 +41,12 @@ impl Disassembler {
         Self(Box::new(disassembler))
     }
 
-    pub fn disassemble_insn(
+    pub fn disassemble(
         &mut self,
-        address: Address,
-        bytes: &[u8],
+        address: impl Into<Address>,
+        bytes: impl AsRef<[u8]>,
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        self.0.disassemble_insn(address, bytes, context)
+        self.0.disassemble(address.into(), bytes.as_ref(), context)
     }
 }

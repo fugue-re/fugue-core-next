@@ -127,7 +127,7 @@ impl ArmDisassembler {
 }
 
 impl DisassemblerT for ArmDisassembler {
-    fn disassemble_insn(
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],

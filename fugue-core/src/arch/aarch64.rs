@@ -106,7 +106,7 @@ impl AArch64Disassembler {
 }
 
 impl DisassemblerT for AArch64Disassembler {
-    fn disassemble_insn(
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],

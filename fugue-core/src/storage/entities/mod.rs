@@ -1187,7 +1187,7 @@ mod test {
     use bincode::{Decode, Encode};
 
     use super::*;
-    use crate::types::Address;
+    use crate::ir::Address;
 
     #[test]
     fn test_entity_storage() {
@@ -1205,7 +1205,7 @@ mod test {
 
         let entity = TestEntity {
             id: 1,
-            name: "Test".to_string(),
+            name: "Test".to_owned(),
         };
 
         let address = Address::from(42u64);
@@ -1228,7 +1228,7 @@ mod test {
         for i in 0..10 {
             let entity = TestEntity {
                 id: i,
-                name: format!("Entity {}", i),
+                name: format!("Entity {i}"),
             };
             storage.insert(&Address::from(i as u64), &entity).unwrap();
         }
@@ -1240,7 +1240,7 @@ mod test {
             let (address, entity) = val.unwrap();
             let expected = TestEntity {
                 id: count,
-                name: format!("Entity {}", count),
+                name: format!("Entity {count}"),
             };
             assert_eq!(entity, expected);
             assert_eq!(address, Address::from(count as u64));
@@ -1262,7 +1262,7 @@ mod test {
         for i in 0..5 {
             let entity = TestEntity {
                 id: i,
-                name: format!("Entity {}", i),
+                name: format!("Entity {i}"),
             };
             let cached = cache.get(&Address::from(i as u64)).unwrap();
 
@@ -1274,7 +1274,7 @@ mod test {
         for i in 50..100 {
             let entity = TestEntity {
                 id: i,
-                name: format!("New Cached Entity {}", i),
+                name: format!("New Cached Entity {i}"),
             };
             cache.insert(Address::from(i as u64), entity).unwrap();
         }
@@ -1287,7 +1287,7 @@ mod test {
                 *cached.unwrap(),
                 TestEntity {
                     id: i,
-                    name: format!("New Cached Entity {}", i)
+                    name: format!("New Cached Entity {i}")
                 }
             );
         }

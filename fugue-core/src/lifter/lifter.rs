@@ -140,7 +140,18 @@ impl Lifter {
         self.0.user_op_by_id(id)
     }
 
-    pub fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
+    pub fn disassemble(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        output: &mut String,
+    ) -> Option<usize> {
+        let address = address.into();
+        self.0.disassemble(address.into(), bytes, output)
+    }
+
+    pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
+        let address = address.into();
         let mut operations = Vec::new();
         let Some(length) = self.0.lift(address.into(), bytes, &mut operations) else {
             return Err(LifterError::InvalidInstruction(address));

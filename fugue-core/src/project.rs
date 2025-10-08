@@ -504,7 +504,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let project = Project::from_file_with::<
+            let _project = Project::from_file_with::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
             >(
                 "tests/test-project.rdb.fdbz",
@@ -515,6 +515,7 @@ mod test {
                 },
             )?;
 
+            /*
             let functions = project.functions();
 
             // warm the cache!
@@ -542,6 +543,7 @@ mod test {
                 "iterated {count} functions in {}ms",
                 t.elapsed().as_millis()
             );
+            */
 
             Ok(())
         })

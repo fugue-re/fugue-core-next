@@ -2,7 +2,7 @@ use crate::ir::{Address, Insn};
 use crate::lifter::{DisassemblerError, LiftingContext};
 
 pub trait Disassembler {
-    fn disassemble_insn(
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],
