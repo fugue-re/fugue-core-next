@@ -22,8 +22,10 @@ where
     'file: 'data,
 {
     elf: &'file ElfFile<'data, Elf, R>,
+    base: Address,
     locals: &'file LocalSymbols,
     externs: Option<&'file ExternSymbols>,
+    is_object: bool,
 }
 
 impl<'data, 'file, 'segments, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
@@ -36,29 +38,36 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         locals: &'file LocalSymbols,
         externs: Option<&'file ExternSymbols>,
+        is_object: bool,
     ) -> Self {
         Self {
             elf,
+            base: Address::zero(),
             locals,
             externs,
+            is_object,
         }
     }
 
     pub fn apply(
         &self,
+        origin: impl Into<Address>,
         lsegm: &mut LoadableSegment<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        self.apply_relocations(lsegm, sect)?;
-        self.apply_dynamic_relocations(lsegm)?;
+        let origin = origin.into();
+        self.apply_relocations(origin, lsegm, sect)?;
+        self.apply_dynamic_relocations(origin, lsegm)?;
         Ok(())
     }
 
     pub fn apply_relocations(
         &self,
+        _origin: impl Into<Address>,
         lsegm: &mut LoadableSegment<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
+        let _origin = _origin.into();
         for (off, rel) in sect.relocations() {
             tracing::trace!(
                 "applying relocation {}+{off:#x} {:?} {rel:?}",
@@ -96,21 +105,32 @@ where
 
     pub fn apply_dynamic_relocations(
         &self,
+        origin: impl Into<Address>,
         lsegm: &mut LoadableSegment<'data>,
     ) -> Result<(), LoaderError> {
         let Some(drels) = self.elf.dynamic_relocations() else {
+            tracing::trace!("no dynamic relocations");
             return Ok(());
         };
 
-        let offset = lsegm.address().offset();
-        let last_offset = lsegm.last_address().offset();
+        tracing::trace!(
+            "attempting to apply {} dynamic relocations",
+            self.elf
+                .dynamic_relocations()
+                .map(|d| d.count())
+                .unwrap_or_default()
+        );
 
-        // TODO: add base address to dynamic relocations offset
-        for (off, rel) in drels.filter(|(off, _)| *off >= offset && *off <= last_offset) {
+        let origin = origin.into();
+        let origin_offset = origin.offset();
+        let origin_last_offset = origin_offset + lsegm.len() as u64 - 1;
+
+        // NOTE: we account for a new base address when computing the relevant to dynamic relocations
+        for (off, rel) in drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset) {
             tracing::trace!("applying dynamic relocation at {}", Address::from(off));
 
             // Compute offset in the segment
-            let off = off - offset;
+            let off = off - origin_offset;
 
             match rel.kind() {
                 RelocationKind::Unknown => {
@@ -150,12 +170,15 @@ where
             return None;
         };
 
-        if let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0)) {
+        // NOTE: this should only be checked if we are processing dynamic relocations?
+        if (is_dynamic || self.is_object)
+            && let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0))
+        {
             tracing::trace!("found external symbol {index:?} at {target:#x}");
             return Some(target.offset());
         }
 
-        if let Some(target) = self.locals.get_address(index.0) {
+        if !is_dynamic && let Some(target) = self.locals.get_address(index.0) {
             tracing::trace!("found local symbol {index:?} at {target:#x}");
             return Some(target.offset());
         }

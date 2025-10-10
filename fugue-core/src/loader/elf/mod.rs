@@ -197,10 +197,8 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
         let address = section_start + symbol.address();
 
         tracing::trace!(
-            "symbol {} in section {:?} at {:#x}",
+            "symbol {} in section {section:?} at {address:#x}",
             symbol.name().ok().unwrap_or("<unnamed>"),
-            section,
-            address
         );
 
         let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
@@ -492,7 +490,8 @@ where
     }
 
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
 
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -567,7 +566,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(&mut lsegm, &sect)?;
+            relocator.apply(Address::zero(), &mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -582,7 +581,8 @@ where
             return Ok(None);
         };
 
-        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
 
         while let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
@@ -623,7 +623,7 @@ where
 
             self.covered.ranges_insert(range);
 
-            relocator.apply_dynamic_relocations(&mut lsegm)?;
+            relocator.apply_dynamic_relocations(address, &mut lsegm)?;
 
             return Ok(Some(lsegm));
         }
@@ -636,7 +636,8 @@ where
     pub(crate) fn next_linked_section(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
 
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -693,7 +694,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(&mut lsegm, &sect)?;
+            relocator.apply(address, &mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -704,7 +705,8 @@ where
     pub(crate) fn next_linked_segment(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.locals, self.externs);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
 
         while let Some(segm) = self.segms.next() {
             let size = segm.size();
@@ -785,7 +787,7 @@ where
 
             self.covered.ranges_insert(range);
 
-            relocator.apply_dynamic_relocations(&mut lsegm)?;
+            relocator.apply_dynamic_relocations(address, &mut lsegm)?;
 
             return Ok(Some(lsegm));
         }
