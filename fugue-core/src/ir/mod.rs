@@ -5,7 +5,7 @@ use bincode::{Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod address;
-pub use address::{Address, ToAddress};
+pub use address::{Address, AddressMap, ToAddress};
 
 pub mod block;
 pub use block::{BasicBlock, BasicBlockId, BasicBlockProperties};
@@ -32,7 +32,7 @@ pub use segment::SegmentProperties;
 
 pub mod symbol;
 pub use symbol::{
-    ExternFunctionTemplate, ExternSymbols, LocalSymbols, Symbol, SymbolEntry, SymbolId,
+    ExternFunctionTemplate, ExternSymbols, LocalSymbols, Symbol, SymbolEntry, SymbolId, SymbolMap,
     SymbolProperties, SymbolTable,
 };
 
@@ -112,6 +112,19 @@ impl<T> Id<T> {
             id,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    pub(crate) const fn from_index(index: usize) -> Self {
+        assert!(index < u32::MAX as usize, "invalid index");
+        Id {
+            id: index as u32,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) const fn index(&self) -> usize {
+        assert!(self.id < u32::MAX, "invalid index");
+        self.id as usize
     }
 
     #[inline(always)]

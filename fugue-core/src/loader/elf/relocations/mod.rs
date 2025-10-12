@@ -1,7 +1,7 @@
 use object::read::elf::{ElfFile, ElfSection, FileHeader};
 use object::{
-    Architecture, Object, ObjectSection, ObjectSymbol, ObjectSymbolTable, ReadRef, Relocation,
-    RelocationFlags, RelocationKind, RelocationTarget,
+    Architecture, Object, ObjectSection, ReadRef, Relocation, RelocationFlags, RelocationKind,
+    RelocationTarget,
 };
 
 use crate::ir::{Address, SymbolProperties};
@@ -126,7 +126,9 @@ where
         let origin_last_offset = origin_offset + lsegm.len() as u64 - 1;
 
         // NOTE: we account for a new base address when computing the relevant to dynamic relocations
-        for (off, rel) in drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset) {
+        for (off, rel) in
+            drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
+        {
             tracing::trace!("applying dynamic relocation at {}", Address::from(off));
 
             // Compute offset in the segment
@@ -183,20 +185,28 @@ where
             return Some(target.offset());
         }
 
-        // FIXME: in this case, we need to compute the address + our base
+        tracing::warn!(
+            "attempting to resolve symbol that is not contained in either expected symbol table {index:?} (dynamic: {is_dynamic})",
+        );
+
+        None
+
+        // TODO: review this logic--it's not clear we need it.
+        //
+        // NOTE: in this case, we need to compute the address + our base
         // for object files, this base address will be the beginning of the
         // loaded segment containing it, probably we should save the section
         // map computed in `elf_symbols`?
-
-        let table = if is_dynamic {
-            self.elf.dynamic_symbol_table()?
-        } else {
-            self.elf.symbol_table()?
-        };
-
-        let symbol = table.symbol_by_index(index).ok()?;
-
-        Some(symbol.address())
+        //
+        // let table = if is_dynamic {
+        //    self.elf.dynamic_symbol_table()?
+        // } else {
+        //    self.elf.symbol_table()?
+        // };
+        //
+        // let symbol = table.symbol_by_index(index).ok()?;
+        //
+        // Some(symbol.address())
     }
 
     pub(crate) fn mark_function_symbol(&self, address: impl Into<Address>) {

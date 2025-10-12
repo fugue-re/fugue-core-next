@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt::Display;
 use std::ops::RangeInclusive;
 
@@ -210,6 +211,322 @@ impl SymbolProperties {
 
     pub fn is_data(self) -> bool {
         self.contains(SymbolProperties::DATA)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SymbolIndex(usize);
+
+impl SymbolIndex {
+    // Selector bits is the number of upper bits used to encode symbol index provenance;
+    // for ELF we have two possibilities: the global symbol table, and the dynamic symbol
+    // table.
+    const SELECTOR_BITS: usize = 1;
+    // Selector bits mask is the mask for the selector bits.
+    const SELECTOR_MASK: usize = (1usize << Self::SELECTOR_BITS).wrapping_sub(1);
+    // Selector bits shift is the number of bits to shift the selector bits to the upper bits.
+    const SELECTOR_SHIFT: u32 = usize::BITS.wrapping_sub(Self::SELECTOR_BITS as u32);
+    // Index mask is the upper bits used to determine the symbol index provenance.
+    const INDEX_MASK: usize = Self::SELECTOR_MASK << Self::SELECTOR_SHIFT;
+
+    pub fn new(selector: usize, index: usize) -> Self {
+        assert_eq!(selector & Self::SELECTOR_MASK, 0, "invalid selector bits");
+        assert_eq!(index & Self::INDEX_MASK, 0, "symbol index out of range");
+        Self(selector << Self::SELECTOR_SHIFT | index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0 & !Self::SELECTOR_MASK
+    }
+}
+
+pub struct ElfSymbolTable {
+    // all known symbols
+    symbols: Vec<SymbolEntry>,
+    // map from each original symbol table to its symbols
+    indices: BTreeMap<SymbolIndex, Id<Symbol>>,
+    // map of symbol names to known symbols
+    names: SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
+    // map of addresses to known symbols
+    addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+}
+
+pub struct SymbolEntryIter<'a> {
+    ids: std::slice::Iter<'a, Id<Symbol>>,
+    symbols: &'a [SymbolEntry],
+}
+
+impl<'a> SymbolEntryIter<'a> {
+    pub(crate) fn new(ids: &'a [Id<Symbol>], symbols: &'a [SymbolEntry]) -> Self {
+        Self {
+            ids: ids.iter(),
+            symbols,
+        }
+    }
+}
+
+impl<'a> Iterator for SymbolEntryIter<'a> {
+    type Item = (Id<Symbol>, &'a SymbolEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = self.ids.next()?;
+        Some((*id, &self.symbols[id.index()]))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.ids.size_hint()
+    }
+}
+
+impl<'a> ExactSizeIterator for SymbolEntryIter<'a> {}
+
+pub struct SymbolEntryIterMut<'a> {
+    ids: std::slice::Iter<'a, Id<Symbol>>,
+    symbols: &'a mut [SymbolEntry],
+}
+
+impl<'a> SymbolEntryIterMut<'a> {
+    pub(crate) fn new(ids: &'a [Id<Symbol>], symbols: &'a mut [SymbolEntry]) -> Self {
+        Self {
+            ids: ids.iter(),
+            symbols,
+        }
+    }
+}
+
+impl<'a> Iterator for SymbolEntryIterMut<'a> {
+    type Item = (Id<Symbol>, &'a mut SymbolEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = self.ids.next()?;
+        // SAFETY: we know that the ids will be unique and valid.
+        unsafe {
+            let symbols_ptr = self.symbols.as_mut_ptr();
+            Some((*id, &mut *symbols_ptr.add(id.index())))
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for SymbolEntryIterMut<'a> {}
+
+impl ElfSymbolTable {
+    pub fn new() -> Self {
+        Self {
+            symbols: Vec::new(),
+            indices: BTreeMap::new(),
+            names: SymbolMap::default(),
+            addresses: BTreeMap::new(),
+        }
+    }
+
+    pub fn get(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &SymbolEntry)>> {
+        let symbol = Symbol::from_existing(symbol.as_ref())?;
+        let ids = self.names.get(&symbol)?;
+        Some(SymbolEntryIter::new(ids, &self.symbols))
+    }
+
+    pub fn get_mut(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)>> {
+        let symbol = Symbol::from_existing(symbol.as_ref())?;
+        let ids = self.names.get(&symbol)?;
+        Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
+    }
+
+    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.get(symbol).and_then(|mut iter| iter.next())
+    }
+
+    pub fn get_first_mut(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.get_mut(symbol).and_then(|mut iter| iter.next())
+    }
+
+    pub fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry> {
+        self.symbols.get(id.index())
+    }
+
+    pub fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry> {
+        self.symbols.get_mut(id.index())
+    }
+
+    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        let id = self.indices.get(&index)?;
+        self.get_by_id(*id).map(|sym_entry| (*id, sym_entry))
+    }
+
+    pub fn get_by_index_mut(
+        &mut self,
+        index: SymbolIndex,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        let id = self.indices.get(&index)?;
+        self.symbols
+            .get_mut(id.index())
+            .map(|sym_entry| (*id, sym_entry))
+    }
+
+    pub fn get_by_address(
+        &self,
+        address: impl Into<Address>,
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &SymbolEntry)>> {
+        let address = address.into();
+        let ids = self.addresses.get(&address)?;
+        Some(SymbolEntryIter::new(ids, &self.symbols))
+    }
+
+    pub fn get_by_address_mut(
+        &mut self,
+        address: impl Into<Address>,
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)>> {
+        let address = address.into();
+        let ids = self.addresses.get(&address)?;
+        Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
+    }
+
+    pub fn get_first_by_address(
+        &self,
+        address: impl Into<Address>,
+    ) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.get_by_address(address)
+            .and_then(|mut iter| iter.next())
+    }
+
+    pub fn get_first_by_address_mut(
+        &mut self,
+        address: impl Into<Address>,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.get_by_address_mut(address)
+            .and_then(|mut iter| iter.next())
+    }
+
+    pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
+        let Some(symbol) = Symbol::from_existing(symbol.as_ref()) else {
+            return false;
+        };
+        self.names.contains_key(&symbol)
+    }
+
+    pub fn contains_index(&self, index: SymbolIndex) -> bool {
+        self.indices.contains_key(&index)
+    }
+
+    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
+        self.addresses.contains_key(&address.into())
+    }
+
+    pub fn insert_local(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: impl Into<Symbol>,
+    ) -> (bool, Id<Symbol>) {
+        self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
+    }
+
+    pub fn insert_local_with(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
+    }
+
+    pub fn insert_extern(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: impl Into<Symbol>,
+    ) -> (bool, Id<Symbol>) {
+        self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
+    }
+
+    pub fn insert_extern_with(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        self.insert(
+            index,
+            address,
+            symbol,
+            properties | SymbolProperties::EXTERN,
+        )
+    }
+
+    pub fn insert(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        let symbol = symbol.into();
+        let symbol_entry = SymbolEntry::new(address, Some(symbol), properties);
+
+        match self.indices.entry(index) {
+            Entry::Vacant(entry) => {
+                let symbol_id = Id::from_index(self.symbols.len());
+
+                self.symbols.push(symbol_entry);
+                entry.insert(symbol_id);
+
+                // NOTE: due to how symbol identifiers are constructed, we know that
+                // the set of symbols will remain sorted.
+                self.names.entry(symbol).or_default().push(symbol_id);
+                self.addresses.entry(address).or_default().push(symbol_id);
+
+                (true, symbol_id)
+            }
+            Entry::Occupied(entry) => {
+                let symbol_id = *entry.get();
+                let existing = &self.symbols[symbol_id.index()];
+
+                if existing == &symbol_entry {
+                    return (false, symbol_id);
+                }
+
+                self.symbols[symbol_id.index()] = symbol_entry;
+                (true, symbol_id)
+            }
+        }
+    }
+
+    // Iterator over all symbol entries in insertion order.
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
+        self.symbols.iter().enumerate().map(|(i, entry)| {
+            let id = Id::from_index(i);
+            (id, entry)
+        })
+    }
+
+    // Iterator over all symbol entries in (ascending) order by address.
+    pub fn iter_by_address<'a>(
+        &'a self,
+        address: impl Into<Address>,
+    ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
+        let address = address.into();
+        self.addresses
+            .get(&address)
+            .into_iter()
+            .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.symbols.len()
     }
 }
 

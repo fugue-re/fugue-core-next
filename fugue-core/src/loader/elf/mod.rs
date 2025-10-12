@@ -231,6 +231,12 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
     // NOTE: this template is used to create a stub for the external symbols, such that
     // if we were to consider the external address as a function, and call to it, we would
     // hit valid code, and return.
+
+    // FIXME: this is incorrect for shared objects, where we have exports. The dynamic symbol
+    // table will contain both imports and exports, and by our conventions, we should only add
+    // imports to the externs table, which we do, but we therefore miss the exports. Unfortunately,
+    // the way object exposes the symbol tables, each has its own set of symbol indices...
+
     let mut externs = ExternSymbols::new(aligned_base, addr_align, arch.external_thunk_template());
     let aligned_template_size = externs.aligned_template_size();
 
@@ -257,6 +263,11 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
 
                 Some((oidx, sym, kind))
             } else {
+                tracing::debug!(
+                    "skipping symbol {} (bind: {st_bind}, type: {st_type}, addr: {:#x})",
+                    sym.name().ok().unwrap_or("<unnamed>"),
+                    sym.address(),
+                );
                 None
             }
         })
@@ -961,6 +972,40 @@ mod test {
                     "{}-{} ({:?})",
                     segm.address(),
                     segm.last_address(),
+                    segm.name()
+                );
+            }
+            tracing::info!("architecture: {}", elf.architecture());
+
+            for sym in elf.locals().iter() {
+                tracing::info!("local symbol {sym}");
+            }
+
+            for sym in elf.externs().iter() {
+                tracing::info!("external symbol {sym}");
+            }
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_elf_dyn() -> Result<(), Box<dyn std::error::Error>> {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_line_number(true)
+            .with_file(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let elf = Elf::new(BytesOrMapping::from_file("tests/libssl.so")?)?;
+            let mut segments = elf.segments();
+            while let Some(segm) = segments.next()? {
+                tracing::info!(
+                    "{}-{} ({:?})",
+                    segm.address(),
+                    segm.address() + segm.len(),
                     segm.name()
                 );
             }
