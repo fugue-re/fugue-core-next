@@ -45,7 +45,7 @@ where
                 };
 
                 if reloc_type == R_X86_64_JUMP_SLOT {
-                    self.mark_function_symbol(value);
+                    self.mark_function_symbol(value, lsegm);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
@@ -61,7 +61,7 @@ where
                 };
 
                 if reloc_type == R_X86_64_GOT64 {
-                    self.mark_function_symbol(value);
+                    self.mark_function_symbol(value, lsegm);
                 }
 
                 let value = value.wrapping_add_signed(reloc.addend());
@@ -121,7 +121,7 @@ where
                     return;
                 };
 
-                self.mark_function_symbol(value);
+                self.mark_function_symbol(value, lsegm);
 
                 let value =
                     (value.wrapping_add_signed(reloc.addend()) as u32).wrapping_sub(target as u32);

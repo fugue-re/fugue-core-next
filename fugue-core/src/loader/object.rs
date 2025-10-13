@@ -190,6 +190,7 @@ impl Loadable for Object<'_> {
                 address,
                 properties: SegmentProperties::all(),
                 bytes,
+                ..Default::default()
             }))
         }))
     }

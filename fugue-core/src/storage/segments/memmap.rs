@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader};
 use std::ops::Range;
@@ -125,6 +126,7 @@ pub struct LoadableSegmentMetadata {
     physical_offset: usize,
     properties: SegmentProperties,
     size: usize,
+    function_hints: BTreeSet<Address>,
 }
 
 impl LoadableSegmentMetadata {
@@ -135,6 +137,7 @@ impl LoadableSegmentMetadata {
             physical_offset,
             properties: segm.properties(),
             size: segm.len(),
+            function_hints: segm.function_hints().clone(),
         }
     }
 
@@ -164,6 +167,10 @@ impl LoadableSegmentMetadata {
 
     pub fn properties(&self) -> SegmentProperties {
         self.properties
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
     }
 
     pub fn len(&self) -> usize {
@@ -601,6 +608,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
                     segm.address(),
                     segm.properties(),
                     bytes,
+                    Cow::Borrowed(segm.function_hints()),
                 ))
             })
             .ok_or(SegmentStorageError::InvalidAddress)

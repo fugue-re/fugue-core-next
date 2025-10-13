@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt::{Debug, Display};
 use std::path::Path;
 
@@ -11,7 +12,8 @@ use fugue_bytes::{BE, LE};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, ExternSymbols, LocalSymbols, SegmentProperties};
+use crate::ir::symbol::IndexedSymbolTable;
+use crate::ir::{Address, SegmentProperties};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -180,23 +182,25 @@ impl LoadableMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LoadableSegment<'a> {
-    name: Cow<'a, str>,            // Name of the segment
-    address: Address,              // Starting address of the segment
-    properties: SegmentProperties, // Properties of the segment (e.g., permissions)
-    bytes: Cow<'a, [u8]>,          // Bytes of the segment
+    name: Cow<'a, str>,                         // Name of the segment
+    address: Address,                           // Starting address of the segment
+    properties: SegmentProperties,              // Properties of the segment (e.g., permissions)
+    bytes: Cow<'a, [u8]>,                       // Bytes of the segment
+    function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
 }
 
 impl Display for LoadableSegment<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} with bounds {}-{} and properties {:?}",
+            "{} with bounds {}-{} and properties {:?}; at least {} potential functions",
             self.name,
             self.address,
             self.last_address(),
-            self.properties
+            self.properties,
+            self.function_hints.len(),
         )
     }
 }
@@ -208,12 +212,14 @@ impl<'a> LoadableSegment<'a> {
         address: Address,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
+        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
     ) -> LoadableSegment<'a> {
         Self {
             name: name.into(),
             address,
             properties,
             bytes: bytes.into(),
+            function_hints: function_hints.into(),
         }
     }
 
@@ -245,6 +251,21 @@ impl<'a> LoadableSegment<'a> {
     /// Returns the bytes of the segment.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the function hints of the segment.
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
+    }
+
+    /// Returns a mutable reference to the function hints of the segment.
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
+        self.function_hints.to_mut()
+    }
+
+    /// Adds a function hint to the segment.
+    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
+        self.function_hints.to_mut().insert(address.into());
     }
 
     /// Returns the length of the segment in bytes.
@@ -404,6 +425,7 @@ impl<'a> LoadableSegment<'a> {
             address: self.address,
             properties: self.properties,
             bytes: self.bytes.into_owned().into(),
+            function_hints: Cow::Owned(self.function_hints.into_owned()),
         }
     }
 }
@@ -451,11 +473,7 @@ pub trait Loadable {
 
     fn architecture(&self) -> Arch;
 
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
-        None
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
         None
     }
 
@@ -552,17 +570,10 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
         match self {
-            Self::Elf(elf) => elf.local_symbols(),
-            Self::Object(object) => object.local_symbols(),
-        }
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
-        match self {
-            Self::Elf(elf) => elf.extern_symbols(),
-            Self::Object(object) => object.extern_symbols(),
+            Self::Elf(elf) => Some(elf.symbols()),
+            Self::Object(object) => object.symbols(),
         }
     }
 

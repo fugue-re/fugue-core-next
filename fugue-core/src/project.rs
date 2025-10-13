@@ -121,6 +121,7 @@ impl Project {
 
         tracing::trace!("loading project segments");
 
+        /*
         let local_symbols = storage
             .entities
             .get(&ProjectEntity::LocalSymbols)?
@@ -134,6 +135,7 @@ impl Project {
             .get(&ProjectEntity::ExternSymbols)?
             .or_else(|| loadable.map(|l| l.extern_symbols().cloned()))
             .ok_or(StorageProviderError::NotAStandaloneProject)?;
+        */
 
         tracing::trace!("loading project functions");
 
@@ -148,8 +150,8 @@ impl Project {
             language,
             // FIXME: we should fetch this from the storage or loadable.
             entry: loadable.and_then(|l| l.entry()),
-            local_symbols,
-            extern_symbols,
+            local_symbols: None,
+            extern_symbols: None,
             functions,
             attributes,
             storage,
@@ -404,8 +406,6 @@ impl Project {
 
 #[cfg(test)]
 mod test {
-    use std::time::Instant;
-
     use crate::attributes;
     use crate::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
     use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};

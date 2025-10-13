@@ -4,8 +4,9 @@ use object::{
     RelocationTarget,
 };
 
-use crate::ir::{Address, SymbolProperties};
-use crate::loader::{ExternSymbols, LoadableSegment, LoaderError, LocalSymbols};
+use crate::ir::{Address, ExternSymbols, IndexedSymbolTable, SymbolIndex};
+use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
+use crate::loader::{LoadableSegment, LoaderError};
 
 pub mod generic;
 
@@ -23,7 +24,7 @@ where
 {
     elf: &'file ElfFile<'data, Elf, R>,
     base: Address,
-    locals: &'file LocalSymbols,
+    symbols: &'file IndexedSymbolTable,
     externs: Option<&'file ExternSymbols>,
     is_object: bool,
 }
@@ -36,14 +37,14 @@ where
 {
     pub fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        locals: &'file LocalSymbols,
+        symbols: &'file IndexedSymbolTable,
         externs: Option<&'file ExternSymbols>,
         is_object: bool,
     ) -> Self {
         Self {
             elf,
             base: Address::zero(),
-            locals,
+            symbols,
             externs,
             is_object,
         }
@@ -172,17 +173,28 @@ where
             return None;
         };
 
+        let extern_selector = if self.is_object {
+            ELF_SYMTAB_SELECTOR
+        } else {
+            ELF_DYNSYM_SELECTOR
+        };
+
         // NOTE: this should only be checked if we are processing dynamic relocations?
         if (is_dynamic || self.is_object)
-            && let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0))
+            // && let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0))
+            && let Some((id, entry)) = self.symbols.get_by_index(SymbolIndex::new(extern_selector, index.0))
         {
-            tracing::trace!("found external symbol {index:?} at {target:#x}");
-            return Some(target.offset());
+            let address = entry.address();
+            tracing::trace!("found external symbol {id:?} at {address}");
+            return Some(address.offset());
         }
 
-        if !is_dynamic && let Some(target) = self.locals.get_address(index.0) {
-            tracing::trace!("found local symbol {index:?} at {target:#x}");
-            return Some(target.offset());
+        if !is_dynamic && // let Some(target) = self.symbols.get_address(index.0) {
+            let Some((id, entry)) = self.symbols.get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
+        {
+            let address = entry.address();
+            tracing::trace!("found symbol {id:?} at {address}");
+            return Some(address.offset());
         }
 
         tracing::warn!(
@@ -209,18 +221,32 @@ where
         // Some(symbol.address())
     }
 
-    pub(crate) fn mark_function_symbol(&self, address: impl Into<Address>) {
+    pub(crate) fn mark_function_symbol(
+        &self,
+        address: impl Into<Address>,
+        lsegm: &mut LoadableSegment<'data>,
+    ) {
         let address = address.into();
 
         tracing::trace!("marking symbol {address} as function");
 
+        lsegm.add_function_hint(address);
+
+        /*
         if self.externs.as_ref().map_or(false, |externs| {
             externs.update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION)
         }) {
             return;
         }
 
-        self.locals
-            .update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION);
+        let Some(entries) = self.symbols.get_by_address_mut(address) else {
+            tracing::warn!("attempting to mark non-existing symbol {address} as function");
+            return;
+        };
+
+        entries.for_each(|(_, entry)| {
+            entry.mark_as_function();
+        });
+        */
     }
 }

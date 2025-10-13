@@ -48,7 +48,7 @@ where
 
                 if [RelocationKind::GotRelative, RelocationKind::PltRelative].contains(&reloc_type)
                 {
-                    self.mark_function_symbol(value);
+                    self.mark_function_symbol(value, lsegm);
                 }
 
                 let value = value

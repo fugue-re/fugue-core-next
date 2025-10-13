@@ -1,11 +1,12 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
 
 use object::elf::{
     FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
-    STB_WEAK, STT_COMMON, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_TLS,
+    STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
 use object::read::elf::{
     self, ElfFile, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
@@ -19,7 +20,8 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Address, ExternSymbols, LocalSymbols, SegmentProperties, Symbol, SymbolProperties,
+    Address, ExternSymbols, IndexedSymbolTable, SegmentProperties, Symbol, SymbolIndex,
+    SymbolProperties,
 };
 use crate::loader::object::object_language;
 use crate::loader::{
@@ -29,6 +31,9 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
+
+pub const ELF_SYMTAB_SELECTOR: usize = 0;
+pub const ELF_DYNSYM_SELECTOR: usize = 1;
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -73,7 +78,7 @@ pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,
     metadata: LoadableMetadata,
-    locals: LocalSymbols,
+    symbols: IndexedSymbolTable,
     externs: ExternSymbols,
     attributes: AttributeMap,
 }
@@ -93,7 +98,7 @@ impl<'a> Elf<'a> {
         let language = with_elf!(view, elf | object_language(elf))?;
         let architecture = Arch::new(language);
 
-        let (locals, externs) = with_elf!(view, elf | elf_symbols(elf, &architecture));
+        let (symbols, externs) = with_elf!(view, elf | elf_symbols(elf, &architecture));
 
         let metadata = LoadableMetadata::new(
             object.borrow_data(),
@@ -104,14 +109,14 @@ impl<'a> Elf<'a> {
             object,
             architecture,
             metadata,
-            locals,
+            symbols,
             externs,
             attributes: attributes.into(),
         })
     }
 
-    pub fn locals(&self) -> &LocalSymbols {
-        &self.locals
+    pub fn symbols(&self) -> &IndexedSymbolTable {
+        &self.symbols
     }
 
     pub fn externs(&self) -> &ExternSymbols {
@@ -126,7 +131,11 @@ impl<'a> Elf<'a> {
     }
 }
 
-pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, ExternSymbols) {
+// TODO: this will return a ExternSegment
+pub fn elf_symbols<'a>(
+    elf: &'a impl Object<'a>,
+    arch: &Arch,
+) -> (IndexedSymbolTable, ExternSymbols) {
     // TODO:
     // - base address should be configurable.
 
@@ -180,7 +189,7 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
     let aligned_base =
         (base + addr_align.wrapping_sub(1) as u64) & !(addr_align as u64).wrapping_sub(1);
 
-    let mut locals = LocalSymbols::new();
+    let mut symbols = IndexedSymbolTable::new();
 
     for (section, symbol) in elf
         .symbols()
@@ -207,11 +216,11 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
 
         let st_type = st_info & 0x0f;
 
-        locals.add_symbol_with(
-            symbol.index().0,
-            Address::from(address),
-            symbol.name().ok().map(Symbol::from),
-            if st_type == STT_FUNC {
+        symbols.insert(
+            SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
+            address,
+            symbol.name().ok().unwrap_or_default(),
+            if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
                 SymbolProperties::FUNCTION
             } else if [STT_COMMON, STT_OBJECT, STT_TLS].contains(&st_type) {
                 SymbolProperties::DATA
@@ -253,7 +262,7 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
             let is_import = (st_bind == STB_GLOBAL || st_bind == STB_WEAK) && sym.address() == 0;
 
             if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
-                let kind = if st_type == STT_FUNC {
+                let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
                     SymbolProperties::FUNCTION
                 } else if [STT_COMMON, STT_OBJECT, STT_TLS].contains(&st_type) {
                     SymbolProperties::DATA
@@ -281,11 +290,17 @@ pub fn elf_symbols<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> (LocalSymbols, 
             )
         })
     {
-        let sym = sym.name().ok().map(Symbol::from);
-        externs.add_symbol_with(index, addr, sym, kind);
+        let sym = sym.name().ok();
+        symbols.insert(
+            SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
+            addr,
+            sym.unwrap_or_default(),
+            kind,
+        );
+        externs.add_symbol_with(index, addr, sym.map(Symbol::from), kind);
     }
 
-    (locals, externs)
+    (symbols, externs)
 }
 
 pub fn elf_section_properties<'a>(sect: &impl ObjectSection<'a>) -> SegmentProperties {
@@ -369,6 +384,7 @@ pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<
         address,
         properties: elf_section_properties(sect),
         bytes,
+        ..Default::default()
     })
 }
 
@@ -398,6 +414,7 @@ pub fn elf_segment<'a>(segm: &impl ObjectSegment<'a>) -> Option<LoadableSegment<
         address,
         properties: elf_segment_properties(segm),
         bytes,
+        ..Default::default()
     })
 }
 
@@ -435,8 +452,8 @@ where
     segms_split: Option<(IntoRangesIter<u64>, ElfSegment<'data, 'file, Elf, R>)>,
     // current base address
     pub(crate) current_base: Address,
-    // mapping of local symbols
-    pub(crate) locals: &'file LocalSymbols,
+    // mapping of local and external symbols
+    pub(crate) symbols: &'file IndexedSymbolTable,
     // virtual segment containing external symbols and their mapping
     pub(crate) externs: Option<&'file ExternSymbols>,
     // if we're working with an object file or not
@@ -451,7 +468,7 @@ where
 {
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        locals: &'file LocalSymbols,
+        symbols: &'file IndexedSymbolTable,
         externs: &'file ExternSymbols,
     ) -> Self {
         let is_object = elf.kind() == ObjectKind::Relocatable;
@@ -462,7 +479,7 @@ where
             covered: RangeSetBlaze::new(),
             segms_split: None,
             current_base: Address::zero(),
-            locals,
+            symbols,
             externs: Some(externs),
             is_object,
         }
@@ -495,6 +512,23 @@ where
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
             bytes: Cow::Owned(bytes),
+            // TODO: ensure the functions are actually in range
+            function_hints: Cow::Owned(
+                self.externs
+                    .map(|externs| {
+                        externs
+                            .iter()
+                            .filter_map(|s| {
+                                if s.is_function() {
+                                    Some(s.address())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default(),
+            ),
         };
 
         Ok(Some(lsegm))
@@ -502,7 +536,7 @@ where
 
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.externs, self.is_object);
 
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -573,6 +607,7 @@ where
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
+                ..Default::default()
             };
 
             self.covered.ranges_insert(vrange);
@@ -593,7 +628,7 @@ where
         };
 
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.externs, self.is_object);
 
         while let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
@@ -630,6 +665,7 @@ where
                 address,
                 properties: elf_segment_properties(&*segm),
                 bytes,
+                ..Default::default()
             };
 
             self.covered.ranges_insert(range);
@@ -648,7 +684,7 @@ where
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.externs, self.is_object);
 
         while let Some(sect) = self.sects.next() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -701,6 +737,7 @@ where
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
+                ..Default::default()
             };
 
             self.covered.ranges_insert(vrange);
@@ -717,7 +754,7 @@ where
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.locals, self.externs, self.is_object);
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.externs, self.is_object);
 
         while let Some(segm) = self.segms.next() {
             let size = segm.size();
@@ -790,6 +827,7 @@ where
                 address,
                 properties: elf_segment_properties(&segm),
                 bytes,
+                ..Default::default()
             };
 
             if should_split {
@@ -906,12 +944,8 @@ impl Loadable for Elf<'_> {
         self.architecture.clone()
     }
 
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
-        Some(&self.locals)
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
-        Some(&self.externs)
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+        Some(&self.symbols)
     }
 
     fn segments<'b>(
@@ -921,7 +955,7 @@ impl Loadable for Elf<'_> {
 
         with_elf!(
             view,
-            elf | Box::new(ElfLoadableSegments::new(elf, &self.locals, &self.externs))
+            elf | Box::new(ElfLoadableSegments::new(elf, &self.symbols, &self.externs))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )
     }
@@ -977,8 +1011,8 @@ mod test {
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for sym in elf.locals().iter() {
-                tracing::info!("local symbol {sym}");
+            for (_, sym) in elf.symbols().iter() {
+                tracing::info!("symbol {sym}");
             }
 
             for sym in elf.externs().iter() {
@@ -1011,7 +1045,7 @@ mod test {
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for sym in elf.locals().iter() {
+            for (_, sym) in elf.symbols().iter() {
                 tracing::info!("local symbol {sym}");
             }
 
@@ -1045,7 +1079,7 @@ mod test {
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for sym in elf.locals().iter() {
+            for (_, sym) in elf.symbols().iter() {
                 tracing::info!("local symbol {sym}");
             }
 

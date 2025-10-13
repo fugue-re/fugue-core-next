@@ -133,6 +133,7 @@ impl Loadable for Shellcode<'_> {
             address: self.address,
             properties: SegmentProperties::PERM_ALL,
             bytes: Cow::Borrowed(self.bytes()),
+            ..Default::default()
         })
     }
 

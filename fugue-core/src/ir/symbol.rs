@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::ops::RangeInclusive;
 
 use bincode::{Decode, Encode};
@@ -128,6 +128,26 @@ impl SymbolEntry {
         self.properties
     }
 
+    pub fn mark_as_extern(&mut self) {
+        self.properties |= SymbolProperties::EXTERN;
+        self.properties.remove(SymbolProperties::LOCAL);
+    }
+
+    pub fn mark_as_local(&mut self) {
+        self.properties |= SymbolProperties::LOCAL;
+        self.properties.remove(SymbolProperties::EXTERN);
+    }
+
+    pub fn mark_as_function(&mut self) {
+        self.properties |= SymbolProperties::FUNCTION;
+        self.properties.remove(SymbolProperties::DATA);
+    }
+
+    pub fn mark_as_data(&mut self) {
+        self.properties |= SymbolProperties::DATA;
+        self.properties.remove(SymbolProperties::FUNCTION);
+    }
+
     pub fn is_extern(&self) -> bool {
         self.properties.is_extern()
     }
@@ -214,8 +234,17 @@ impl SymbolProperties {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolIndex(usize);
+
+impl Debug for SymbolIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolIndex")
+            .field("selector", &self.selector())
+            .field("index", &self.index())
+            .finish()
+    }
+}
 
 impl SymbolIndex {
     // Selector bits is the number of upper bits used to encode symbol index provenance;
@@ -227,20 +256,25 @@ impl SymbolIndex {
     // Selector bits shift is the number of bits to shift the selector bits to the upper bits.
     const SELECTOR_SHIFT: u32 = usize::BITS.wrapping_sub(Self::SELECTOR_BITS as u32);
     // Index mask is the upper bits used to determine the symbol index provenance.
-    const INDEX_MASK: usize = Self::SELECTOR_MASK << Self::SELECTOR_SHIFT;
+    const INDEX_MASK: usize = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
 
     pub fn new(selector: usize, index: usize) -> Self {
-        assert_eq!(selector & Self::SELECTOR_MASK, 0, "invalid selector bits");
-        assert_eq!(index & Self::INDEX_MASK, 0, "symbol index out of range");
-        Self(selector << Self::SELECTOR_SHIFT | index)
+        assert_eq!(selector & !Self::SELECTOR_MASK, 0, "invalid selector bits");
+        assert_eq!(index & !Self::INDEX_MASK, 0, "symbol index out of range");
+        Self((selector << Self::SELECTOR_SHIFT) | index)
     }
 
     pub fn index(self) -> usize {
-        self.0 & !Self::SELECTOR_MASK
+        self.0 & Self::INDEX_MASK
+    }
+
+    pub fn selector(self) -> usize {
+        (self.0 >> Self::SELECTOR_SHIFT) & Self::SELECTOR_MASK
     }
 }
 
-pub struct ElfSymbolTable {
+#[derive(Debug, Clone)]
+pub struct IndexedSymbolTable {
     // all known symbols
     symbols: Vec<SymbolEntry>,
     // map from each original symbol table to its symbols
@@ -251,6 +285,7 @@ pub struct ElfSymbolTable {
     addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
 }
 
+#[derive(Clone)]
 pub struct SymbolEntryIter<'a> {
     ids: std::slice::Iter<'a, Id<Symbol>>,
     symbols: &'a [SymbolEntry],
@@ -309,7 +344,7 @@ impl<'a> Iterator for SymbolEntryIterMut<'a> {
 
 impl<'a> ExactSizeIterator for SymbolEntryIterMut<'a> {}
 
-impl ElfSymbolTable {
+impl IndexedSymbolTable {
     pub fn new() -> Self {
         Self {
             symbols: Vec::new(),
@@ -423,7 +458,7 @@ impl ElfSymbolTable {
     pub fn insert_local(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: impl Into<Address>,
         symbol: impl Into<Symbol>,
     ) -> (bool, Id<Symbol>) {
         self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
@@ -432,7 +467,7 @@ impl ElfSymbolTable {
     pub fn insert_local_with(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: impl Into<Address>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -442,7 +477,7 @@ impl ElfSymbolTable {
     pub fn insert_extern(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: impl Into<Address>,
         symbol: impl Into<Symbol>,
     ) -> (bool, Id<Symbol>) {
         self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
@@ -451,7 +486,7 @@ impl ElfSymbolTable {
     pub fn insert_extern_with(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: impl Into<Address>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -466,10 +501,11 @@ impl ElfSymbolTable {
     pub fn insert(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: impl Into<Address>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
+        let address = address.into();
         let symbol = symbol.into();
         let symbol_entry = SymbolEntry::new(address, Some(symbol), properties);
 
@@ -1092,5 +1128,29 @@ impl SymbolTable {
 
     pub fn iter<'a>(&'a self) -> SymbolIterator<'a> {
         self.inner.iter()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "invalid selector bits")]
+    fn test_symbol_index_invalid_selector() {
+        let _ = SymbolIndex::new(2, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "symbol index out of range")]
+    fn test_symbol_index_invalid_index() {
+        let _ = SymbolIndex::new(1, usize::MAX);
+    }
+
+    #[test]
+    fn test_symbol_index_valid() {
+        let index = SymbolIndex::new(1, 42);
+        assert_eq!(index.index(), 42);
+        assert_eq!(index.selector(), 1);
     }
 }
