@@ -10,81 +10,11 @@ use smallvec::SmallVec;
 pub use ustr::{Ustr as Symbol, UstrMap as SymbolMap};
 
 use crate::ir::traits::{SymbolIterator, SymbolTable as SymbolTableT};
-use crate::ir::{Address, Id};
-use crate::lifter::ContextSet;
+use crate::ir::{Address, ExternFunctionTemplate, Id};
 use crate::storage::entities::common::{ENTITY_EXTERN_SYMBOLS_ID, ENTITY_LOCAL_SYMBOLS_ID};
 use crate::storage::entities::{Entity, EntityId};
 
 pub type SymbolId = Id<Symbol>;
-
-#[derive(Debug, Clone)]
-pub struct ExternFunctionTemplate {
-    bytes: SmallVec<[u8; 16]>,
-    context: ContextSet,
-}
-
-impl<T> From<T> for ExternFunctionTemplate
-where
-    T: AsRef<[u8]>,
-{
-    fn from(value: T) -> Self {
-        Self::new(value)
-    }
-}
-
-impl Encode for ExternFunctionTemplate {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bytes.len().encode(encoder)?;
-        for b in &self.bytes {
-            b.encode(encoder)?;
-        }
-        self.context.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for ExternFunctionTemplate {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bytes_len = usize::decode(decoder)?;
-        let mut bytes = SmallVec::<[u8; 16]>::with_capacity(bytes_len);
-        for _ in 0..bytes_len {
-            let b = u8::decode(decoder)?;
-            bytes.push(b);
-        }
-        let context = ContextSet::decode(decoder)?;
-        Ok(Self { bytes, context })
-    }
-}
-
-impl ExternFunctionTemplate {
-    pub fn new(bytes: impl AsRef<[u8]>) -> Self {
-        Self::new_with(bytes, ContextSet::default())
-    }
-
-    pub fn new_with(bytes: impl AsRef<[u8]>, context: ContextSet) -> Self {
-        Self {
-            bytes: SmallVec::from_slice(bytes.as_ref()),
-            context,
-        }
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn context(&self) -> &ContextSet {
-        &self.context
-    }
-
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {

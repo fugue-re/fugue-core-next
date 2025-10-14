@@ -4,7 +4,7 @@ use object::{
     RelocationTarget,
 };
 
-use crate::ir::{Address, ExternSymbols, IndexedSymbolTable, SymbolIndex};
+use crate::ir::{Address, IndexedSymbolTable, SymbolIndex};
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
 use crate::loader::{LoadableSegment, LoaderError};
 
@@ -25,7 +25,6 @@ where
     elf: &'file ElfFile<'data, Elf, R>,
     base: Address,
     symbols: &'file IndexedSymbolTable,
-    externs: Option<&'file ExternSymbols>,
     is_object: bool,
 }
 
@@ -38,14 +37,12 @@ where
     pub fn new(
         elf: &'file ElfFile<'data, Elf, R>,
         symbols: &'file IndexedSymbolTable,
-        externs: Option<&'file ExternSymbols>,
         is_object: bool,
     ) -> Self {
         Self {
             elf,
             base: Address::zero(),
             symbols,
-            externs,
             is_object,
         }
     }
