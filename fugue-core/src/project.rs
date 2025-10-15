@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, ExternSymbols, Function, LocalSymbols, SymbolEntry};
+use crate::ir::{Address, Function, IndexedSymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
@@ -19,8 +19,7 @@ pub struct Project {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
     pub(crate) entry: Option<Address>,
-    pub(crate) local_symbols: Option<LocalSymbols>,
-    pub(crate) extern_symbols: Option<ExternSymbols>,
+    pub(crate) symbols: IndexedSymbolTable,
     pub(crate) functions: EntityCache<Address, Function>,
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
@@ -39,8 +38,7 @@ pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
     pub language: &'static Language,
     pub entry: Option<Address>,
-    pub local_symbols: Option<&'a LocalSymbols>,
-    pub extern_symbols: Option<&'a ExternSymbols>,
+    pub symbols: &'a IndexedSymbolTable,
     pub functions: &'a EntityCache<Address, Function>,
     pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
@@ -50,8 +48,7 @@ pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
     pub entry: Option<Address>,
-    pub local_symbols: Option<&'a mut LocalSymbols>,
-    pub extern_symbols: Option<&'a mut ExternSymbols>,
+    pub symbols: &'a mut IndexedSymbolTable,
     pub functions: &'a EntityCache<Address, Function>,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
@@ -121,6 +118,15 @@ impl Project {
 
         tracing::trace!("loading project segments");
 
+        let symbols = storage
+            .entities
+            .get(&ProjectEntity::SymbolTable)?
+            .unwrap_or_else(|| {
+                loadable
+                    .and_then(|l| l.symbols().cloned())
+                    .unwrap_or_default()
+            });
+
         /*
         let local_symbols = storage
             .entities
@@ -150,8 +156,7 @@ impl Project {
             language,
             // FIXME: we should fetch this from the storage or loadable.
             entry: loadable.and_then(|l| l.entry()),
-            local_symbols: None,
-            extern_symbols: None,
+            symbols,
             functions,
             attributes,
             storage,
@@ -287,34 +292,12 @@ impl Project {
         self.entry
     }
 
-    pub fn local_symbols(&self) -> Option<&LocalSymbols> {
-        self.local_symbols.as_ref()
+    pub fn symbols(&self) -> &IndexedSymbolTable {
+        &self.symbols
     }
 
-    pub fn local_symbols_mut(&mut self) -> Option<&mut LocalSymbols> {
-        self.local_symbols.as_mut()
-    }
-
-    pub fn iter_local_symbols<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
-        self.local_symbols
-            .as_ref()
-            .into_iter()
-            .flat_map(|symbols| symbols.iter())
-    }
-
-    pub fn extern_symbols(&self) -> Option<&ExternSymbols> {
-        self.extern_symbols.as_ref()
-    }
-
-    pub fn extern_symbols_mut(&mut self) -> Option<&mut ExternSymbols> {
-        self.extern_symbols.as_mut()
-    }
-
-    pub fn iter_extern_symbols<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
-        self.extern_symbols
-            .as_ref()
-            .into_iter()
-            .flat_map(|symbols| symbols.iter())
+    pub fn symbols_mut(&mut self) -> &mut IndexedSymbolTable {
+        &mut self.symbols
     }
 
     pub fn functions(&self) -> &EntityCache<Address, Function> {
@@ -364,15 +347,10 @@ impl Project {
             .entities
             .insert(&ProjectEntity::Attributes, &self.attributes)?;
 
-        tracing::debug!("persisting local symbol table");
+        tracing::debug!("persisting symbol table");
         self.storage
             .entities
-            .insert(&ProjectEntity::LocalSymbols, &self.local_symbols)?;
-
-        tracing::debug!("persisting external symbol table");
-        self.storage
-            .entities
-            .insert(&ProjectEntity::ExternSymbols, &self.extern_symbols)?;
+            .insert(&ProjectEntity::SymbolTable, &self.symbols)?;
 
         Ok(())
     }
@@ -382,8 +360,7 @@ impl Project {
             arch: &self.arch,
             language: self.language,
             entry: self.entry,
-            local_symbols: self.local_symbols.as_ref(),
-            extern_symbols: self.extern_symbols.as_ref(),
+            symbols: &self.symbols,
             functions: &self.functions,
             attributes: &self.attributes,
             storage: &self.storage,
@@ -395,8 +372,7 @@ impl Project {
             arch: &mut self.arch,
             language: self.language,
             entry: self.entry,
-            local_symbols: self.local_symbols.as_mut(),
-            extern_symbols: self.extern_symbols.as_mut(),
+            symbols: &mut self.symbols,
             functions: &self.functions,
             attributes: &mut self.attributes,
             storage: &mut self.storage,

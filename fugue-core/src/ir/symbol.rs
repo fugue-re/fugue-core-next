@@ -11,7 +11,7 @@ pub use ustr::{Ustr as Symbol, UstrMap as SymbolMap};
 
 use crate::ir::traits::{SymbolIterator, SymbolTable as SymbolTableT};
 use crate::ir::{Address, ExternFunctionTemplate, Id};
-use crate::storage::entities::common::{ENTITY_EXTERN_SYMBOLS_ID, ENTITY_LOCAL_SYMBOLS_ID};
+use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
 pub type SymbolId = Id<Symbol>;
@@ -30,6 +30,37 @@ impl Display for SymbolEntry {
         } else {
             write!(f, "<unnamed> at {}; {}", self.address, self.properties)
         }
+    }
+}
+
+impl Encode for SymbolEntry {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        self.address.encode(encoder)?;
+        Compat(&self.symbol).encode(encoder)?;
+        self.properties.encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for SymbolEntry {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let address = Address::decode(decoder)?;
+        let Compat(symbol) = Compat::<Option<Symbol>>::decode(decoder)?;
+        let properties = SymbolProperties::decode(decoder)?;
+
+        Ok(Self {
+            address,
+            symbol,
+            properties,
+        })
     }
 }
 
@@ -164,7 +195,8 @@ impl SymbolProperties {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[repr(transparent)]
 pub struct SymbolIndex(usize);
 
 impl Debug for SymbolIndex {
@@ -203,7 +235,7 @@ impl SymbolIndex {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IndexedSymbolTable {
     // all known symbols
     symbols: Vec<SymbolEntry>,
@@ -213,6 +245,88 @@ pub struct IndexedSymbolTable {
     names: SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
     // map of addresses to known symbols
     addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+}
+
+impl<C> Decode<C> for IndexedSymbolTable {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let symbols = Vec::<SymbolEntry>::decode(decoder)?;
+        let indices = BTreeMap::<SymbolIndex, Id<Symbol>>::decode(decoder)?;
+
+        let names_len = usize::decode(decoder)?;
+        let names = (0..names_len)
+            .into_iter()
+            .map(|_| {
+                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
+                let ids_len = usize::decode(decoder)?;
+                let ids = (0..ids_len)
+                    .into_iter()
+                    .map(|_| Id::<Symbol>::decode(decoder))
+                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
+                Ok((sym, ids))
+            })
+            .collect::<Result<SymbolMap<SmallVec<[_; 2]>>, _>>()?;
+
+        let addresses_len = usize::decode(decoder)?;
+        let addresses = (0..addresses_len)
+            .into_iter()
+            .map(|_| {
+                let addr = Address::decode(decoder)?;
+                let ids_len = usize::decode(decoder)?;
+                let ids = (0..ids_len)
+                    .into_iter()
+                    .map(|_| Id::<Symbol>::decode(decoder))
+                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
+                Ok((addr, ids))
+            })
+            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
+
+        Ok(Self {
+            symbols,
+            indices,
+            names,
+            addresses,
+        })
+    }
+}
+
+impl Encode for IndexedSymbolTable {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        use bincode::serde::Compat;
+
+        self.symbols.encode(encoder)?;
+        self.indices.encode(encoder)?;
+
+        self.names.len().encode(encoder)?;
+        for (sym, ids) in &self.names {
+            Compat(sym).encode(encoder)?;
+            ids.len().encode(encoder)?;
+            for id in ids {
+                id.encode(encoder)?;
+            }
+        }
+
+        self.addresses.len().encode(encoder)?;
+        for (addr, ids) in &self.addresses {
+            addr.encode(encoder)?;
+            ids.len().encode(encoder)?;
+            for id in ids {
+                id.encode(encoder)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Entity for IndexedSymbolTable {
+    const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
 }
 
 #[derive(Clone)]
@@ -566,10 +680,6 @@ impl Encode for LocalSymbols {
     }
 }
 
-impl Entity for Option<LocalSymbols> {
-    const ID: EntityId = ENTITY_LOCAL_SYMBOLS_ID;
-}
-
 impl LocalSymbols {
     pub fn new() -> Self {
         Self {
@@ -805,10 +915,6 @@ impl Encode for ExternSymbols {
 
         Ok(())
     }
-}
-
-impl Entity for Option<ExternSymbols> {
-    const ID: EntityId = ENTITY_EXTERN_SYMBOLS_ID;
 }
 
 impl ExternSymbols {
