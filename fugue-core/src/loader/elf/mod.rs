@@ -234,7 +234,7 @@ pub fn elf_symbols<'a>(
             symbol.name().ok().unwrap_or_default(),
             if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
                 SymbolProperties::FUNCTION
-            } else if [STT_COMMON, STT_OBJECT, STT_TLS].contains(&st_type) {
+            } else if [STT_COMMON, STT_OBJECT /*, STT_TLS */].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
                 tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
