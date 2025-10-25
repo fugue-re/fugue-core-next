@@ -7,7 +7,7 @@ use fallible_iterator::FallibleIterator;
 
 use object::elf::{
     FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
-    STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_NOTYPE, STT_OBJECT, STT_TLS,
+    STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
 use object::read::elf::{
     self, ElfFile, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
@@ -31,6 +31,8 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
+
+const STT_GNU_UNIQUE: u8 = STT_LOOS;
 
 pub const ELF_SYMTAB_SELECTOR: usize = 0;
 pub const ELF_DYNSYM_SELECTOR: usize = 1;
@@ -140,6 +142,7 @@ pub fn elf_symbols<'a>(
 ) -> (RangeInclusive<Address>, IndexedSymbolTable, ExternSegment) {
     // TODO:
     // - base address should be configurable.
+    // - determine if GNU and hence IFUNC and UNIQUE are supported.
 
     let is_object = elf.kind() == ObjectKind::Relocatable;
     let addr_size = arch.language().address_size();
@@ -207,6 +210,7 @@ pub fn elf_symbols<'a>(
         .symbols()
         .filter_map(|sym| sym.section_index().map(|idx| (idx, sym)))
     {
+        // NOTE: this will remove references to externs?
         let Some(section_start) = section_map
             .get(section.0)
             .and_then(|start| *start)
@@ -215,6 +219,8 @@ pub fn elf_symbols<'a>(
             continue;
         };
 
+        // TODO: determine what symbol.address() means in the context of non-object files, with
+        // respect to section_start.
         let address = section_start + symbol.address();
 
         tracing::trace!(
@@ -226,20 +232,38 @@ pub fn elf_symbols<'a>(
             continue;
         };
 
+        let st_bind = st_info >> 4;
         let st_type = st_info & 0x0f;
+
+        let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
+
+        let is_import = is_visible && symbol.address() == 0;
+        let is_export = is_visible && symbol.address() != 0;
+
+        let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+            SymbolProperties::FUNCTION
+        } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
+            SymbolProperties::DATA
+        } else {
+            tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
+            SymbolProperties::NONE
+        };
+
+        let mut properties = kind;
+
+        if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
+            properties |= SymbolProperties::EXTERN;
+        } else if is_export {
+            properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
+        } else {
+            properties |= SymbolProperties::LOCAL;
+        }
 
         symbols.insert(
             SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
             address,
             symbol.name().ok().unwrap_or_default(),
-            if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
-                SymbolProperties::FUNCTION
-            } else if [STT_COMMON, STT_OBJECT /*, STT_TLS */].contains(&st_type) {
-                SymbolProperties::DATA
-            } else {
-                tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
-                SymbolProperties::NONE
-            },
+            properties,
         );
     }
 
@@ -260,6 +284,8 @@ pub fn elf_symbols<'a>(
 
     let mut externs = ExternSegment::new(aligned_base, addr_align, arch.external_thunk_template());
 
+    // TODO: refactor the inner logic so we avoid duplication between the two loops.
+
     for (index, sym, kind) in syms.enumerate().filter_map(|(index, sym)| {
         let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
             return None;
@@ -268,18 +294,27 @@ pub fn elf_symbols<'a>(
         let st_bind = st_info >> 4;
         let st_type = st_info & 0x0f;
 
-        let is_import = (st_bind == STB_GLOBAL || st_bind == STB_WEAK) && sym.address() == 0;
+        let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
+
+        let is_import = is_visible && sym.address() == 0;
+        let is_export = is_visible && sym.address() != 0;
+
+        let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+            SymbolProperties::FUNCTION
+        } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
+            SymbolProperties::DATA
+        } else {
+            SymbolProperties::NONE
+        };
 
         if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
-            let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
-                SymbolProperties::FUNCTION
-            } else if [STT_COMMON, STT_OBJECT, STT_TLS].contains(&st_type) {
-                SymbolProperties::DATA
-            } else {
-                SymbolProperties::NONE
-            };
-
-            Some((index, sym, kind))
+            Some((index, sym, kind | SymbolProperties::EXTERN))
+        } else if is_export {
+            Some((
+                index,
+                sym,
+                kind | SymbolProperties::LOCAL | SymbolProperties::EXPORT,
+            ))
         } else {
             tracing::debug!(
                 "skipping symbol {} (bind: {st_bind}, type: {st_type}, addr: {:#x})",
@@ -289,8 +324,11 @@ pub fn elf_symbols<'a>(
             None
         }
     }) {
+        let addr = kind
+            .is_extern()
+            .then(|| externs.add_extern())
+            .unwrap_or(sym.address().into()); // FIXME: this needs to be mapped, see above.
         let sym = sym.name().ok();
-        let addr = externs.add_extern();
 
         symbols.insert(
             SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),

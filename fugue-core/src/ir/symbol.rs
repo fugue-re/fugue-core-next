@@ -131,9 +131,13 @@ bitflags::bitflags! {
     pub struct SymbolProperties: u8 {
         const NONE     = 0b0000_0000;
         const EXTERN   = 0b0000_0001;
-        const LOCAL    = 0b0000_0010;
-        const FUNCTION = 0b0000_0100;
-        const DATA     = 0b0000_1000;
+        const EXPORT   = 0b0000_0010;
+        const LOCAL    = 0b0000_0100;
+        const FUNCTION = 0b0000_1000;
+        const DATA     = 0b0001_0000;
+
+        // aliases
+        const IMPORT   = Self::EXTERN.bits();
     }
 }
 
@@ -176,6 +180,14 @@ impl Display for SymbolProperties {
 impl SymbolProperties {
     pub fn new() -> Self {
         Self::NONE
+    }
+
+    pub fn is_import(self) -> bool {
+        self.is_extern()
+    }
+
+    pub fn is_export(self) -> bool {
+        self.contains(SymbolProperties::EXPORT)
     }
 
     pub fn is_extern(self) -> bool {
@@ -708,7 +720,7 @@ impl LocalSymbols {
         let addr = addr.into();
         let sym = symbol.into();
 
-        let sym = sym.and_then(|sym| sym.is_empty().then(|| None).unwrap_or(Some(sym)));
+        let sym = sym.and_then(|sym| if sym.is_empty() { None } else { Some(sym) });
 
         self.indices.insert(index, addr);
 

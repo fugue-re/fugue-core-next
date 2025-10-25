@@ -215,7 +215,7 @@ impl ExternSegment {
     }
 
     pub fn last_address(&self) -> Option<Address> {
-        (self.symbols == 0).then(|| self.address() + self.size() - 1usize)
+        (self.symbols != 0).then(|| self.address() + self.size() - 1usize)
     }
 
     pub fn bounds(&self) -> Option<RangeInclusive<Address>> {
