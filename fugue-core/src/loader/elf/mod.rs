@@ -174,7 +174,7 @@ pub fn elf_symbols<'a>(
 
             if sect.size() == 0 {
                 section_map.push(None);
-                base += 1; // assume byte alignment (same as IDA Pro)
+                base += 1; // assume byte alignment
                 continue;
             }
 
@@ -221,7 +221,7 @@ pub fn elf_symbols<'a>(
 
         // TODO: determine what symbol.address() means in the context of non-object files, with
         // respect to section_start.
-        let address = section_start + symbol.address();
+        let address = symbol.address() + if is_object { section_start } else { 0 };
 
         tracing::trace!(
             "symbol {} in section {section:?} at {address:#x}",
@@ -1060,7 +1060,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let elf = Elf::new(BytesOrMapping::from_file("tests/libssl.so")?)?;
+            let elf = Elf::new(BytesOrMapping::from_file("tests/libipmi.so")?)?;
             let mut segments = elf.segments();
             while let Some(segm) = segments.next()? {
                 tracing::info!(
