@@ -99,6 +99,11 @@ impl SymbolEntry {
         self.properties.remove(SymbolProperties::EXTERN);
     }
 
+    pub fn mark_as_export(&mut self) {
+        self.properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
+        self.properties.remove(SymbolProperties::EXTERN);
+    }
+
     pub fn mark_as_function(&mut self) {
         self.properties |= SymbolProperties::FUNCTION;
         self.properties.remove(SymbolProperties::DATA);
@@ -126,11 +131,23 @@ impl SymbolEntry {
     }
 
     pub fn kind(&self) -> SymbolProperties {
-        self.properties & (SymbolProperties::FUNCTION | SymbolProperties::DATA)
+        self.properties & SymbolProperties::KIND
     }
 
     pub fn visibility(&self) -> SymbolProperties {
-        self.properties & (SymbolProperties::EXTERN | SymbolProperties::LOCAL)
+        self.properties & SymbolProperties::VISIBILITY
+    }
+
+    pub fn update_kind(&mut self, properties: SymbolProperties) {
+        let kind = properties & SymbolProperties::KIND;
+        self.properties.remove(SymbolProperties::KIND);
+        self.properties |= kind;
+    }
+
+    pub fn update_visibility(&mut self, properties: SymbolProperties) {
+        let visibility = properties & SymbolProperties::VISIBILITY;
+        self.properties.remove(SymbolProperties::VISIBILITY);
+        self.properties |= visibility;
     }
 
     pub fn has_same_referent(&self, other: &SymbolEntry) -> bool {
@@ -149,7 +166,11 @@ bitflags::bitflags! {
         const DATA     = 0b0001_0000;
 
         // aliases
-        const IMPORT   = Self::EXTERN.bits();
+        const IMPORT = Self::EXTERN.bits();
+
+        // groups
+        const KIND       = Self::FUNCTION.bits() | Self::DATA.bits();
+        const VISIBILITY = Self::EXTERN.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
     }
 }
 
@@ -581,14 +602,15 @@ impl IndexedSymbolTable {
             Entry::Vacant(entry) => {
                 let address = address.into();
                 let symbol_id = if let Some(symbol_id) =
-                    // inlines get_by_address to split the borrows.
+                    // inlines get_by_address to split the borrows
                     self.addresses.get(&address).and_then(|ids| {
-                        SymbolEntryIter::new(ids, &self.symbols).find_map(|(id, entry)| {
-                            entry.has_same_referent(&symbol_entry).then_some(id)
-                        })
-                    }) {
-                    // NOTE: we need to merge the properties if the symbol already exists
-                    self.symbols[symbol_id.index()].properties |= properties;
+                            SymbolEntryIter::new(ids, &self.symbols).find_map(|(id, entry)| {
+                                entry.has_same_referent(&symbol_entry).then_some(id)
+                            })
+                        }) {
+                    // NOTE: we update the properties with new visibility if the symbol already
+                    // exists.
+                    self.symbols[symbol_id.index()].update_visibility(properties);
 
                     symbol_id
                 } else {
