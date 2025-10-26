@@ -124,6 +124,14 @@ impl SymbolEntry {
     pub fn is_data(&self) -> bool {
         self.properties.is_data()
     }
+
+    pub fn kind(&self) -> SymbolProperties {
+        self.properties & (SymbolProperties::FUNCTION | SymbolProperties::DATA)
+    }
+
+    pub fn has_same_referent(&self, other: &SymbolEntry) -> bool {
+        self.address == other.address && self.symbol == other.symbol && self.kind() == other.kind()
+    }
 }
 
 bitflags::bitflags! {
@@ -567,15 +575,28 @@ impl IndexedSymbolTable {
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
-                let symbol_id = Id::from_index(self.symbols.len());
+                let address = address.into();
+                let symbol_id = if let Some(symbol_id) =
+                    self.addresses.get(&address).and_then(|ids| {
+                        SymbolEntryIter::new(ids, &self.symbols).find_map(|(id, entry)| {
+                            entry.has_same_referent(&symbol_entry).then_some(id)
+                        })
+                    }) {
+                    symbol_id
+                } else {
+                    let symbol_id = Id::from_index(self.symbols.len());
 
-                self.symbols.push(symbol_entry);
+                    self.symbols.push(symbol_entry);
+
+                    // NOTE: due to how symbol identifiers are constructed, we know that
+                    // the set of symbols will remain sorted.
+                    self.names.entry(symbol).or_default().push(symbol_id);
+                    self.addresses.entry(address).or_default().push(symbol_id);
+
+                    symbol_id
+                };
+
                 entry.insert(symbol_id);
-
-                // NOTE: due to how symbol identifiers are constructed, we know that
-                // the set of symbols will remain sorted.
-                self.names.entry(symbol).or_default().push(symbol_id);
-                self.addresses.entry(address).or_default().push(symbol_id);
 
                 (true, symbol_id)
             }
@@ -598,6 +619,20 @@ impl IndexedSymbolTable {
         self.symbols.iter().enumerate().map(|(i, entry)| {
             let id = Id::from_index(i);
             (id, entry)
+        })
+    }
+
+    // Iterator over all symbol entries for a given selector.
+    pub fn iter_by_selector<'a>(
+        &'a self,
+        selector: usize,
+    ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
+        self.indices.iter().filter_map(move |(&index, &id)| {
+            if index.selector() == selector {
+                Some((id, &self.symbols[id.index()]))
+            } else {
+                None
+            }
         })
     }
 
