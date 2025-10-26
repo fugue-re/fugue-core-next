@@ -129,6 +129,10 @@ impl SymbolEntry {
         self.properties & (SymbolProperties::FUNCTION | SymbolProperties::DATA)
     }
 
+    pub fn visibility(&self) -> SymbolProperties {
+        self.properties & (SymbolProperties::EXTERN | SymbolProperties::LOCAL)
+    }
+
     pub fn has_same_referent(&self, other: &SymbolEntry) -> bool {
         self.address == other.address && self.symbol == other.symbol && self.kind() == other.kind()
     }
@@ -577,11 +581,15 @@ impl IndexedSymbolTable {
             Entry::Vacant(entry) => {
                 let address = address.into();
                 let symbol_id = if let Some(symbol_id) =
+                    // inlines get_by_address to split the borrows.
                     self.addresses.get(&address).and_then(|ids| {
                         SymbolEntryIter::new(ids, &self.symbols).find_map(|(id, entry)| {
                             entry.has_same_referent(&symbol_entry).then_some(id)
                         })
                     }) {
+                    // NOTE: we need to merge the properties if the symbol already exists
+                    self.symbols[symbol_id.index()].properties |= properties;
+
                     symbol_id
                 } else {
                     let symbol_id = Id::from_index(self.symbols.len());
