@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
 
@@ -63,6 +63,19 @@ impl<C> Decode<C> for ContextSet {
     }
 }
 
+impl<'de, C> BorrowDecode<'de, C> for ContextSet {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = usize::borrow_decode(decoder)?;
+        let mut context = ArrayVec::new();
+        for _ in 0..len {
+            context.push(ContextUpdate::borrow_decode(decoder)?);
+        }
+        Ok(Self(context))
+    }
+}
+
 impl From<ContextUpdate> for ContextSet {
     fn from(value: ContextUpdate) -> Self {
         Self(ArrayVec::from_iter([value]))
@@ -121,5 +134,88 @@ impl ContextSet {
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
             context.set_variable_region_by_bits(bits, from.into(), to.map(Address::into), *value);
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub enum ContextHintKind {
+    Code(u8),
+    Data,
+}
+
+impl ContextHintKind {
+    pub fn code() -> Self {
+        ContextHintKind::Code(0)
+    }
+
+    pub fn code_with_bitness(bits: u8) -> Self {
+        ContextHintKind::Code(bits)
+    }
+
+    pub fn data() -> Self {
+        ContextHintKind::Data
+    }
+
+    pub fn is_code(&self) -> bool {
+        matches!(self, ContextHintKind::Code(_))
+    }
+
+    pub fn is_data(&self) -> bool {
+        matches!(self, ContextHintKind::Data)
+    }
+
+    pub fn has_bitness(&self) -> bool {
+        matches!(self, ContextHintKind::Code(bits) if *bits != 0)
+    }
+
+    pub fn bitness(&self) -> Option<u32> {
+        match self {
+            ContextHintKind::Code(bits) if *bits != 0 => Some(*bits as u32),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct ContextHint {
+    kind: ContextHintKind,
+    context: Option<ContextSet>,
+}
+
+impl ContextHint {
+    pub fn new(kind: ContextHintKind) -> Self {
+        Self::new_with(kind, None)
+    }
+
+    pub fn new_with(kind: ContextHintKind, context: impl Into<Option<ContextSet>>) -> Self {
+        Self {
+            kind,
+            context: context.into(),
+        }
+    }
+
+    pub fn code() -> Self {
+        Self::new(ContextHintKind::code())
+    }
+
+    pub fn code_with_bitness(bits: u8) -> Self {
+        Self::new(ContextHintKind::code_with_bitness(bits))
+    }
+
+    pub fn data() -> Self {
+        Self::new(ContextHintKind::data())
+    }
+
+    pub fn kind(&self) -> &ContextHintKind {
+        &self.kind
+    }
+
+    pub fn context(&self) -> Option<&ContextSet> {
+        self.context.as_ref()
+    }
+
+    pub fn with_context(mut self, context: ContextSet) -> Self {
+        self.context = Some(context);
+        self
     }
 }

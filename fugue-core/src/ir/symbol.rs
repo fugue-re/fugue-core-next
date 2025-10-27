@@ -3,11 +3,14 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::{Debug, Display};
 use std::ops::RangeInclusive;
+use std::sync::LazyLock;
 
 use bincode::{Decode, Encode};
 use smallvec::SmallVec;
 
-pub use ustr::{Ustr as Symbol, UstrMap as SymbolMap};
+pub use ustr::{
+    Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
+};
 
 use crate::ir::traits::{SymbolIterator, SymbolTable as SymbolTableT};
 use crate::ir::{Address, ExternFunctionTemplate, Id};
@@ -15,6 +18,14 @@ use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
 pub type SymbolId = Id<Symbol>;
+pub type LazySymbol = LazyLock<Symbol>;
+
+#[macro_export]
+macro_rules! lazy_symbol {
+    ($value:literal) => {
+        ::std::sync::LazyLock::new(|| ::fugue_core::ir::symbol::symbol($value))
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {

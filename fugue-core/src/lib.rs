@@ -1,3 +1,5 @@
+extern crate self as fugue_core;
+
 // pub mod analysis;
 pub mod arch;
 pub mod ir;

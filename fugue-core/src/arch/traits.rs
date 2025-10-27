@@ -4,8 +4,10 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate};
-use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext};
+use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::lifter::{
+    ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
+};
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,11 +136,6 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
-    fn is_mapping_symbol(&self, symbol: &str) -> bool {
-        false
-    }
-
-    #[allow(unused)]
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
         false
     }
@@ -156,6 +153,11 @@ pub trait Arch: Send + Sync + 'static {
     #[allow(unused)]
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         false
+    }
+
+    #[allow(unused)]
+    fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
+        None
     }
 
     fn language(&self) -> &'static Language {

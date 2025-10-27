@@ -5,8 +5,10 @@ use std::hash::{Hash, Hasher};
 use bincode::{Decode, Encode};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate};
-use crate::lifter::{ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext};
+use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::lifter::{
+    ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
+};
 use crate::loader::util::parse_language;
 use crate::storage::entities::common::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
@@ -166,10 +168,6 @@ impl Arch {
         self.0.is_halt_intrinsic(op, args)
     }
 
-    pub fn is_mapping_symbol(&self, symbol: &str) -> bool {
-        self.0.is_mapping_symbol(symbol)
-    }
-
     pub fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
         self.0.is_nonsense_pattern(bytes)
     }
@@ -184,6 +182,10 @@ impl Arch {
 
     pub fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         self.0.is_trap_intrinsic(op, args)
+    }
+
+    pub fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
+        self.0.resolve_mapping_symbol(symbol)
     }
 
     pub fn language(&self) -> &'static Language {

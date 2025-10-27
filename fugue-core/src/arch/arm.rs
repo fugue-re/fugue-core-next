@@ -10,15 +10,21 @@ pub use fugue_lifter::arm::*;
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextSet, Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext,
+    ContextHint, ContextSet, Disassembler, DisassemblerError, LanguageVariant, Lifter,
+    LiftingContext,
 };
 
 const GPRS: &[Varnode] = &[
     R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
 ];
+
+static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
+static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
+static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Arm {
@@ -72,6 +78,22 @@ impl ArchT for Arm {
 
     fn gprs(&self) -> &[Varnode] {
         GPRS
+    }
+
+    fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
+        if symbol == &*MAPPING_SYMBOL_ARM {
+            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 0)));
+        }
+
+        if symbol == &*MAPPING_SYMBOL_THUMB {
+            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 1)));
+        }
+
+        if symbol == &*MAPPING_SYMBOL_DATA {
+            return Some(ContextHint::data());
+        }
+
+        None
     }
 
     fn language_variant(&self) -> LanguageVariant {
