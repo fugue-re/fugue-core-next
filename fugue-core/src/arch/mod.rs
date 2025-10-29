@@ -184,8 +184,8 @@ impl Arch {
         self.0.is_trap_intrinsic(op, args)
     }
 
-    pub fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
-        self.0.resolve_mapping_symbol(symbol)
+    pub fn resolve_mapping_symbol(&self, symbol: impl Into<Symbol>) -> Option<ContextHint> {
+        self.0.resolve_mapping_symbol(&symbol.into())
     }
 
     pub fn language(&self) -> &'static Language {

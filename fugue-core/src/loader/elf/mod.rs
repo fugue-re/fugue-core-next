@@ -21,8 +21,10 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
+    Address, AddressMap, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex,
+    SymbolProperties,
 };
+use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
@@ -81,6 +83,7 @@ pub struct Elf<'a> {
     architecture: Arch,
     metadata: LoadableMetadata,
     bounds: RangeInclusive<Address>,
+    mapping_hints: AddressMap<ContextHint>,
     symbols: IndexedSymbolTable,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
@@ -101,7 +104,12 @@ impl<'a> Elf<'a> {
         let language = with_elf!(view, elf | object_language(elf))?;
         let architecture = Arch::new(language);
 
-        let (bounds, symbols, extern_segm) = with_elf!(view, elf | elf_symbols(elf, &architecture));
+        let ElfSymbolData {
+            bounds,
+            symbols,
+            mapping_hints,
+            extern_segm,
+        } = with_elf!(view, elf | ElfSymbolData::from_elf(elf, &architecture));
 
         let metadata = LoadableMetadata::new(
             object.borrow_data(),
@@ -113,10 +121,15 @@ impl<'a> Elf<'a> {
             architecture,
             metadata,
             bounds,
+            mapping_hints,
             symbols,
             extern_segm,
             attributes: attributes.into(),
         })
+    }
+
+    pub fn mapping_hints(&self) -> &AddressMap<ContextHint> {
+        &self.mapping_hints
     }
 
     pub fn symbols(&self) -> &IndexedSymbolTable {
@@ -135,213 +148,233 @@ impl<'a> Elf<'a> {
     }
 }
 
-// TODO: this will return a ExternSegment
-pub fn elf_symbols<'a>(
-    elf: &'a impl Object<'a>,
-    arch: &Arch,
-) -> (RangeInclusive<Address>, IndexedSymbolTable, ExternSegment) {
-    // TODO:
-    // - base address should be configurable.
-    // - determine if GNU and hence IFUNC and UNIQUE are supported.
+struct ElfSymbolData {
+    bounds: RangeInclusive<Address>,
+    mapping_hints: AddressMap<ContextHint>,
+    symbols: IndexedSymbolTable,
+    extern_segm: ExternSegment,
+}
 
-    let is_object = elf.kind() == ObjectKind::Relocatable;
-    let addr_size = arch.language().address_size();
+impl ElfSymbolData {
+    fn from_elf<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> Self {
+        // TODO:
+        // - base address should be configurable.
+        // - determine if GNU and hence IFUNC and UNIQUE are supported.
 
-    // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
-    // which is only applicable for Thumb.
-    let addr_align = arch.language().address_alignment().max(addr_size);
+        let is_object = elf.kind() == ObjectKind::Relocatable;
+        let addr_size = arch.language().address_size();
 
-    let mut section_map = Vec::new();
+        // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
+        // which is only applicable for Thumb.
+        let addr_align = arch.language().address_alignment().max(addr_size);
 
-    let base_addr = Address::zero();
+        let mut section_map = Vec::new();
+        let mut mapping_hints = AddressMap::new();
 
-    let mut min_addr = base_addr;
-    let mut max_addr = base_addr;
+        let base_addr = Address::zero();
 
-    let base = if is_object {
-        let mut base = base_addr.offset();
-        for sect in elf.sections() {
-            let SectionFlags::Elf { sh_flags } = sect.flags() else {
-                // NOTE: we could probably panic here
-                section_map.push(None);
+        let mut min_addr = base_addr;
+        let mut max_addr = base_addr;
+
+        let base = if is_object {
+            let mut base = base_addr.offset();
+            for sect in elf.sections() {
+                let SectionFlags::Elf { sh_flags } = sect.flags() else {
+                    // NOTE: we could probably panic here
+                    section_map.push(None);
+                    continue;
+                };
+
+                if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+                    section_map.push(None);
+                    continue;
+                }
+
+                if sect.size() == 0 {
+                    section_map.push(None);
+                    base += 1; // assume byte alignment
+                    continue;
+                }
+
+                let aligned_start =
+                    (base + sect.align().wrapping_sub(1)) & !sect.align().wrapping_sub(1);
+
+                section_map.push(Some(aligned_start));
+
+                base = aligned_start + sect.size();
+            }
+
+            max_addr = Address::from(base);
+            base
+        } else {
+            for (addr, size) in elf
+                .sections()
+                .map(|sect| (sect.address(), sect.size()))
+                .chain(elf.segments().map(|segm| (segm.address(), segm.size())))
+                .filter(|(_, size)| *size != 0)
+            {
+                max_addr = max_addr.max(Address::from(addr + size));
+                min_addr = min_addr.min(Address::from(addr));
+            }
+            max_addr.offset() + addr_size as u64
+        };
+
+        let aligned_base =
+            (base + addr_align.wrapping_sub(1) as u64) & !(addr_align as u64).wrapping_sub(1);
+
+        let mut symbols = IndexedSymbolTable::new();
+
+        for (section, symbol) in elf
+            .symbols()
+            .filter_map(|sym| sym.section_index().map(|idx| (idx, sym)))
+        {
+            // NOTE: this will remove references to externs?
+            let Some(section_start) = section_map
+                .get(section.0)
+                .and_then(|start| *start)
+                .or_else(|| Some(elf.section_by_index(section).ok()?.address()))
+            else {
                 continue;
             };
 
-            if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
-                section_map.push(None);
-                continue;
-            }
+            let address = symbol.address() + if is_object { section_start } else { 0 };
 
-            if sect.size() == 0 {
-                section_map.push(None);
-                base += 1; // assume byte alignment
-                continue;
-            }
-
-            let aligned_start =
-                (base + sect.align().wrapping_sub(1)) & !sect.align().wrapping_sub(1);
-
-            section_map.push(Some(aligned_start));
-
-            base = aligned_start + sect.size();
-        }
-
-        max_addr = Address::from(base);
-        base
-    } else {
-        for (addr, size) in elf
-            .sections()
-            .map(|sect| (sect.address(), sect.size()))
-            .chain(elf.segments().map(|segm| (segm.address(), segm.size())))
-            .filter(|(_, size)| *size != 0)
-        {
-            max_addr = max_addr.max(Address::from(addr + size));
-            min_addr = min_addr.min(Address::from(addr));
-        }
-        max_addr.offset() + addr_size as u64
-    };
-
-    let aligned_base =
-        (base + addr_align.wrapping_sub(1) as u64) & !(addr_align as u64).wrapping_sub(1);
-
-    let mut symbols = IndexedSymbolTable::new();
-
-    for (section, symbol) in elf
-        .symbols()
-        .filter_map(|sym| sym.section_index().map(|idx| (idx, sym)))
-    {
-        // NOTE: this will remove references to externs?
-        let Some(section_start) = section_map
-            .get(section.0)
-            .and_then(|start| *start)
-            .or_else(|| Some(elf.section_by_index(section).ok()?.address()))
-        else {
-            continue;
-        };
-
-        // TODO: determine what symbol.address() means in the context of non-object files, with
-        // respect to section_start.
-        let address = symbol.address() + if is_object { section_start } else { 0 };
-
-        tracing::trace!(
-            "symbol {} in section {section:?} at {address:#x}",
-            symbol.name().ok().unwrap_or("<unnamed>"),
-        );
-
-        let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
-            continue;
-        };
-
-        let st_bind = st_info >> 4;
-        let st_type = st_info & 0x0f;
-
-        let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
-
-        let is_import = is_visible && symbol.address() == 0;
-        let is_export = is_visible && symbol.address() != 0;
-
-        let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
-            SymbolProperties::FUNCTION
-        } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
-            SymbolProperties::DATA
-        } else {
-            tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
-            SymbolProperties::NONE
-        };
-
-        let mut properties = kind;
-
-        if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
-            properties |= SymbolProperties::EXTERN;
-        } else if is_export {
-            properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
-        } else {
-            properties |= SymbolProperties::LOCAL;
-        }
-
-        symbols.insert(
-            SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
-            address,
-            symbol.name().ok().unwrap_or_default(),
-            properties,
-        );
-    }
-
-    let syms = if is_object {
-        elf.symbols()
-    } else {
-        elf.dynamic_symbols()
-    };
-
-    // NOTE: this template is used to create a stub for the external symbols, such that
-    // if we were to consider the external address as a function, and call to it, we would
-    // hit valid code, and return.
-
-    // FIXME: this is incorrect for shared objects, where we have exports. The dynamic symbol
-    // table will contain both imports and exports, and by our conventions, we should only add
-    // imports to the externs table, which we do, but we therefore miss the exports. Unfortunately,
-    // the way object exposes the symbol tables, each has its own set of symbol indices...
-
-    let mut externs = ExternSegment::new(aligned_base, addr_align, arch.external_thunk_template());
-
-    // TODO: refactor the inner logic so we avoid duplication between the two loops.
-
-    for (index, sym, kind) in syms.enumerate().filter_map(|(index, sym)| {
-        let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
-            return None;
-        };
-
-        let st_bind = st_info >> 4;
-        let st_type = st_info & 0x0f;
-
-        let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
-
-        let is_import = is_visible && sym.address() == 0;
-        let is_export = is_visible && sym.address() != 0;
-
-        let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
-            SymbolProperties::FUNCTION
-        } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
-            SymbolProperties::DATA
-        } else {
-            SymbolProperties::NONE
-        };
-
-        if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
-            Some((index, sym, kind | SymbolProperties::EXTERN))
-        } else if is_export {
-            Some((
-                index,
-                sym,
-                kind | SymbolProperties::LOCAL | SymbolProperties::EXPORT,
-            ))
-        } else {
-            tracing::debug!(
-                "skipping symbol {} (bind: {st_bind}, type: {st_type}, addr: {:#x})",
-                sym.name().ok().unwrap_or("<unnamed>"),
-                sym.address(),
+            tracing::trace!(
+                "symbol {} in section {section:?} at {address:#x}",
+                symbol.name().ok().unwrap_or("<unnamed>"),
             );
-            None
+
+            // NOTE: here we deal with mapping symbols, which are used to indicate code/data
+            // boundaries, etc. and do not need to be added to the symbol table.
+            if symbol.address() != 0
+                && let Ok(name) = symbol.name()
+                && let Some(context) = arch.resolve_mapping_symbol(name)
+            {
+                mapping_hints.insert(address, context);
+                continue;
+            }
+
+            let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
+                continue;
+            };
+
+            let st_bind = st_info >> 4;
+            let st_type = st_info & 0x0f;
+
+            let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
+
+            let is_import = is_visible && symbol.address() == 0;
+            let is_export = is_visible && symbol.address() != 0;
+
+            let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+                SymbolProperties::FUNCTION
+            } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
+                SymbolProperties::DATA
+            } else {
+                tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
+                SymbolProperties::NONE
+            };
+
+            let mut properties = kind;
+
+            if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
+                properties |= SymbolProperties::EXTERN;
+            } else if is_export {
+                properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
+            } else {
+                properties |= SymbolProperties::LOCAL;
+            }
+
+            symbols.insert(
+                SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
+                address,
+                symbol.name().ok().unwrap_or_default(),
+                properties,
+            );
         }
-    }) {
-        let addr = kind
-            .is_extern()
-            .then(|| externs.add_extern())
-            .unwrap_or(sym.address().into()); // FIXME: this needs to be mapped, see above.
-        let sym = sym.name().ok();
 
-        symbols.insert(
-            SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
-            addr,
-            sym.unwrap_or_default(),
-            kind,
-        );
+        let syms = if is_object {
+            elf.symbols()
+        } else {
+            elf.dynamic_symbols()
+        };
+
+        // NOTE: this template is used to create a stub for the external symbols, such that
+        // if we were to consider the external address as a function, and call to it, we would
+        // hit valid code, and return.
+
+        // FIXME: this is incorrect for shared objects, where we have exports. The dynamic symbol
+        // table will contain both imports and exports, and by our conventions, we should only add
+        // imports to the externs table, which we do, but we therefore miss the exports. Unfortunately,
+        // the way object exposes the symbol tables, each has its own set of symbol indices...
+
+        let mut extern_segm =
+            ExternSegment::new(aligned_base, addr_align, arch.external_thunk_template());
+
+        // TODO: refactor the inner logic so we avoid duplication between the two loops.
+
+        for (index, sym, kind) in syms.enumerate().filter_map(|(index, sym)| {
+            let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
+                return None;
+            };
+
+            let st_bind = st_info >> 4;
+            let st_type = st_info & 0x0f;
+
+            let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
+
+            let is_import = is_visible && sym.address() == 0;
+            let is_export = is_visible && sym.address() != 0;
+
+            let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+                SymbolProperties::FUNCTION
+            } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
+                SymbolProperties::DATA
+            } else {
+                SymbolProperties::NONE
+            };
+
+            if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
+                Some((index, sym, kind | SymbolProperties::EXTERN))
+            } else if is_export {
+                Some((
+                    index,
+                    sym,
+                    kind | SymbolProperties::LOCAL | SymbolProperties::EXPORT,
+                ))
+            } else {
+                tracing::debug!(
+                    "skipping symbol {} (bind: {st_bind}, type: {st_type}, addr: {:#x})",
+                    sym.name().ok().unwrap_or("<unnamed>"),
+                    sym.address(),
+                );
+                None
+            }
+        }) {
+            let addr = kind
+                .is_extern()
+                .then(|| extern_segm.add_extern())
+                .unwrap_or(sym.address().into()); // FIXME: this needs to be mapped, see above.
+            let sym = sym.name().ok();
+
+            symbols.insert(
+                SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
+                addr,
+                sym.unwrap_or_default(),
+                kind,
+            );
+        }
+
+        let max_addr = extern_segm.last_address().unwrap_or(max_addr);
+        let bounds = min_addr..=max_addr;
+
+        Self {
+            bounds,
+            mapping_hints,
+            symbols,
+            extern_segm,
+        }
     }
-
-    let max_addr = externs.last_address().unwrap_or(max_addr);
-    let bounds = min_addr..=max_addr;
-
-    (bounds, symbols, externs)
 }
 
 pub fn elf_section_properties<'a>(sect: &impl ObjectSection<'a>) -> SegmentProperties {
