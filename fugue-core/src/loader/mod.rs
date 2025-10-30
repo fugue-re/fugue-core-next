@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display};
 use std::path::Path;
 
@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
+use crate::lifter::ContextHint;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -182,12 +183,13 @@ impl LoadableMetadata {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct LoadableSegment<'a> {
-    name: Cow<'a, str>,                         // Name of the segment
-    address: Address,                           // Starting address of the segment
-    properties: SegmentProperties,              // Properties of the segment (e.g., permissions)
-    bytes: Cow<'a, [u8]>,                       // Bytes of the segment
+    name: Cow<'a, str>,                                     // Name of the segment
+    address: Address,                                       // Starting address of the segment
+    properties: SegmentProperties, // Properties of the segment (e.g., permissions)
+    bytes: Cow<'a, [u8]>,          // Bytes of the segment
+    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
     function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
 }
 
@@ -212,6 +214,7 @@ impl<'a> LoadableSegment<'a> {
         address: Address,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
+        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
         function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
     ) -> LoadableSegment<'a> {
         Self {
@@ -219,6 +222,7 @@ impl<'a> LoadableSegment<'a> {
             address,
             properties,
             bytes: bytes.into(),
+            mapping_hints: mapping_hints.into(),
             function_hints: function_hints.into(),
         }
     }
@@ -251,6 +255,21 @@ impl<'a> LoadableSegment<'a> {
     /// Returns the bytes of the segment.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the context hints of the segment.
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    /// Returns a mutable reference to the context hints of the segment.
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
+        self.mapping_hints.to_mut()
+    }
+
+    // Adds a context hint to the segment.
+    pub fn add_context_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
+        self.mapping_hints.to_mut().insert(address.into(), hint);
     }
 
     /// Returns the function hints of the segment.
@@ -425,6 +444,7 @@ impl<'a> LoadableSegment<'a> {
             address: self.address,
             properties: self.properties,
             bytes: self.bytes.into_owned().into(),
+            mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
         }
     }

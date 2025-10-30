@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
-use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign};
 
 use bincode::{Decode, Encode};
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
@@ -411,10 +411,32 @@ impl AddressSet {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AddressMap<V>(RangeMapBlaze<u64, V>)
 where
     V: Clone + Eq;
+
+impl<V> Default for AddressMap<V>
+where
+    V: Clone + Eq,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V> FromIterator<(Address, V)> for AddressMap<V>
+where
+    V: Clone + Eq,
+{
+    fn from_iter<T: IntoIterator<Item = (Address, V)>>(iter: T) -> Self {
+        let mut map = AddressMap::new();
+        for (addr, value) in iter {
+            map.insert(addr, value);
+        }
+        map
+    }
+}
 
 impl<V> AddressMap<V>
 where
@@ -450,5 +472,13 @@ where
 
     pub fn iter(&self) -> impl Iterator<Item = (Address, &V)> {
         self.0.iter().map(|(k, v)| (Address::from(k), v))
+    }
+
+    pub fn range(&self, range: impl RangeBounds<Address>) -> impl Iterator<Item = (Address, V)> {
+        let start = range.start_bound().map(|addr| addr.offset());
+        let end = range.end_bound().map(|addr| addr.offset());
+        self.0
+            .range((start, end))
+            .map(|(k, v)| (Address::from(k), v))
     }
 }

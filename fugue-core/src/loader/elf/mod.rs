@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
@@ -21,8 +21,7 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Address, AddressMap, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -83,7 +82,7 @@ pub struct Elf<'a> {
     architecture: Arch,
     metadata: LoadableMetadata,
     bounds: RangeInclusive<Address>,
-    mapping_hints: AddressMap<ContextHint>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
     symbols: IndexedSymbolTable,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
@@ -128,7 +127,7 @@ impl<'a> Elf<'a> {
         })
     }
 
-    pub fn mapping_hints(&self) -> &AddressMap<ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
@@ -150,7 +149,7 @@ impl<'a> Elf<'a> {
 
 struct ElfSymbolData {
     bounds: RangeInclusive<Address>,
-    mapping_hints: AddressMap<ContextHint>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
     symbols: IndexedSymbolTable,
     extern_segm: ExternSegment,
 }
@@ -169,7 +168,7 @@ impl ElfSymbolData {
         let addr_align = arch.language().address_alignment().max(addr_size);
 
         let mut section_map = Vec::new();
-        let mut mapping_hints = AddressMap::new();
+        let mut mapping_hints = BTreeMap::new();
 
         let base_addr = Address::zero();
 
@@ -250,7 +249,7 @@ impl ElfSymbolData {
                 && let Ok(name) = symbol.name()
                 && let Some(context) = arch.resolve_mapping_symbol(name)
             {
-                mapping_hints.insert(address, context);
+                mapping_hints.insert(address.into(), context);
                 continue;
             }
 
@@ -526,6 +525,8 @@ where
     segms_split: Option<(IntoRangesIter<u64>, ElfSegment<'data, 'file, Elf, R>)>,
     // current base address
     pub(crate) current_base: Address,
+    // mapping hints provided by mapping symbols
+    pub(crate) mapping_hints: &'file BTreeMap<Address, ContextHint>,
     // mapping of local and external symbols
     pub(crate) symbols: &'file IndexedSymbolTable,
     // virtual segment containing externals
@@ -542,6 +543,7 @@ where
 {
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
+        mapping_hints: &'file BTreeMap<Address, ContextHint>,
         symbols: &'file IndexedSymbolTable,
         externs: &'file ExternSegment,
     ) -> Self {
@@ -553,6 +555,7 @@ where
             covered: RangeSetBlaze::new(),
             segms_split: None,
             current_base: Address::zero(),
+            mapping_hints,
             symbols,
             extern_segm: Some(externs),
             is_object,
@@ -605,6 +608,7 @@ where
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
             bytes: Cow::Owned(bytes),
+            mapping_hints: Cow::Owned(BTreeMap::new()),
             function_hints: Cow::Owned(function_hints),
         };
 
@@ -683,6 +687,12 @@ where
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
+                mapping_hints: Cow::Owned(
+                    self.mapping_hints
+                        .range(address..=last_address)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                ),
                 ..Default::default()
             };
 
@@ -727,7 +737,7 @@ where
             };
 
             let address = Address::from(*range.start());
-            let last_address = address + bytes.len();
+            let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");
 
@@ -740,6 +750,12 @@ where
                 address,
                 properties: elf_segment_properties(&*segm),
                 bytes,
+                mapping_hints: Cow::Owned(
+                    self.mapping_hints
+                        .range(address..=last_address)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                ),
                 ..Default::default()
             };
 
@@ -811,6 +827,12 @@ where
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
+                mapping_hints: Cow::Owned(
+                    self.mapping_hints
+                        .range(address..=last_address)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                ),
                 ..Default::default()
             };
 
@@ -887,7 +909,7 @@ where
             };
 
             let address = Address::from(*range.start());
-            let last_address = address + bytes.len();
+            let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");
 
@@ -900,6 +922,12 @@ where
                 address,
                 properties: elf_segment_properties(&segm),
                 bytes,
+                mapping_hints: Cow::Owned(
+                    self.mapping_hints
+                        .range(address..=last_address)
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect(),
+                ),
                 ..Default::default()
             };
 
@@ -1030,6 +1058,7 @@ impl Loadable for Elf<'_> {
             view,
             elf | Box::new(ElfLoadableSegments::new(
                 elf,
+                &self.mapping_hints,
                 &self.symbols,
                 &self.extern_segm
             ))
