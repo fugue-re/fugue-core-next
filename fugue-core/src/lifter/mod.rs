@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use arrayvec::ArrayVec;
 use bincode::{BorrowDecode, Decode, Encode};
 
@@ -17,6 +19,18 @@ pub mod traits;
 pub struct ContextUpdate {
     bits: ContextBitRange,
     value: u32,
+}
+
+impl Display for ContextUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}:{}]={}",
+            self.bits.start_bit(),
+            self.bits.end_bit(),
+            self.value
+        )
+    }
 }
 
 impl ContextUpdate {
@@ -143,6 +157,21 @@ pub enum ContextHintKind {
     Data,
 }
 
+impl Display for ContextHintKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextHintKind::Code(bits) => {
+                if *bits != 0 {
+                    write!(f, "code ({bits}-bit)")
+                } else {
+                    f.write_str("code")
+                }
+            }
+            ContextHintKind::Data => f.write_str("data"),
+        }
+    }
+}
+
 impl ContextHintKind {
     pub fn code() -> Self {
         ContextHintKind::Code(0)
@@ -180,6 +209,34 @@ impl ContextHintKind {
 pub struct ContextHint {
     kind: ContextHintKind,
     context: Option<ContextSet>,
+}
+
+impl Display for ContextHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            ContextHintKind::Code(bits) => {
+                if *bits != 0 {
+                    write!(f, "code ({bits}-bit)")
+                } else {
+                    f.write_str("code")
+                }
+            }
+            ContextHintKind::Data => f.write_str("data"),
+        }?;
+
+        if let Some((first, rest)) = &self
+            .context
+            .as_ref()
+            .and_then(|context| context.0.split_first())
+        {
+            write!(f, " with context: {first}")?;
+            for update in rest.iter() {
+                write!(f, ", {update}")?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ContextHint {

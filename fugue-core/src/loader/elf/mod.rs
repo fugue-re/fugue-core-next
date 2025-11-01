@@ -302,11 +302,6 @@ impl ElfSymbolData {
         // if we were to consider the external address as a function, and call to it, we would
         // hit valid code, and return.
 
-        // FIXME: this is incorrect for shared objects, where we have exports. The dynamic symbol
-        // table will contain both imports and exports, and by our conventions, we should only add
-        // imports to the externs table, which we do, but we therefore miss the exports. Unfortunately,
-        // the way object exposes the symbol tables, each has its own set of symbol indices...
-
         let mut extern_segm =
             ExternSegment::new(aligned_base, addr_align, arch.external_thunk_template());
 
@@ -1136,6 +1131,10 @@ mod test {
 
             for (_, sym) in elf.symbols().iter() {
                 tracing::info!("symbol {sym}");
+            }
+
+            for (addr, hint) in elf.mapping_hints() {
+                tracing::info!("mapping hint {addr}: {hint}");
             }
 
             Ok(())
