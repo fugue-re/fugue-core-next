@@ -25,6 +25,9 @@ use entities::{
     EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
 };
 
+pub mod project;
+pub use project::ProjectStorage;
+
 pub mod segments;
 pub use segments::{
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentStorage,
