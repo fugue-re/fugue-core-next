@@ -1,20 +1,44 @@
-use crate::ir::{Address, Symbol, SymbolEntry, SymbolProperties};
+use crate::ir::{Address, Id, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
 use crate::storage::{EntityStorage, EntityStorageError};
 
-pub struct SymbolIterator<'a> {
-    inner: Box<dyn Iterator<Item = SymbolEntry> + 'a>,
+pub struct SymbolEntryIter<'a> {
+    inner: Box<dyn Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a>,
 }
 
-impl<'a> SymbolIterator<'a> {
-    pub fn new(iter: impl Iterator<Item = SymbolEntry> + 'a) -> Self {
+impl<'a> SymbolEntryIter<'a> {
+    pub fn new(iter: impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a) -> Self {
         Self {
             inner: Box::new(iter),
         }
     }
 }
 
-impl<'a> Iterator for SymbolIterator<'a> {
-    type Item = SymbolEntry;
+impl<'a> Iterator for SymbolEntryIter<'a> {
+    type Item = (Id<Symbol>, &'a SymbolEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+pub struct SymbolEntryIterMut<'a> {
+    inner: Box<dyn Iterator<Item = (Id<Symbol>, &'a mut SymbolEntry)> + 'a>,
+}
+
+impl<'a> SymbolEntryIterMut<'a> {
+    pub fn new(iter: impl Iterator<Item = (Id<Symbol>, &'a mut SymbolEntry)> + 'a) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for SymbolEntryIterMut<'a> {
+    type Item = (Id<Symbol>, &'a mut SymbolEntry);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()
@@ -26,32 +50,56 @@ impl<'a> Iterator for SymbolIterator<'a> {
 }
 
 pub trait SymbolTable {
+    fn get(&self, symbol: &str) -> Option<SymbolEntryIter<'_>>;
+    fn get_mut(&mut self, symbol: &str) -> Option<SymbolEntryIterMut<'_>>;
+
+    fn get_first(&self, symbol: &str) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.get(symbol).and_then(|mut iter| iter.next())
+    }
+
+    fn get_first_mut(&mut self, symbol: &str) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.get_mut(symbol).and_then(|mut iter| iter.next())
+    }
+
+    fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry>;
+    fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry>;
+    fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)>;
+    fn get_by_index_mut(&mut self, index: SymbolIndex) -> Option<(Id<Symbol>, &mut SymbolEntry)>;
+
+    fn get_by_address(&self, address: Address) -> Option<SymbolEntryIter<'_>>;
+    fn get_by_address_mut(&mut self, address: Address) -> Option<SymbolEntryIterMut<'_>>;
+
+    fn get_first_by_address(&self, address: Address) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.get_by_address(address)
+            .and_then(|mut iter| iter.next())
+    }
+
+    fn get_first_by_address_mut(
+        &mut self,
+        address: Address,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.get_by_address_mut(address)
+            .and_then(|mut iter| iter.next())
+    }
+
+    fn contains(&self, symbol: &str) -> bool;
+    fn contains_index(&self, index: SymbolIndex) -> bool;
+    fn contains_address(&self, address: Address) -> bool;
+
     fn insert(
         &mut self,
-        index: usize,
-        addr: Address,
-        symbol: Option<Symbol>,
-        props: SymbolProperties,
-    );
+        index: SymbolIndex,
+        address: Address,
+        symbol: Symbol,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>);
+
+    fn iter(&self) -> SymbolEntryIter<'_>;
+    fn iter_by_selector(&self, selector: usize) -> SymbolEntryIter<'_>;
+    fn iter_by_address(&self, address: Address) -> SymbolEntryIter<'_>;
 
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-
-    fn get_at(&self, addr: Address) -> Option<SymbolEntry>;
-    fn get_properties_at(&self, addr: Address) -> Option<SymbolProperties>;
-
-    fn get(&self, sym: &str) -> Option<SymbolEntry>;
-    fn get_address(&self, sym: &str) -> Option<Address>;
-    fn get_properties(&self, sym: &str) -> Option<SymbolProperties>;
-
-    fn get_by_index(&self, index: usize) -> Option<SymbolEntry>;
-    fn get_address_by_index(&self, index: usize) -> Option<Address>;
-    fn get_properties_by_index(&self, index: usize) -> Option<SymbolProperties>;
-
-    fn contains_address(&self, addr: Address) -> bool;
-    fn contains(&self, sym: &str) -> bool;
-
-    fn iter<'a>(&'a self) -> SymbolIterator<'a>;
 
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
 }

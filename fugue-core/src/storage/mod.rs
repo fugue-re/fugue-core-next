@@ -26,7 +26,7 @@ use entities::{
 };
 
 pub mod project;
-pub use project::ProjectStorage;
+pub use project::{ProjectStorage, ProjectStorageProvider};
 
 pub mod segments;
 pub use segments::{

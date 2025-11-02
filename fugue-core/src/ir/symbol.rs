@@ -1,8 +1,6 @@
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::{Debug, Display};
-use std::ops::RangeInclusive;
 use std::sync::LazyLock;
 
 use bincode::{Decode, Encode};
@@ -12,10 +10,14 @@ pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
 
-use crate::ir::traits::{SymbolIterator, SymbolTable as SymbolTableT};
-use crate::ir::{Address, ExternFunctionTemplate, Id};
+use crate::ir::traits::{
+    SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
+    SymbolTable as SymbolTableT,
+};
+use crate::ir::{Address, Id};
 use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId};
+use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type SymbolId = Id<Symbol>;
 pub type LazySymbol = LazyLock<Symbol>;
@@ -446,12 +448,7 @@ impl<'a> ExactSizeIterator for SymbolEntryIterMut<'a> {}
 
 impl IndexedSymbolTable {
     pub fn new() -> Self {
-        Self {
-            symbols: Vec::new(),
-            indices: BTreeMap::new(),
-            names: SymbolMap::default(),
-            addresses: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get(
@@ -698,489 +695,6 @@ impl IndexedSymbolTable {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct LocalSymbols {
-    indices: BTreeMap<usize, Address>,
-    sym_to_addr: SymbolMap<Address>,
-    addr_to_sym: BTreeMap<Address, (Option<Symbol>, Cell<SymbolProperties>)>,
-}
-
-impl<C> Decode<C> for LocalSymbols {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let indices = BTreeMap::<usize, Address>::decode(decoder)?;
-
-        let sym_len = usize::decode(decoder)?;
-        let sym_to_addr = (0..sym_len)
-            .into_iter()
-            .map(|_| {
-                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
-                let addr = Address::decode(decoder)?;
-                Ok((sym, addr))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let addr_len = usize::decode(decoder)?;
-        let addr_to_sym = (0..addr_len)
-            .into_iter()
-            .map(|_| {
-                let addr = Address::decode(decoder)?;
-                let Compat(sym) = Compat::<Option<Symbol>>::decode(decoder)?;
-                let props = Cell::new(SymbolProperties::decode(decoder)?);
-                Ok((addr, (sym, props)))
-            })
-            .collect::<Result<_, _>>()?;
-
-        Ok(Self {
-            indices,
-            sym_to_addr,
-            addr_to_sym,
-        })
-    }
-}
-
-impl Encode for LocalSymbols {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
-        self.indices.encode(encoder)?;
-
-        self.sym_to_addr.len().encode(encoder)?;
-        for (&sym, &addr) in &self.sym_to_addr {
-            sym.encode(encoder)?;
-            addr.encode(encoder)?;
-        }
-
-        self.addr_to_sym.len().encode(encoder)?;
-        for (&addr, (sym, props)) in &self.addr_to_sym {
-            addr.encode(encoder)?;
-            Compat(sym).encode(encoder)?;
-            props.get().encode(encoder)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl LocalSymbols {
-    pub fn new() -> Self {
-        Self {
-            indices: BTreeMap::new(),
-            sym_to_addr: SymbolMap::default(),
-            addr_to_sym: BTreeMap::new(),
-        }
-    }
-
-    pub fn add_symbol(
-        &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-    ) {
-        Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::LOCAL)
-    }
-
-    pub fn add_symbol_with(
-        &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-        props: SymbolProperties,
-    ) {
-        let addr = addr.into();
-        let sym = symbol.into();
-
-        let sym = sym.and_then(|sym| if sym.is_empty() { None } else { Some(sym) });
-
-        self.indices.insert(index, addr);
-
-        self.addr_to_sym
-            .insert(addr, (sym, Cell::new(props | SymbolProperties::LOCAL)));
-
-        let Some(sym) = sym else {
-            return;
-        };
-
-        self.sym_to_addr.insert(sym, addr);
-    }
-
-    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Symbol>, SymbolProperties)> {
-        self.addr_to_sym
-            .get(&addr.into())
-            .map(|(sym, props)| (*sym, props.get()))
-    }
-
-    pub fn symbol_properties(&self, addr: impl Into<Address>) -> Option<SymbolProperties> {
-        self.addr_to_sym
-            .get(&addr.into())
-            .map(|(_, props)| props.get())
-    }
-
-    pub fn update_symbol_properties(
-        &self,
-        addr: impl Into<Address>,
-        f: impl FnOnce(SymbolProperties) -> SymbolProperties,
-    ) -> bool {
-        let Some((_, curr_props)) = self.addr_to_sym.get(&addr.into()) else {
-            return false;
-        };
-
-        curr_props.set(f(curr_props.get()));
-        true
-    }
-
-    pub fn add_or_update_symbol_properties(
-        &mut self,
-        addr: impl Into<Address>,
-        f: impl FnOnce(SymbolProperties) -> SymbolProperties,
-    ) {
-        let entry = self
-            .addr_to_sym
-            .entry(addr.into())
-            .or_insert_with(|| (None, Cell::new(SymbolProperties::LOCAL)));
-
-        entry.1.set(f(entry.1.get()));
-    }
-
-    pub fn address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        let sym = Symbol::from_existing(sym.as_ref())?;
-        self.sym_to_addr.get(&sym).copied()
-    }
-
-    pub fn properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        let sym = Symbol::from_existing(sym.as_ref())?;
-        self.sym_to_addr
-            .get(&sym)
-            .and_then(|addr| self.addr_to_sym.get(addr).map(|(_, props)| props.get()))
-    }
-
-    pub fn get_symbol(&self, index: usize) -> Option<Symbol> {
-        self.indices
-            .get(&index)
-            .and_then(|&addr| self.addr_to_sym.get(&addr).and_then(|(sym, _)| *sym))
-    }
-
-    pub fn get_address(&self, index: usize) -> Option<Address> {
-        self.indices.get(&index).copied()
-    }
-
-    pub fn get_properties(&self, index: usize) -> Option<SymbolProperties> {
-        self.indices
-            .get(&index)
-            .and_then(|&addr| self.addr_to_sym.get(&addr).map(|(_, props)| props.get()))
-    }
-
-    pub fn get_symbol_with_properties(
-        &self,
-        index: usize,
-    ) -> Option<(Option<Symbol>, SymbolProperties)> {
-        self.indices.get(&index).and_then(|&addr| {
-            self.addr_to_sym
-                .get(&addr)
-                .map(|(sym, props)| (*sym, props.get()))
-        })
-    }
-
-    pub fn contains_address(&self, addr: impl Into<Address>) -> bool {
-        self.addr_to_sym.contains_key(&addr.into())
-    }
-
-    pub fn contains_symbol(&self, sym: impl AsRef<str>) -> bool {
-        let Some(sym) = Symbol::from_existing(sym.as_ref()) else {
-            return false;
-        };
-        self.sym_to_addr.contains_key(&sym)
-    }
-
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
-        self.addr_to_sym
-            .iter()
-            .map(|(&addr, (sym, props))| SymbolEntry {
-                address: addr,
-                symbol: *sym,
-                properties: props.get(),
-            })
-    }
-
-    pub fn next_index(&self) -> usize {
-        self.indices.keys().max().map_or(0, |&max| max + 1)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.indices.len()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExternSymbols {
-    base: Address,
-    alignment: usize,
-    indices: BTreeMap<usize, Address>,
-    sym_to_addr: SymbolMap<Address>,
-    addr_to_sym: BTreeMap<Address, (Option<Symbol>, Cell<SymbolProperties>)>,
-    template: ExternFunctionTemplate,
-}
-
-impl<C> Decode<C> for ExternSymbols {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let base = Address::decode(decoder)?;
-        let alignment = usize::decode(decoder)?;
-        let indices = BTreeMap::<usize, Address>::decode(decoder)?;
-
-        let sym_len = usize::decode(decoder)?;
-        let sym_to_addr = (0..sym_len)
-            .into_iter()
-            .map(|_| {
-                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
-                let addr = Address::decode(decoder)?;
-                Ok((sym, addr))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let addr_len = usize::decode(decoder)?;
-        let addr_to_sym = (0..addr_len)
-            .into_iter()
-            .map(|_| {
-                let addr = Address::decode(decoder)?;
-                let Compat(sym) = Compat::<Option<Symbol>>::decode(decoder)?;
-                let props = Cell::new(SymbolProperties::decode(decoder)?);
-                Ok((addr, (sym, props)))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let template = ExternFunctionTemplate::decode(decoder)?;
-
-        Ok(Self {
-            base,
-            alignment,
-            indices,
-            sym_to_addr,
-            addr_to_sym,
-            template,
-        })
-    }
-}
-
-impl Encode for ExternSymbols {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
-        self.base.encode(encoder)?;
-        self.alignment.encode(encoder)?;
-        self.indices.encode(encoder)?;
-
-        self.sym_to_addr.len().encode(encoder)?;
-        for (&sym, &addr) in &self.sym_to_addr {
-            sym.encode(encoder)?;
-            addr.encode(encoder)?;
-        }
-
-        self.addr_to_sym.len().encode(encoder)?;
-        for (&addr, (sym, props)) in &self.addr_to_sym {
-            addr.encode(encoder)?;
-            Compat(sym).encode(encoder)?;
-            props.get().encode(encoder)?;
-        }
-
-        self.template.encode(encoder)?;
-
-        Ok(())
-    }
-}
-
-impl ExternSymbols {
-    pub fn new(
-        base: impl Into<Address>,
-        alignment: usize,
-        template: ExternFunctionTemplate,
-    ) -> Self {
-        Self {
-            base: base.into(),
-            alignment,
-            indices: BTreeMap::new(),
-            sym_to_addr: SymbolMap::default(),
-            addr_to_sym: BTreeMap::new(),
-            template,
-        }
-    }
-
-    pub fn add_symbol(
-        &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-    ) {
-        Self::add_symbol_with(self, index, addr, symbol, SymbolProperties::EXTERN)
-    }
-
-    pub fn add_symbol_with(
-        &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-        props: SymbolProperties,
-    ) {
-        let addr = addr.into();
-        let sym = symbol.into();
-
-        let sym = sym.and_then(|sym| sym.is_empty().then(|| None).unwrap_or(Some(sym)));
-
-        self.indices.insert(index, addr);
-
-        self.addr_to_sym
-            .insert(addr, (sym, Cell::new(props | SymbolProperties::EXTERN)));
-
-        let Some(sym) = sym else {
-            return;
-        };
-
-        self.sym_to_addr.insert(sym, addr);
-    }
-
-    pub fn base(&self) -> Address {
-        self.base
-    }
-
-    pub fn alignment(&self) -> usize {
-        self.alignment
-    }
-
-    pub fn last_address(&self) -> Address {
-        if self.is_empty() {
-            self.base()
-        } else {
-            self.base() + self.size() - 1usize
-        }
-    }
-
-    pub fn bounds(&self) -> RangeInclusive<Address> {
-        self.base()..=self.last_address()
-    }
-
-    pub fn symbol(&self, addr: impl Into<Address>) -> Option<(Option<Symbol>, SymbolProperties)> {
-        self.addr_to_sym
-            .get(&addr.into())
-            .map(|(sym, props)| (*sym, props.get()))
-    }
-
-    pub fn symbol_properties(&self, addr: impl Into<Address>) -> Option<SymbolProperties> {
-        self.addr_to_sym
-            .get(&addr.into())
-            .map(|(_, props)| props.get())
-    }
-
-    pub fn update_symbol_properties(
-        &self,
-        addr: impl Into<Address>,
-        f: impl FnOnce(SymbolProperties) -> SymbolProperties,
-    ) -> bool {
-        let Some((_, curr_props)) = self.addr_to_sym.get(&addr.into()) else {
-            return false;
-        };
-
-        curr_props.set(f(curr_props.get()));
-        true
-    }
-
-    pub fn address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        let sym = Symbol::from_existing(sym.as_ref())?;
-        self.sym_to_addr.get(&sym).copied()
-    }
-
-    pub fn properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        let sym = Symbol::from_existing(sym.as_ref())?;
-        self.sym_to_addr
-            .get(&sym)
-            .and_then(|addr| self.addr_to_sym.get(addr).map(|(_, props)| props.get()))
-    }
-
-    pub fn get_symbol(&self, index: usize) -> Option<Symbol> {
-        self.indices
-            .get(&index)
-            .and_then(|&addr| self.addr_to_sym.get(&addr).and_then(|(sym, _)| *sym))
-    }
-
-    pub fn get_address(&self, index: usize) -> Option<Address> {
-        self.indices.get(&index).copied()
-    }
-
-    pub fn get_properties(&self, index: usize) -> Option<SymbolProperties> {
-        self.indices
-            .get(&index)
-            .and_then(|&addr| self.addr_to_sym.get(&addr).map(|(_, props)| props.get()))
-    }
-
-    pub fn get_symbol_with_properties(
-        &self,
-        index: usize,
-    ) -> Option<(Option<Symbol>, SymbolProperties)> {
-        self.indices.get(&index).and_then(|&addr| {
-            self.addr_to_sym
-                .get(&addr)
-                .map(|(sym, props)| (*sym, props.get()))
-        })
-    }
-
-    pub fn contains_address(&self, addr: impl Into<Address>) -> bool {
-        self.addr_to_sym.contains_key(&addr.into())
-    }
-
-    pub fn contains_symbol(&self, sym: impl AsRef<str>) -> bool {
-        let Some(sym) = Symbol::from_existing(sym.as_ref()) else {
-            return false;
-        };
-        self.sym_to_addr.contains_key(&sym)
-    }
-
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = SymbolEntry> + 'a {
-        self.addr_to_sym
-            .iter()
-            .map(|(&addr, (sym, props))| SymbolEntry {
-                address: addr,
-                symbol: *sym,
-                properties: props.get(),
-            })
-    }
-
-    pub fn template(&self) -> &ExternFunctionTemplate {
-        &self.template
-    }
-
-    pub fn aligned_template_size(&self) -> usize {
-        let template_size = self.template.len();
-        (template_size + self.alignment.wrapping_sub(1)) & !self.alignment().wrapping_sub(1)
-    }
-
-    pub fn size(&self) -> usize {
-        self.indices.len() * self.aligned_template_size()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.indices.len()
-    }
-}
-
 pub struct SymbolTable {
     inner: Box<dyn SymbolTableT>,
 }
@@ -1192,14 +706,145 @@ impl SymbolTable {
         }
     }
 
+    pub fn get(&self, symbol: impl AsRef<str>) -> Option<BoxedSymbolEntryIter<'_>> {
+        self.inner.get(symbol.as_ref())
+    }
+
+    pub fn get_mut(&mut self, symbol: impl AsRef<str>) -> Option<BoxedSymbolEntryIterMut<'_>> {
+        self.inner.get_mut(symbol.as_ref())
+    }
+
+    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.inner.get_first(symbol.as_ref())
+    }
+
+    pub fn get_first_mut(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.inner.get_first_mut(symbol.as_ref())
+    }
+
+    pub fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry> {
+        self.inner.get_by_id(id)
+    }
+
+    pub fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry> {
+        self.inner.get_by_id_mut(id)
+    }
+
+    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.inner.get_by_index(index)
+    }
+
+    pub fn get_by_index_mut(
+        &mut self,
+        index: SymbolIndex,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.inner.get_by_index_mut(index)
+    }
+
+    pub fn get_by_address(&self, address: impl Into<Address>) -> Option<BoxedSymbolEntryIter<'_>> {
+        self.inner.get_by_address(address.into())
+    }
+
+    pub fn get_by_address_mut(
+        &mut self,
+        address: impl Into<Address>,
+    ) -> Option<BoxedSymbolEntryIterMut<'_>> {
+        self.inner.get_by_address_mut(address.into())
+    }
+
+    pub fn get_first_by_address(
+        &self,
+        address: impl Into<Address>,
+    ) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        self.inner.get_first_by_address(address.into())
+    }
+
+    pub fn get_first_by_address_mut(
+        &mut self,
+        address: impl Into<Address>,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        self.inner.get_first_by_address_mut(address.into())
+    }
+
+    pub fn contains(&self, symbol: &str) -> bool {
+        self.inner.contains(symbol)
+    }
+
+    pub fn contains_index(&self, index: SymbolIndex) -> bool {
+        self.inner.contains_index(index)
+    }
+
+    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
+        self.inner.contains_address(address.into())
+    }
+
+    pub fn insert_local(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+    ) -> (bool, Id<Symbol>) {
+        self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
+    }
+
+    pub fn insert_local_with(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
+    }
+
+    pub fn insert_extern(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+    ) -> (bool, Id<Symbol>) {
+        self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
+    }
+
+    pub fn insert_extern_with(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        self.insert(
+            index,
+            address,
+            symbol,
+            properties | SymbolProperties::EXTERN,
+        )
+    }
+
     pub fn insert(
         &mut self,
-        index: usize,
-        addr: impl Into<Address>,
-        symbol: impl Into<Option<Symbol>>,
-        props: SymbolProperties,
-    ) {
-        self.inner.insert(index, addr.into(), symbol.into(), props);
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        self.inner
+            .insert(index, address.into(), symbol.into(), properties)
+    }
+
+    pub fn iter(&self) -> BoxedSymbolEntryIter<'_> {
+        self.inner.iter()
+    }
+
+    pub fn iter_by_selector(&self, selector: usize) -> BoxedSymbolEntryIter<'_> {
+        self.inner.iter_by_selector(selector)
+    }
+
+    pub fn iter_by_address(&self, address: impl Into<Address>) -> BoxedSymbolEntryIter<'_> {
+        self.inner.iter_by_address(address.into())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1210,48 +855,8 @@ impl SymbolTable {
         self.inner.len()
     }
 
-    pub fn get_at(&self, addr: impl Into<Address>) -> Option<SymbolEntry> {
-        self.inner.get_at(addr.into())
-    }
-
-    pub fn get_properties_at(&self, addr: impl Into<Address>) -> Option<SymbolProperties> {
-        self.inner.get_properties_at(addr.into())
-    }
-
-    pub fn get_address(&self, sym: impl AsRef<str>) -> Option<Address> {
-        self.inner.get_address(sym.as_ref())
-    }
-
-    pub fn get(&self, sym: impl AsRef<str>) -> Option<SymbolEntry> {
-        self.inner.get(sym.as_ref())
-    }
-
-    pub fn get_properties(&self, sym: impl AsRef<str>) -> Option<SymbolProperties> {
-        self.inner.get_properties(sym.as_ref())
-    }
-
-    pub fn get_by_index(&self, index: usize) -> Option<SymbolEntry> {
-        self.inner.get_by_index(index)
-    }
-
-    pub fn get_address_by_index(&self, index: usize) -> Option<Address> {
-        self.inner.get_address_by_index(index)
-    }
-
-    pub fn get_properties_by_index(&self, index: usize) -> Option<SymbolProperties> {
-        self.inner.get_properties_by_index(index)
-    }
-
-    pub fn contains_address(&self, addr: impl Into<Address>) -> bool {
-        self.inner.contains_address(addr.into())
-    }
-
-    pub fn contains(&self, sym: impl AsRef<str>) -> bool {
-        self.inner.contains(sym.as_ref())
-    }
-
-    pub fn iter<'a>(&'a self) -> SymbolIterator<'a> {
-        self.inner.iter()
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+        self.inner.persist(storage)
     }
 }
 

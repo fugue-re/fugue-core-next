@@ -32,8 +32,8 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 
 pub mod symbol;
 pub use symbol::{
-    ExternSymbols, IndexedSymbolTable, LazySymbol, LocalSymbols, Symbol, SymbolEntry, SymbolId,
-    SymbolIndex, SymbolMap, SymbolProperties, SymbolTable,
+    IndexedSymbolTable, LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap,
+    SymbolProperties, SymbolTable,
 };
 
 pub mod traits;

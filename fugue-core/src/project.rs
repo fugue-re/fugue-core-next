@@ -9,8 +9,8 @@ use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, Loade
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, StorageContainer, StorageProvider,
-    StorageProviderError,
+    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, ProjectStorage,
+    ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
@@ -67,7 +67,7 @@ pub enum ProjectError {
 impl Project {
     pub fn new<P>(loadable: &impl Loadable) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         Self::new_with::<P>(loadable, AttributeMap::default())
     }
@@ -77,7 +77,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         // NOTE: we make a copy of the loader attributes, as project attributes will be a superset.
         let mut attributes = attributes.into();
@@ -86,16 +86,20 @@ impl Project {
 
         tracing::trace!("initialising project storage layer");
 
-        let storage = StorageContainer::from_loadable::<P>(loadable, &mut attributes)?;
+        let storage =
+            StorageContainer::from_loadable::<P::StorageProvider>(loadable, &mut attributes)?;
 
-        Self::from_storage(Some(loadable), storage, attributes)
+        Self::from_storage::<P::ProjectStorage>(Some(loadable), storage, attributes)
     }
 
-    fn from_storage(
+    fn from_storage<P>(
         loadable: Option<&impl Loadable>,
         storage: StorageContainer,
         attributes: impl Into<AttributeMap>,
-    ) -> Result<Self, ProjectError> {
+    ) -> Result<Self, ProjectError>
+    where
+        P: ProjectStorage,
+    {
         let mut attributes = attributes.into();
 
         tracing::trace!("loading project architecture and lifter");
@@ -165,7 +169,7 @@ impl Project {
 
     pub fn from_bytes<P>(bytes: &[u8]) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         Self::from_bytes_with::<P>(bytes, AttributeMap::default())
     }
@@ -175,7 +179,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
         L: LoadableFromBytes<'a>,
     {
         Self::try_from_bytes_with::<P, L>(bytes, attributes)
@@ -186,7 +190,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         Self::try_from_bytes_with::<P, Loader>(bytes, attributes)
     }
@@ -196,14 +200,16 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
         L: LoadableFromBytes<'a>,
     {
         let mut attributes = attributes.into();
 
         if let Some(path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
-            return match P::from_storage(path, &mut attributes) {
-                Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
+            return match P::StorageProvider::from_storage(path, &mut attributes) {
+                Ok(storage) => {
+                    Self::from_storage::<P::ProjectStorage>(None::<&L>, storage, attributes)
+                }
                 Err(e) if e.requires_loadable() => L::from_bytes_with(bytes, attributes)
                     .map_err(ProjectError::from)
                     .and_then(|loader| Self::new::<P>(&loader)),
@@ -219,14 +225,14 @@ impl Project {
     /// Loads or creates a project from the given file path.
     pub fn from_file<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         Self::from_file_with::<P>(path, AttributeMap::default())
     }
 
     pub fn try_from_file<P, L>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
         L: LoadableFromFile,
     {
         Self::try_from_file_with::<P, L>(path, AttributeMap::default())
@@ -238,7 +244,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
     {
         Self::try_from_file_with::<P, Loader>(path, attributes).map_err(ProjectError::from)
     }
@@ -248,7 +254,7 @@ impl Project {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        P: StorageProvider,
+        P: ProjectStorageProvider,
         L: LoadableFromFile,
     {
         let path = path.as_ref();
@@ -266,8 +272,8 @@ impl Project {
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .expect("valid project path");
 
-        match P::from_storage(project_path, &mut attributes) {
-            Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
+        match P::StorageProvider::from_storage(project_path, &mut attributes) {
+            Ok(storage) => Self::from_storage::<P::ProjectStorage>(None::<&L>, storage, attributes),
             Err(e) if e.requires_loadable() => L::from_file_with(path, attributes)
                 .map_err(ProjectError::from)
                 .and_then(|loader| Self::new::<P>(&loader)),
@@ -385,10 +391,10 @@ mod test {
     use crate::attributes;
     use crate::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
     use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
-    use crate::storage::{
-        DefaultPersistentSegmentStorage, DefaultPersistentStorageProvider,
-        PersistentStorageProvider, TransientStorageProvider,
+    use crate::storage::project::{
+        DefaultPersistentProjectStorageProvider, DefaultTransientProjectStorageProvider,
     };
+    use crate::storage::{DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage};
 
     use super::*;
 
@@ -408,7 +414,8 @@ mod test {
     #[test]
     fn test_project() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let project = Project::from_file::<TransientStorageProvider>("tests/ls.elf")?;
+            let project =
+                Project::from_file::<DefaultTransientProjectStorageProvider>("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
             project
@@ -431,7 +438,12 @@ mod test {
     #[test]
     fn test_project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let project = Project::from_file_with::<DefaultPersistentStorageProvider>(
+            let project = Project::from_file_with::<
+                DefaultPersistentProjectStorageProvider<
+                    DefaultPersistentEntityStorage,
+                    DefaultPersistentSegmentStorage,
+                >,
+            >(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "tests/ls.fdbz"
@@ -448,7 +460,10 @@ mod test {
     fn test_project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
             let project = Project::from_file_with::<
-                PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+                DefaultPersistentProjectStorageProvider<
+                    MdbxEntityStorage,
+                    DefaultPersistentSegmentStorage,
+                >,
             >(
                 "tests/ls.elf",
                 attributes![
@@ -466,7 +481,10 @@ mod test {
     fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
             let _project = Project::from_file_with::<
-                PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+                DefaultPersistentProjectStorageProvider<
+                    RocksDbEntityStorage,
+                    DefaultPersistentSegmentStorage,
+                >,
             >(
                 "tests/test-project.rdb.fdbz",
                 attributes! {
