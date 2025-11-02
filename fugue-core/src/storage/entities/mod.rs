@@ -16,6 +16,9 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod common;
 pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
 
+pub mod dummy;
+pub use dummy::DummyEntityStorage;
+
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
 
@@ -24,6 +27,9 @@ pub use mdbx::MdbxEntityStorage;
 
 pub mod rocksdb;
 pub use rocksdb::RocksDbEntityStorage;
+
+pub mod sqlite;
+pub use sqlite::SqliteEntityStorage;
 
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;

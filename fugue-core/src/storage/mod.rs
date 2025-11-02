@@ -8,6 +8,7 @@ use fugue_bytes::order::{ReadBytesExt as _, WriteBytesExt as _};
 use hex_display::HexDisplayExt;
 use thiserror::Error;
 use walkdir::WalkDir;
+
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 

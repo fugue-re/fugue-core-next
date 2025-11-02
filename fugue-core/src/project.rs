@@ -392,8 +392,9 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn test_project() -> Result<(), Box<dyn std::error::Error>> {
+    fn with_logging(
+        f: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
             .with_line_number(true)
@@ -401,7 +402,12 @@ mod test {
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::subscriber::with_default(subscriber, f)
+    }
+
+    #[test]
+    fn test_project() -> Result<(), Box<dyn std::error::Error>> {
+        with_logging(|| {
             let project = Project::from_file::<TransientStorageProvider>("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
@@ -424,14 +430,7 @@ mod test {
 
     #[test]
     fn test_project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
-            .with_line_number(true)
-            .with_file(true)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
+        with_logging(|| {
             let project = Project::from_file_with::<DefaultPersistentStorageProvider>(
                 "tests/ls.elf",
                 attributes![
@@ -447,14 +446,7 @@ mod test {
 
     #[test]
     fn test_project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
-            .with_line_number(true)
-            .with_file(true)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
+        with_logging(|| {
             let project = Project::from_file_with::<
                 PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
             >(
@@ -472,14 +464,7 @@ mod test {
 
     #[test]
     fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
-            .with_line_number(true)
-            .with_file(true)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
+        with_logging(|| {
             let _project = Project::from_file_with::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
             >(

@@ -4,6 +4,11 @@ version = "0.3.0"
 authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2024"
 
+[features]
+#mdbx = ["libmdbx"]
+#sqlite = ["r2d2", "r2d2_sqlite", "rusqlite"]
+#rocsksdb = ["dep:rocksdb"]
+
 [dependencies]
 anyhow = "1"
 arrayvec = "0.7"
@@ -33,7 +38,10 @@ ouroboros = "0.18"
 quick_cache = "0.6"
 parking_lot = "0.12"
 range-set-blaze = "0.3"
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
 rocksdb = { version = "0.23", features = ["serde1", "snappy"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rustc-hash = "1.1"
 sealed = "0.5"
 serde = { version = "1", features = ["derive"] }
