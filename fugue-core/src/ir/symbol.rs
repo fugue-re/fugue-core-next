@@ -12,11 +12,11 @@ pub use ustr::{
 
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
-    SymbolTable as SymbolTableT,
+    SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId};
+use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type SymbolId = Id<Symbol>;
@@ -32,14 +32,14 @@ macro_rules! lazy_symbol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {
     address: Address,
-    symbol: Option<Symbol>,
+    symbol: Symbol,
     properties: SymbolProperties,
 }
 
 impl Display for SymbolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(sym) = &self.symbol {
-            write!(f, "{sym} at {}; {}", self.address, self.properties)
+        if !self.symbol.is_empty() {
+            write!(f, "{} at {}; {}", self.symbol, self.address, self.properties)
         } else {
             write!(f, "<unnamed> at {}; {}", self.address, self.properties)
         }
@@ -66,7 +66,7 @@ impl<C> Decode<C> for SymbolEntry {
         use bincode::serde::Compat;
 
         let address = Address::decode(decoder)?;
-        let Compat(symbol) = Compat::<Option<Symbol>>::decode(decoder)?;
+        let Compat(symbol) = Compat::<Symbol>::decode(decoder)?;
         let properties = SymbolProperties::decode(decoder)?;
 
         Ok(Self {
@@ -80,7 +80,7 @@ impl<C> Decode<C> for SymbolEntry {
 impl SymbolEntry {
     pub fn new(
         address: Address,
-        symbol: impl Into<Option<Symbol>>,
+        symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> Self {
         Self {
@@ -94,8 +94,8 @@ impl SymbolEntry {
         self.address
     }
 
-    pub fn symbol(&self) -> Option<&Symbol> {
-        self.symbol.as_ref()
+    pub fn symbol(&self) -> Symbol {
+        self.symbol
     }
 
     pub fn properties(&self) -> SymbolProperties {
@@ -451,19 +451,19 @@ impl IndexedSymbolTable {
         Self::default()
     }
 
-    pub fn get(
-        &self,
+    pub fn get<'a>(
+        &'a self,
         symbol: impl AsRef<str>,
-    ) -> Option<impl Iterator<Item = (Id<Symbol>, &SymbolEntry)>> {
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a> {
         let symbol = Symbol::from_existing(symbol.as_ref())?;
         let ids = self.names.get(&symbol)?;
         Some(SymbolEntryIter::new(ids, &self.symbols))
     }
 
-    pub fn get_mut(
-        &mut self,
+    pub fn get_mut<'a>(
+        &'a mut self,
         symbol: impl AsRef<str>,
-    ) -> Option<impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)>> {
+    ) -> Option<impl Iterator<Item = (Id<Symbol>, &'a mut SymbolEntry)> + 'a> {
         let symbol = Symbol::from_existing(symbol.as_ref())?;
         let ids = self.names.get(&symbol)?;
         Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
@@ -604,7 +604,7 @@ impl IndexedSymbolTable {
     ) -> (bool, Id<Symbol>) {
         let address = address.into();
         let symbol = symbol.into();
-        let symbol_entry = SymbolEntry::new(address, Some(symbol), properties);
+        let symbol_entry = SymbolEntry::new(address, symbol, properties);
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
@@ -686,12 +686,125 @@ impl IndexedSymbolTable {
             .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
     }
 
+    // Iterator over all symbol entries by their original symbol table indices.
+    pub fn iter_by_index<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (SymbolIndex, Id<Symbol>, &'a SymbolEntry)> + 'a {
+        self.indices
+            .iter()
+            .map(move |(&index, &id)| (index, id, &self.symbols[id.index()]))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty()
     }
 
     pub fn len(&self) -> usize {
         self.symbols.len()
+    }
+}
+
+impl SymbolTableT for IndexedSymbolTable {
+    fn get(&self, symbol: &str) -> Option<BoxedSymbolEntryIter> {
+        Self::get(self, symbol).map(BoxedSymbolEntryIter::new)
+    }
+
+    fn get_mut(&mut self, symbol: &str) -> Option<BoxedSymbolEntryIterMut> {
+        Self::get_mut(self, symbol).map(BoxedSymbolEntryIterMut::new)
+    }
+
+    fn get_first(&self, symbol: &str) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        Self::get_first(self, symbol)
+    }
+
+    fn get_first_mut(&mut self, symbol: &str) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        Self::get_first_mut(self, symbol)
+    }
+
+    fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry> {
+        Self::get_by_id(self, id)
+    }
+
+    fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry> {
+        Self::get_by_id_mut(self, id)
+    }
+
+    fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        Self::get_by_index(self, index)
+    }
+
+    fn get_by_index_mut(&mut self, index: SymbolIndex) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        Self::get_by_index_mut(self, index)
+    }
+
+    fn get_by_address(&self, address: Address) -> Option<BoxedSymbolEntryIter> {
+        Self::get_by_address(self, address).map(BoxedSymbolEntryIter::new)
+    }
+
+    fn get_by_address_mut(&mut self, address: Address) -> Option<BoxedSymbolEntryIterMut> {
+        Self::get_by_address_mut(self, address).map(BoxedSymbolEntryIterMut::new)
+    }
+
+    fn get_first_by_address(&self, address: Address) -> Option<(Id<Symbol>, &SymbolEntry)> {
+        Self::get_first_by_address(self, address)
+    }
+
+    fn get_first_by_address_mut(
+        &mut self,
+        address: Address,
+    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
+        Self::get_first_by_address_mut(self, address)
+    }
+
+    fn contains(&self, symbol: &str) -> bool {
+        Self::contains(self, symbol)
+    }
+
+    fn contains_index(&self, index: SymbolIndex) -> bool {
+        Self::contains_index(self, index)
+    }
+
+    fn contains_address(&self, address: Address) -> bool {
+        Self::contains_address(self, address)
+    }
+
+    fn insert(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: Symbol,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        Self::insert(self, index, address, symbol, properties)
+    }
+
+    fn iter(&self) -> BoxedSymbolEntryIter {
+        BoxedSymbolEntryIter::new(self.iter())
+    }
+
+    fn iter_by_selector(&self, selector: usize) -> BoxedSymbolEntryIter {
+        BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
+    }
+
+    fn iter_by_address(&self, address: Address) -> BoxedSymbolEntryIter {
+        BoxedSymbolEntryIter::new(self.iter_by_address(address))
+    }
+
+    fn iter_by_index(&self) -> BoxedSymbolIndexAndEntryIter {
+        BoxedSymbolIndexAndEntryIter::new(self.iter_by_index())
+    }
+
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
+    }
+
+    fn len(&self) -> usize {
+        Self::len(self)
+    }
+
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+        tracing::trace!("persisting SymbolTable with {} entries", self.len());
+        storage.insert(&ProjectEntity::SymbolTable, self)
     }
 }
 
@@ -847,6 +960,10 @@ impl SymbolTable {
         self.inner.iter_by_address(address.into())
     }
 
+    pub fn iter_by_index(&self) -> BoxedSymbolIndexAndEntryIter<'_> {
+        self.inner.iter_by_index()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -855,7 +972,7 @@ impl SymbolTable {
         self.inner.len()
     }
 
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+    pub fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         self.inner.persist(storage)
     }
 }

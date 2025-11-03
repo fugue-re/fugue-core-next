@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, Function, IndexedSymbolTable};
+use crate::ir::traits::SymbolTable as _;
+use crate::ir::{Address, Function, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
@@ -19,7 +20,7 @@ pub struct Project {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
     pub(crate) entry: Option<Address>,
-    pub(crate) symbols: IndexedSymbolTable,
+    pub(crate) symbols: SymbolTable,
     pub(crate) functions: EntityCache<Address, Function>,
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
@@ -38,7 +39,7 @@ pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
     pub language: &'static Language,
     pub entry: Option<Address>,
-    pub symbols: &'a IndexedSymbolTable,
+    pub symbols: &'a SymbolTable,
     pub functions: &'a EntityCache<Address, Function>,
     pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
@@ -48,7 +49,7 @@ pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
     pub entry: Option<Address>,
-    pub symbols: &'a mut IndexedSymbolTable,
+    pub symbols: &'a mut SymbolTable,
     pub functions: &'a EntityCache<Address, Function>,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
@@ -120,32 +121,27 @@ impl Project {
             attributes.merge_vacant(&nattributes);
         }
 
-        tracing::trace!("loading project segments");
+        tracing::trace!("loading project symbols");
 
-        let symbols = storage
-            .entities
-            .get(&ProjectEntity::SymbolTable)?
-            .unwrap_or_else(|| {
-                loadable
-                    .and_then(|l| l.symbols().cloned())
-                    .unwrap_or_default()
-            });
+        let symbols = P::symbol_table(&storage.entities)?
+            .or_else(|| {
+                loadable.map(|l| {
+                    let mut symbols = P::SymbolTable::default();
 
-        /*
-        let local_symbols = storage
-            .entities
-            .get(&ProjectEntity::LocalSymbols)?
-            .or_else(|| loadable.map(|l| l.local_symbols().cloned()))
+                    let Some(loadable_symbols) = l.symbols() else {
+                        return symbols;
+                    };
+
+                    tracing::trace!("transfering {} symbols from loadable", loadable_symbols.len());
+
+                    for (index, _, entry) in loadable_symbols.iter_by_index() {
+                        symbols.insert(index, entry.address(), entry.symbol(), entry.properties());
+                    }
+
+                    symbols
+                })
+            })
             .ok_or(StorageProviderError::NotAStandaloneProject)?;
-
-        tracing::trace!("loading project external symbols");
-
-        let extern_symbols = storage
-            .entities
-            .get(&ProjectEntity::ExternSymbols)?
-            .or_else(|| loadable.map(|l| l.extern_symbols().cloned()))
-            .ok_or(StorageProviderError::NotAStandaloneProject)?;
-        */
 
         tracing::trace!("loading project functions");
 
@@ -160,7 +156,7 @@ impl Project {
             language,
             // FIXME: we should fetch this from the storage or loadable.
             entry: loadable.and_then(|l| l.entry()),
-            symbols,
+            symbols: SymbolTable::new(symbols),
             functions,
             attributes,
             storage,
@@ -298,11 +294,11 @@ impl Project {
         self.entry
     }
 
-    pub fn symbols(&self) -> &IndexedSymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
 
-    pub fn symbols_mut(&mut self) -> &mut IndexedSymbolTable {
+    pub fn symbols_mut(&mut self) -> &mut SymbolTable {
         &mut self.symbols
     }
 
@@ -354,9 +350,7 @@ impl Project {
             .insert(&ProjectEntity::Attributes, &self.attributes)?;
 
         tracing::debug!("persisting symbol table");
-        self.storage
-            .entities
-            .insert(&ProjectEntity::SymbolTable, &self.symbols)?;
+        self.symbols.persist(&self.storage.entities)?;
 
         Ok(())
     }

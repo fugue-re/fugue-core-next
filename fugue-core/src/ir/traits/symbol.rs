@@ -49,6 +49,32 @@ impl<'a> Iterator for SymbolEntryIterMut<'a> {
     }
 }
 
+pub struct SymbolIndexAndEntryIter<'a> {
+    inner: Box<dyn Iterator<Item = (SymbolIndex, Id<Symbol>, &'a SymbolEntry)> + 'a>,
+}
+
+impl<'a> SymbolIndexAndEntryIter<'a> {
+    pub fn new(
+        iter: impl Iterator<Item = (SymbolIndex, Id<Symbol>, &'a SymbolEntry)> + 'a,
+    ) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for SymbolIndexAndEntryIter<'a> {
+    type Item = (SymbolIndex, Id<Symbol>, &'a SymbolEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
 pub trait SymbolTable {
     fn get(&self, symbol: &str) -> Option<SymbolEntryIter<'_>>;
     fn get_mut(&mut self, symbol: &str) -> Option<SymbolEntryIterMut<'_>>;
@@ -63,6 +89,7 @@ pub trait SymbolTable {
 
     fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry>;
     fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry>;
+
     fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)>;
     fn get_by_index_mut(&mut self, index: SymbolIndex) -> Option<(Id<Symbol>, &mut SymbolEntry)>;
 
@@ -97,6 +124,7 @@ pub trait SymbolTable {
     fn iter(&self) -> SymbolEntryIter<'_>;
     fn iter_by_selector(&self, selector: usize) -> SymbolEntryIter<'_>;
     fn iter_by_address(&self, address: Address) -> SymbolEntryIter<'_>;
+    fn iter_by_index(&self) -> SymbolIndexAndEntryIter<'_>;
 
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;

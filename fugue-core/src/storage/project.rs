@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 
 use crate::ir::IndexedSymbolTable;
-use crate::storage::entities::EntityStorageProviderFromStorage;
+use crate::ir::traits::SymbolTable;
+use crate::storage::entities::{EntityStorageProviderFromStorage, ProjectEntity};
 use crate::storage::segments::SegmentStorageProviderFromStorage;
 use crate::storage::{
     EntityStorage, EntityStorageError, PersistentStorageProvider, StorageProvider,
@@ -19,7 +20,7 @@ use crate::storage::{
 // structures.
 pub trait ProjectStorage {
     // type FunctionTable: Default;
-    type SymbolTable: Default; // + SymbolTable;
+    type SymbolTable: Default + SymbolTable + 'static;
 
     // NOTE: these are not configurable at the moment, but they could be in the future.
     // fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError>;
@@ -42,9 +43,9 @@ impl ProjectStorage for DefaultProjectStorage {
     type SymbolTable = IndexedSymbolTable;
 
     fn symbol_table(
-        _storage: &EntityStorage,
+        storage: &EntityStorage,
     ) -> Result<Option<Self::SymbolTable>, EntityStorageError> {
-        Ok(Some(IndexedSymbolTable::default()))
+        storage.get(&ProjectEntity::SymbolTable)
     }
 }
 
