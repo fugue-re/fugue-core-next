@@ -7,7 +7,9 @@ use crate::ir::traits::SymbolTable as _;
 use crate::ir::{Address, Function, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
-use crate::storage::entities::{EntityCache, EntityStorage, EntityStorageError, ProjectEntity};
+use crate::storage::entities::{
+    EntityCache, EntityStorage, EntityStorageError, PersistableEntity, ProjectEntity,
+};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
     ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, ProjectStorage,
@@ -132,7 +134,10 @@ impl Project {
                         return symbols;
                     };
 
-                    tracing::trace!("transfering {} symbols from loadable", loadable_symbols.len());
+                    tracing::trace!(
+                        "transfering {} symbols from loadable",
+                        loadable_symbols.len()
+                    );
 
                     for (index, _, entry) in loadable_symbols.iter_by_index() {
                         symbols.insert(index, entry.address(), entry.symbol(), entry.properties());

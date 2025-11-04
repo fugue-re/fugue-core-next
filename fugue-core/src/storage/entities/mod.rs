@@ -14,7 +14,9 @@ use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 pub mod common;
-pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
+pub use common::{
+    Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, PersistableEntity, ProjectEntity,
+};
 
 pub mod dummy;
 pub use dummy::DummyEntityStorage;

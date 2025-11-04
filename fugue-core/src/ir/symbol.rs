@@ -16,7 +16,7 @@ use crate::ir::traits::{
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, ProjectEntity};
+use crate::storage::entities::{Entity, EntityId, PersistableEntity, ProjectEntity};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type SymbolId = Id<Symbol>;
@@ -39,7 +39,11 @@ pub struct SymbolEntry {
 impl Display for SymbolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if !self.symbol.is_empty() {
-            write!(f, "{} at {}; {}", self.symbol, self.address, self.properties)
+            write!(
+                f,
+                "{} at {}; {}",
+                self.symbol, self.address, self.properties
+            )
         } else {
             write!(f, "<unnamed> at {}; {}", self.address, self.properties)
         }
@@ -78,11 +82,7 @@ impl<C> Decode<C> for SymbolEntry {
 }
 
 impl SymbolEntry {
-    pub fn new(
-        address: Address,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
-    ) -> Self {
+    pub fn new(address: Address, symbol: impl Into<Symbol>, properties: SymbolProperties) -> Self {
         Self {
             address,
             symbol: symbol.into(),
@@ -385,6 +385,13 @@ impl Encode for IndexedSymbolTable {
 
 impl Entity for IndexedSymbolTable {
     const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
+}
+
+impl PersistableEntity for IndexedSymbolTable {
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+        tracing::trace!("persisting SymbolTable with {} entries", self.len());
+        storage.insert(&ProjectEntity::SymbolTable, self)
+    }
 }
 
 #[derive(Clone)]
@@ -801,15 +808,16 @@ impl SymbolTableT for IndexedSymbolTable {
     fn len(&self) -> usize {
         Self::len(self)
     }
-
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        tracing::trace!("persisting SymbolTable with {} entries", self.len());
-        storage.insert(&ProjectEntity::SymbolTable, self)
-    }
 }
 
 pub struct SymbolTable {
     inner: Box<dyn SymbolTableT>,
+}
+
+impl PersistableEntity for SymbolTable {
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+        self.inner.persist(storage)
+    }
 }
 
 impl SymbolTable {
@@ -970,10 +978,6 @@ impl SymbolTable {
 
     pub fn len(&self) -> usize {
         self.inner.len()
-    }
-
-    pub fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        self.inner.persist(storage)
     }
 }
 

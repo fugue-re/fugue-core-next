@@ -1,5 +1,5 @@
 use crate::ir::{Address, Id, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
-use crate::storage::{EntityStorage, EntityStorageError};
+use crate::storage::entities::PersistableEntity;
 
 pub struct SymbolEntryIter<'a> {
     inner: Box<dyn Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a>,
@@ -75,7 +75,7 @@ impl<'a> Iterator for SymbolIndexAndEntryIter<'a> {
     }
 }
 
-pub trait SymbolTable {
+pub trait SymbolTable: PersistableEntity {
     fn get(&self, symbol: &str) -> Option<SymbolEntryIter<'_>>;
     fn get_mut(&mut self, symbol: &str) -> Option<SymbolEntryIterMut<'_>>;
 
@@ -128,6 +128,4 @@ pub trait SymbolTable {
 
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
 }
