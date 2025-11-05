@@ -3,7 +3,9 @@ use std::marker::PhantomData;
 use crate::arch::Arch;
 use crate::ir::IndexedSymbolTable;
 use crate::ir::traits::SymbolTable;
-use crate::storage::entities::{EntityStorageProviderFromStorage, ProjectEntity};
+use crate::storage::entities::{
+    DefaultFromEntityStorage, EntityStorageProviderFromStorage, ProjectEntity,
+};
 use crate::storage::segments::SegmentStorageProviderFromStorage;
 use crate::storage::{
     EntityStorage, EntityStorageError, PersistentStorageProvider, StorageProvider,
@@ -22,7 +24,8 @@ use crate::types::AttributeMap;
 // structures.
 pub trait ProjectStorage {
     // type FunctionTable: Default;
-    type SymbolTable: Default + SymbolTable + 'static;
+    type SymbolTable: SymbolTable + DefaultFromEntityStorage + 'static;
+    // type FunctionTable: FunctionTable + DefaultFromEntityStorage + 'static;
 
     // NOTE: these are not configurable at the moment, but they could be in the future.
     fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError>;

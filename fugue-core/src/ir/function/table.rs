@@ -3,6 +3,7 @@ use crate::ir::traits::{
     FunctionTable as FunctionTableT,
 };
 use crate::ir::{Address, Function, Id};
+use crate::storage::entities::PersistableEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub struct FunctionTable {
@@ -28,20 +29,20 @@ impl FunctionTable {
         self.inner.len()
     }
 
-    pub fn get(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.inner.get(id)
+    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
+        self.inner.get_by_id(id)
     }
 
-    pub fn get_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
-        self.inner.get_mut(id)
+    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
+        self.inner.get_by_id_mut(id)
     }
 
-    pub fn get_at(&self, addr: Address) -> Option<FunctionRef> {
-        self.inner.get_at(addr)
+    pub fn get_by_address(&self, addr: impl Into<Address>) -> Option<FunctionRef> {
+        self.inner.get_by_address(addr.into())
     }
 
-    pub fn get_mut_at(&mut self, addr: Address) -> Option<FunctionMut> {
-        self.inner.get_mut_at(addr)
+    pub fn get_by_address_mut(&mut self, addr: impl Into<Address>) -> Option<FunctionMut> {
+        self.inner.get_by_address_mut(addr.into())
     }
 
     pub fn iter<'a>(&'a self) -> FunctionIterator<'a> {
@@ -51,8 +52,10 @@ impl FunctionTable {
     pub fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a> {
         self.inner.iter_mut()
     }
+}
 
-    pub fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
+impl PersistableEntity for FunctionTable {
+    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         self.inner.persist(storage)
     }
 }

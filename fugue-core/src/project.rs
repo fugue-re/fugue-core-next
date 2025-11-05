@@ -8,7 +8,8 @@ use crate::ir::{Address, Function, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{
-    EntityCache, EntityStorage, EntityStorageError, PersistableEntity, ProjectEntity,
+    DefaultFromEntityStorage, EntityCache, EntityStorage, EntityStorageError, PersistableEntity,
+    ProjectEntity,
 };
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
@@ -125,15 +126,16 @@ impl Project {
 
         tracing::trace!("loading project symbols");
 
-        let symbols = P::symbol_table(&storage.entities)?
-            .or_else(|| {
-                loadable.map(|l| {
-                    let mut symbols = P::SymbolTable::default();
+        let symbols = match P::symbol_table(&storage.entities)? {
+            Some(symbols) => symbols,
+            None => {
+                let Some(loadable) = loadable else {
+                    return Err(StorageProviderError::NotAStandaloneProject.into());
+                };
 
-                    let Some(loadable_symbols) = l.symbols() else {
-                        return symbols;
-                    };
+                let mut symbols = P::SymbolTable::default_from_entity_storage(&storage.entities)?;
 
+                if let Some(loadable_symbols) = loadable.symbols() {
                     tracing::trace!(
                         "transfering {} symbols from loadable",
                         loadable_symbols.len()
@@ -142,11 +144,10 @@ impl Project {
                     for (index, _, entry) in loadable_symbols.iter_by_index() {
                         symbols.insert(index, entry.address(), entry.symbol(), entry.properties());
                     }
-
-                    symbols
-                })
-            })
-            .ok_or(StorageProviderError::NotAStandaloneProject)?;
+                }
+                symbols
+            }
+        };
 
         tracing::trace!("loading project functions");
 

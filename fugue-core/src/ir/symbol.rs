@@ -16,7 +16,9 @@ use crate::ir::traits::{
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, PersistableEntity, ProjectEntity};
+use crate::storage::entities::{
+    DefaultFromEntityStorage, Entity, EntityId, PersistableEntity, ProjectEntity,
+};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type SymbolId = Id<Symbol>;
@@ -385,6 +387,13 @@ impl Encode for IndexedSymbolTable {
 
 impl Entity for IndexedSymbolTable {
     const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
+}
+
+impl DefaultFromEntityStorage for IndexedSymbolTable {
+    fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
+        tracing::trace!("creating default (empty) SymbolTable from entity storage");
+        Ok(Self::default())
+    }
 }
 
 impl PersistableEntity for IndexedSymbolTable {

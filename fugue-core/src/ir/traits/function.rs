@@ -1,5 +1,5 @@
 use crate::ir::{Address, Function, Id};
-use crate::storage::{EntityStorage, EntityStorageError};
+use crate::storage::entities::PersistableEntity;
 
 pub type FunctionRef<'a> = &'a Function;
 pub type FunctionMut<'a> = &'a mut Function;
@@ -52,20 +52,18 @@ impl<'a> Iterator for FunctionIteratorMut<'a> {
     }
 }
 
-pub trait FunctionTable {
+pub trait FunctionTable: PersistableEntity {
     fn insert(&mut self, func: Function);
 
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
 
-    fn get(&self, id: Id<Function>) -> Option<FunctionRef>;
-    fn get_mut(&mut self, id: Id<Function>) -> Option<FunctionMut>;
+    fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef>;
+    fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut>;
 
-    fn get_at(&self, addr: Address) -> Option<FunctionRef>;
-    fn get_mut_at(&mut self, addr: Address) -> Option<FunctionMut>;
+    fn get_by_address(&self, addr: Address) -> Option<FunctionRef>;
+    fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut>;
 
     fn iter<'a>(&'a self) -> FunctionIterator<'a>;
     fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a>;
-
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
 }
