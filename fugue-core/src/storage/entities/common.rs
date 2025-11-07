@@ -23,6 +23,7 @@ pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = 4;
 pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
 pub const ENTITY_ATTRIBUTES_ID: EntityId = 1;
 pub const ENTITY_SYMBOL_TABLE_ID: EntityId = 2;
+pub const ENTITY_FUNCTION_TABLE_ID: EntityId = 3;
 
 pub const ENTITY_FUNCTION_ID: EntityId = 4;
 pub const ENTITY_BASIC_BLOCK_ID: EntityId = 5;

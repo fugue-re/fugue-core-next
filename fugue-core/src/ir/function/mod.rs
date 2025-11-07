@@ -1,4 +1,4 @@
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use ustr::Ustr;
 
 use crate::ir::{Address, BasicBlockId, Id};
@@ -9,7 +9,7 @@ pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
 pub mod table;
-pub use table::FunctionTable;
+pub use table::{FunctionTable, IndexedFunctionTable};
 
 pub type FunctionId = Id<Function>;
 
@@ -57,6 +57,30 @@ impl Encode for Function {
     }
 }
 
+impl<'de, C> BorrowDecode<'de, C> for Function {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let id = Id::<Self>::borrow_decode(decoder)?;
+        let Compat(name) = Compat::<Option<Ustr>>::borrow_decode(decoder)?;
+        let entry = Address::borrow_decode(decoder)?;
+        let blocks = Vec::<(Address, BasicBlockId)>::borrow_decode(decoder)?;
+        let frame = FunctionFrame::borrow_decode(decoder)?;
+        let properties = FunctionProperties::borrow_decode(decoder)?;
+
+        Ok(Function {
+            id,
+            name,
+            entry,
+            blocks,
+            frame,
+            properties,
+        })
+    }
+}
+
 impl<C> Decode<C> for Function {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
@@ -100,6 +124,15 @@ impl Encode for FunctionProperties {
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
         self.bits().encode(encoder)
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for FunctionProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::borrow_decode(decoder)?;
+        Ok(FunctionProperties::from_bits_truncate(bits))
     }
 }
 
@@ -158,6 +191,10 @@ impl Function {
     }
 
     pub fn entry(&self) -> Address {
+        self.entry
+    }
+
+    pub fn address(&self) -> Address {
         self.entry
     }
 

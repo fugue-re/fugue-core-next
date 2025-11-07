@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 
 use crate::arch::Arch;
-use crate::ir::IndexedSymbolTable;
-use crate::ir::traits::SymbolTable;
+use crate::ir::{IndexedFunctionTable, IndexedSymbolTable};
+use crate::ir::traits::{FunctionTable, SymbolTable};
 use crate::storage::entities::{
     DefaultFromEntityStorage, EntityStorageProviderFromStorage, ProjectEntity,
 };
@@ -25,17 +25,15 @@ use crate::types::AttributeMap;
 pub trait ProjectStorage {
     // type FunctionTable: Default;
     type SymbolTable: SymbolTable + DefaultFromEntityStorage + 'static;
-    // type FunctionTable: FunctionTable + DefaultFromEntityStorage + 'static;
+    type FunctionTable: FunctionTable + DefaultFromEntityStorage + 'static;
 
     // NOTE: these are not configurable at the moment, but they could be in the future.
     fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError>;
     fn attributes(storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError>;
 
-    /*
     fn function_table(
         storage: &EntityStorage,
     ) -> Result<Option<Self::FunctionTable>, EntityStorageError>;
-    */
 
     fn symbol_table(
         storage: &EntityStorage,
@@ -46,6 +44,7 @@ pub struct DefaultProjectStorage;
 
 impl ProjectStorage for DefaultProjectStorage {
     type SymbolTable = IndexedSymbolTable;
+    type FunctionTable = IndexedFunctionTable;
 
     fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError> {
         storage.get(&ProjectEntity::Architecture)
@@ -53,6 +52,12 @@ impl ProjectStorage for DefaultProjectStorage {
 
     fn attributes(storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError> {
         storage.get(&ProjectEntity::Attributes)
+    }
+
+    fn function_table(
+        storage: &EntityStorage,
+    ) -> Result<Option<Self::FunctionTable>, EntityStorageError> {
+        storage.get(&ProjectEntity::FunctionTable)
     }
 
     fn symbol_table(
@@ -66,12 +71,19 @@ pub struct InMemoryProjectStorage;
 
 impl ProjectStorage for InMemoryProjectStorage {
     type SymbolTable = IndexedSymbolTable;
+    type FunctionTable = IndexedFunctionTable;
 
     fn architecture(_storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError> {
         Ok(None)
     }
 
     fn attributes(_storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError> {
+        Ok(None)
+    }
+
+    fn function_table(
+        _storage: &EntityStorage,
+    ) -> Result<Option<Self::FunctionTable>, EntityStorageError> {
         Ok(None)
     }
 

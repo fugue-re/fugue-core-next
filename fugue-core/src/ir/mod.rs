@@ -1,7 +1,7 @@
 use std::fmt::{Debug, LowerHex, UpperHex};
 use std::hash::Hash;
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod address;
@@ -16,7 +16,7 @@ pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
 pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
+pub use function::{Function, FunctionId, FunctionProperties, FunctionTable, IndexedFunctionTable};
 
 pub mod insn;
 pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
@@ -238,6 +238,18 @@ impl<T> Encode for Id<T> {
     }
 }
 
+impl<'de, T, C> BorrowDecode<'de, C> for Id<T> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let id = u32::borrow_decode(decoder)?;
+        Ok(Id {
+            id,
+            _marker: std::marker::PhantomData,
+        })
+    }
+}
+
 impl<T, C> Decode<C> for Id<T> {
     fn decode<D: bincode::de::Decoder<Context = C>>(
         decoder: &mut D,
@@ -262,6 +274,20 @@ impl<T> Encode for IdSet<T> {
             id.encode(encoder)?;
         }
         Ok(())
+    }
+}
+
+impl<'de, T, C> BorrowDecode<'de, C> for IdSet<T> {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let len = usize::borrow_decode(decoder)?;
+        let mut set = IdSet::<T>::new();
+        for _ in 0..len {
+            let id = Id::<T>::borrow_decode(decoder)?;
+            set.insert(id);
+        }
+        Ok(set)
     }
 }
 
