@@ -28,6 +28,7 @@ use crate::loader::object::object_language;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
+use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod relocations;
@@ -115,7 +116,7 @@ impl<'a> Elf<'a> {
             format!("Fugue v{} ELF Loader", env!("CARGO_PKG_VERSION")),
         );
 
-        Ok(Self {
+        let mut slf = Self {
             object,
             architecture,
             metadata,
@@ -124,7 +125,22 @@ impl<'a> Elf<'a> {
             symbols,
             extern_segm,
             attributes: attributes.into(),
-        })
+        };
+
+        if let Some(entry) = slf.entry() {
+            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        }
+
+        Ok(slf)
+    }
+
+    pub fn entry(&self) -> Option<Address> {
+        let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
+        (addr == 0).then_some(Address::from(addr))
+    }
+
+    pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
+        self.object.borrow_view()
     }
 
     pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
@@ -1017,13 +1033,6 @@ impl LoadableFromFile for Elf<'_> {
 }
 
 impl Loadable for Elf<'_> {
-    fn entry(&self) -> Option<Address> {
-        Some(with_elf!(
-            self.object.borrow_view(),
-            elf | elf.entry().into()
-        ))
-    }
-
     fn attributes(&self) -> &AttributeMap {
         &self.attributes
     }

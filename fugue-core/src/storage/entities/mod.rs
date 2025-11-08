@@ -10,6 +10,7 @@ use quick_cache::sync::Cache;
 use thiserror::Error;
 
 use crate::loader::Loadable;
+use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
@@ -422,6 +423,10 @@ pub trait EntityStorageProvider: Send + Sync {
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+
+    fn persistence(&self) -> StoragePersistence {
+        PERSISTENT
+    }
 }
 
 pub trait ErasedEntityStorageProvider: Send + Sync {
@@ -458,6 +463,8 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
     fn erased_transactional_writer(
         &self,
     ) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+
+    fn erased_persistence(&self) -> StoragePersistence;
 }
 
 impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
@@ -524,6 +531,10 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
         self.erased_transactional_writer()
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        self.erased_persistence()
     }
 }
 
@@ -593,6 +604,10 @@ where
         &self,
     ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
         self.transactional_writer()
+    }
+
+    fn erased_persistence(&self) -> StoragePersistence {
+        self.persistence()
     }
 }
 
@@ -1184,6 +1199,18 @@ impl EntityStorage {
         size: usize,
     ) -> Result<EntityCache<K, E>, EntityStorageError> {
         EntityCache::new(self.clone(), size)
+    }
+
+    pub fn persistence(&self) -> StoragePersistence {
+        self.backing.persistence()
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        matches!(self.backing.persistence(), PERSISTENT)
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self.backing.persistence(), TRANSIENT)
     }
 
     pub fn storage_provider(&self) -> Arc<dyn ErasedEntityStorageProvider> {

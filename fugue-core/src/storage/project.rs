@@ -11,7 +11,6 @@ use crate::storage::{
     EntityStorage, EntityStorageError, PersistentStorageProvider, StorageProvider,
     TransientStorageProvider,
 };
-use crate::types::AttributeMap;
 
 // ProjectStorage provides a higher-level abstraction over EntityStorage, which is itself an
 // abstraction over raw key-value storage. ProjectStorage focuses on project-specific data, and
@@ -22,14 +21,10 @@ use crate::types::AttributeMap;
 // different use-cases, e.g., in-memory vs on-disk storage, different caching strategies, etc.,
 // which can be swapped out without changing the higher-level logic that operates on these data
 // structures.
+//
 pub trait ProjectStorage {
-    // type FunctionTable: Default;
     type SymbolTable: SymbolTable + DefaultFromEntityStorage + 'static;
     type FunctionTable: FunctionTable + DefaultFromEntityStorage + 'static;
-
-    // NOTE: these are not configurable at the moment, but they could be in the future.
-    fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError>;
-    fn attributes(storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError>;
 
     fn function_table(
         storage: &EntityStorage,
@@ -45,14 +40,6 @@ pub struct DefaultProjectStorage;
 impl ProjectStorage for DefaultProjectStorage {
     type SymbolTable = IndexedSymbolTable;
     type FunctionTable = IndexedFunctionTable;
-
-    fn architecture(storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError> {
-        storage.get(&ProjectEntity::Architecture)
-    }
-
-    fn attributes(storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError> {
-        storage.get(&ProjectEntity::Attributes)
-    }
 
     fn function_table(
         storage: &EntityStorage,
@@ -72,14 +59,6 @@ pub struct InMemoryProjectStorage;
 impl ProjectStorage for InMemoryProjectStorage {
     type SymbolTable = IndexedSymbolTable;
     type FunctionTable = IndexedFunctionTable;
-
-    fn architecture(_storage: &EntityStorage) -> Result<Option<Arch>, EntityStorageError> {
-        Ok(None)
-    }
-
-    fn attributes(_storage: &EntityStorage) -> Result<Option<AttributeMap>, EntityStorageError> {
-        Ok(None)
-    }
 
     fn function_table(
         _storage: &EntityStorage,

@@ -10,6 +10,7 @@ use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::loader::util::parse_language;
 use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoaderError};
+use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub struct Shellcode<'a> {
@@ -75,12 +76,16 @@ impl<'a> Shellcode<'a> {
             format!("Fugue v{} Shellcode Loader", env!("CARGO_PKG_VERSION")),
         );
 
+        let mut attributes = attributes.into();
+
+        attributes.set_attr(ATTRIBUTE_ENTRY_POINT, address);
+
         Ok(Self {
             address: address.into(),
             bytes: bytes.into(),
             arch,
             metadata,
-            attributes: attributes.into(),
+            attributes,
         })
     }
 
@@ -119,10 +124,6 @@ impl<'a> Shellcode<'a> {
 impl Loadable for Shellcode<'_> {
     fn architecture(&self) -> Arch {
         self.arch.clone()
-    }
-
-    fn entry(&self) -> Option<Address> {
-        Some(self.address())
     }
 
     fn segments<'a>(

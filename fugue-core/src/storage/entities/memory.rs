@@ -8,6 +8,7 @@ use skiplist::SkipMap;
 use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use crate::loader::Loadable;
+use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::common::ENTITY_PREFIX_SIZE;
@@ -206,6 +207,10 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         Err(EntityStorageError::unsupported_with(
             "transactions are not supported by the in-memory storage provider",
         ))
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        TRANSIENT
     }
 }
 

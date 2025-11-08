@@ -3,11 +3,14 @@ use std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign};
 
 use bincode::{Decode, Encode};
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use serde::{Deserialize, Serialize};
 
 use crate::il::pcode::Varnode;
 use crate::lifter::Language;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
+)]
 #[repr(transparent)]
 pub struct Address(u64);
 

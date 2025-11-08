@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::loader::Loadable;
+use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
 
 use super::{
@@ -98,5 +99,9 @@ impl EntityStorageProvider for DummyEntityStorage {
         &self,
     ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
         Err(DummyEntityStorageError("transactional_writer").into())
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        TRANSIENT
     }
 }

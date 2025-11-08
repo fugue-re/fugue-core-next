@@ -11,6 +11,7 @@ use crate::lifter::LanguageVariant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
+use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
@@ -34,6 +35,7 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
 
+    // FIXME: if we have no entry, then we need to check for other hints...
     let is_thumb = object.entry() & 1 == 1;
 
     let language = match object.architecture() {
@@ -86,11 +88,19 @@ impl<'a> Object<'a> {
             ),
         );
 
+        let mut attributes = attributes.into();
+
+        let entry = view.entry();
+
+        if entry != 0 {
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::from(entry));
+        }
+
         Ok(Self {
             object,
             arch,
             metadata,
-            attributes: attributes.into(),
+            attributes,
         })
     }
 
@@ -134,10 +144,6 @@ impl LoadableFromFile for Object<'_> {
 }
 
 impl Loadable for Object<'_> {
-    fn entry(&self) -> Option<Address> {
-        Some(self.object.borrow_view().entry().into())
-    }
-
     fn attributes(&self) -> &AttributeMap {
         &self.attributes
     }

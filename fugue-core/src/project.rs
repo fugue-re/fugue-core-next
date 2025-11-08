@@ -4,17 +4,15 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTable as _;
-use crate::ir::{Address, Function, SymbolTable};
+use crate::ir::{FunctionTable, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{
-    DefaultFromEntityStorage, EntityCache, EntityStorage, EntityStorageError, PersistableEntity,
-    ProjectEntity,
+    DefaultFromEntityStorage, EntityStorage, EntityStorageError, PersistableEntity, ProjectEntity,
 };
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_SIZE, ProjectStorage,
-    ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
+    ProjectStorage, ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
@@ -22,9 +20,8 @@ use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 pub struct Project {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
-    pub(crate) entry: Option<Address>,
     pub(crate) symbols: SymbolTable,
-    pub(crate) functions: EntityCache<Address, Function>,
+    pub(crate) functions: FunctionTable,
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
@@ -41,9 +38,8 @@ impl Drop for Project {
 pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
     pub language: &'static Language,
-    pub entry: Option<Address>,
     pub symbols: &'a SymbolTable,
-    pub functions: &'a EntityCache<Address, Function>,
+    pub functions: &'a FunctionTable,
     pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
 }
@@ -51,9 +47,8 @@ pub struct ProjectRef<'a> {
 pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
-    pub entry: Option<Address>,
     pub symbols: &'a mut SymbolTable,
-    pub functions: &'a EntityCache<Address, Function>,
+    pub functions: &'a mut FunctionTable,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
 }
@@ -151,19 +146,24 @@ impl Project {
 
         tracing::trace!("loading project functions");
 
+        let functions = match P::function_table(&storage.entities)? {
+            Some(functions) => functions,
+            None => P::FunctionTable::default_from_entity_storage(&storage.entities)?,
+        };
+
+        /*
         let function_cache_size = attributes
             .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
             .unwrap_or(DEFAULT_FUNCTION_CACHE_SIZE);
 
         let functions = EntityCache::new(storage.entities.clone(), function_cache_size)?;
+        */
 
         Ok(Self {
             arch,
             language,
-            // FIXME: we should fetch this from the storage or loadable.
-            entry: loadable.and_then(|l| l.entry()),
             symbols: SymbolTable::new(symbols),
-            functions,
+            functions: FunctionTable::new(functions),
             attributes,
             storage,
         })
@@ -288,16 +288,11 @@ impl Project {
     }
 
     pub fn lifter(&self) -> Lifter {
-        // HybridLifter::new(self.arch.disassembler(), self.arch.lifter())
         self.arch.lifter()
     }
 
     pub fn language(&self) -> &'static Language {
         self.language
-    }
-
-    pub fn entry(&self) -> Option<Address> {
-        self.entry
     }
 
     pub fn symbols(&self) -> &SymbolTable {
@@ -308,7 +303,7 @@ impl Project {
         &mut self.symbols
     }
 
-    pub fn functions(&self) -> &EntityCache<Address, Function> {
+    pub fn functions(&self) -> &FunctionTable {
         &self.functions
     }
 
@@ -340,9 +335,12 @@ impl Project {
         &mut self.attributes
     }
 
-    pub fn persist(&self) -> Result<(), StorageProviderError> {
-        // NOTE: the function cache is already persisted in the background, so we don't need to
-        // persist it here.
+    pub(crate) fn persist(&self) -> Result<(), StorageProviderError> {
+        if self.storage.entities.is_transient() {
+            tracing::debug!("entity storage is transient; skipping persistenece");
+            return Ok(());
+        }
+
         tracing::debug!("persisting project data");
 
         tracing::debug!("persisting project architecture and lifter");
@@ -358,6 +356,9 @@ impl Project {
         tracing::debug!("persisting symbol table");
         self.symbols.persist(&self.storage.entities)?;
 
+        tracing::debug!("persisting function table");
+        self.functions.persist(&self.storage.entities)?;
+
         Ok(())
     }
 
@@ -365,7 +366,6 @@ impl Project {
         ProjectRef {
             arch: &self.arch,
             language: self.language,
-            entry: self.entry,
             symbols: &self.symbols,
             functions: &self.functions,
             attributes: &self.attributes,
@@ -377,9 +377,8 @@ impl Project {
         ProjectMut {
             arch: &mut self.arch,
             language: self.language,
-            entry: self.entry,
             symbols: &mut self.symbols,
-            functions: &self.functions,
+            functions: &mut self.functions,
             attributes: &mut self.attributes,
             storage: &mut self.storage,
         }

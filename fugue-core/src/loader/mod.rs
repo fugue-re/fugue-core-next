@@ -489,8 +489,6 @@ pub trait Loadable {
 
     fn metadata(&self) -> &LoadableMetadata;
 
-    fn entry(&self) -> Option<Address>;
-
     fn architecture(&self) -> Arch;
 
     fn symbols(&self) -> Option<&IndexedSymbolTable> {
@@ -569,13 +567,6 @@ impl LoadableFromFile for Loader<'_> {
 }
 
 impl Loadable for Loader<'_> {
-    fn entry(&self) -> Option<Address> {
-        match self {
-            Self::Elf(elf) => elf.entry(),
-            Self::Object(object) => object.entry(),
-        }
-    }
-
     fn architecture(&self) -> Arch {
         match self {
             Self::Elf(elf) => elf.architecture(),
