@@ -6,6 +6,7 @@ use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 
 use thiserror::Error;
 
+use crate::il::pcode::PCodeOp;
 use crate::ir::{Address, Insn};
 
 #[derive(Debug, Error)]
@@ -153,9 +154,8 @@ impl Lifter {
     pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
         let address = address.into();
         let mut operations = Vec::new();
-        let Some(length) = self.0.lift(address.into(), bytes, &mut operations) else {
-            return Err(LifterError::InvalidInstruction(address));
-        };
+
+        let length = self.lift_into(address, bytes, &mut operations)?;
 
         Ok(Insn::from_lifted(
             self.language(),
@@ -163,5 +163,19 @@ impl Lifter {
             length,
             operations,
         ))
+    }
+
+    pub fn lift_into(
+        &mut self,
+        addr: impl Into<Address>,
+        bytes: &[u8],
+        output: &mut Vec<PCodeOp>,
+    ) -> Result<usize, LifterError> {
+        let address = addr.into();
+        let Some(length) = self.0.lift(address.into(), bytes, output) else {
+            return Err(LifterError::InvalidInstruction(address));
+        };
+
+        Ok(length)
     }
 }

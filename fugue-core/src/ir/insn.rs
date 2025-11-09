@@ -5,6 +5,7 @@ use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
 use crate::ir::{Address, Id, Location, ToAddress};
+use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
 
@@ -92,7 +93,7 @@ impl Insn {
             targets,
             length: length
                 .try_into()
-                .expect("instruction length must not exceed 255"),
+                .expect("instruction length must not exceed 255 bytes"),
         }
     }
 
@@ -108,8 +109,41 @@ impl Insn {
             targets: SmallVec::new(),
             length: length
                 .try_into()
-                .expect("instruction length must not exceed 255"),
+                .expect("instruction length must not exceed 255 bytes"),
         }
+    }
+
+    pub fn ensure_lifted(&mut self, lifter: &mut Lifter, bytes: &[u8]) -> Result<(), LifterError> {
+        if self.is_lifted() {
+            return Ok(());
+        }
+
+        self.operations.clear();
+        self.targets.clear();
+
+        let length = lifter.lift_into(self.address, bytes, &mut self.operations)?;
+
+        self.length = length
+            .try_into()
+            .expect("instruction length must not exceed 255 bytes");
+
+        let naddress = self.next_address();
+
+        InsnTarget::from_lifted_into(
+            lifter.language(),
+            self.address,
+            naddress,
+            &self.operations,
+            &mut self.targets,
+        );
+
+        self.properties = InsnProperties::from_targets(&self.targets) | InsnProperties::LIFTED;
+
+        if self.operations.is_empty() {
+            self.properties |= InsnProperties::NOP;
+        }
+
+        Ok(())
     }
 
     pub fn address(&self) -> Address {
