@@ -8,7 +8,7 @@ pub mod address;
 pub use address::{Address, AddressMap, ToAddress};
 
 pub mod block;
-pub use block::{BasicBlock, BasicBlockId, BasicBlockProperties};
+pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties};
 
 pub mod cfg;
 pub use cfg::{FlowKind, FlowTarget};

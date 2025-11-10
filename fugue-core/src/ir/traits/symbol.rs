@@ -93,20 +93,18 @@ pub trait SymbolTable: PersistableEntity {
     fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)>;
     fn get_by_index_mut(&mut self, index: SymbolIndex) -> Option<(Id<Symbol>, &mut SymbolEntry)>;
 
-    fn get_by_address(&self, address: Address) -> Option<SymbolEntryIter<'_>>;
-    fn get_by_address_mut(&mut self, address: Address) -> Option<SymbolEntryIterMut<'_>>;
+    fn get_by_address(&self, address: Address) -> SymbolEntryIter<'_>;
+    fn get_by_address_mut(&mut self, address: Address) -> SymbolEntryIterMut<'_>;
 
     fn get_first_by_address(&self, address: Address) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        self.get_by_address(address)
-            .and_then(|mut iter| iter.next())
+        self.get_by_address(address).next()
     }
 
     fn get_first_by_address_mut(
         &mut self,
         address: Address,
     ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        self.get_by_address_mut(address)
-            .and_then(|mut iter| iter.next())
+        self.get_by_address_mut(address).next()
     }
 
     fn contains(&self, symbol: &str) -> bool;

@@ -14,12 +14,6 @@ use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
-pub mod common;
-pub use common::{
-    DefaultFromEntityStorage, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
-    PersistableEntity, ProjectEntity,
-};
-
 pub mod dummy;
 pub use dummy::DummyEntityStorage;
 
@@ -31,6 +25,12 @@ pub use mdbx::MdbxEntityStorage;
 
 pub mod rocksdb;
 pub use rocksdb::RocksDbEntityStorage;
+
+pub mod schema;
+pub use schema::{
+    DefaultFromEntityStorage, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
+    PersistableEntity, ProjectEntity,
+};
 
 pub mod sqlite;
 pub use sqlite::SqliteEntityStorage;
@@ -132,7 +132,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| {
@@ -149,7 +149,7 @@ impl<'a> EntityTransactionalReader<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -158,7 +158,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.contains(&key)
     }
 }
@@ -194,7 +194,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| {
@@ -211,7 +211,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -220,7 +220,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.contains(&key)
     }
 
@@ -229,7 +229,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
 
@@ -239,7 +239,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.remove(&key)
     }
 
@@ -293,7 +293,7 @@ impl<'a> EntityBulkInserter<'a> {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
 
@@ -1054,9 +1054,9 @@ where
 
     pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
         // TODO: should we cache the elements in the iterator if the cache has capacity?
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         Ok(self.storage.backing.iter_prefix_as(&pfx, |k, v| {
-            let key = common::extract_key::<K, E>(k.into())
+            let key = schema::extract_key::<K, E>(k.into())
                 .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
             if let Some(val) = self.entities.get(&key) {
@@ -1110,7 +1110,7 @@ impl EntityStorage {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
 
         self.backing.get_as(&key, |bytes| {
             bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
@@ -1124,7 +1124,7 @@ impl EntityStorage {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
         let encoded = BytesOrSlice::from(encoded);
@@ -1137,23 +1137,23 @@ impl EntityStorage {
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.backing.remove(&key)
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.backing.contains(&key)
     }
 
     pub fn iter<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         self.backing.iter_prefix(&pfx).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
-                    let key = common::extract_key::<K, E>(key)
+                    let key = schema::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
                     let val = bincode::decode_from_slice::<E, _>(
                         value.as_slice(),
@@ -1170,11 +1170,11 @@ impl EntityStorage {
     pub fn keys<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         self.backing.iter_prefix_keys(&pfx).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|key| {
-                    common::extract_key::<K, E>(key).ok_or(EntityStorageError::InvalidKeyFormat)
+                    schema::extract_key::<K, E>(key).ok_or(EntityStorageError::InvalidKeyFormat)
                 })
             })) as EntityKeyIterator<'_, K>
         })

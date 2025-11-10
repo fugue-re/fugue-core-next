@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use bincode::{Decode, Encode};
 
 use crate::ir::traits::{
-    FunctionIterator, FunctionIteratorMut, FunctionMut, FunctionRef,
+    FunctionIter, FunctionIterMut, FunctionMut, FunctionRef,
     FunctionTable as FunctionTableT,
 };
 use crate::ir::{Address, Function, Id};
-use crate::storage::entities::common::ENTITY_KEY_FUNCTION_ENTITY_ID;
+use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
 use crate::storage::entities::{
     DefaultFromEntityStorage, Entity, EntityKeyId, PersistableEntity, ProjectEntity,
 };
@@ -69,12 +69,12 @@ impl FunctionTableT for IndexedFunctionTable {
             .and_then(|id| self.get_by_id_mut(id))
     }
 
-    fn iter<'a>(&'a self) -> FunctionIterator<'a> {
-        FunctionIterator::new(self.functions.iter())
+    fn iter<'a>(&'a self) -> FunctionIter<'a> {
+        FunctionIter::new(self.functions.iter())
     }
 
-    fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a> {
-        FunctionIteratorMut::new(self.functions.iter_mut())
+    fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
+        FunctionIterMut::new(self.functions.iter_mut())
     }
 }
 
@@ -133,11 +133,11 @@ impl FunctionTable {
         self.inner.get_by_address_mut(addr.into())
     }
 
-    pub fn iter<'a>(&'a self) -> FunctionIterator<'a> {
+    pub fn iter<'a>(&'a self) -> FunctionIter<'a> {
         self.inner.iter()
     }
 
-    pub fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a> {
+    pub fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
         self.inner.iter_mut()
     }
 }

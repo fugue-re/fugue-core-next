@@ -1,8 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::arch::Arch;
-use crate::ir::{IndexedFunctionTable, IndexedSymbolTable};
 use crate::ir::traits::{FunctionTable, SymbolTable};
+use crate::ir::{IndexedFunctionTable, IndexedSymbolTable};
 use crate::storage::entities::{
     DefaultFromEntityStorage, EntityStorageProviderFromStorage, ProjectEntity,
 };

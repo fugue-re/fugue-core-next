@@ -15,7 +15,7 @@ use crate::ir::traits::{
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
 };
 use crate::ir::{Address, Id};
-use crate::storage::entities::common::ENTITY_SYMBOL_TABLE_ID;
+use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{
     DefaultFromEntityStorage, Entity, EntityId, PersistableEntity, ProjectEntity,
 };
@@ -522,35 +522,37 @@ impl IndexedSymbolTable {
     pub fn get_by_address(
         &self,
         address: impl Into<Address>,
-    ) -> Option<impl Iterator<Item = (Id<Symbol>, &SymbolEntry)>> {
+    ) -> impl Iterator<Item = (Id<Symbol>, &SymbolEntry)> {
         let address = address.into();
-        let ids = self.addresses.get(&address)?;
-        Some(SymbolEntryIter::new(ids, &self.symbols))
+        let ids = self
+            .addresses
+            .get(&address)
+            .map(|ids| ids.as_slice())
+            .unwrap_or_default();
+        SymbolEntryIter::new(ids, &self.symbols)
     }
 
     pub fn get_by_address_mut(
         &mut self,
         address: impl Into<Address>,
-    ) -> Option<impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)>> {
+    ) -> impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)> {
         let address = address.into();
-        let ids = self.addresses.get(&address)?;
-        Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
+        let ids = self.addresses.get(&address).map(|ids| ids.as_slice()).unwrap_or_default();
+        SymbolEntryIterMut::new(ids, &mut self.symbols)
     }
 
     pub fn get_first_by_address(
         &self,
         address: impl Into<Address>,
     ) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        self.get_by_address(address)
-            .and_then(|mut iter| iter.next())
+        self.get_by_address(address).next()
     }
 
     pub fn get_first_by_address_mut(
         &mut self,
         address: impl Into<Address>,
     ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        self.get_by_address_mut(address)
-            .and_then(|mut iter| iter.next())
+        self.get_by_address_mut(address).next()
     }
 
     pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
@@ -753,12 +755,12 @@ impl SymbolTableT for IndexedSymbolTable {
         Self::get_by_index_mut(self, index)
     }
 
-    fn get_by_address(&self, address: Address) -> Option<BoxedSymbolEntryIter> {
-        Self::get_by_address(self, address).map(BoxedSymbolEntryIter::new)
+    fn get_by_address(&self, address: Address) -> BoxedSymbolEntryIter {
+        BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
     }
 
-    fn get_by_address_mut(&mut self, address: Address) -> Option<BoxedSymbolEntryIterMut> {
-        Self::get_by_address_mut(self, address).map(BoxedSymbolEntryIterMut::new)
+    fn get_by_address_mut(&mut self, address: Address) -> BoxedSymbolEntryIterMut {
+        BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
     }
 
     fn get_first_by_address(&self, address: Address) -> Option<(Id<Symbol>, &SymbolEntry)> {
@@ -874,14 +876,14 @@ impl SymbolTable {
         self.inner.get_by_index_mut(index)
     }
 
-    pub fn get_by_address(&self, address: impl Into<Address>) -> Option<BoxedSymbolEntryIter<'_>> {
+    pub fn get_by_address(&self, address: impl Into<Address>) -> BoxedSymbolEntryIter<'_> {
         self.inner.get_by_address(address.into())
     }
 
     pub fn get_by_address_mut(
         &mut self,
         address: impl Into<Address>,
-    ) -> Option<BoxedSymbolEntryIterMut<'_>> {
+    ) -> BoxedSymbolEntryIterMut<'_> {
         self.inner.get_by_address_mut(address.into())
     }
 

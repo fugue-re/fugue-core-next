@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 pub extern crate serde_json;
 
-use crate::storage::entities::common::ENTITY_ATTRIBUTES_ID;
+use crate::storage::entities::schema::ENTITY_ATTRIBUTES_ID;
 use crate::storage::entities::{Entity, EntityId};
 
 pub const ATTRIBUTE_FILE_PATH: &str = "project.input_path";

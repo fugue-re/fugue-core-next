@@ -4,11 +4,11 @@ use crate::storage::entities::PersistableEntity;
 pub type FunctionRef<'a> = &'a Function;
 pub type FunctionMut<'a> = &'a mut Function;
 
-pub struct FunctionIterator<'a> {
+pub struct FunctionIter<'a> {
     inner: Box<dyn Iterator<Item = FunctionRef<'a>> + 'a>,
 }
 
-impl<'a> FunctionIterator<'a> {
+impl<'a> FunctionIter<'a> {
     pub fn new(iter: impl Iterator<Item = FunctionRef<'a>> + 'a) -> Self {
         Self {
             inner: Box::new(iter),
@@ -16,7 +16,7 @@ impl<'a> FunctionIterator<'a> {
     }
 }
 
-impl<'a> Iterator for FunctionIterator<'a> {
+impl<'a> Iterator for FunctionIter<'a> {
     type Item = FunctionRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -28,11 +28,11 @@ impl<'a> Iterator for FunctionIterator<'a> {
     }
 }
 
-pub struct FunctionIteratorMut<'a> {
+pub struct FunctionIterMut<'a> {
     inner: Box<dyn Iterator<Item = FunctionMut<'a>> + 'a>,
 }
 
-impl<'a> FunctionIteratorMut<'a> {
+impl<'a> FunctionIterMut<'a> {
     pub fn new(iter: impl Iterator<Item = FunctionMut<'a>> + 'a) -> Self {
         Self {
             inner: Box::new(iter),
@@ -40,7 +40,7 @@ impl<'a> FunctionIteratorMut<'a> {
     }
 }
 
-impl<'a> Iterator for FunctionIteratorMut<'a> {
+impl<'a> Iterator for FunctionIterMut<'a> {
     type Item = FunctionMut<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -64,6 +64,6 @@ pub trait FunctionTable: PersistableEntity {
     fn get_by_address(&self, addr: Address) -> Option<FunctionRef>;
     fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut>;
 
-    fn iter<'a>(&'a self) -> FunctionIterator<'a>;
-    fn iter_mut<'a>(&'a mut self) -> FunctionIteratorMut<'a>;
+    fn iter<'a>(&'a self) -> FunctionIter<'a>;
+    fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a>;
 }

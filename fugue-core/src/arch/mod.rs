@@ -10,7 +10,7 @@ use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
 };
 use crate::loader::util::parse_language;
-use crate::storage::entities::common::ENTITY_ARCHITECTURE_ID;
+use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
 pub mod aarch64;

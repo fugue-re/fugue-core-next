@@ -1,8 +1,8 @@
 use bincode::{BorrowDecode, Decode, Encode};
 use ustr::Ustr;
 
-use crate::ir::{Address, BasicBlockId, Id};
-use crate::storage::entities::common::ENTITY_FUNCTION_ID;
+use crate::ir::{Address, CodeBlockId, Id};
+use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
 pub mod frame;
@@ -18,7 +18,7 @@ pub struct Function {
     id: Id<Self>,
     name: Option<Ustr>,
     entry: Address,
-    blocks: Vec<(Address, BasicBlockId)>,
+    blocks: Vec<(Address, CodeBlockId)>,
     frame: FunctionFrame,
     properties: FunctionProperties,
 }
@@ -66,7 +66,7 @@ impl<'de, C> BorrowDecode<'de, C> for Function {
         let id = Id::<Self>::borrow_decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::borrow_decode(decoder)?;
         let entry = Address::borrow_decode(decoder)?;
-        let blocks = Vec::<(Address, BasicBlockId)>::borrow_decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::borrow_decode(decoder)?;
         let frame = FunctionFrame::borrow_decode(decoder)?;
         let properties = FunctionProperties::borrow_decode(decoder)?;
 
@@ -90,7 +90,7 @@ impl<C> Decode<C> for Function {
         let id = Id::<Self>::decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
         let entry = Address::decode(decoder)?;
-        let blocks = Vec::<(Address, BasicBlockId)>::decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::decode(decoder)?;
         let frame = FunctionFrame::decode(decoder)?;
         let properties = FunctionProperties::decode(decoder)?;
 
@@ -198,12 +198,12 @@ impl Function {
         self.entry
     }
 
-    pub fn entry_block(&self) -> BasicBlockId {
+    pub fn entry_block(&self) -> CodeBlockId {
         self.block_at(self.entry)
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn add_block(&mut self, address: Address, block: BasicBlockId) {
+    pub(crate) fn add_block(&mut self, address: Address, block: CodeBlockId) {
         self.blocks.insert(
             self.blocks
                 .binary_search_by_key(&address, |(addr, _)| *addr)
@@ -212,16 +212,16 @@ impl Function {
         );
     }
 
-    pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, BasicBlockId)>) {
+    pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
         self.blocks.extend(blocks);
         self.blocks.sort_by_key(|(addr, _)| *addr);
     }
 
-    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, BasicBlockId)> + '_ {
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, CodeBlockId)> + '_ {
         self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
     }
 
-    pub fn block_at(&self, address: Address) -> Option<BasicBlockId> {
+    pub fn block_at(&self, address: Address) -> Option<CodeBlockId> {
         self.blocks
             .binary_search_by_key(&address, |(addr, _)| *addr)
             .ok()

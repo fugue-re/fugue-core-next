@@ -11,7 +11,7 @@ use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
 
-use super::common::ENTITY_PREFIX_SIZE;
+use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
     EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,

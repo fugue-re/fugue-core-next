@@ -1,9 +1,10 @@
 use std::hash::Hash;
+use std::mem;
 
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::ir::{Address, BasicBlock, Function, Id, Insn};
+use crate::ir::{Address, CodeBlock, Function, Id, Insn};
 use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::BytesOrSlice;
 
@@ -16,7 +17,7 @@ pub const ENTITY_PREFIX_SIZE: usize = 2;
 pub const ENTITY_KEY_PROJECT_ENTITY_ID: EntityKeyId = 0;
 pub const ENTITY_KEY_ADDRESS_ENTITY_ID: EntityKeyId = 1;
 pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = 2;
-pub const ENTITY_KEY_BASIC_BLOCK_ENTITY_ID: EntityKeyId = 3;
+pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = 3;
 pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = 4;
 
 // Entity identifiers
@@ -24,10 +25,11 @@ pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
 pub const ENTITY_ATTRIBUTES_ID: EntityId = 1;
 pub const ENTITY_SYMBOL_TABLE_ID: EntityId = 2;
 pub const ENTITY_FUNCTION_TABLE_ID: EntityId = 3;
+pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = 4;
 
-pub const ENTITY_FUNCTION_ID: EntityId = 4;
-pub const ENTITY_BASIC_BLOCK_ID: EntityId = 5;
-pub const ENTITY_INSN_ID: EntityId = 6;
+pub const ENTITY_FUNCTION_ID: EntityId = 5;
+pub const ENTITY_CODE_BLOCK_ID: EntityId = 6;
+pub const ENTITY_INSN_ID: EntityId = 7;
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -58,6 +60,7 @@ pub enum ProjectEntity {
     Attributes = 0b0000_0001,
     FunctionTable = 0b0000_0010,
     SymbolTable = 0b0000_0011,
+    CodeBlockTable = 0b0000_0100,
 }
 
 impl EntityKey for ProjectEntity {
@@ -70,6 +73,7 @@ impl EntityKey for ProjectEntity {
                 0b0000_0001 => Some(ProjectEntity::Attributes),
                 0b0000_0010 => Some(ProjectEntity::SymbolTable),
                 0b0000_0011 => Some(ProjectEntity::FunctionTable),
+                0b0000_0100 => Some(ProjectEntity::CodeBlockTable),
                 _ => None,
             }
         } else {
@@ -86,7 +90,7 @@ impl EntityKey for Address {
     const ID: EntityKeyId = ENTITY_KEY_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        <[u8; 8]>::try_from(buf)
+        <[u8; mem::size_of::<Self>()]>::try_from(buf)
             .ok()
             .map(|val| Address::from(u64::from_be_bytes(val)))
     }
@@ -108,15 +112,15 @@ impl EntityKey for Id<Function> {
     }
 }
 
-impl EntityKey for Id<BasicBlock> {
-    const ID: EntityKeyId = ENTITY_KEY_BASIC_BLOCK_ENTITY_ID;
+impl EntityKey for Id<CodeBlock> {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<BasicBlock>::decode_as_key(buf)
+        Id::<CodeBlock>::decode_as_key(buf)
     }
 
     fn encode(&self, buf: &mut BytesMut) {
-        Id::<BasicBlock>::encode_as_key(self, buf);
+        Id::<CodeBlock>::encode_as_key(self, buf);
     }
 }
 
