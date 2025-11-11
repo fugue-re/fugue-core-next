@@ -5,7 +5,6 @@ use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::ir::{Address, CodeBlock, Function, Id, Insn};
-use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;
@@ -40,17 +39,6 @@ pub trait EntityKey: Clone + PartialEq + Eq + Hash {
     where
         Self: Sized;
     fn encode(&self, buf: &mut BytesMut);
-}
-
-pub trait PersistableEntity {
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError>;
-}
-
-pub trait DefaultFromEntityStorage: Sized {
-    // Creates a default instance of the entity from the given storage. This should essentially
-    // mirror a Default implementation, but allows for initialisation based on the underlying
-    // entity storage.
-    fn default_from_entity_storage(storage: &EntityStorage) -> Result<Self, EntityStorageError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]

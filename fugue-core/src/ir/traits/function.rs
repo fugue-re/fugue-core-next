@@ -1,5 +1,7 @@
-use crate::ir::{Address, Function, Id};
-use crate::storage::entities::PersistableEntity;
+use crate::{
+    ir::{Address, Function, Id},
+    storage::project::PersistableProjectEntity,
+};
 
 pub type FunctionRef<'a> = &'a Function;
 pub type FunctionMut<'a> = &'a mut Function;
@@ -52,7 +54,7 @@ impl<'a> Iterator for FunctionIterMut<'a> {
     }
 }
 
-pub trait FunctionTable: PersistableEntity {
+pub trait FunctionTable: PersistableProjectEntity {
     fn insert(&mut self, func: Function);
 
     fn is_empty(&self) -> bool;

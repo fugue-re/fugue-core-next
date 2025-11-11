@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 
 use crate::ir::{Address, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
@@ -9,10 +9,11 @@ use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
 pub mod table;
+pub use table::{CodeBlockTable, IndexedCodeBlockTable};
 
 pub type CodeBlockId = Id<CodeBlock>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
 pub struct CodeBlock {
     id: Id<Self>,
     start: Address,
@@ -31,65 +32,6 @@ impl Entity for CodeBlock {
 impl MutableEntity<CodeBlockId> for CodeBlock {
     fn entity_key(&self) -> CodeBlockId {
         self.id
-    }
-}
-
-impl Encode for CodeBlock {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.id.encode(encoder)?;
-        self.start.encode(encoder)?;
-        self.len.encode(encoder)?;
-        self.instructions.encode(encoder)?;
-
-        self.successors.encode(encoder)?;
-        self.predecessors.encode(encoder)?;
-
-        self.properties.encode(encoder)?;
-        self.context.encode(encoder)?;
-
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for CodeBlock {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let id = Id::<Self>::decode(decoder)?;
-        let start = Address::decode(decoder)?;
-        let len = u16::decode(decoder)?;
-        let instructions = InsnList::decode(decoder)?;
-
-        let successors_len = usize::decode(decoder)?;
-        let mut successors = IdSet::new();
-        for _ in 0..successors_len {
-            let succ = Id::decode(decoder)?;
-            successors.insert(succ);
-        }
-
-        let predecessors_len = usize::decode(decoder)?;
-        let mut predecessors = IdSet::new();
-        for _ in 0..predecessors_len {
-            let pred = Id::decode(decoder)?;
-            predecessors.insert(pred);
-        }
-
-        let properties = CodeBlockProperties::decode(decoder)?;
-        let context = ContextSet::decode(decoder)?;
-
-        Ok(CodeBlock {
-            id,
-            start,
-            len,
-            instructions,
-            successors,
-            predecessors,
-            properties,
-            context,
-        })
     }
 }
 
@@ -126,6 +68,15 @@ impl<C> Decode<C> for CodeBlockProperties {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let bits = u32::decode(decoder)?;
+        Ok(CodeBlockProperties::from_bits(bits).unwrap_or(CodeBlockProperties::NONE))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for CodeBlockProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::borrow_decode(decoder)?;
         Ok(CodeBlockProperties::from_bits(bits).unwrap_or(CodeBlockProperties::NONE))
     }
 }

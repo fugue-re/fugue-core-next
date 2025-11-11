@@ -27,10 +27,7 @@ pub mod rocksdb;
 pub use rocksdb::RocksDbEntityStorage;
 
 pub mod schema;
-pub use schema::{
-    DefaultFromEntityStorage, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
-    PersistableEntity, ProjectEntity,
-};
+pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
 
 pub mod sqlite;
 pub use sqlite::SqliteEntityStorage;

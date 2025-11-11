@@ -47,7 +47,7 @@ struct ElfInner<'a> {
     view: ElfFileRepr<'this, 'a>,
 }
 
-enum ElfFileRepr<'this, 'data> {
+pub enum ElfFileRepr<'this, 'data> {
     Elf32(ElfFile<'this, FileHeader32<Endianness>, &'this BytesOrMapping<'data>>),
     Elf64(ElfFile<'this, FileHeader64<Endianness>, &'this BytesOrMapping<'data>>),
 }

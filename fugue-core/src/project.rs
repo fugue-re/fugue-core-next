@@ -4,12 +4,11 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTable as _;
-use crate::ir::{FunctionTable, SymbolTable};
+use crate::ir::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
-use crate::storage::entities::{
-    DefaultFromEntityStorage, EntityStorage, EntityStorageError, PersistableEntity, ProjectEntity,
-};
+use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};
+use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
     ProjectStorage, ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
@@ -22,6 +21,7 @@ pub struct Project {
     pub(crate) language: &'static Language,
     pub(crate) symbols: SymbolTable,
     pub(crate) functions: FunctionTable,
+    pub(crate) blocks: CodeBlockTable,
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
@@ -40,6 +40,7 @@ pub struct ProjectRef<'a> {
     pub language: &'static Language,
     pub symbols: &'a SymbolTable,
     pub functions: &'a FunctionTable,
+    pub blocks: &'a CodeBlockTable,
     pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
 }
@@ -49,6 +50,7 @@ pub struct ProjectMut<'a> {
     pub language: &'static Language,
     pub symbols: &'a mut SymbolTable,
     pub functions: &'a mut FunctionTable,
+    pub blocks: &'a mut CodeBlockTable,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
 }
@@ -151,6 +153,13 @@ impl Project {
             None => P::FunctionTable::default_from_entity_storage(&storage.entities)?,
         };
 
+        tracing::trace!("loading project code blocks");
+
+        let blocks = match P::code_block_table(&storage.entities)? {
+            Some(blocks) => blocks,
+            None => P::CodeBlockTable::default_from_entity_storage(&storage.entities)?,
+        };
+
         /*
         let function_cache_size = attributes
             .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
@@ -164,6 +173,7 @@ impl Project {
             language,
             symbols: SymbolTable::new(symbols),
             functions: FunctionTable::new(functions),
+            blocks: CodeBlockTable::new(blocks),
             attributes,
             storage,
         })
@@ -303,8 +313,20 @@ impl Project {
         &mut self.symbols
     }
 
+    pub fn blocks(&self) -> &CodeBlockTable {
+        &self.blocks
+    }
+
+    pub fn blocks_mut(&mut self) -> &mut CodeBlockTable {
+        &mut self.blocks
+    }
+
     pub fn functions(&self) -> &FunctionTable {
         &self.functions
+    }
+
+    pub fn functions_mut(&mut self) -> &mut FunctionTable {
+        &mut self.functions
     }
 
     pub fn entities(&self) -> &EntityStorage {
@@ -368,6 +390,7 @@ impl Project {
             language: self.language,
             symbols: &self.symbols,
             functions: &self.functions,
+            blocks: &self.blocks,
             attributes: &self.attributes,
             storage: &self.storage,
         }
@@ -379,6 +402,7 @@ impl Project {
             language: self.language,
             symbols: &mut self.symbols,
             functions: &mut self.functions,
+            blocks: &mut self.blocks,
             attributes: &mut self.attributes,
             storage: &mut self.storage,
         }

@@ -3,14 +3,12 @@ use std::collections::BTreeMap;
 use bincode::{Decode, Encode};
 
 use crate::ir::traits::{
-    FunctionIter, FunctionIterMut, FunctionMut, FunctionRef,
-    FunctionTable as FunctionTableT,
+    FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
 };
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
-use crate::storage::entities::{
-    DefaultFromEntityStorage, Entity, EntityKeyId, PersistableEntity, ProjectEntity,
-};
+use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
+use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 #[derive(Debug, Clone, Default, Decode, Encode)]
@@ -82,13 +80,17 @@ impl Entity for IndexedFunctionTable {
     const ID: EntityKeyId = ENTITY_KEY_FUNCTION_ENTITY_ID;
 }
 
-impl DefaultFromEntityStorage for IndexedFunctionTable {
+impl ProjectEntityFromStorage for IndexedFunctionTable {
+    fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
+        storage.get(&ProjectEntity::FunctionTable)
+    }
+
     fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
         Ok(Self::default())
     }
 }
 
-impl PersistableEntity for IndexedFunctionTable {
+impl PersistableProjectEntity for IndexedFunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         storage.insert(&ProjectEntity::FunctionTable, self)
     }
@@ -142,7 +144,7 @@ impl FunctionTable {
     }
 }
 
-impl PersistableEntity for FunctionTable {
+impl PersistableProjectEntity for FunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         self.inner.persist(storage)
     }

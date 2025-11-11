@@ -1,6 +1,6 @@
 use crate::ir::{Address, CodeBlock, Id};
 use crate::lifter::ContextSet;
-use crate::storage::entities::PersistableEntity;
+use crate::storage::project::PersistableProjectEntity;
 
 pub type CodeBlockRef<'a> = &'a CodeBlock;
 pub type CodeBlockMut<'a> = &'a mut CodeBlock;
@@ -53,7 +53,7 @@ impl<'a> Iterator for CodeBlockIterMut<'a> {
     }
 }
 
-pub trait CodeBlockTable: PersistableEntity {
+pub trait CodeBlockTable: PersistableProjectEntity {
     fn insert(&mut self, func: CodeBlock);
 
     fn is_empty(&self) -> bool;
