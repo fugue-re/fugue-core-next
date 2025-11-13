@@ -10,7 +10,8 @@ use crate::types::BytesOrSlice;
 pub type EntityKeyId = u8;
 pub type EntityId = u8;
 
-pub const ENTITY_PREFIX_SIZE: usize = 2;
+// Packed entity key ID and entity (value) ID
+pub const ENTITY_PREFIX_SIZE: usize = mem::size_of::<EntityKeyId>() + mem::size_of::<EntityId>();
 
 // Entity key identifiers
 pub const ENTITY_KEY_PROJECT_ENTITY_ID: EntityKeyId = 0;

@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::io;
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -653,11 +654,11 @@ pub struct EntityCache<K: EntityKey, E: Entity> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct EntityRef<E>(Arc<E>)
+pub struct EntityRef<'a, E>(Arc<E>, PhantomData<&'a E>)
 where
     E: Entity;
 
-impl<E> Display for EntityRef<E>
+impl<E> Display for EntityRef<'_, E>
 where
     E: Entity + Display,
 {
@@ -666,7 +667,7 @@ where
     }
 }
 
-impl<E> AsRef<E> for EntityRef<E>
+impl<E> AsRef<E> for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -675,7 +676,7 @@ where
     }
 }
 
-impl<E> Deref for EntityRef<E>
+impl<E> Deref for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -686,12 +687,16 @@ where
     }
 }
 
-impl<E> EntityRef<E>
+impl<'a, E> EntityRef<'a, E>
 where
     E: Entity,
 {
-    pub(crate) fn new(entity: Arc<E>) -> Self {
-        Self(entity)
+    pub fn new(entity: E) -> Self {
+        Self(Arc::new(entity), PhantomData)
+    }
+
+    pub fn from_arc(entity: Arc<E>) -> Self {
+        Self(entity, PhantomData)
     }
 }
 
@@ -809,9 +814,17 @@ where
     K: EntityKey,
     E: Entity + MutableEntity<K>,
 {
-    pub(crate) fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
+    pub fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
         Self {
             entity: ManuallyDrop::new(entity),
+            flags: EntityMutFlags::NONE,
+            cache,
+        }
+    }
+
+    pub fn make_mut(entity: EntityRef<'a, E>, cache: &'a EntityCache<K, E>) -> Self {
+        Self {
+            entity: ManuallyDrop::new(entity.0),
             flags: EntityMutFlags::NONE,
             cache,
         }
@@ -982,13 +995,13 @@ where
 
     pub fn get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
         if let Some(entity) = self.entities.get(key) {
-            return Ok(Some(EntityRef::new(entity)));
+            return Ok(Some(EntityRef::from_arc(entity)));
         }
 
         if let Some(entity) = self.storage.get::<K, E>(key)? {
             let entity = Arc::new(entity);
             self.entities.insert(key.to_owned(), entity.to_owned());
-            return Ok(Some(EntityRef::new(entity)));
+            return Ok(Some(EntityRef::from_arc(entity)));
         }
 
         Ok(None)
@@ -1027,7 +1040,7 @@ where
 
         self.entities.insert(key, entity.clone());
 
-        Ok(EntityRef::new(entity))
+        Ok(EntityRef::from_arc(entity))
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
@@ -1049,7 +1062,7 @@ where
         self.storage.keys::<K, E>()
     }
 
-    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
+    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<'_, E>>, EntityStorageError> {
         // TODO: should we cache the elements in the iterator if the cache has capacity?
         let pfx = schema::make_prefix::<K, E>();
         Ok(self.storage.backing.iter_prefix_as(&pfx, |k, v| {
@@ -1057,14 +1070,14 @@ where
                 .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
             if let Some(val) = self.entities.get(&key) {
-                return Ok((key, EntityRef::new(val)));
+                return Ok((key, EntityRef::from_arc(val)));
             }
 
             let val = bincode::decode_from_slice::<E, _>(v, bincode::config::standard())
                 .map(|(entity, _)| entity)
                 .map_err(EntityStorageError::decode)?;
 
-            Ok((key, EntityRef::new(Arc::new(val))))
+            Ok((key, EntityRef::new(val)))
         })? as EntityIterator<'_, K, EntityRef<E>>)
     }
 

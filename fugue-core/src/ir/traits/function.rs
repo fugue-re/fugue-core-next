@@ -1,10 +1,9 @@
-use crate::{
-    ir::{Address, Function, Id},
-    storage::project::PersistableProjectEntity,
-};
+use crate::ir::{Address, Function, Id};
+use crate::storage::entities::{EntityMut, EntityRef};
+use crate::storage::project::PersistableProjectEntity;
 
-pub type FunctionRef<'a> = &'a Function;
-pub type FunctionMut<'a> = &'a mut Function;
+pub type FunctionRef<'a> = &'a Function; // EntityRef<'a, Function>;
+pub type FunctionMut<'a> = &'a mut Function; // EntityMut<'a, Id<Function>, Function>;
 
 pub struct FunctionIter<'a> {
     inner: Box<dyn Iterator<Item = FunctionRef<'a>> + 'a>,

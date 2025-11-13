@@ -11,10 +11,22 @@ use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
 
+// A simple function table that maps function addresses to their corresponding
+// function IDs.
+//
+// This implementation is primarily suited to project storage implementations
+// that are purely in-memory, i.e., so-called transient storage in our
+// nomenclature.
+//
+// Within the project storage layer, this implementation retreives the entire
+// table contents at once on project creation/load, and defers persisting
+// changes until the project is explicitly persisted or the owning project is
+// dropped.
+//
 #[derive(Debug, Clone, Default, Decode, Encode)]
 pub struct IndexedFunctionTable {
     addresses: BTreeMap<Address, Id<Function>>,
-    functions: Vec<Function>,
+    functions: Vec<Function>, // TODO: replace with Slab
 }
 
 impl IndexedFunctionTable {
