@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::traits::SymbolTable as _;
-use crate::ir::{CodeBlockTable, FunctionTable, SymbolTable};
+use crate::ir::traits::SymbolTable2 as _;
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};

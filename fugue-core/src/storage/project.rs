@@ -1,7 +1,9 @@
 use std::marker::PhantomData;
 
 use crate::ir::block::table::IndexedCodeBlockTable;
-use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
+use crate::ir::traits::{
+    CodeBlockTable2 as CodeBlockTable, FunctionTable2 as FunctionTable, SymbolTable2 as SymbolTable,
+};
 use crate::ir::{IndexedFunctionTable, IndexedSymbolTable};
 use crate::storage::entities::EntityStorageProviderFromStorage;
 use crate::storage::segments::SegmentStorageProviderFromStorage;
