@@ -13,6 +13,7 @@ pub use ustr::{
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
+    SymbolTable2,
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
@@ -35,6 +36,18 @@ pub struct SymbolEntry {
     address: Address,
     symbol: Symbol,
     properties: SymbolProperties,
+}
+
+impl AsRef<SymbolEntry> for SymbolEntry {
+    fn as_ref(&self) -> &SymbolEntry {
+        self
+    }
+}
+
+impl AsMut<SymbolEntry> for SymbolEntry {
+    fn as_mut(&mut self) -> &mut SymbolEntry {
+        self
+    }
 }
 
 impl Display for SymbolEntry {
@@ -817,6 +830,130 @@ impl SymbolTableT for IndexedSymbolTable {
     }
 
     fn iter_by_index(&self) -> BoxedSymbolIndexAndEntryIter {
+        BoxedSymbolIndexAndEntryIter::new(self.iter_by_index())
+    }
+
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
+    }
+
+    fn len(&self) -> usize {
+        Self::len(self)
+    }
+}
+
+impl SymbolTable2 for IndexedSymbolTable {
+    type SymbolEntryRef<'a> = &'a SymbolEntry;
+    type SymbolEntryMut<'a> = &'a mut SymbolEntry;
+
+    type SymbolEntryIter<'a> = BoxedSymbolEntryIter<'a>;
+    type SymbolEntryIterMut<'a> = BoxedSymbolEntryIterMut<'a>;
+    type SymbolIndexAndEntryIter<'a> = BoxedSymbolIndexAndEntryIter<'a>;
+
+    fn get<'a>(&'a self, symbol: &str) -> Option<Self::SymbolEntryIter<'a>> {
+        Self::get(self, symbol).map(BoxedSymbolEntryIter::new)
+    }
+
+    fn get_mut<'a>(&'a mut self, symbol: &str) -> Option<Self::SymbolEntryIterMut<'a>> {
+        Self::get_mut(self, symbol).map(BoxedSymbolEntryIterMut::new)
+    }
+
+    fn get_first(&self, symbol: &str) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
+        Self::get_first(self, symbol)
+    }
+
+    fn get_first_mut(
+        &mut self,
+        symbol: &str,
+    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
+        Self::get_first_mut(self, symbol)
+    }
+
+    fn get_by_id(&self, id: Id<Symbol>) -> Option<Self::SymbolEntryRef<'_>> {
+        Self::get_by_id(self, id)
+    }
+
+    fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<Self::SymbolEntryMut<'_>> {
+        Self::get_by_id_mut(self, id)
+    }
+
+    fn get_by_index(
+        &self,
+        index: SymbolIndex,
+    ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
+        Self::get_by_index(self, index)
+    }
+
+    fn get_by_index_mut(
+        &mut self,
+        index: SymbolIndex,
+    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
+        Self::get_by_index_mut(self, index)
+    }
+
+    fn get_by_address(
+        &self,
+        address: Address,
+    ) -> Self::SymbolEntryIter<'_> {
+        BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
+    }
+
+    fn get_by_address_mut(
+        &mut self,
+        address: Address,
+    ) -> Self::SymbolEntryIterMut<'_> {
+        BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
+    }
+
+    fn get_first_by_address(
+        &self,
+        address: Address,
+    ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
+        Self::get_first_by_address(self, address)
+    }
+
+    fn get_first_by_address_mut(
+        &mut self,
+        address: Address,
+    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
+        Self::get_first_by_address_mut(self, address)
+    }
+
+    fn contains(&self, symbol: &str) -> bool {
+        Self::contains(self, symbol)
+    }
+
+    fn contains_index(&self, index: SymbolIndex) -> bool {
+        Self::contains_index(self, index)
+    }
+
+    fn contains_address(&self, address: Address) -> bool {
+        Self::contains_address(self, address)
+    }
+
+    fn insert(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: Symbol,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>) {
+        Self::insert(self, index, address, symbol, properties)
+    }
+
+    fn iter(&self) -> Self::SymbolEntryIter<'_> {
+        BoxedSymbolEntryIter::new(self.iter())
+    }
+
+    fn iter_by_selector(&self, selector: usize) -> Self::SymbolEntryIter<'_> {
+        BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
+    }
+
+    fn iter_by_address(&self, address: Address) -> Self::SymbolEntryIter<'_> {
+        BoxedSymbolEntryIter::new(self.iter_by_address(address))
+    }
+
+    fn iter_by_index(&self) -> Self::SymbolIndexAndEntryIter<'_> {
         BoxedSymbolIndexAndEntryIter::new(self.iter_by_index())
     }
 

@@ -25,6 +25,18 @@ pub struct CodeBlock {
     context: ContextSet,
 }
 
+impl AsRef<CodeBlock> for CodeBlock {
+    fn as_ref(&self) -> &CodeBlock {
+        self
+    }
+}
+
+impl AsMut<CodeBlock> for CodeBlock {
+    fn as_mut(&mut self) -> &mut CodeBlock {
+        self
+    }
+}
+
 impl Entity for CodeBlock {
     const ID: EntityId = ENTITY_CODE_BLOCK_ID;
 }

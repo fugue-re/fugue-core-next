@@ -23,6 +23,18 @@ pub struct Function {
     properties: FunctionProperties,
 }
 
+impl AsRef<Function> for Function {
+    fn as_ref(&self) -> &Function {
+        self
+    }
+}
+
+impl AsMut<Function> for Function {
+    fn as_mut(&mut self) -> &mut Function {
+        self
+    }
+}
+
 impl Entity for Function {
     const ID: EntityId = ENTITY_FUNCTION_ID;
 }

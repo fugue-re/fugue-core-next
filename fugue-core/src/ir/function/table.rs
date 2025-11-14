@@ -4,6 +4,7 @@ use bincode::{Decode, Encode};
 
 use crate::ir::traits::{
     FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
+    FunctionTable2,
 };
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
@@ -69,14 +70,66 @@ impl FunctionTableT for IndexedFunctionTable {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| self.get_by_id(id))
+            .and_then(|id| FunctionTableT::get_by_id(self, id))
     }
 
     fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| self.get_by_id_mut(id))
+            .and_then(|id| FunctionTableT::get_by_id_mut(self, id))
+    }
+
+    fn iter<'a>(&'a self) -> FunctionIter<'a> {
+        FunctionIter::new(self.functions.iter())
+    }
+
+    fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
+        FunctionIterMut::new(self.functions.iter_mut())
+    }
+}
+
+impl FunctionTable2 for IndexedFunctionTable {
+    type FunctionRef<'a> = FunctionRef<'a>;
+    type FunctionMut<'a> = FunctionMut<'a>;
+
+    type FunctionIter<'a> = FunctionIter<'a>;
+    type FunctionIterMut<'a> = FunctionIterMut<'a>;
+
+    fn insert(&mut self, func: Function) {
+        let id = Id::new(self.functions.len() as u32);
+        self.addresses.insert(func.address(), id);
+        self.functions.push(func);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.functions.len()
+    }
+
+    fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
+        self.functions.get(id.index() as usize)
+    }
+
+    fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
+        self.functions.get_mut(id.index() as usize)
+    }
+
+    fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
+        self.addresses
+            .get(&addr)
+            .copied()
+            .and_then(|id| FunctionTable2::get_by_id(self, id))
+    }
+
+    fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
+        self.addresses
+            .get(&addr)
+            .copied()
+            .and_then(|id| FunctionTable2::get_by_id_mut(self, id))
     }
 
     fn iter<'a>(&'a self) -> FunctionIter<'a> {

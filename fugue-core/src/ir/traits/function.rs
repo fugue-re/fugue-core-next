@@ -1,6 +1,8 @@
+use std::ops::{Deref, DerefMut};
+
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::{EntityMut, EntityRef};
-use crate::storage::project::PersistableProjectEntity;
+use crate::storage::project::{FundamentalProjectEntity, PersistableProjectEntity};
 
 pub type FunctionRef<'a> = &'a Function; // EntityRef<'a, Function>;
 pub type FunctionMut<'a> = &'a mut Function; // EntityMut<'a, Id<Function>, Function>;
@@ -67,4 +69,43 @@ pub trait FunctionTable: PersistableProjectEntity {
 
     fn iter<'a>(&'a self) -> FunctionIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a>;
+}
+
+pub trait AsFunctionRef<'a>: AsRef<Function> + Deref<Target = Function> {}
+
+impl<'a> AsFunctionRef<'a> for FunctionRef<'a> {}
+
+
+pub trait AsFunctionMut<'a>: AsMut<Function> + DerefMut<Target = Function> {}
+
+impl<'a> AsFunctionMut<'a> for FunctionMut<'a> {}
+
+pub trait FunctionTable2: FundamentalProjectEntity {
+    type FunctionRef<'a>: AsFunctionRef<'a>
+    where
+        Self: 'a;
+    type FunctionMut<'a>: AsFunctionMut<'a>
+    where
+        Self: 'a;
+
+    type FunctionIter<'a>: Iterator<Item = Self::FunctionRef<'a>> + 'a
+    where
+        Self: 'a;
+    type FunctionIterMut<'a>: Iterator<Item = Self::FunctionMut<'a>> + 'a
+    where
+        Self: 'a;
+
+    fn insert(&mut self, func: Function);
+
+    fn is_empty(&self) -> bool;
+    fn len(&self) -> usize;
+
+    fn get_by_id<'a>(&'a self, id: Id<Function>) -> Option<Self::FunctionRef<'a>>;
+    fn get_by_id_mut<'a>(&'a mut self, id: Id<Function>) -> Option<Self::FunctionMut<'a>>;
+
+    fn get_by_address<'a>(&'a self, addr: Address) -> Option<Self::FunctionRef<'a>>;
+    fn get_by_address_mut<'a>(&'a mut self, addr: Address) -> Option<Self::FunctionMut<'a>>;
+
+    fn iter<'a>(&'a self) -> Self::FunctionIter<'a>;
+    fn iter_mut<'a>(&'a mut self) -> Self::FunctionIterMut<'a>;
 }
