@@ -13,7 +13,6 @@ pub use ustr::{
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
-    SymbolTable2,
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
@@ -744,105 +743,6 @@ impl IndexedSymbolTable {
 }
 
 impl SymbolTableT for IndexedSymbolTable {
-    fn get(&self, symbol: &str) -> Option<BoxedSymbolEntryIter> {
-        Self::get(self, symbol).map(BoxedSymbolEntryIter::new)
-    }
-
-    fn get_mut(&mut self, symbol: &str) -> Option<BoxedSymbolEntryIterMut> {
-        Self::get_mut(self, symbol).map(BoxedSymbolEntryIterMut::new)
-    }
-
-    fn get_first(&self, symbol: &str) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        Self::get_first(self, symbol)
-    }
-
-    fn get_first_mut(&mut self, symbol: &str) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        Self::get_first_mut(self, symbol)
-    }
-
-    fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry> {
-        Self::get_by_id(self, id)
-    }
-
-    fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry> {
-        Self::get_by_id_mut(self, id)
-    }
-
-    fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        Self::get_by_index(self, index)
-    }
-
-    fn get_by_index_mut(&mut self, index: SymbolIndex) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        Self::get_by_index_mut(self, index)
-    }
-
-    fn get_by_address(&self, address: Address) -> BoxedSymbolEntryIter {
-        BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
-    }
-
-    fn get_by_address_mut(&mut self, address: Address) -> BoxedSymbolEntryIterMut {
-        BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
-    }
-
-    fn get_first_by_address(&self, address: Address) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        Self::get_first_by_address(self, address)
-    }
-
-    fn get_first_by_address_mut(
-        &mut self,
-        address: Address,
-    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        Self::get_first_by_address_mut(self, address)
-    }
-
-    fn contains(&self, symbol: &str) -> bool {
-        Self::contains(self, symbol)
-    }
-
-    fn contains_index(&self, index: SymbolIndex) -> bool {
-        Self::contains_index(self, index)
-    }
-
-    fn contains_address(&self, address: Address) -> bool {
-        Self::contains_address(self, address)
-    }
-
-    fn insert(
-        &mut self,
-        index: SymbolIndex,
-        address: Address,
-        symbol: Symbol,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
-        Self::insert(self, index, address, symbol, properties)
-    }
-
-    fn iter(&self) -> BoxedSymbolEntryIter {
-        BoxedSymbolEntryIter::new(self.iter())
-    }
-
-    fn iter_by_selector(&self, selector: usize) -> BoxedSymbolEntryIter {
-        BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
-    }
-
-    fn iter_by_address(&self, address: Address) -> BoxedSymbolEntryIter {
-        BoxedSymbolEntryIter::new(self.iter_by_address(address))
-    }
-
-    fn iter_by_index(&self) -> BoxedSymbolIndexAndEntryIter {
-        BoxedSymbolIndexAndEntryIter::new(self.iter_by_index())
-    }
-
-    fn is_empty(&self) -> bool {
-        Self::is_empty(self)
-    }
-
-    fn len(&self) -> usize {
-        Self::len(self)
-    }
-}
-
-impl SymbolTable2 for IndexedSymbolTable {
     type SymbolEntryRef<'a> = &'a SymbolEntry;
     type SymbolEntryMut<'a> = &'a mut SymbolEntry;
 
@@ -862,10 +762,7 @@ impl SymbolTable2 for IndexedSymbolTable {
         Self::get_first(self, symbol)
     }
 
-    fn get_first_mut(
-        &mut self,
-        symbol: &str,
-    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
+    fn get_first_mut(&mut self, symbol: &str) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
         Self::get_first_mut(self, symbol)
     }
 
@@ -877,10 +774,7 @@ impl SymbolTable2 for IndexedSymbolTable {
         Self::get_by_id_mut(self, id)
     }
 
-    fn get_by_index(
-        &self,
-        index: SymbolIndex,
-    ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
+    fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
         Self::get_by_index(self, index)
     }
 
@@ -891,17 +785,11 @@ impl SymbolTable2 for IndexedSymbolTable {
         Self::get_by_index_mut(self, index)
     }
 
-    fn get_by_address(
-        &self,
-        address: Address,
-    ) -> Self::SymbolEntryIter<'_> {
+    fn get_by_address(&self, address: Address) -> Self::SymbolEntryIter<'_> {
         BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
     }
 
-    fn get_by_address_mut(
-        &mut self,
-        address: Address,
-    ) -> Self::SymbolEntryIterMut<'_> {
+    fn get_by_address_mut(&mut self, address: Address) -> Self::SymbolEntryIterMut<'_> {
         BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
     }
 
@@ -963,177 +851,6 @@ impl SymbolTable2 for IndexedSymbolTable {
 
     fn len(&self) -> usize {
         Self::len(self)
-    }
-}
-
-pub struct SymbolTable {
-    inner: Box<dyn SymbolTableT>,
-}
-
-impl PersistableProjectEntity for SymbolTable {
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        self.inner.persist(storage)
-    }
-}
-
-impl SymbolTable {
-    pub fn new(inner: impl SymbolTableT + 'static) -> Self {
-        Self {
-            inner: Box::new(inner),
-        }
-    }
-
-    pub fn get(&self, symbol: impl AsRef<str>) -> Option<BoxedSymbolEntryIter<'_>> {
-        self.inner.get(symbol.as_ref())
-    }
-
-    pub fn get_mut(&mut self, symbol: impl AsRef<str>) -> Option<BoxedSymbolEntryIterMut<'_>> {
-        self.inner.get_mut(symbol.as_ref())
-    }
-
-    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        self.inner.get_first(symbol.as_ref())
-    }
-
-    pub fn get_first_mut(
-        &mut self,
-        symbol: impl AsRef<str>,
-    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        self.inner.get_first_mut(symbol.as_ref())
-    }
-
-    pub fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry> {
-        self.inner.get_by_id(id)
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry> {
-        self.inner.get_by_id_mut(id)
-    }
-
-    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        self.inner.get_by_index(index)
-    }
-
-    pub fn get_by_index_mut(
-        &mut self,
-        index: SymbolIndex,
-    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        self.inner.get_by_index_mut(index)
-    }
-
-    pub fn get_by_address(&self, address: impl Into<Address>) -> BoxedSymbolEntryIter<'_> {
-        self.inner.get_by_address(address.into())
-    }
-
-    pub fn get_by_address_mut(
-        &mut self,
-        address: impl Into<Address>,
-    ) -> BoxedSymbolEntryIterMut<'_> {
-        self.inner.get_by_address_mut(address.into())
-    }
-
-    pub fn get_first_by_address(
-        &self,
-        address: impl Into<Address>,
-    ) -> Option<(Id<Symbol>, &SymbolEntry)> {
-        self.inner.get_first_by_address(address.into())
-    }
-
-    pub fn get_first_by_address_mut(
-        &mut self,
-        address: impl Into<Address>,
-    ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
-        self.inner.get_first_by_address_mut(address.into())
-    }
-
-    pub fn contains(&self, symbol: &str) -> bool {
-        self.inner.contains(symbol)
-    }
-
-    pub fn contains_index(&self, index: SymbolIndex) -> bool {
-        self.inner.contains_index(index)
-    }
-
-    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
-        self.inner.contains_address(address.into())
-    }
-
-    pub fn insert_local(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-    ) -> (bool, Id<Symbol>) {
-        self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
-    }
-
-    pub fn insert_local_with(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
-        self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
-    }
-
-    pub fn insert_extern(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-    ) -> (bool, Id<Symbol>) {
-        self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
-    }
-
-    pub fn insert_extern_with(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
-        self.insert(
-            index,
-            address,
-            symbol,
-            properties | SymbolProperties::EXTERN,
-        )
-    }
-
-    pub fn insert(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
-        self.inner
-            .insert(index, address.into(), symbol.into(), properties)
-    }
-
-    pub fn iter(&self) -> BoxedSymbolEntryIter<'_> {
-        self.inner.iter()
-    }
-
-    pub fn iter_by_selector(&self, selector: usize) -> BoxedSymbolEntryIter<'_> {
-        self.inner.iter_by_selector(selector)
-    }
-
-    pub fn iter_by_address(&self, address: impl Into<Address>) -> BoxedSymbolEntryIter<'_> {
-        self.inner.iter_by_address(address.into())
-    }
-
-    pub fn iter_by_index(&self) -> BoxedSymbolIndexAndEntryIter<'_> {
-        self.inner.iter_by_index()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
     }
 }
 

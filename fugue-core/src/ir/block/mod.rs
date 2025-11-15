@@ -9,7 +9,7 @@ use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
 pub mod table;
-pub use table::{CodeBlockTable, IndexedCodeBlockTable};
+pub use table::IndexedCodeBlockTable;
 
 pub type CodeBlockId = Id<CodeBlock>;
 

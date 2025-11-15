@@ -4,7 +4,6 @@ use bincode::{Decode, Encode};
 
 use crate::ir::traits::{
     FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
-    FunctionTable2,
 };
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
@@ -44,52 +43,6 @@ impl IndexedFunctionTable {
 }
 
 impl FunctionTableT for IndexedFunctionTable {
-    fn insert(&mut self, func: Function) {
-        let id = Id::new(self.functions.len() as u32);
-        self.addresses.insert(func.address(), id);
-        self.functions.push(func);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.functions.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.functions.len()
-    }
-
-    fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.functions.get(id.index() as usize)
-    }
-
-    fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
-        self.functions.get_mut(id.index() as usize)
-    }
-
-    fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
-        self.addresses
-            .get(&addr)
-            .copied()
-            .and_then(|id| FunctionTableT::get_by_id(self, id))
-    }
-
-    fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
-        self.addresses
-            .get(&addr)
-            .copied()
-            .and_then(|id| FunctionTableT::get_by_id_mut(self, id))
-    }
-
-    fn iter<'a>(&'a self) -> FunctionIter<'a> {
-        FunctionIter::new(self.functions.iter())
-    }
-
-    fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
-        FunctionIterMut::new(self.functions.iter_mut())
-    }
-}
-
-impl FunctionTable2 for IndexedFunctionTable {
     type FunctionRef<'a> = FunctionRef<'a>;
     type FunctionMut<'a> = FunctionMut<'a>;
 
@@ -122,14 +75,14 @@ impl FunctionTable2 for IndexedFunctionTable {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| FunctionTable2::get_by_id(self, id))
+            .and_then(|id| self.get_by_id(id))
     }
 
     fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| FunctionTable2::get_by_id_mut(self, id))
+            .and_then(|id| self.get_by_id_mut(id))
     }
 
     fn iter<'a>(&'a self) -> FunctionIter<'a> {
@@ -158,59 +111,5 @@ impl ProjectEntityFromStorage for IndexedFunctionTable {
 impl PersistableProjectEntity for IndexedFunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         storage.insert(&ProjectEntity::FunctionTable, self)
-    }
-}
-
-pub struct FunctionTable {
-    inner: Box<dyn FunctionTableT>,
-}
-
-impl FunctionTable {
-    pub fn new(inner: impl FunctionTableT + 'static) -> Self {
-        Self {
-            inner: Box::new(inner),
-        }
-    }
-
-    pub fn insert(&mut self, func: Function) {
-        self.inner.insert(func);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.inner.get_by_id(id)
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
-        self.inner.get_by_id_mut(id)
-    }
-
-    pub fn get_by_address(&self, addr: impl Into<Address>) -> Option<FunctionRef> {
-        self.inner.get_by_address(addr.into())
-    }
-
-    pub fn get_by_address_mut(&mut self, addr: impl Into<Address>) -> Option<FunctionMut> {
-        self.inner.get_by_address_mut(addr.into())
-    }
-
-    pub fn iter<'a>(&'a self) -> FunctionIter<'a> {
-        self.inner.iter()
-    }
-
-    pub fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
-        self.inner.iter_mut()
-    }
-}
-
-impl PersistableProjectEntity for FunctionTable {
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        self.inner.persist(storage)
     }
 }

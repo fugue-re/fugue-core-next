@@ -8,9 +8,7 @@ pub mod address;
 pub use address::{Address, AddressMap, ToAddress};
 
 pub mod block;
-pub use block::{
-    CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable, IndexedCodeBlockTable,
-};
+pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};
 
 pub mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
@@ -18,7 +16,7 @@ pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
 pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties, FunctionTable, IndexedFunctionTable};
+pub use function::{Function, FunctionId, FunctionProperties, IndexedFunctionTable};
 
 pub mod insn;
 pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
@@ -35,7 +33,7 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 pub mod symbol;
 pub use symbol::{
     IndexedSymbolTable, LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap,
-    SymbolProperties, SymbolTable,
+    SymbolProperties,
 };
 
 pub mod traits;
