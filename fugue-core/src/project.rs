@@ -382,6 +382,9 @@ where
         tracing::debug!("persisting function table");
         self.functions.persist(&self.storage.entities)?;
 
+        tracing::debug!("persisting code block table");
+        self.blocks.persist(&self.storage.entities)?;
+
         Ok(())
     }
 
