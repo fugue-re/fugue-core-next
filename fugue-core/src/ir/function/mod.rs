@@ -13,7 +13,7 @@ pub use table::IndexedFunctionTable;
 
 pub type FunctionId = Id<Function>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Function {
     id: Id<Self>,
     name: Option<Ustr>,
@@ -175,6 +175,10 @@ impl Function {
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,
         }
+    }
+
+    pub fn id(&self) -> FunctionId {
+        self.id
     }
 
     pub fn set_frame(&mut self, frame: FunctionFrame) {
