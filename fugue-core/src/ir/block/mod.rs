@@ -120,6 +120,10 @@ impl CodeBlock {
         }
     }
 
+    pub fn id(&self) -> CodeBlockId {
+        self.id
+    }
+
     pub fn start(&self) -> Address {
         self.start
     }

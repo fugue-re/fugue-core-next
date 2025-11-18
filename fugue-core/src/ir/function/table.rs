@@ -156,14 +156,14 @@ impl FunctionTableT for IndexedFunctionTable {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| self.get_by_id(id).filter(|f| f.id().is_valid()))
+            .and_then(|id| self.get_by_id(id))
     }
 
     fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
         self.addresses
             .get(&addr)
             .copied()
-            .and_then(|id| self.get_by_id_mut(id).filter(|f| f.id().is_valid()))
+            .and_then(|id| self.get_by_id_mut(id))
     }
 
     fn iter<'a>(&'a self) -> FunctionIter<'a> {

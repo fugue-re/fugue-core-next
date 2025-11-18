@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use bincode::{BorrowDecode, Decode, Encode};
 use iset::IntervalMap;
+use thiserror::Error;
 
 use crate::ir::traits::{
     CodeBlockIter, CodeBlockIterMut, CodeBlockMut, CodeBlockRef, CodeBlockTable as CodeBlockTableT,
@@ -13,10 +14,11 @@ use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IndexedCodeBlockTable {
-    blocks: Vec<CodeBlock>,
     bounds: IntervalMap<Address, IdSet<CodeBlock>>,
+    blocks: Vec<CodeBlock>,
+    free_ids: Vec<Id<CodeBlock>>,
 }
 
 impl Encode for IndexedCodeBlockTable {
@@ -24,12 +26,13 @@ impl Encode for IndexedCodeBlockTable {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        self.blocks.encode(encoder)?;
         self.bounds.len().encode(encoder)?;
         for (iv, val) in self.bounds.unsorted_iter() {
             iv.encode(encoder)?;
             val.encode(encoder)?;
         }
+        self.blocks.encode(encoder)?;
+        self.free_ids.encode(encoder)?;
         Ok(())
     }
 }
@@ -38,7 +41,6 @@ impl<C> Decode<C> for IndexedCodeBlockTable {
     fn decode<D: bincode::de::Decoder<Context = C>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let blocks = Vec::<CodeBlock>::decode(decoder)?;
         let nbounds = usize::decode(decoder)?;
         let mut bounds = IntervalMap::with_capacity(nbounds);
         for _ in 0..nbounds {
@@ -46,7 +48,13 @@ impl<C> Decode<C> for IndexedCodeBlockTable {
             let val = IdSet::<CodeBlock>::decode(decoder)?;
             bounds.force_insert(iv, val);
         }
-        Ok(Self { blocks, bounds })
+        let blocks = Vec::<CodeBlock>::decode(decoder)?;
+        let free_ids = Vec::<Id<CodeBlock>>::decode(decoder)?;
+        Ok(Self {
+            bounds,
+            blocks,
+            free_ids,
+        })
     }
 }
 
@@ -54,7 +62,6 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let blocks = Vec::<CodeBlock>::borrow_decode(decoder)?;
         let nbounds = usize::borrow_decode(decoder)?;
         let mut bounds = IntervalMap::with_capacity(nbounds);
         for _ in 0..nbounds {
@@ -62,50 +69,85 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
             let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
             bounds.force_insert(iv, val);
         }
-        Ok(Self { blocks, bounds })
+        let blocks = Vec::<CodeBlock>::borrow_decode(decoder)?;
+        let free_ids = Vec::<Id<CodeBlock>>::borrow_decode(decoder)?;
+        Ok(Self {
+            bounds,
+            blocks,
+            free_ids,
+        })
     }
 }
 
 impl IndexedCodeBlockTable {
     pub fn new() -> Self {
-        Self {
-            blocks: Vec::new(),
-            bounds: IntervalMap::new(),
-        }
+        Self::default()
     }
 }
 
+#[derive(Debug, Error)]
+pub enum IndexedCodeBlockTableError {
+    #[error("code block to insert has a different address than that used for insertion")]
+    AddressMismatch,
+    #[error(transparent)]
+    Storage(#[from] EntityStorageError),
+}
+
 impl CodeBlockTableT for IndexedCodeBlockTable {
+    type Error = IndexedCodeBlockTableError;
+
     type CodeBlockRef<'a> = CodeBlockRef<'a>;
     type CodeBlockMut<'a> = CodeBlockMut<'a>;
 
     type CodeBlockIter<'a> = CodeBlockIter<'a>;
     type CodeBlockIterMut<'a> = CodeBlockIterMut<'a>;
 
-    fn insert(&mut self, block: CodeBlock) {
-        let id = Id::new(self.blocks.len() as u32);
-        let bounds = block.range();
+    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    where
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
+        E: Into<Self::Error>,
+    {
+        let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
+            (true, free_id)
+        } else {
+            (false, Id::new(self.blocks.len() as u32))
+        };
+
+        let nb = f(id, addr)?;
+
+        if nb.start() != addr {
+            return Err(IndexedCodeBlockTableError::AddressMismatch);
+        }
+
         self.bounds
-            .entry(bounds)
+            .entry(nb.range())
             .or_insert_with(IdSet::new)
             .insert(id);
-        self.blocks.push(block);
+
+        if reuse {
+            self.free_ids.pop();
+            self.blocks[id.index() as usize] = nb;
+        } else {
+            self.blocks.push(nb);
+        }
+
+        Ok(id)
     }
 
     fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.len() == 0
     }
 
     fn len(&self) -> usize {
-        self.blocks.len()
+        self.blocks.len() - self.free_ids.len()
     }
 
     fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {
-        self.blocks.get(id.index())
+        self.blocks.get(id.index()).filter(|blk| blk.id().is_valid())
     }
 
     fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut> {
-        self.blocks.get_mut(id.index())
+        self.blocks.get_mut(id.index()).filter(|blk| blk.id().is_valid())
     }
 
     fn get_by_address(&self, addr: Address) -> CodeBlockIter {
@@ -186,11 +228,11 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
     }
 
     fn iter(&self) -> CodeBlockIter {
-        CodeBlockIter::new(self.blocks.iter())
+        CodeBlockIter::new(self.blocks.iter().filter(|blk| blk.id().is_valid()))
     }
 
     fn iter_mut(&mut self) -> CodeBlockIterMut {
-        CodeBlockIterMut::new(self.blocks.iter_mut())
+        CodeBlockIterMut::new(self.blocks.iter_mut().filter(|blk| blk.id().is_valid()))
     }
 }
 

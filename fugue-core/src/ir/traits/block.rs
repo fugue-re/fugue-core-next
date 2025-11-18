@@ -62,6 +62,8 @@ pub trait AsCodeBlockMut<'a>: AsMut<CodeBlock> + DerefMut<Target = CodeBlock> {}
 impl<'a> AsCodeBlockMut<'a> for CodeBlockMut<'a> {}
 
 pub trait CodeBlockTable: FundamentalProjectEntity {
+    type Error: std::error::Error + 'static;
+
     type CodeBlockRef<'a>: AsCodeBlockRef<'a>
     where
         Self: 'a;
@@ -76,7 +78,10 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
-    fn insert(&mut self, func: CodeBlock);
+    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    where
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
+        E: Into<Self::Error>;
 
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
