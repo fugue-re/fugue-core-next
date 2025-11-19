@@ -160,7 +160,6 @@ mod test {
         let cfg = CFG::new(&ast_ok)?;
 
         assert_eq!(cfg.blocks.len(), 3);
-
         assert_eq!(cfg.edges.len(), 3);
         assert_eq!(cfg.edges[0].len(), 1);
         assert_eq!(cfg.edges[1].len(), 1);

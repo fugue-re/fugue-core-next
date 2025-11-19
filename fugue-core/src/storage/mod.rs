@@ -8,31 +8,34 @@ use fugue_bytes::order::{ReadBytesExt as _, WriteBytesExt as _};
 use hex_display::HexDisplayExt;
 use thiserror::Error;
 use walkdir::WalkDir;
+
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
+
+use crate::loader::Loadable;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod entities;
 pub use entities::{
     DefaultPersistentEntityStorage, DefaultTransientEntityStorage, EntityStorage,
     EntityStorageError, EntityStorageProvider,
 };
+use entities::{
+    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
+};
+
+pub mod project;
+pub use project::{ProjectStorage, ProjectStorageProvider};
 
 pub mod segments;
 pub use segments::{
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentStorage,
     SegmentStorageError, SegmentStorageProvider,
 };
-
-use entities::{
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
-};
 use segments::{
     InMemorySegmentStorage, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,
 };
-
-use crate::loader::Loadable;
-use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::{AttributeMap, BytesOrMapping};
 
 // The magic bytes used to identify a Fugue project file.
 //
@@ -457,7 +460,7 @@ impl CompressedPersistentStorage {
     ) -> Result<Self, StorageProviderError> {
         if !path.exists() {
             return Err(StorageProviderError::create_project_not_found(format!(
-                "`{0}` does not exist",
+                "`{}` does not exist",
                 path.display()
             )));
         }
@@ -582,7 +585,7 @@ impl CompressedPersistentStorage {
         let unpacked = path.with_extension("fdb");
         if unpacked.exists() {
             return Err(StorageProviderError::create_project_already_exists(
-                "unpacked project data already exists; potenially corrupted project",
+                "unpacked project data already exists; potentially corrupted project",
             ));
         }
 

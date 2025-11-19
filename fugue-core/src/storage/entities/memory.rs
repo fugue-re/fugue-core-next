@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use dashmap::mapref::one::Ref as DashMapRef;
 use dashmap::DashMap;
-use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
+use dashmap::mapref::one::Ref as DashMapRef;
 use skiplist::SkipMap;
+use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use crate::loader::Loadable;
+use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
 
-use super::common::ENTITY_PREFIX_SIZE;
+use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
     EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
@@ -206,6 +207,10 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         Err(EntityStorageError::unsupported_with(
             "transactions are not supported by the in-memory storage provider",
         ))
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        TRANSIENT
     }
 }
 

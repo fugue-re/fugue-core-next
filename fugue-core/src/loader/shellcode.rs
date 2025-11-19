@@ -7,10 +7,11 @@ use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
 use crate::arch::Arch;
+use crate::ir::{Address, SegmentProperties};
 use crate::loader::util::parse_language;
 use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoaderError};
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
+use crate::types::{AttributeMap, BytesOrMapping};
 
 pub struct Shellcode<'a> {
     address: Address,
@@ -75,12 +76,16 @@ impl<'a> Shellcode<'a> {
             format!("Fugue v{} Shellcode Loader", env!("CARGO_PKG_VERSION")),
         );
 
+        let mut attributes = attributes.into();
+
+        attributes.set_attr(ATTRIBUTE_ENTRY_POINT, address);
+
         Ok(Self {
             address: address.into(),
             bytes: bytes.into(),
             arch,
             metadata,
-            attributes: attributes.into(),
+            attributes,
         })
     }
 
@@ -121,10 +126,6 @@ impl Loadable for Shellcode<'_> {
         self.arch.clone()
     }
 
-    fn entry(&self) -> Option<Address> {
-        Some(self.address())
-    }
-
     fn segments<'a>(
         &'a self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
@@ -133,6 +134,7 @@ impl Loadable for Shellcode<'_> {
             address: self.address,
             properties: SegmentProperties::PERM_ALL,
             bytes: Cow::Borrowed(self.bytes()),
+            ..Default::default()
         })
     }
 
@@ -158,9 +160,9 @@ mod test {
     use fallible_iterator::FallibleIterator;
 
     use crate::attributes;
+    use crate::ir::Address;
     use crate::loader::Loadable;
     use crate::loader::shellcode::Shellcode;
-    use crate::types::Address;
 
     #[test]
     fn test_arm_snippet() -> anyhow::Result<()> {

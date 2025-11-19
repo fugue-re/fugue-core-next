@@ -1045,7 +1045,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             #[allow(unused_mut)]
             pub fn default_context() -> fugue_lifter_runtime::ContextDatabase {
                 let mut context =
-                    fugue_lifter_runtime::ContextDatabase::new(ADDRESS_UPPER_BOUND);
+                    fugue_lifter_runtime::ContextDatabase::new(
+                        ADDRESS_UPPER_BOUND,
+                        ADDRESS_ALIGNMENT,
+                    );
 
                 #(#context_variable_registrations)*
 

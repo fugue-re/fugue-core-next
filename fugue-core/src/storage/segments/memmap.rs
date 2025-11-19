@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader};
 use std::ops::Range;
@@ -10,11 +11,12 @@ use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
+use crate::ir::{Address, SegmentProperties};
+use crate::lifter::ContextHint;
 use crate::loader::{Loadable, LoadableSegment, Loader};
-use crate::memory::SegmentProperties;
 use crate::storage::{self, PERSISTENT, StoragePersistence};
+use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::{Address, AttributeMap};
 
 use super::{
     SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
@@ -118,13 +120,15 @@ impl MemoryMappedSegmentStorageMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct LoadableSegmentMetadata {
     name: String,
     address: Address,
     physical_offset: usize,
     properties: SegmentProperties,
     size: usize,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
 }
 
 impl LoadableSegmentMetadata {
@@ -135,6 +139,8 @@ impl LoadableSegmentMetadata {
             physical_offset,
             properties: segm.properties(),
             size: segm.len(),
+            mapping_hints: segm.mapping_hints().clone(),
+            function_hints: segm.function_hints().clone(),
         }
     }
 
@@ -164,6 +170,14 @@ impl LoadableSegmentMetadata {
 
     pub fn properties(&self) -> SegmentProperties {
         self.properties
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
     }
 
     pub fn len(&self) -> usize {
@@ -601,6 +615,8 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
                     segm.address(),
                     segm.properties(),
                     bytes,
+                    Cow::Borrowed(segm.mapping_hints()),
+                    Cow::Borrowed(segm.function_hints()),
                 ))
             })
             .ok_or(SegmentStorageError::InvalidAddress)

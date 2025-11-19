@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 
-use crate::types::Address;
+use crate::ir::Address;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct StackChangePoint {

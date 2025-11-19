@@ -1,18 +1,18 @@
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 
-use crate::arch::{Arch, ArchImpl, Flag};
-use crate::entities::{Insn, InsnProperties};
-use crate::lifter::x86::register::{
+use fugue_lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
-use crate::lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
-use crate::lifter::{
-    Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
-    Varnode,
-};
-use crate::loader::symbols::ExternFunctionTemplate;
-use crate::types::Address;
+use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+pub use fugue_lifter::x86::*;
+
+use crate::arch::traits::Arch as ArchT;
+use crate::arch::{Arch, Flag};
+use crate::il::pcode::Varnode;
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::lifter::traits::Disassembler as DisassemblerT;
+use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 
 const FLAGS: &[Flag] = &[
     Flag::a(AF),
@@ -31,7 +31,7 @@ pub struct X86 {
     language: LanguageVariant,
 }
 
-impl ArchImpl for X86 {
+impl ArchT for X86 {
     fn dissassembler(&self) -> Disassembler {
         X86Disassembler::new()
     }
@@ -77,7 +77,7 @@ impl ArchImpl for X86 {
 
 impl X86 {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
     }
 }
 
@@ -126,8 +126,8 @@ impl X86Disassembler {
     }
 }
 
-impl DisassemblerImpl for X86Disassembler {
-    fn disassemble_insn(
+impl DisassemblerT for X86Disassembler {
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],

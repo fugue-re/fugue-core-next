@@ -3,7 +3,7 @@ members = [
   "fugue",
   "fugue-arch",
   "fugue-core",
-  "fugue-core-idalib",
+  # "fugue-core-idalib",
   "fugue-bytes",
   "fugue-bv",
   "fugue-fp",
@@ -20,6 +20,9 @@ members = [
   "fugue-sleigh-semantics",
 ]
 resolver = "2"
+
+[workspace.lints.rust]
+mismatched_lifetime_syntaxes = "allow"
 
 [profile.bench]
 debug = true

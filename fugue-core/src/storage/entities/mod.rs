@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::io;
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -10,22 +11,38 @@ use quick_cache::sync::Cache;
 use thiserror::Error;
 
 use crate::loader::Loadable;
+use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
-pub mod common;
-pub use common::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
+pub mod dummy;
+pub use dummy::DummyEntityStorage;
 
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
 
+#[cfg(feature = "mdbx")]
 pub mod mdbx;
+#[cfg(feature = "mdbx")]
 pub use mdbx::MdbxEntityStorage;
 
+#[cfg(feature = "rocksdb")]
 pub mod rocksdb;
+#[cfg(feature = "rocksdb")]
 pub use rocksdb::RocksDbEntityStorage;
 
+pub mod schema;
+pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteEntityStorage;
+
+#[cfg(feature = "rocksdb")]
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
+#[cfg(not(feature = "rocksdb"))]
+pub type DefaultPersistentEntityStorage = InMemoryEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
 
 #[derive(Debug, Error)]
@@ -122,7 +139,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| {
@@ -139,7 +156,7 @@ impl<'a> EntityTransactionalReader<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -148,7 +165,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.contains(&key)
     }
 }
@@ -184,7 +201,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| {
@@ -201,7 +218,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -210,7 +227,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.contains(&key)
     }
 
@@ -219,7 +236,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
 
@@ -229,7 +246,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.inner.remove(&key)
     }
 
@@ -283,7 +300,7 @@ impl<'a> EntityBulkInserter<'a> {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
 
@@ -413,6 +430,10 @@ pub trait EntityStorageProvider: Send + Sync {
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+
+    fn persistence(&self) -> StoragePersistence {
+        PERSISTENT
+    }
 }
 
 pub trait ErasedEntityStorageProvider: Send + Sync {
@@ -449,6 +470,8 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
     fn erased_transactional_writer(
         &self,
     ) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+
+    fn erased_persistence(&self) -> StoragePersistence;
 }
 
 impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
@@ -515,6 +538,10 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
         self.erased_transactional_writer()
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        self.erased_persistence()
     }
 }
 
@@ -585,6 +612,10 @@ where
     ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
         self.transactional_writer()
     }
+
+    fn erased_persistence(&self) -> StoragePersistence {
+        self.persistence()
+    }
 }
 
 pub struct OutMapper<'a> {
@@ -632,11 +663,11 @@ pub struct EntityCache<K: EntityKey, E: Entity> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct EntityRef<E>(Arc<E>)
+pub struct EntityRef<'a, E>(Arc<E>, PhantomData<&'a E>)
 where
     E: Entity;
 
-impl<E> Display for EntityRef<E>
+impl<E> Display for EntityRef<'_, E>
 where
     E: Entity + Display,
 {
@@ -645,7 +676,7 @@ where
     }
 }
 
-impl<E> AsRef<E> for EntityRef<E>
+impl<E> AsRef<E> for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -654,7 +685,7 @@ where
     }
 }
 
-impl<E> Deref for EntityRef<E>
+impl<E> Deref for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -665,12 +696,16 @@ where
     }
 }
 
-impl<E> EntityRef<E>
+impl<'a, E> EntityRef<'a, E>
 where
     E: Entity,
 {
-    pub(crate) fn new(entity: Arc<E>) -> Self {
-        Self(entity)
+    pub fn new(entity: E) -> Self {
+        Self(Arc::new(entity), PhantomData)
+    }
+
+    pub fn from_arc(entity: Arc<E>) -> Self {
+        Self(entity, PhantomData)
     }
 }
 
@@ -788,9 +823,17 @@ where
     K: EntityKey,
     E: Entity + MutableEntity<K>,
 {
-    pub(crate) fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
+    pub fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
         Self {
             entity: ManuallyDrop::new(entity),
+            flags: EntityMutFlags::NONE,
+            cache,
+        }
+    }
+
+    pub fn make_mut(entity: EntityRef<'a, E>, cache: &'a EntityCache<K, E>) -> Self {
+        Self {
+            entity: ManuallyDrop::new(entity.0),
             flags: EntityMutFlags::NONE,
             cache,
         }
@@ -961,13 +1004,13 @@ where
 
     pub fn get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
         if let Some(entity) = self.entities.get(key) {
-            return Ok(Some(EntityRef::new(entity)));
+            return Ok(Some(EntityRef::from_arc(entity)));
         }
 
         if let Some(entity) = self.storage.get::<K, E>(key)? {
             let entity = Arc::new(entity);
             self.entities.insert(key.to_owned(), entity.to_owned());
-            return Ok(Some(EntityRef::new(entity)));
+            return Ok(Some(EntityRef::from_arc(entity)));
         }
 
         Ok(None)
@@ -1006,7 +1049,7 @@ where
 
         self.entities.insert(key, entity.clone());
 
-        Ok(EntityRef::new(entity))
+        Ok(EntityRef::from_arc(entity))
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
@@ -1028,22 +1071,22 @@ where
         self.storage.keys::<K, E>()
     }
 
-    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
+    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<'_, E>>, EntityStorageError> {
         // TODO: should we cache the elements in the iterator if the cache has capacity?
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         Ok(self.storage.backing.iter_prefix_as(&pfx, |k, v| {
-            let key = common::extract_key::<K, E>(k.into())
+            let key = schema::extract_key::<K, E>(k.into())
                 .ok_or(EntityStorageError::InvalidKeyFormat)?;
 
             if let Some(val) = self.entities.get(&key) {
-                return Ok((key, EntityRef::new(val)));
+                return Ok((key, EntityRef::from_arc(val)));
             }
 
             let val = bincode::decode_from_slice::<E, _>(v, bincode::config::standard())
                 .map(|(entity, _)| entity)
                 .map_err(EntityStorageError::decode)?;
 
-            Ok((key, EntityRef::new(Arc::new(val))))
+            Ok((key, EntityRef::new(val)))
         })? as EntityIterator<'_, K, EntityRef<E>>)
     }
 
@@ -1086,7 +1129,7 @@ impl EntityStorage {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
 
         self.backing.get_as(&key, |bytes| {
             bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
@@ -1100,7 +1143,7 @@ impl EntityStorage {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
             .map_err(EntityStorageError::encode)?;
         let encoded = BytesOrSlice::from(encoded);
@@ -1113,23 +1156,23 @@ impl EntityStorage {
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.backing.remove(&key)
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = common::make_key::<K, E>(key);
+        let key = schema::make_key::<K, E>(key);
         self.backing.contains(&key)
     }
 
     pub fn iter<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         self.backing.iter_prefix(&pfx).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
-                    let key = common::extract_key::<K, E>(key)
+                    let key = schema::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
                     let val = bincode::decode_from_slice::<E, _>(
                         value.as_slice(),
@@ -1146,11 +1189,11 @@ impl EntityStorage {
     pub fn keys<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
-        let pfx = common::make_prefix::<K, E>();
+        let pfx = schema::make_prefix::<K, E>();
         self.backing.iter_prefix_keys(&pfx).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|key| {
-                    common::extract_key::<K, E>(key).ok_or(EntityStorageError::InvalidKeyFormat)
+                    schema::extract_key::<K, E>(key).ok_or(EntityStorageError::InvalidKeyFormat)
                 })
             })) as EntityKeyIterator<'_, K>
         })
@@ -1177,6 +1220,18 @@ impl EntityStorage {
         EntityCache::new(self.clone(), size)
     }
 
+    pub fn persistence(&self) -> StoragePersistence {
+        self.backing.persistence()
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        matches!(self.backing.persistence(), PERSISTENT)
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self.backing.persistence(), TRANSIENT)
+    }
+
     pub fn storage_provider(&self) -> Arc<dyn ErasedEntityStorageProvider> {
         self.backing.clone()
     }
@@ -1187,7 +1242,7 @@ mod test {
     use bincode::{Decode, Encode};
 
     use super::*;
-    use crate::types::Address;
+    use crate::ir::Address;
 
     #[test]
     fn test_entity_storage() {
@@ -1205,7 +1260,7 @@ mod test {
 
         let entity = TestEntity {
             id: 1,
-            name: "Test".to_string(),
+            name: "Test".to_owned(),
         };
 
         let address = Address::from(42u64);
@@ -1228,7 +1283,7 @@ mod test {
         for i in 0..10 {
             let entity = TestEntity {
                 id: i,
-                name: format!("Entity {}", i),
+                name: format!("Entity {i}"),
             };
             storage.insert(&Address::from(i as u64), &entity).unwrap();
         }
@@ -1240,7 +1295,7 @@ mod test {
             let (address, entity) = val.unwrap();
             let expected = TestEntity {
                 id: count,
-                name: format!("Entity {}", count),
+                name: format!("Entity {count}"),
             };
             assert_eq!(entity, expected);
             assert_eq!(address, Address::from(count as u64));
@@ -1262,7 +1317,7 @@ mod test {
         for i in 0..5 {
             let entity = TestEntity {
                 id: i,
-                name: format!("Entity {}", i),
+                name: format!("Entity {i}"),
             };
             let cached = cache.get(&Address::from(i as u64)).unwrap();
 
@@ -1274,7 +1329,7 @@ mod test {
         for i in 50..100 {
             let entity = TestEntity {
                 id: i,
-                name: format!("New Cached Entity {}", i),
+                name: format!("New Cached Entity {i}"),
             };
             cache.insert(Address::from(i as u64), entity).unwrap();
         }
@@ -1287,7 +1342,7 @@ mod test {
                 *cached.unwrap(),
                 TestEntity {
                     id: i,
-                    name: format!("New Cached Entity {}", i)
+                    name: format!("New Cached Entity {i}")
                 }
             );
         }

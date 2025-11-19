@@ -1,15 +1,16 @@
 use std::fmt;
-use std::ops::RangeInclusive;
 
 use bincode::{Decode, Encode};
-pub use fugue_lifter::{
-    ContextBitRange, Language, Lifter, LifterBuilder, LifterBuilderError, LiftingContext, Op,
-    PCodeOp,
-};
-use range_set_blaze::RangeSetBlaze;
+use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::types::{Address, Location, ToAddress};
+use crate::ir::{Address, Id, Location, ToAddress};
+use crate::lifter::{Lifter, LifterError};
+
+pub type InsnId = Id<Insn>;
+
+// TODO: review the choice of Vec
+pub type InsnList = Vec<InsnId>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Insn {
@@ -17,7 +18,7 @@ pub struct Insn {
     properties: InsnProperties,
     operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
-    length: usize,
+    length: u8,
 }
 
 impl Encode for Insn {
@@ -55,7 +56,7 @@ impl<C> Decode<C> for Insn {
             targets.push(target);
         }
 
-        let length = usize::decode(decoder)?;
+        let length = u8::decode(decoder)?;
 
         Ok(Self {
             address,
@@ -90,7 +91,9 @@ impl Insn {
             properties,
             operations,
             targets,
-            length,
+            length: length
+                .try_into()
+                .expect("instruction length must not exceed 255 bytes"),
         }
     }
 
@@ -104,8 +107,43 @@ impl Insn {
             properties,
             operations: Vec::new(),
             targets: SmallVec::new(),
-            length,
+            length: length
+                .try_into()
+                .expect("instruction length must not exceed 255 bytes"),
         }
+    }
+
+    pub fn ensure_lifted(&mut self, lifter: &mut Lifter, bytes: &[u8]) -> Result<(), LifterError> {
+        if self.is_lifted() {
+            return Ok(());
+        }
+
+        self.operations.clear();
+        self.targets.clear();
+
+        let length = lifter.lift_into(self.address, bytes, &mut self.operations)?;
+
+        self.length = length
+            .try_into()
+            .expect("instruction length must not exceed 255 bytes");
+
+        let naddress = self.next_address();
+
+        InsnTarget::from_lifted_into(
+            lifter.language(),
+            self.address,
+            naddress,
+            &self.operations,
+            &mut self.targets,
+        );
+
+        self.properties = InsnProperties::from_targets(&self.targets) | InsnProperties::LIFTED;
+
+        if self.operations.is_empty() {
+            self.properties |= InsnProperties::NOP;
+        }
+
+        Ok(())
     }
 
     pub fn address(&self) -> Address {
@@ -113,7 +151,7 @@ impl Insn {
     }
 
     pub fn next_address(&self) -> Address {
-        self.address + self.length
+        self.address + self.length as usize
     }
 
     pub fn properties(&self) -> InsnProperties {
@@ -221,7 +259,7 @@ impl Insn {
     }
 
     pub fn len(&self) -> usize {
-        self.length
+        self.length as _
     }
 
     pub fn iter_targets<'a>(
@@ -263,9 +301,7 @@ impl fmt::Display for InsnFormatter<'_> {
             return write!(f, "<not lifted; length: {}>", lifted.len());
         }
 
-        write!(f, "{}", language.display(&lifted.operations))?;
-
-        Ok(())
+        language.display(&lifted.operations).fmt(f)
     }
 }
 
@@ -527,69 +563,5 @@ impl fmt::Display for InsnTarget {
             Self::Intrinsic => write!(f, "intrinsic flow"),
             Self::Unresolved => write!(f, "unresolved"),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InsnList(RangeSetBlaze<usize>);
-
-impl Encode for InsnList {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.0.ranges_len().encode(encoder)?;
-        for range in self.0.ranges() {
-            range.encode(encoder)?;
-        }
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for InsnList {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let n = usize::decode(decoder)?;
-        let mut ranges = RangeSetBlaze::new();
-        for _ in 0..n {
-            let range = RangeInclusive::decode(decoder)?;
-            ranges.ranges_insert(range);
-        }
-        Ok(Self(ranges))
-    }
-}
-
-impl InsnList {
-    pub fn new() -> Self {
-        Self(RangeSetBlaze::new())
-    }
-
-    pub fn insert(&mut self, idx: usize) {
-        self.0.insert(idx);
-    }
-
-    pub fn remove(&mut self, idx: usize) {
-        self.0.remove(idx);
-    }
-
-    pub fn contains(&self, idx: usize) -> bool {
-        self.0.contains(idx)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn first(&self) -> Option<usize> {
-        self.0.first()
-    }
-
-    pub fn last(&self) -> Option<usize> {
-        self.0.last()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = usize> + use<'_> {
-        self.0.iter()
     }
 }

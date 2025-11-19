@@ -4,6 +4,12 @@ version = "0.3.0"
 authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2024"
 
+[features]
+mdbx = ["libmdbx"]
+sqlite = ["r2d2", "r2d2_sqlite", "rusqlite"]
+rocksdb = ["dep:rocksdb"]
+default = ["rocksdb"]
+
 [dependencies]
 anyhow = "1"
 arrayvec = "0.7"
@@ -25,7 +31,7 @@ hex-display = "0.3"
 indexmap = "2.9"
 iset = "0.3"
 itertools = "0.14"
-libmdbx = "0.5"
+libmdbx = { version = "0.5", optional = true }
 md-5 = "0.10"
 memmap2 = "0.9"
 object = "0.35"
@@ -33,7 +39,10 @@ ouroboros = "0.18"
 quick_cache = "0.6"
 parking_lot = "0.12"
 range-set-blaze = "0.3"
-rocksdb = { version = "0.23", features = ["serde1", "snappy"] }
+r2d2 = { version = "0.8", optional = true }
+r2d2_sqlite = { version = "0.31", optional = true }
+rocksdb = { version = "0.23", features = ["serde1", "snappy"], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rustc-hash = "1.1"
 sealed = "0.5"
 serde = { version = "1", features = ["derive"] }
@@ -58,3 +67,6 @@ zip = { version = "4.2", default-features = false, features = ["zstd"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[lints]
+workspace = true

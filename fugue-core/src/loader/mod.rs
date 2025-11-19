@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display};
 use std::path::Path;
 
@@ -11,9 +12,10 @@ use fugue_bytes::{BE, LE};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::lifter::LifterBuilderError;
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::ir::symbol::IndexedSymbolTable;
+use crate::ir::{Address, SegmentProperties};
+use crate::lifter::ContextHint;
+use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
 pub use elf::Elf;
@@ -30,9 +32,6 @@ pub use object::Object;
 pub mod shellcode;
 pub use shellcode::Shellcode;
 
-pub mod symbols;
-pub use symbols::{ExternSymbols, LocalSymbols, SymbolEntry};
-
 pub mod util;
 
 #[derive(Debug, Error)]
@@ -41,8 +40,6 @@ pub enum LoaderError {
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
     Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Lifter(#[from] LifterBuilderError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
     #[error("cannot load object; unsupported architecture")]
@@ -186,23 +183,26 @@ impl LoadableMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct LoadableSegment<'a> {
-    name: Cow<'a, str>,            // Name of the segment
-    address: Address,              // Starting address of the segment
+    name: Cow<'a, str>,                                     // Name of the segment
+    address: Address,                                       // Starting address of the segment
     properties: SegmentProperties, // Properties of the segment (e.g., permissions)
     bytes: Cow<'a, [u8]>,          // Bytes of the segment
+    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
+    function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
 }
 
 impl Display for LoadableSegment<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} with bounds {}-{} and properties {:?}",
+            "{} with bounds {}-{} and properties {:?}; at least {} potential functions",
             self.name,
             self.address,
             self.last_address(),
-            self.properties
+            self.properties,
+            self.function_hints.len(),
         )
     }
 }
@@ -214,12 +214,16 @@ impl<'a> LoadableSegment<'a> {
         address: Address,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
+        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
+        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
     ) -> LoadableSegment<'a> {
         Self {
             name: name.into(),
             address,
             properties,
             bytes: bytes.into(),
+            mapping_hints: mapping_hints.into(),
+            function_hints: function_hints.into(),
         }
     }
 
@@ -251,6 +255,36 @@ impl<'a> LoadableSegment<'a> {
     /// Returns the bytes of the segment.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Returns the context hints of the segment.
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    /// Returns a mutable reference to the context hints of the segment.
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
+        self.mapping_hints.to_mut()
+    }
+
+    // Adds a context hint to the segment.
+    pub fn add_context_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
+        self.mapping_hints.to_mut().insert(address.into(), hint);
+    }
+
+    /// Returns the function hints of the segment.
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
+    }
+
+    /// Returns a mutable reference to the function hints of the segment.
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
+        self.function_hints.to_mut()
+    }
+
+    /// Adds a function hint to the segment.
+    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
+        self.function_hints.to_mut().insert(address.into());
     }
 
     /// Returns the length of the segment in bytes.
@@ -410,6 +444,8 @@ impl<'a> LoadableSegment<'a> {
             address: self.address,
             properties: self.properties,
             bytes: self.bytes.into_owned().into(),
+            mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
+            function_hints: Cow::Owned(self.function_hints.into_owned()),
         }
     }
 }
@@ -453,15 +489,9 @@ pub trait Loadable {
 
     fn metadata(&self) -> &LoadableMetadata;
 
-    fn entry(&self) -> Option<Address>;
-
     fn architecture(&self) -> Arch;
 
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
-        None
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
         None
     }
 
@@ -537,13 +567,6 @@ impl LoadableFromFile for Loader<'_> {
 }
 
 impl Loadable for Loader<'_> {
-    fn entry(&self) -> Option<Address> {
-        match self {
-            Self::Elf(elf) => elf.entry(),
-            Self::Object(object) => object.entry(),
-        }
-    }
-
     fn architecture(&self) -> Arch {
         match self {
             Self::Elf(elf) => elf.architecture(),
@@ -558,17 +581,10 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
         match self {
-            Self::Elf(elf) => elf.local_symbols(),
-            Self::Object(object) => object.local_symbols(),
-        }
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
-        match self {
-            Self::Elf(elf) => elf.extern_symbols(),
-            Self::Object(object) => object.extern_symbols(),
+            Self::Elf(elf) => Some(elf.symbols()),
+            Self::Object(object) => object.symbols(),
         }
     }
 

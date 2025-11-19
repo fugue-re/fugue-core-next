@@ -180,10 +180,7 @@ impl<V: StateValue> StateOps for FlatState<V> {
         let end = start.checked_add(size);
 
         if start > self.len() || end.is_none() || end.unwrap() > self.len() {
-            return Err(Error::OOBRead {
-                address,
-                size,
-            });
+            return Err(Error::OOBRead { address, size });
         }
 
         let end = end.unwrap();
@@ -200,10 +197,7 @@ impl<V: StateValue> StateOps for FlatState<V> {
         let end = start.checked_add(size);
 
         if start > self.len() || end.is_none() || end.unwrap() > self.len() {
-            return Err(Error::OOBRead {
-                address,
-                size,
-            });
+            return Err(Error::OOBRead { address, size });
         }
 
         let end = end.unwrap();
@@ -223,10 +217,7 @@ impl<V: StateValue> StateOps for FlatState<V> {
         let end = start.checked_add(size);
 
         if start > self.len() || end.is_none() || end.unwrap() > self.len() {
-            return Err(Error::OOBWrite {
-                address,
-                size,
-            });
+            return Err(Error::OOBWrite { address, size });
         }
 
         let end = end.unwrap();

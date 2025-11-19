@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::project::Project;
 
 pub mod core;
+pub mod function;
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {

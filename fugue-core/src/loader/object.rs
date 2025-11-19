@@ -5,13 +5,14 @@ use fallible_iterator::FallibleIterator;
 
 use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::arch::Arch;
+use crate::arch::{self, Arch};
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
-use crate::memory::SegmentProperties;
-use crate::types::{Address, AttributeMap, BytesOrMapping};
+use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
+use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
 struct ObjectInner<'a> {
@@ -34,27 +35,28 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
 
+    // FIXME: if we have no entry, then we need to check for other hints...
     let is_thumb = object.entry() & 1 == 1;
 
     let language = match object.architecture() {
-        A::Arm if is_64 && is_le => crate::lifter::aarch64::le::variants::DEFAULT,
-        A::Arm if is_64 => crate::lifter::aarch64::be::variants::DEFAULT,
+        A::Arm if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
+        A::Arm if is_64 => arch::aarch64::be::variants::DEFAULT,
         A::Arm if is_le => {
             if is_thumb {
-                crate::lifter::arm::le::variants::DEFAULT_THUMB
+                arch::arm::le::variants::DEFAULT_THUMB
             } else {
-                crate::lifter::arm::le::variants::DEFAULT
+                arch::arm::le::variants::DEFAULT
             }
         }
         A::Arm => {
             if is_thumb {
-                crate::lifter::arm::be::variants::DEFAULT_THUMB
+                arch::arm::be::variants::DEFAULT_THUMB
             } else {
-                crate::lifter::arm::be::variants::DEFAULT
+                arch::arm::be::variants::DEFAULT
             }
         }
-        A::I386 => crate::lifter::x86::variants::DEFAULT,
-        A::X86_64 => crate::lifter::x86_64::variants::DEFAULT,
+        A::I386 => arch::x86::variants::DEFAULT,
+        A::X86_64 => arch::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
@@ -86,11 +88,19 @@ impl<'a> Object<'a> {
             ),
         );
 
+        let mut attributes = attributes.into();
+
+        let entry = view.entry();
+
+        if entry != 0 {
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::from(entry));
+        }
+
         Ok(Self {
             object,
             arch,
             metadata,
-            attributes: attributes.into(),
+            attributes,
         })
     }
 
@@ -134,10 +144,6 @@ impl LoadableFromFile for Object<'_> {
 }
 
 impl Loadable for Object<'_> {
-    fn entry(&self) -> Option<Address> {
-        Some(self.object.borrow_view().entry().into())
-    }
-
     fn attributes(&self) -> &AttributeMap {
         &self.attributes
     }
@@ -190,6 +196,7 @@ impl Loadable for Object<'_> {
                 address,
                 properties: SegmentProperties::all(),
                 bytes,
+                ..Default::default()
             }))
         }))
     }

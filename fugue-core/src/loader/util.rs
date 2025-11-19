@@ -1,3 +1,4 @@
+use crate::arch;
 use crate::lifter::{LanguageId, LanguageVariant};
 use crate::loader::LoaderError;
 
@@ -29,16 +30,16 @@ fn parse_arm(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, Load
     let language = match variant {
         None | Some("v8") => {
             if is_le {
-                crate::lifter::arm::le::variants::V8
+                arch::arm::le::variants::V8
             } else {
-                crate::lifter::arm::be::variants::V8
+                arch::arm::be::variants::V8
             }
         }
         Some("v8T") => {
             if is_le {
-                crate::lifter::arm::le::variants::V8T
+                arch::arm::le::variants::V8T
             } else {
-                crate::lifter::arm::be::variants::V8T
+                arch::arm::be::variants::V8T
             }
         }
         _ => return Err(LoaderError::UnsupportedArch),
@@ -51,9 +52,9 @@ fn parse_aarch64(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, 
     let language = match variant {
         None | Some("v8A") => {
             if is_le {
-                crate::lifter::aarch64::le::variants::V8A
+                arch::aarch64::le::variants::V8A
             } else {
-                crate::lifter::aarch64::be::variants::V8A
+                arch::aarch64::be::variants::V8A
             }
         }
         _ => return Err(LoaderError::UnsupportedArch),
@@ -64,7 +65,7 @@ fn parse_aarch64(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, 
 
 fn parse_x86(variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
     let language = match variant {
-        None | Some("default") => crate::lifter::x86::variants::DEFAULT,
+        None | Some("default") => arch::x86::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 
@@ -73,8 +74,8 @@ fn parse_x86(variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
 
 fn parse_x86_64(variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
     let language = match variant {
-        None | Some("default") => crate::lifter::x86_64::variants::DEFAULT,
-        Some("compat32") => crate::lifter::x86_64::variants::COMPAT32,
+        None | Some("default") => arch::x86_64::variants::DEFAULT,
+        Some("compat32") => arch::x86_64::variants::COMPAT32,
         _ => return Err(LoaderError::UnsupportedArch),
     };
 

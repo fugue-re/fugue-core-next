@@ -1,22 +1,30 @@
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
 
-use crate::arch::{Arch, ArchImpl};
-use crate::entities::{Insn, InsnProperties};
-use crate::lifter::arm::context::T_MODE;
-use crate::lifter::arm::register::{
-    LR, PC, R0, R1, R10, R11, R12, R2, R3, R4, R5, R6, R7, R8, R9, SP,
+use fugue_lifter::arm::context::T_MODE;
+use fugue_lifter::arm::register::{
+    LR, PC, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP,
 };
+pub use fugue_lifter::arm::*;
+
+use crate::arch::Arch;
+use crate::arch::traits::Arch as ArchT;
+use crate::il::pcode::Varnode;
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::lazy_symbol;
+use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextSet, Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter,
-    LiftingContext, Varnode,
+    ContextHint, ContextSet, Disassembler, DisassemblerError, LanguageVariant, Lifter,
+    LiftingContext,
 };
-use crate::loader::symbols::ExternFunctionTemplate;
-use crate::types::Address;
 
 const GPRS: &[Varnode] = &[
     R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
 ];
+
+static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
+static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
+static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Arm {
@@ -24,7 +32,7 @@ pub struct Arm {
     is_thumb: bool,
 }
 
-impl ArchImpl for Arm {
+impl ArchT for Arm {
     fn dissassembler(&self) -> Disassembler {
         ArmDisassembler::new(self.is_thumb)
     }
@@ -35,7 +43,8 @@ impl ArchImpl for Arm {
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
-        let naddr = addr.wrap_and_align(self.language());
+        let alignment = if t_mode != 0 { 2 } else { 4 };
+        let naddr = addr.wrap_and_align_with(self.language(), alignment);
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
     }
 
@@ -71,6 +80,22 @@ impl ArchImpl for Arm {
         GPRS
     }
 
+    fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
+        if symbol == &*MAPPING_SYMBOL_ARM {
+            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 0)));
+        }
+
+        if symbol == &*MAPPING_SYMBOL_THUMB {
+            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 1)));
+        }
+
+        if symbol == &*MAPPING_SYMBOL_DATA {
+            return Some(ContextHint::data());
+        }
+
+        None
+    }
+
     fn language_variant(&self) -> LanguageVariant {
         self.language
     }
@@ -79,7 +104,7 @@ impl ArchImpl for Arm {
 impl Arm {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
-        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchT>)
     }
 }
 
@@ -123,8 +148,8 @@ impl ArmDisassembler {
     }
 }
 
-impl DisassemblerImpl for ArmDisassembler {
-    fn disassemble_insn(
+impl DisassemblerT for ArmDisassembler {
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],

@@ -1,26 +1,48 @@
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use ustr::Ustr;
 
-use crate::entities::{BasicBlock, Insn};
-use crate::storage::entities::common::ENTITY_FUNCTION_ID;
+use crate::ir::{Address, CodeBlockId, Id};
+use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
-use crate::types::Address;
 
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub mod table;
+pub use table::IndexedFunctionTable;
+
+pub type FunctionId = Id<Function>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Function {
+    id: Id<Self>,
     name: Option<Ustr>,
     entry: Address,
-    blocks: Vec<BasicBlock>,
-    instructions: Vec<Insn>,
+    blocks: Vec<(Address, CodeBlockId)>,
     frame: FunctionFrame,
     properties: FunctionProperties,
 }
 
+impl AsRef<Function> for Function {
+    fn as_ref(&self) -> &Function {
+        self
+    }
+}
+
+impl AsMut<Function> for Function {
+    fn as_mut(&mut self) -> &mut Function {
+        self
+    }
+}
+
 impl Entity for Function {
     const ID: EntityId = ENTITY_FUNCTION_ID;
+}
+
+impl MutableEntity<FunctionId> for Function {
+    fn entity_key(&self) -> FunctionId {
+        self.id
+    }
 }
 
 impl MutableEntity<Address> for Function {
@@ -36,14 +58,38 @@ impl Encode for Function {
     ) -> Result<(), bincode::error::EncodeError> {
         use bincode::serde::Compat;
 
+        self.id.encode(encoder)?;
         Compat(&self.name).encode(encoder)?;
         self.entry.encode(encoder)?;
         self.blocks.encode(encoder)?;
-        self.instructions.encode(encoder)?;
         self.frame.encode(encoder)?;
         self.properties.encode(encoder)?;
 
         Ok(())
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for Function {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let id = Id::<Self>::borrow_decode(decoder)?;
+        let Compat(name) = Compat::<Option<Ustr>>::borrow_decode(decoder)?;
+        let entry = Address::borrow_decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::borrow_decode(decoder)?;
+        let frame = FunctionFrame::borrow_decode(decoder)?;
+        let properties = FunctionProperties::borrow_decode(decoder)?;
+
+        Ok(Function {
+            id,
+            name,
+            entry,
+            blocks,
+            frame,
+            properties,
+        })
     }
 }
 
@@ -53,18 +99,18 @@ impl<C> Decode<C> for Function {
     ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::serde::Compat;
 
+        let id = Id::<Self>::decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
         let entry = Address::decode(decoder)?;
-        let blocks = Vec::<BasicBlock>::decode(decoder)?;
-        let instructions = Vec::<Insn>::decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::decode(decoder)?;
         let frame = FunctionFrame::decode(decoder)?;
         let properties = FunctionProperties::decode(decoder)?;
 
         Ok(Function {
+            id,
             name,
             entry,
             blocks,
-            instructions,
             frame,
             properties,
         })
@@ -93,6 +139,15 @@ impl Encode for FunctionProperties {
     }
 }
 
+impl<'de, C> BorrowDecode<'de, C> for FunctionProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::borrow_decode(decoder)?;
+        Ok(FunctionProperties::from_bits_truncate(bits))
+    }
+}
+
 impl<C> Decode<C> for FunctionProperties {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
@@ -103,19 +158,27 @@ impl<C> Decode<C> for FunctionProperties {
 }
 
 impl Function {
-    pub fn new(entry: Address) -> Self {
-        Self::new_with(None, entry)
+    pub fn new(id: FunctionId, entry: impl Into<Address>) -> Self {
+        Self::new_with(id, entry, None)
     }
 
-    pub fn new_with(name: impl Into<Option<Ustr>>, entry: Address) -> Self {
+    pub fn new_with(
+        id: FunctionId,
+        entry: impl Into<Address>,
+        name: impl Into<Option<Ustr>>,
+    ) -> Self {
         Function {
+            id,
             name: name.into(),
-            entry,
+            entry: entry.into(),
             blocks: Vec::new(),
-            instructions: Vec::new(),
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,
         }
+    }
+
+    pub fn id(&self) -> FunctionId {
+        self.id
     }
 
     pub fn set_frame(&mut self, frame: FunctionFrame) {
@@ -147,42 +210,38 @@ impl Function {
         self.entry
     }
 
-    pub fn entry_block(&self) -> &BasicBlock {
+    pub fn address(&self) -> Address {
+        self.entry
+    }
+
+    pub fn entry_block(&self) -> CodeBlockId {
         self.block_at(self.entry)
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn set_blocks(&mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) {
-        self.blocks = blocks;
-        self.instructions = insns;
+    pub(crate) fn add_block(&mut self, address: Address, block: CodeBlockId) {
+        self.blocks.insert(
+            self.blocks
+                .binary_search_by_key(&address, |(addr, _)| *addr)
+                .unwrap_or_else(|idx| idx),
+            (address, block),
+        );
     }
 
-    pub(crate) fn with_blocks(mut self, blocks: Vec<BasicBlock>, insns: Vec<Insn>) -> Self {
-        self.set_blocks(blocks, insns);
-        self
+    pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
+        self.blocks.extend(blocks);
+        self.blocks.sort_by_key(|(addr, _)| *addr);
     }
 
-    pub fn blocks(&self) -> &[BasicBlock] {
-        &self.blocks
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, CodeBlockId)> + '_ {
+        self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
     }
 
-    pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
+    pub fn block_at(&self, address: Address) -> Option<CodeBlockId> {
         self.blocks
-            .binary_search_by_key(&address, |blk| blk.start())
+            .binary_search_by_key(&address, |(addr, _)| *addr)
             .ok()
-            .map(|idx| &self.blocks[idx])
-    }
-
-    pub fn instruction_at(&self, address: impl Into<Address>) -> Option<&Insn> {
-        let address = address.into();
-        self.instructions
-            .binary_search_by_key(&address, |insn| insn.address())
-            .ok()
-            .map(|idx| &self.instructions[idx])
-    }
-
-    pub fn instructions(&self) -> &[Insn] {
-        &self.instructions
+            .map(|idx| self.blocks[idx].1)
     }
 
     pub fn is_non_returning(&self) -> bool {

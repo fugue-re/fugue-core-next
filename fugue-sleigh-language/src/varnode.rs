@@ -77,7 +77,7 @@ impl VarnodeData {
     }
 
     pub fn space(&self) -> AddressSpaceId {
-        self.space.clone()
+        self.space
     }
 
     pub fn offset(&self) -> u64 {

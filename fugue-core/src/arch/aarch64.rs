@@ -1,18 +1,18 @@
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
-use crate::arch::{Arch, ArchImpl};
-use crate::entities::{Insn, InsnProperties};
-use crate::lifter::aarch64::register::{
-    X0, X1, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X2, X20, X21, X22, X23, X24, X25,
-    X26, X27, X28, X29, X3, X30, X4, X5, X6, X7, X8, X9,
+use fugue_lifter::aarch64::register::{
+    X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
+    X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
 };
-use crate::lifter::{
-    Disassembler, DisassemblerError, DisassemblerImpl, LanguageVariant, Lifter, LiftingContext,
-    Varnode,
-};
-use crate::loader::symbols::ExternFunctionTemplate;
-use crate::types::Address;
+pub use fugue_lifter::aarch64::*;
+
+use crate::arch::Arch;
+use crate::arch::traits::Arch as ArchT;
+use crate::il::pcode::Varnode;
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::lifter::traits::Disassembler as DisassemblerT;
+use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 
 const GPRS: &[Varnode] = &[
     X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
@@ -24,7 +24,7 @@ pub struct AArch64 {
     language: LanguageVariant,
 }
 
-impl ArchImpl for AArch64 {
+impl ArchT for AArch64 {
     fn dissassembler(&self) -> Disassembler {
         AArch64Disassembler::new()
     }
@@ -52,7 +52,7 @@ impl ArchImpl for AArch64 {
 
 impl AArch64 {
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchImpl>)
+        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
     }
 }
 
@@ -105,8 +105,8 @@ impl AArch64Disassembler {
     }
 }
 
-impl DisassemblerImpl for AArch64Disassembler {
-    fn disassemble_insn(
+impl DisassemblerT for AArch64Disassembler {
+    fn disassemble(
         &mut self,
         address: Address,
         bytes: &[u8],
