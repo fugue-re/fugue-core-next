@@ -1,7 +1,8 @@
+use std::mem;
 use std::ops::Range;
 
 use bincode::{BorrowDecode, Decode, Encode};
-use iset::IntervalMap;
+use iset::{Entry, IntervalMap};
 use thiserror::Error;
 
 use crate::ir::traits::{
@@ -113,41 +114,65 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             (false, Id::new(self.blocks.len() as u32))
         };
 
-        let nb = f(id, addr)?;
+        let nblk = f(id, addr)?;
 
-        if nb.start() != addr {
+        if nblk.start() != addr {
             return Err(IndexedCodeBlockTableError::AddressMismatch);
         }
 
         self.bounds
-            .entry(nb.range())
+            .entry(nblk.range())
             .or_insert_with(IdSet::new)
             .insert(id);
 
         if reuse {
             self.free_ids.pop();
-            self.blocks[id.index() as usize] = nb;
+            self.blocks[id.index() as usize] = nblk;
         } else {
-            self.blocks.push(nb);
+            self.blocks.push(nblk);
         }
 
         Ok(id)
     }
 
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
+        let Some(blk) = self
+            .blocks
+            .get_mut(id.index())
+            .filter(|blk| blk.id().is_valid())
+        else {
+            return false;
+        };
 
-    fn len(&self) -> usize {
-        self.blocks.len() - self.free_ids.len()
+        let Entry::Occupied(mut entry) = self.bounds.entry(blk.range()) else {
+            // this should never happen
+            return false;
+        };
+
+        let id_set = entry.get_mut();
+        id_set.remove(id);
+
+        if id_set.is_empty() {
+            entry.remove();
+        }
+
+        self.free_ids.push(id);
+
+        mem::take(blk); // remove the block; replace with default
+
+        true
     }
 
     fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {
-        self.blocks.get(id.index()).filter(|blk| blk.id().is_valid())
+        self.blocks
+            .get(id.index())
+            .filter(|blk| blk.id().is_valid())
     }
 
     fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut> {
-        self.blocks.get_mut(id.index()).filter(|blk| blk.id().is_valid())
+        self.blocks
+            .get_mut(id.index())
+            .filter(|blk| blk.id().is_valid())
     }
 
     fn get_by_address(&self, addr: Address) -> CodeBlockIter {
@@ -233,6 +258,14 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
 
     fn iter_mut(&mut self) -> CodeBlockIterMut {
         CodeBlockIterMut::new(self.blocks.iter_mut().filter(|blk| blk.id().is_valid()))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn len(&self) -> usize {
+        self.blocks.len() - self.free_ids.len()
     }
 }
 

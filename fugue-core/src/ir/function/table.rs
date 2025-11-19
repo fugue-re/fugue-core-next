@@ -107,7 +107,7 @@ impl FunctionTableT for IndexedFunctionTable {
     fn remove_by_id(&mut self, id: Id<Function>) -> bool {
         let Some(f) = self
             .functions
-            .get_mut(id.index() as usize)
+            .get_mut(id.index())
             .filter(|f| f.id().is_valid())
         else {
             return false

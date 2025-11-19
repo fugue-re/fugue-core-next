@@ -13,7 +13,7 @@ pub use table::IndexedCodeBlockTable;
 
 pub type CodeBlockId = Id<CodeBlock>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Encode)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Decode, Encode)]
 pub struct CodeBlock {
     id: Id<Self>,
     start: Address,

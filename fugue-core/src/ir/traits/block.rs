@@ -83,8 +83,7 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
         F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
         E: Into<Self::Error>;
 
-    fn is_empty(&self) -> bool;
-    fn len(&self) -> usize;
+    fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool;
 
     fn get_by_id<'a>(&'a self, id: Id<CodeBlock>) -> Option<Self::CodeBlockRef<'a>>;
     fn get_by_id_mut<'a>(&'a mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut<'a>>;
@@ -119,4 +118,7 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
 
     fn iter<'a>(&'a self) -> Self::CodeBlockIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> Self::CodeBlockIterMut<'a>;
+
+    fn is_empty(&self) -> bool;
+    fn len(&self) -> usize;
 }

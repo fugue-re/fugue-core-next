@@ -95,9 +95,6 @@ pub trait FunctionTable: FundamentalProjectEntity {
     fn remove_by_id(&mut self, id: Id<Function>) -> bool;
     fn remove_by_address(&mut self, addr: Address) -> bool;
 
-    fn is_empty(&self) -> bool;
-    fn len(&self) -> usize;
-
     fn get_by_id<'a>(&'a self, id: Id<Function>) -> Option<Self::FunctionRef<'a>>;
     fn get_by_id_mut<'a>(&'a mut self, id: Id<Function>) -> Option<Self::FunctionMut<'a>>;
 
@@ -106,4 +103,7 @@ pub trait FunctionTable: FundamentalProjectEntity {
 
     fn iter<'a>(&'a self) -> Self::FunctionIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> Self::FunctionIterMut<'a>;
+
+    fn is_empty(&self) -> bool;
+    fn len(&self) -> usize;
 }
