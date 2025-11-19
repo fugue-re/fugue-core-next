@@ -21,19 +21,28 @@ pub use dummy::DummyEntityStorage;
 pub mod memory;
 pub use memory::InMemoryEntityStorage;
 
+#[cfg(feature = "mdbx")]
 pub mod mdbx;
+#[cfg(feature = "mdbx")]
 pub use mdbx::MdbxEntityStorage;
 
+#[cfg(feature = "rocksdb")]
 pub mod rocksdb;
+#[cfg(feature = "rocksdb")]
 pub use rocksdb::RocksDbEntityStorage;
 
 pub mod schema;
 pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
 
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
 
+#[cfg(feature = "rocksdb")]
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
+#[cfg(not(feature = "rocksdb"))]
+pub type DefaultPersistentEntityStorage = InMemoryEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
 
 #[derive(Debug, Error)]
