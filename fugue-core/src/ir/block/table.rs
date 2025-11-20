@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use bincode::{BorrowDecode, Decode, Encode};
 use iset::{Entry, IntervalMap};
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::traits::{
@@ -161,6 +162,68 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         mem::take(blk); // remove the block; replace with default
 
         true
+    }
+
+    fn remove_by_address(&mut self, addr: Address) -> usize {
+        let mut removed = 0;
+
+        let ranges_to_remove = self
+            .bounds
+            .intervals_overlap(addr)
+            .filter(|iv| iv.start == addr)
+            .collect::<SmallVec<[_; 2]>>();
+
+        for range in ranges_to_remove.into_iter() {
+            let Some(id_set) = self.bounds.remove(range) else {
+                // this should never happen
+                continue;
+            };
+
+            for id in id_set.iter().filter(|id| id.is_valid()) {
+                let blk = &mut self.blocks[id.index()];
+
+                self.free_ids.push(id);
+                mem::take(blk); // remove the block; replace with default
+                removed += 1;
+            }
+        }
+
+        removed
+    }
+
+    fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
+        let mut removed = 0;
+
+        let ranges_to_remove = self
+            .bounds
+            .intervals_overlap(addr)
+            .filter(|iv| iv.start == addr)
+            .collect::<SmallVec<[_; 2]>>();
+
+        for range in ranges_to_remove.into_iter() {
+            let Entry::Occupied(id_set) = self.bounds.entry(range) else {
+                // this should never happen
+                continue;
+            };
+
+            for id in id_set.get().iter().filter(|id| id.is_valid()) {
+                let blk = &mut self.blocks[id.index()];
+
+                if blk.context() != context {
+                    continue;
+                }
+
+                self.free_ids.push(id);
+                mem::take(blk); // remove the block; replace with default
+                removed += 1;
+            }
+
+            if id_set.get().is_empty() {
+                id_set.remove();
+            }
+        }
+
+        removed
     }
 
     fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {

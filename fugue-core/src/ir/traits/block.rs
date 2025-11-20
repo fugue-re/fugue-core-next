@@ -84,6 +84,8 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
         E: Into<Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool;
+    fn remove_by_address(&mut self, addr: Address) -> usize;
+    fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize;
 
     fn get_by_id<'a>(&'a self, id: Id<CodeBlock>) -> Option<Self::CodeBlockRef<'a>>;
     fn get_by_id_mut<'a>(&'a mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut<'a>>;
@@ -109,6 +111,14 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
 
     fn get_first_by_address_mut<'a>(&'a mut self, addr: Address) -> Option<Self::CodeBlockMut<'a>> {
         self.get_by_address_mut(addr).next()
+    }
+
+    fn get_first_by_address_and_context<'a>(
+        &'a self,
+        addr: Address,
+        context: &'a ContextSet,
+    ) -> Option<Self::CodeBlockRef<'a>> {
+        self.get_by_address_and_context(addr, context).next()
     }
 
     fn overlaps<'a>(&'a self, addr: Address) -> Self::CodeBlockIter<'a>;
