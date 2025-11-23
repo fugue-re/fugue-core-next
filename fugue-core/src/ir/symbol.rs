@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::fmt::{Debug, Display};
+use std::mem;
 use std::sync::LazyLock;
 
 use bincode::{Decode, Encode};
@@ -30,11 +30,12 @@ macro_rules! lazy_symbol {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {
     address: Address,
     symbol: Symbol,
     properties: SymbolProperties,
+    indices: SmallVec<[SymbolIndex; 2]>,
 }
 
 impl AsRef<SymbolEntry> for SymbolEntry {
@@ -86,10 +87,19 @@ impl<C> Decode<C> for SymbolEntry {
         let Compat(symbol) = Compat::<Symbol>::decode(decoder)?;
         let properties = SymbolProperties::decode(decoder)?;
 
+        let mut indices = SmallVec::new();
+        let n = usize::decode(decoder)?;
+
+        for _i in 0..n {
+            let index = SymbolIndex::decode(decoder)?;
+            indices.push(index);
+        }
+
         Ok(Self {
             address,
             symbol,
             properties,
+            indices,
         })
     }
 }
@@ -100,6 +110,7 @@ impl SymbolEntry {
             address,
             symbol: symbol.into(),
             properties,
+            indices: SmallVec::new(),
         }
     }
 
@@ -113,6 +124,16 @@ impl SymbolEntry {
 
     pub fn properties(&self) -> SymbolProperties {
         self.properties
+    }
+
+    fn add_index(&mut self, index: SymbolIndex) {
+        if !self.indices.contains(&index) {
+            self.indices.push(index);
+        }
+    }
+
+    fn indices(&self) -> &[SymbolIndex] {
+        &self.indices
     }
 
     pub fn mark_as_extern(&mut self) {
@@ -156,6 +177,10 @@ impl SymbolEntry {
         self.properties.is_data()
     }
 
+    fn is_valid(&self) -> bool {
+        self.properties != SymbolProperties::INVALID
+    }
+
     pub fn kind(&self) -> SymbolProperties {
         self.properties & SymbolProperties::KIND
     }
@@ -197,6 +222,15 @@ bitflags::bitflags! {
         // groups
         const KIND       = Self::FUNCTION.bits() | Self::DATA.bits();
         const VISIBILITY = Self::EXTERN.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
+
+        // invalid (marker)
+        const INVALID = 0b1111_1111;
+    }
+}
+
+impl Default for SymbolProperties {
+    fn default() -> Self {
+        Self::INVALID
     }
 }
 
@@ -316,6 +350,8 @@ pub struct IndexedSymbolTable {
     names: SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
     // map of addresses to known symbols
     addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+    // indices of removed symbols that can be reused
+    free_ids: Vec<Id<Symbol>>,
 }
 
 impl<C> Decode<C> for IndexedSymbolTable {
@@ -355,11 +391,14 @@ impl<C> Decode<C> for IndexedSymbolTable {
             })
             .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
 
+        let free_ids = Vec::<Id<Symbol>>::decode(decoder)?;
+
         Ok(Self {
             symbols,
             indices,
             names,
             addresses,
+            free_ids,
         })
     }
 }
@@ -391,6 +430,8 @@ impl Encode for IndexedSymbolTable {
                 id.encode(encoder)?;
             }
         }
+
+        self.free_ids.encode(encoder)?;
 
         Ok(())
     }
@@ -640,9 +681,11 @@ impl IndexedSymbolTable {
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
+        use std::collections::btree_map::Entry;
+
         let address = address.into();
         let symbol = symbol.into();
-        let symbol_entry = SymbolEntry::new(address, symbol, properties);
+        let mut symbol_entry = SymbolEntry::new(address, symbol, properties);
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
@@ -660,12 +703,15 @@ impl IndexedSymbolTable {
 
                     symbol_id
                 } else {
-                    let symbol_id = Id::from_index(self.symbols.len());
+                    let symbol_id = if let Some(free_id) = self.free_ids.pop() {
+                        self.symbols[free_id.index()] = symbol_entry;
+                        free_id
+                    } else {
+                        let id = Id::from_index(self.symbols.len());
+                        self.symbols.push(symbol_entry);
+                        id
+                    };
 
-                    self.symbols.push(symbol_entry);
-
-                    // NOTE: due to how symbol identifiers are constructed, we know that
-                    // the set of symbols will remain sorted.
                     self.names.entry(symbol).or_default().push(symbol_id);
                     self.addresses.entry(address).or_default().push(symbol_id);
 
@@ -684,6 +730,10 @@ impl IndexedSymbolTable {
                     return (false, symbol_id);
                 }
 
+                for index in existing.indices() {
+                    symbol_entry.add_index(*index);
+                }
+
                 self.symbols[symbol_id.index()] = symbol_entry;
                 (true, symbol_id)
             }
@@ -692,9 +742,11 @@ impl IndexedSymbolTable {
 
     // Iterator over all symbol entries in insertion order.
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
-        self.symbols.iter().enumerate().map(|(i, entry)| {
-            let id = Id::from_index(i);
-            (id, entry)
+        self.symbols.iter().enumerate().filter_map(|(i, entry)| {
+            entry.is_valid().then(|| {
+                let id = Id::from_index(i);
+                (id, entry)
+            })
         })
     }
 
@@ -734,11 +786,132 @@ impl IndexedSymbolTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.symbols.is_empty()
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
-        self.symbols.len()
+        self.symbols.len() - self.free_ids.len()
+    }
+
+    pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {
+        use std::collections::btree_map::Entry;
+
+        let Some(symbol) = Symbol::from_existing(symbol.as_ref()) else {
+            return 0;
+        };
+
+        let Some(ids) = self.names.remove(&symbol) else {
+            return 0;
+        };
+
+        let count = ids.len();
+
+        for id in ids {
+            let symbol_entry = mem::take(&mut self.symbols[id.index()]);
+
+            // remove from addresses map
+            if let Entry::Occupied(mut entry) = self.addresses.entry(symbol_entry.address()) {
+                let ids = entry.get_mut();
+
+                ids.retain(|oid| *oid != id);
+
+                if ids.is_empty() {
+                    entry.remove();
+                }
+            }
+
+            for index in symbol_entry.indices() {
+                self.indices.remove(index);
+            }
+
+            self.free_ids.push(id);
+        }
+
+        count
+    }
+
+    pub fn remove_by_address(&mut self, address: impl Into<Address>) -> usize {
+        use std::collections::hash_map::Entry;
+
+        let address = address.into();
+
+        let Some(ids) = self.addresses.remove(&address) else {
+            return 0;
+        };
+
+        let count = ids.len();
+
+        for id in ids {
+            let symbol_entry = mem::take(&mut self.symbols[id.index()]);
+
+            // remove from names map
+            if let Entry::Occupied(mut entry) = self.names.entry(symbol_entry.symbol()) {
+                let ids = entry.get_mut();
+
+                ids.retain(|oid| *oid != id);
+
+                if ids.is_empty() {
+                    entry.remove();
+                }
+            }
+
+            for index in symbol_entry.indices() {
+                self.indices.remove(index);
+            }
+
+            self.free_ids.push(id);
+        }
+
+        count
+    }
+
+    pub fn remove_by_id(&mut self, id: Id<Symbol>) -> bool {
+        use std::collections::btree_map::Entry as AddrsEntry;
+        use std::collections::hash_map::Entry as NamesEntry;
+
+        let Some(symbol_entry) = self.symbols.get_mut(id.index()) else {
+            return false;
+        };
+
+        // remove from names map
+        if let NamesEntry::Occupied(mut entry) = self.names.entry(symbol_entry.symbol()) {
+            let ids = entry.get_mut();
+
+            ids.retain(|oid| *oid != id);
+
+            if ids.is_empty() {
+                entry.remove();
+            }
+        }
+
+        // remove from addresses map
+        if let AddrsEntry::Occupied(mut entry) = self.addresses.entry(symbol_entry.address()) {
+            let ids = entry.get_mut();
+
+            ids.retain(|oid| *oid != id);
+
+            if ids.is_empty() {
+                entry.remove();
+            }
+        }
+
+        for index in symbol_entry.indices() {
+            self.indices.remove(index);
+        }
+
+        // mark as removed
+        mem::take(symbol_entry);
+        self.free_ids.push(id);
+
+        true
+    }
+
+    pub fn remove_by_index(&mut self, index: SymbolIndex) -> bool {
+        let Some(id) = self.indices.get(&index).copied() else {
+            return false;
+        };
+
+        self.remove_by_id(id)
     }
 }
 
@@ -851,6 +1024,22 @@ impl SymbolTableT for IndexedSymbolTable {
 
     fn len(&self) -> usize {
         Self::len(self)
+    }
+
+    fn remove(&mut self, symbol: &str) -> usize {
+        Self::remove(self, symbol)
+    }
+
+    fn remove_by_address(&mut self, address: Address) -> usize {
+        Self::remove_by_address(self, address)
+    }
+
+    fn remove_by_id(&mut self, id: Id<Symbol>) -> bool {
+        Self::remove_by_id(self, id)
+    }
+
+    fn remove_by_index(&mut self, index: SymbolIndex) -> bool {
+        Self::remove_by_index(self, index)
     }
 }
 

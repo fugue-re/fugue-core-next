@@ -108,6 +108,19 @@ pub trait SymbolTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
+    fn insert(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        symbol: Symbol,
+        properties: SymbolProperties,
+    ) -> (bool, Id<Symbol>);
+
+    fn remove(&mut self, symbol: &str) -> usize;
+    fn remove_by_address(&mut self, address: Address) -> usize;
+    fn remove_by_id(&mut self, id: Id<Symbol>) -> bool;
+    fn remove_by_index(&mut self, index: SymbolIndex) -> bool;
+
     fn get<'a>(&'a self, symbol: &str) -> Option<Self::SymbolEntryIter<'a>>;
     fn get_mut<'a>(&'a mut self, symbol: &str) -> Option<Self::SymbolEntryIterMut<'a>>;
 
@@ -154,14 +167,6 @@ pub trait SymbolTable: FundamentalProjectEntity {
     fn contains(&self, symbol: &str) -> bool;
     fn contains_index(&self, index: SymbolIndex) -> bool;
     fn contains_address(&self, address: Address) -> bool;
-
-    fn insert(
-        &mut self,
-        index: SymbolIndex,
-        address: Address,
-        symbol: Symbol,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>);
 
     fn iter<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
     fn iter_by_selector<'a>(&'a self, selector: usize) -> Self::SymbolEntryIter<'a>;
