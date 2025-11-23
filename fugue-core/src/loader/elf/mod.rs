@@ -28,7 +28,7 @@ use crate::loader::object::object_language;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
-use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
+use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod relocations;
@@ -82,6 +82,7 @@ pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,
     metadata: LoadableMetadata,
+    base: Address,
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
     symbols: IndexedSymbolTable,
@@ -104,12 +105,21 @@ impl<'a> Elf<'a> {
         let language = with_elf!(view, elf | object_language(elf))?;
         let architecture = Arch::new(language);
 
+        let attributes = attributes.into();
+
+        let base = attributes
+            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .unwrap_or_default();
+
         let ElfSymbolData {
             bounds,
             symbols,
             mapping_hints,
             extern_segm,
-        } = with_elf!(view, elf | ElfSymbolData::from_elf(elf, &architecture));
+        } = with_elf!(
+            view,
+            elf | ElfSymbolData::from_elf(elf, &architecture, base)
+        );
 
         let metadata = LoadableMetadata::new(
             object.borrow_data(),
@@ -120,11 +130,12 @@ impl<'a> Elf<'a> {
             object,
             architecture,
             metadata,
+            base,
             bounds,
             mapping_hints,
             symbols,
             extern_segm,
-            attributes: attributes.into(),
+            attributes,
         };
 
         if let Some(entry) = slf.entry() {
@@ -136,7 +147,7 @@ impl<'a> Elf<'a> {
 
     pub fn entry(&self) -> Option<Address> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
-        (addr == 0).then_some(Address::from(addr))
+        (addr == 0).then_some(self.base + addr)
     }
 
     pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
@@ -171,7 +182,7 @@ struct ElfSymbolData {
 }
 
 impl ElfSymbolData {
-    fn from_elf<'a>(elf: &'a impl Object<'a>, arch: &Arch) -> Self {
+    fn from_elf<'a>(elf: &'a impl Object<'a>, arch: &Arch, base_addr: Address) -> Self {
         // TODO:
         // - base address should be configurable.
         // - determine if GNU and hence IFUNC and UNIQUE are supported.
@@ -186,12 +197,10 @@ impl ElfSymbolData {
         let mut section_map = Vec::new();
         let mut mapping_hints = BTreeMap::new();
 
-        let base_addr = Address::zero();
-
         let mut min_addr = base_addr;
         let mut max_addr = base_addr;
 
-        let base = if is_object {
+        let extern_base = if is_object {
             let mut base = base_addr.offset();
             for sect in elf.sections() {
                 let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -234,8 +243,8 @@ impl ElfSymbolData {
             max_addr.offset() + addr_size as u64
         };
 
-        let aligned_base =
-            (base + addr_align.wrapping_sub(1) as u64) & !(addr_align as u64).wrapping_sub(1);
+        let aligned_extern_base = (extern_base + addr_align.wrapping_sub(1) as u64)
+            & !(addr_align as u64).wrapping_sub(1);
 
         let mut symbols = IndexedSymbolTable::new();
 
@@ -318,8 +327,11 @@ impl ElfSymbolData {
         // if we were to consider the external address as a function, and call to it, we would
         // hit valid code, and return.
 
-        let mut extern_segm =
-            ExternSegment::new(aligned_base, addr_align, arch.external_thunk_template());
+        let mut extern_segm = ExternSegment::new(
+            aligned_extern_base,
+            addr_align,
+            arch.external_thunk_template(),
+        );
 
         // TODO: refactor the inner logic so we avoid duplication between the two loops.
 

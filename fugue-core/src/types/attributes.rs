@@ -12,6 +12,7 @@ use crate::storage::entities::{Entity, EntityId};
 pub const ATTRIBUTE_FILE_PATH: &str = "project.input_path";
 pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
 pub const ATTRIBUTE_ENTRY_POINT: &str = "project.entry_point";
+pub const ATTRIBUTE_IMAGE_BASE: &str = "project.image_base";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(transparent)]

@@ -24,13 +24,10 @@ where
         reloc_type: u32,
         is_dynamic: bool,
     ) {
-        // TODO: allow base address to be configurable
-        let base = 0u64;
-
         match reloc_type {
             R_X86_64_RELATIVE | R_X86_64_RELATIVE64 => {
                 let offset = offset as usize;
-                let value = base.wrapping_add_signed(reloc.addend());
+                let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}",);
 
