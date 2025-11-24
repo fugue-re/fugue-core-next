@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display};
 use std::mem;
 use std::sync::LazyLock;
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use smallvec::SmallVec;
 
 pub use ustr::{
@@ -76,7 +76,6 @@ impl Encode for SymbolEntry {
         self.properties.encode(encoder)?;
 
         self.indices.len().encode(encoder)?;
-
         for index in &self.indices {
             index.encode(encoder)?;
         }
@@ -97,12 +96,35 @@ impl<C> Decode<C> for SymbolEntry {
 
         let n = usize::decode(decoder)?;
         let mut indices = SmallVec::with_capacity(n);
-
         for _i in 0..n {
             let index = SymbolIndex::decode(decoder)?;
             indices.push(index);
         }
 
+        Ok(Self {
+            address,
+            symbol,
+            properties,
+            indices,
+        })
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let address = Address::borrow_decode(decoder)?;
+        let Compat(symbol) = Compat::<Symbol>::borrow_decode(decoder)?;
+        let properties = SymbolProperties::borrow_decode(decoder)?;
+        let n = usize::borrow_decode(decoder)?;
+        let mut indices = SmallVec::with_capacity(n);
+        for _i in 0..n {
+            let index = SymbolIndex::borrow_decode(decoder)?;
+            indices.push(index);
+        }
         Ok(Self {
             address,
             symbol,
@@ -252,6 +274,15 @@ impl<C> Decode<C> for SymbolProperties {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let value = u8::decode(decoder)?;
+        Ok(SymbolProperties::from_bits_truncate(value))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for SymbolProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let value = u8::borrow_decode(decoder)?;
         Ok(SymbolProperties::from_bits_truncate(value))
     }
 }
@@ -1170,6 +1201,7 @@ mod test {
         assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
         assert_eq!(ntable.len(), 1);
 
+        // check the roundtrip for encode/decode
         let config = bincode::config::standard();
         let encoded = bincode::encode_to_vec(&table, config).unwrap();
         let (decoded, _) =
