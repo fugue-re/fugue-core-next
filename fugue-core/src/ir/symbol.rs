@@ -686,14 +686,14 @@ impl IndexedSymbolTable {
         free_ids: &mut Vec<Id<Symbol>>,
         index: SymbolIndex,
         entry: SymbolEntry,
-    ) -> Id<Symbol> {
+    ) -> (bool, Id<Symbol>) {
         let address = entry.address();
         let symbol = entry.symbol();
 
         if let Some(symbol_id) = addresses.get(&address).and_then(|ids| {
             // inlines get_by_address to split the borrows
             SymbolEntryIter::new(ids, &*symbols)
-                .find_map(|(id, entry)| entry.has_same_referent(&entry).then_some(id))
+                .find_map(|(id, existing)| existing.has_same_referent(&entry).then_some(id))
         }) {
             // NOTE: we update the properties with new visibility if the symbol already
             // exists.
@@ -703,7 +703,7 @@ impl IndexedSymbolTable {
             symbol.add_index(index);
             symbol.update_visibility(entry.properties());
 
-            symbol_id
+            (false, symbol_id)
         } else {
             let symbol_id = if let Some(free_id) = free_ids.pop() {
                 symbols[free_id.index()] = entry;
@@ -717,7 +717,7 @@ impl IndexedSymbolTable {
             names.entry(symbol).or_default().push(symbol_id);
             addresses.entry(address).or_default().push(symbol_id);
 
-            symbol_id
+            (true, symbol_id)
         }
     }
 
@@ -736,7 +736,7 @@ impl IndexedSymbolTable {
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
-                let symbol_id = Self::insert_or_update(
+                let (is_new, symbol_id) = Self::insert_or_update(
                     &mut self.addresses,
                     &mut self.names,
                     &mut self.symbols,
@@ -747,7 +747,7 @@ impl IndexedSymbolTable {
 
                 entry.insert(symbol_id);
 
-                (true, symbol_id)
+                (is_new, symbol_id)
             }
             Entry::Occupied(mut entry) => {
                 let symbol_id = *entry.get();
@@ -763,7 +763,7 @@ impl IndexedSymbolTable {
                     // remove the index from existing
                     existing.indices.retain(|idx| *idx != index);
 
-                    let symbol_id = Self::insert_or_update(
+                    let (is_new, symbol_id) = Self::insert_or_update(
                         &mut self.addresses,
                         &mut self.names,
                         &mut self.symbols,
@@ -774,7 +774,7 @@ impl IndexedSymbolTable {
 
                     entry.insert(symbol_id);
 
-                    return (true, symbol_id);
+                    return (is_new, symbol_id);
                 }
 
                 // NOTE: we have a single referent, so it's easier to remove the current
@@ -1136,5 +1136,26 @@ mod test {
 
         // Check that the reused ID is the same as the removed one
         assert_eq!(id1, id3);
+
+        let (inserted4, id4) =
+            table.insert_local(SymbolIndex::new(0, 4), Address::from(0x3000u32), "symbol3");
+        assert!(!inserted4);
+        assert_eq!(table.len(), 2);
+
+        assert_eq!(id3, id4);
+
+        let (inserted5, id5) =
+            table.insert_local(SymbolIndex::new(0, 5), Address::from(0x3000u32), "symbol4");
+        assert!(inserted5);
+
+        assert_eq!(table.len(), 3);
+
+        let mut ntable = table.clone();
+
+        assert_eq!(table.remove("symbol3"), 1);
+        assert_eq!(table.len(), 2);
+
+        assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
+        assert_eq!(ntable.len(), 1);
     }
 }
