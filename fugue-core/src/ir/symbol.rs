@@ -73,7 +73,15 @@ impl Encode for SymbolEntry {
 
         self.address.encode(encoder)?;
         Compat(&self.symbol).encode(encoder)?;
-        self.properties.encode(encoder)
+        self.properties.encode(encoder)?;
+
+        self.indices.len().encode(encoder)?;
+
+        for index in &self.indices {
+            index.encode(encoder)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -87,8 +95,8 @@ impl<C> Decode<C> for SymbolEntry {
         let Compat(symbol) = Compat::<Symbol>::decode(decoder)?;
         let properties = SymbolProperties::decode(decoder)?;
 
-        let mut indices = SmallVec::new();
         let n = usize::decode(decoder)?;
+        let mut indices = SmallVec::with_capacity(n);
 
         for _i in 0..n {
             let index = SymbolIndex::decode(decoder)?;
@@ -345,7 +353,7 @@ impl SymbolIndex {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexedSymbolTable {
     // all known symbols
     symbols: Vec<SymbolEntry>,
@@ -1134,7 +1142,7 @@ mod test {
         assert!(inserted3);
         assert_eq!(table.len(), 2);
 
-        // Check that the reused ID is the same as the removed one
+        // check that the reused ID is the same as the removed one
         assert_eq!(id1, id3);
 
         let (inserted4, id4) =
@@ -1142,20 +1150,31 @@ mod test {
         assert!(!inserted4);
         assert_eq!(table.len(), 2);
 
+        // check that the ID is the same as the existing one (same referent, different symbol index)
         assert_eq!(id3, id4);
 
         let (inserted5, id5) =
             table.insert_local(SymbolIndex::new(0, 5), Address::from(0x3000u32), "symbol4");
         assert!(inserted5);
 
+        // check that we inserted a new symbol referring to the same address as id3 and id4
         assert_eq!(table.len(), 3);
 
         let mut ntable = table.clone();
 
+        // check we remove id3 and id4, which will have two indices associated with it, but one symbol
         assert_eq!(table.remove("symbol3"), 1);
         assert_eq!(table.len(), 2);
 
+        // check we remove id3, id4, and id5, which will be two distinct symbols
         assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
         assert_eq!(ntable.len(), 1);
+
+        let config = bincode::config::standard();
+        let encoded = bincode::encode_to_vec(&table, config).unwrap();
+        let (decoded, _) =
+            bincode::decode_from_slice::<IndexedSymbolTable, _>(&encoded, config).unwrap();
+
+        assert_eq!(table, decoded);
     }
 }
