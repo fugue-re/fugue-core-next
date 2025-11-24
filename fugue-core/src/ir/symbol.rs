@@ -1116,11 +1116,11 @@ mod test {
         let mut table = IndexedSymbolTable::new();
 
         let (inserted1, id1) =
-            table.insert_local(SymbolIndex::new(0, 1), Address::from(0x1000), "symbol1");
+            table.insert_local(SymbolIndex::new(0, 1), Address::from(0x1000u32), "symbol1");
         assert!(inserted1);
 
         let (inserted2, id2) =
-            table.insert_local(SymbolIndex::new(0, 2), Address::from(0x2000), "symbol2");
+            table.insert_local(SymbolIndex::new(0, 2), Address::from(0x2000u32), "symbol2");
         assert!(inserted2);
 
         assert_eq!(table.len(), 2);
@@ -1130,7 +1130,7 @@ mod test {
         assert_eq!(table.len(), 1);
 
         let (inserted3, id3) =
-            table.insert_local(SymbolIndex::new(0, 3), Address::from(0x3000), "symbol3");
+            table.insert_local(SymbolIndex::new(0, 3), Address::from(0x3000u32), "symbol3");
         assert!(inserted3);
         assert_eq!(table.len(), 2);
 

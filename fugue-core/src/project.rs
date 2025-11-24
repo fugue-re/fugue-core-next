@@ -418,8 +418,9 @@ where
 #[cfg(test)]
 mod test {
     use crate::attributes;
-    use crate::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
-    use crate::storage::entities::{MdbxEntityStorage, RocksDbEntityStorage};
+    #[cfg(feature = "mdbx")]
+    use crate::storage::entities::MdbxEntityStorage;
+    use crate::storage::entities::RocksDbEntityStorage;
     use crate::storage::project::{
         DefaultPersistentProjectStorageProvider, DefaultTransientProjectStorageProvider,
     };
@@ -485,6 +486,7 @@ mod test {
         })
     }
 
+    #[cfg(feature = "mdbx")]
     #[test]
     fn test_project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
@@ -514,14 +516,7 @@ mod test {
                     RocksDbEntityStorage,
                     DefaultPersistentSegmentStorage,
                 >,
-            >::from_file_with(
-                "tests/test-project.rdb.fdbz",
-                attributes! {
-                    ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS => {
-                        "size_upper": 4isize * 1024 * 1024 * 1024, // 4GB
-                    }
-                },
-            )?;
+            >::from_file("tests/test-project.rdb.fdbz")?;
 
             /*
             let functions = project.functions();
