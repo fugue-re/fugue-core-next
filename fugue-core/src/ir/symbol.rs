@@ -447,6 +447,55 @@ impl<C> Decode<C> for IndexedSymbolTable {
     }
 }
 
+impl<'de, C> BorrowDecode<'de, C> for IndexedSymbolTable {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        use bincode::serde::Compat;
+
+        let symbols = Vec::<SymbolEntry>::borrow_decode(decoder)?;
+        let indices = BTreeMap::<SymbolIndex, Id<Symbol>>::borrow_decode(decoder)?;
+
+        let names_len = usize::borrow_decode(decoder)?;
+        let names = (0..names_len)
+            .into_iter()
+            .map(|_| {
+                let Compat(sym) = Compat::<Symbol>::borrow_decode(decoder)?;
+                let ids_len = usize::borrow_decode(decoder)?;
+                let ids = (0..ids_len)
+                    .into_iter()
+                    .map(|_| Id::<Symbol>::borrow_decode(decoder))
+                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
+                Ok((sym, ids))
+            })
+            .collect::<Result<SymbolMap<SmallVec<[_; 2]>>, _>>()?;
+
+        let addresses_len = usize::borrow_decode(decoder)?;
+        let addresses = (0..addresses_len)
+            .into_iter()
+            .map(|_| {
+                let addr = Address::borrow_decode(decoder)?;
+                let ids_len = usize::borrow_decode(decoder)?;
+                let ids = (0..ids_len)
+                    .into_iter()
+                    .map(|_| Id::<Symbol>::borrow_decode(decoder))
+                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
+                Ok((addr, ids))
+            })
+            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
+
+        let free_ids = Vec::<Id<Symbol>>::borrow_decode(decoder)?;
+
+        Ok(Self {
+            symbols,
+            indices,
+            names,
+            addresses,
+            free_ids,
+        })
+    }
+}
+
 impl Encode for IndexedSymbolTable {
     fn encode<E: bincode::enc::Encoder>(
         &self,
