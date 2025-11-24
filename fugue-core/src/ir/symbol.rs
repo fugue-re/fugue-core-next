@@ -132,6 +132,11 @@ impl SymbolEntry {
         }
     }
 
+    fn with_index(mut self, index: SymbolIndex) -> Self {
+        self.add_index(index);
+        self
+    }
+
     fn indices(&self) -> &[SymbolIndex] {
         &self.indices
     }
@@ -674,6 +679,48 @@ impl IndexedSymbolTable {
         )
     }
 
+    fn insert_or_update(
+        addresses: &mut BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+        names: &mut SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
+        symbols: &mut Vec<SymbolEntry>,
+        free_ids: &mut Vec<Id<Symbol>>,
+        index: SymbolIndex,
+        entry: SymbolEntry,
+    ) -> Id<Symbol> {
+        let address = entry.address();
+        let symbol = entry.symbol();
+
+        if let Some(symbol_id) = addresses.get(&address).and_then(|ids| {
+            // inlines get_by_address to split the borrows
+            SymbolEntryIter::new(ids, &*symbols)
+                .find_map(|(id, entry)| entry.has_same_referent(&entry).then_some(id))
+        }) {
+            // NOTE: we update the properties with new visibility if the symbol already
+            // exists.
+            let symbol = &mut symbols[symbol_id.index()];
+
+            // NOTE: we resuse the entry for an equivalent symbol
+            symbol.add_index(index);
+            symbol.update_visibility(entry.properties());
+
+            symbol_id
+        } else {
+            let symbol_id = if let Some(free_id) = free_ids.pop() {
+                symbols[free_id.index()] = entry;
+                free_id
+            } else {
+                let id = Id::from_index(symbols.len());
+                symbols.push(entry);
+                id
+            };
+
+            names.entry(symbol).or_default().push(symbol_id);
+            addresses.entry(address).or_default().push(symbol_id);
+
+            symbol_id
+        }
+    }
+
     pub fn insert(
         &mut self,
         index: SymbolIndex,
@@ -685,57 +732,55 @@ impl IndexedSymbolTable {
 
         let address = address.into();
         let symbol = symbol.into();
-        let mut symbol_entry = SymbolEntry::new(address, symbol, properties);
+        let symbol_entry = SymbolEntry::new(address, symbol, properties).with_index(index);
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
-                let address = address.into();
-                let symbol_id = if let Some(symbol_id) =
-                    // inlines get_by_address to split the borrows
-                    self.addresses.get(&address).and_then(|ids| {
-                            SymbolEntryIter::new(ids, &self.symbols).find_map(|(id, entry)| {
-                                entry.has_same_referent(&symbol_entry).then_some(id)
-                            })
-                        }) {
-                    // NOTE: we update the properties with new visibility if the symbol already
-                    // exists.
-                    self.symbols[symbol_id.index()].update_visibility(properties);
-
-                    symbol_id
-                } else {
-                    let symbol_id = if let Some(free_id) = self.free_ids.pop() {
-                        self.symbols[free_id.index()] = symbol_entry;
-                        free_id
-                    } else {
-                        let id = Id::from_index(self.symbols.len());
-                        self.symbols.push(symbol_entry);
-                        id
-                    };
-
-                    self.names.entry(symbol).or_default().push(symbol_id);
-                    self.addresses.entry(address).or_default().push(symbol_id);
-
-                    symbol_id
-                };
+                let symbol_id = Self::insert_or_update(
+                    &mut self.addresses,
+                    &mut self.names,
+                    &mut self.symbols,
+                    &mut self.free_ids,
+                    index,
+                    symbol_entry,
+                );
 
                 entry.insert(symbol_id);
 
                 (true, symbol_id)
             }
-            Entry::Occupied(entry) => {
+            Entry::Occupied(mut entry) => {
                 let symbol_id = *entry.get();
-                let existing = &self.symbols[symbol_id.index()];
+                let existing = &mut self.symbols[symbol_id.index()];
 
-                if existing == &symbol_entry {
+                if *existing == symbol_entry {
                     return (false, symbol_id);
                 }
 
-                for index in existing.indices() {
-                    symbol_entry.add_index(*index);
+                // NOTE: if existing has multiple indices referring to it, then
+                // we just remove this one, and create a new symbol entry.
+                if existing.indices().len() > 1 {
+                    // remove the index from existing
+                    existing.indices.retain(|idx| *idx != index);
+
+                    let symbol_id = Self::insert_or_update(
+                        &mut self.addresses,
+                        &mut self.names,
+                        &mut self.symbols,
+                        &mut self.free_ids,
+                        index,
+                        symbol_entry,
+                    );
+
+                    entry.insert(symbol_id);
+
+                    return (true, symbol_id);
                 }
 
-                self.symbols[symbol_id.index()] = symbol_entry;
-                (true, symbol_id)
+                // NOTE: we have a single referent, so it's easier to remove the current
+                // entry and just insert
+                self.remove_by_id(symbol_id);
+                self.insert(index, address, symbol, properties)
             }
         }
     }
@@ -1064,5 +1109,32 @@ mod test {
         let index = SymbolIndex::new(1, 42);
         assert_eq!(index.index(), 42);
         assert_eq!(index.selector(), 1);
+    }
+
+    #[test]
+    fn test_symbol_index_free_list() {
+        let mut table = IndexedSymbolTable::new();
+
+        let (inserted1, id1) =
+            table.insert_local(SymbolIndex::new(0, 1), Address::from(0x1000), "symbol1");
+        assert!(inserted1);
+
+        let (inserted2, id2) =
+            table.insert_local(SymbolIndex::new(0, 2), Address::from(0x2000), "symbol2");
+        assert!(inserted2);
+
+        assert_eq!(table.len(), 2);
+
+        let removed = table.remove_by_id(id1);
+        assert!(removed);
+        assert_eq!(table.len(), 1);
+
+        let (inserted3, id3) =
+            table.insert_local(SymbolIndex::new(0, 3), Address::from(0x3000), "symbol3");
+        assert!(inserted3);
+        assert_eq!(table.len(), 2);
+
+        // Check that the reused ID is the same as the removed one
+        assert_eq!(id1, id3);
     }
 }
