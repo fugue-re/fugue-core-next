@@ -92,7 +92,25 @@ pub enum IndexedCodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
+    Custom(anyhow::Error),
+    #[error(transparent)]
     Storage(#[from] EntityStorageError),
+}
+
+impl IndexedCodeBlockTableError {
+    pub fn custom<E>(error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Custom(anyhow::Error::new(error))
+    }
+
+    pub fn custom_with<M>(msg: M) -> Self
+    where
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
+        Self::Custom(anyhow::Error::msg(msg))
+    }
 }
 
 impl CodeBlockTableT for IndexedCodeBlockTable {
@@ -104,10 +122,9 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
     type CodeBlockIter<'a> = CodeBlockIter<'a>;
     type CodeBlockIterMut<'a> = CodeBlockIterMut<'a>;
 
-    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
     where
         F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
-        E: Into<Self::Error>,
     {
         let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
             (true, free_id)

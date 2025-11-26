@@ -51,7 +51,25 @@ pub enum IndexedFunctionTableError {
     #[error("function to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
+    Custom(anyhow::Error),
+    #[error(transparent)]
     Storage(#[from] EntityStorageError),
+}
+
+impl IndexedFunctionTableError {
+    pub fn custom<E>(error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Custom(anyhow::Error::new(error))
+    }
+
+    pub fn custom_with<M>(msg: M) -> Self
+    where
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
+        Self::Custom(anyhow::Error::msg(msg))
+    }
 }
 
 impl FunctionTableT for IndexedFunctionTable {
@@ -63,10 +81,9 @@ impl FunctionTableT for IndexedFunctionTable {
     type FunctionIter<'a> = FunctionIter<'a>;
     type FunctionIterMut<'a> = FunctionIterMut<'a>;
 
-    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
         F: Fn(Id<Function>, Address) -> Result<Function, Self::Error>,
-        E: Into<Self::Error>,
     {
         if let Some(existing) = self.get_by_address_mut(addr) {
             let nf = f(existing.id(), addr)?;
@@ -110,7 +127,7 @@ impl FunctionTableT for IndexedFunctionTable {
             .get_mut(id.index())
             .filter(|f| f.id().is_valid())
         else {
-            return false
+            return false;
         };
 
         self.addresses.remove(&f.entry());
@@ -123,7 +140,7 @@ impl FunctionTableT for IndexedFunctionTable {
 
     fn remove_by_address(&mut self, addr: Address) -> bool {
         let Some(id) = self.addresses.remove(&addr) else {
-            return false
+            return false;
         };
 
         let _ = mem::take(&mut self.functions[id.index() as usize]);
@@ -192,5 +209,75 @@ impl ProjectEntityFromStorage for IndexedFunctionTable {
 impl PersistableProjectEntity for IndexedFunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         storage.insert(&ProjectEntity::FunctionTable, self)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_basic_operations() {
+        let mut table = IndexedFunctionTable::new();
+
+        let addr = Address::from(0x1000);
+        let func_id = table
+            .insert(addr, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!(table.len(), 1);
+
+        let func = table.get_by_address(addr).unwrap();
+        assert_eq!(func.id(), func_id);
+
+        assert!(table.remove_by_id(func_id));
+        assert_eq!(table.len(), 0);
+
+        assert!(table.get_by_address(addr).is_none());
+    }
+
+    #[test]
+    fn test_removal_operations() {
+        let mut table = IndexedFunctionTable::new();
+
+        let addr1 = Address::from(0x1000);
+        let addr2 = Address::from(0x2000);
+        let addr3 = Address::from(0x3000);
+
+        let func_id1 = table
+            .insert(addr1, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        let func_id2 = table
+            .insert(addr2, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!(table.len(), 2);
+
+        assert!(table.remove_by_address(addr1));
+        assert_eq!(table.len(), 1);
+
+        assert!(table.get_by_address(addr1).is_none());
+        assert!(table.get_by_address(addr2).is_some());
+
+        let func_id3 = table
+            .insert(addr3, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!(table.len(), 2);
+
+        // free list
+        assert_eq!(func_id1, func_id3);
+        assert!(table.free_ids.is_empty());
+
+        let func_id4 = table
+            .insert(addr1, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!(table.len(), 3);
+        assert_ne!(func_id4, func_id1);
+
+        assert!(table.remove_by_id(func_id2));
+        assert_eq!(table.len(), 2);
     }
 }

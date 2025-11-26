@@ -104,6 +104,12 @@ impl PartialEq<Address> for u64 {
     }
 }
 
+impl From<i32> for Address {
+    fn from(v: i32) -> Self {
+        Self(v as u64)
+    }
+}
+
 impl From<u64> for Address {
     fn from(v: u64) -> Self {
         Self(v)

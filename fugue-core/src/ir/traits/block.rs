@@ -78,10 +78,9 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
-    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
     where
-        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
-        E: Into<Self::Error>;
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool;
     fn remove_by_address(&mut self, addr: Address) -> usize;

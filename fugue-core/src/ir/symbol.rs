@@ -536,19 +536,19 @@ impl Entity for IndexedSymbolTable {
 
 impl ProjectEntityFromStorage for IndexedSymbolTable {
     fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
-        tracing::trace!("loading SymbolTable from entity storage");
+        tracing::trace!("loading symbol table from entity storage");
         storage.get(&ProjectEntity::SymbolTable)
     }
 
     fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
-        tracing::trace!("creating default (empty) SymbolTable from entity storage");
+        tracing::trace!("creating default (empty) symbol table from entity storage");
         Ok(Self::default())
     }
 }
 
 impl PersistableProjectEntity for IndexedSymbolTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        tracing::trace!("persisting SymbolTable with {} entries", self.len());
+        tracing::trace!("persisting symbol table with {} entries", self.len());
         storage.insert(&ProjectEntity::SymbolTable, self)
     }
 }
@@ -1207,7 +1207,7 @@ mod test {
             table.insert_local(SymbolIndex::new(0, 1), Address::from(0x1000u32), "symbol1");
         assert!(inserted1);
 
-        let (inserted2, id2) =
+        let (inserted2, _id2) =
             table.insert_local(SymbolIndex::new(0, 2), Address::from(0x2000u32), "symbol2");
         assert!(inserted2);
 
@@ -1233,7 +1233,7 @@ mod test {
         // check that the ID is the same as the existing one (same referent, different symbol index)
         assert_eq!(id3, id4);
 
-        let (inserted5, id5) =
+        let (inserted5, _id5) =
             table.insert_local(SymbolIndex::new(0, 5), Address::from(0x3000u32), "symbol4");
         assert!(inserted5);
 

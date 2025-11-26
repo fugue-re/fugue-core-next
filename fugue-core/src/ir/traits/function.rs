@@ -87,10 +87,9 @@ pub trait FunctionTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
-    fn insert<F, E>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: Fn(Id<Function>, Address) -> Result<Function, Self::Error>,
-        E: Into<Self::Error>;
+        F: Fn(Id<Function>, Address) -> Result<Function, Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<Function>) -> bool;
     fn remove_by_address(&mut self, addr: Address) -> bool;
