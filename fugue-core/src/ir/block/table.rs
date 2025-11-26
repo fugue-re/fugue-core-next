@@ -368,3 +368,72 @@ impl PersistableProjectEntity for IndexedCodeBlockTable {
         storage.insert(&ProjectEntity::CodeBlockTable, self)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate::ir::InsnList;
+
+    use super::*;
+
+    #[test]
+    fn test_basic_operations() {
+        let mut table = IndexedCodeBlockTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+
+        let addr = Address::from(0x1000);
+        let blk_id = table
+            .insert(addr, |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        let blk = table.get_by_id(blk_id).unwrap();
+        assert_eq!(blk.start(), addr);
+        assert_eq!(blk.len(), 0x10);
+
+        let removed = table.remove_by_id(blk_id);
+        assert!(removed);
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_overlapped() {
+        let mut table = IndexedCodeBlockTable::new();
+
+        let addr1 = Address::from(0x1000);
+        let addr2 = Address::from(0x1000); // overlaps with addr1
+        let addr3 = Address::from(0x1005);
+
+        let blk_id1 = table
+            .insert(addr1, |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        let blk_id2 = table
+            .insert(addr2, |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x8, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        let blk_id3 = table
+            .insert(addr3, |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x6, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        let overlaps = table.overlaps(Address::from(0x1007)).collect::<Vec<_>>();
+        assert_eq!(overlaps.len(), 3); // all three blocks overlap at 0x1007
+        assert!(overlaps.iter().any(|blk| blk.id() == blk_id1));
+        assert!(overlaps.iter().any(|blk| blk.id() == blk_id2));
+        assert!(overlaps.iter().any(|blk| blk.id() == blk_id3));
+
+        let removed_count = table.remove_by_address(Address::from(0x1000));
+        assert_eq!(removed_count, 2);
+
+        let remaining_blk = table.get_by_id(blk_id3).unwrap();
+        assert_eq!(remaining_blk.start(), addr3);
+    }
+}

@@ -120,6 +120,31 @@ impl CodeBlock {
         }
     }
 
+    pub fn try_new(
+        id: Id<Self>,
+        start: Address,
+        len: usize,
+        instructions: InsnList,
+    ) -> Option<Self> {
+        Self::try_new_with(id, start, len, instructions, ContextSet::default())
+    }
+
+    pub fn try_new_with(
+        id: Id<Self>,
+        start: Address,
+        len: usize,
+        instructions: InsnList,
+        context: ContextSet,
+    ) -> Option<Self> {
+        Some(Self::new_with(
+            id,
+            start,
+            NonZeroUsize::new(len)?,
+            instructions,
+            context,
+        ))
+    }
+
     pub fn id(&self) -> CodeBlockId {
         self.id
     }
