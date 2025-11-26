@@ -132,10 +132,11 @@ where
 
         tracing::trace!("loading project symbols");
 
-        let symbols = match S::ProjectStorage::symbol_table(&storage.entities)? {
-            Some(symbols) => symbols,
+        let symbols_builder = || match S::ProjectStorage::symbol_table(&storage.entities)? {
+            Some(symbols) => Ok(symbols),
             None => {
                 let Some(loadable) = loadable else {
+                    tracing::error!("project not a standalone and no loadable instance available");
                     return Err(StorageProviderError::NotAStandaloneProject.into());
                 };
 
@@ -152,29 +153,55 @@ where
                         symbols.insert(index, entry.address(), entry.symbol(), entry.properties());
                     }
                 }
-                symbols
+                Ok(symbols)
+            }
+        };
+
+        let symbols = match symbols_builder() {
+            Ok(table) => table,
+            Err(e) => {
+                tracing::error!("failed to load symbol table: {}", e);
+                return Err(e);
             }
         };
 
         tracing::trace!("loading project functions");
 
-        let functions = match S::ProjectStorage::function_table(&storage.entities)? {
-            Some(functions) => functions,
+        let functions_builder = || match S::ProjectStorage::function_table(&storage.entities)? {
+            Some(functions) => Ok(functions),
             None => {
                 <S::ProjectStorage as ProjectStorage>::FunctionTable::default_from_entity_storage(
                     &storage.entities,
-                )?
+                )
+                .map_err(ProjectError::from)
+            }
+        };
+
+        let functions = match functions_builder() {
+            Ok(table) => table,
+            Err(e) => {
+                tracing::error!("failed to load function table: {}", e);
+                return Err(e);
             }
         };
 
         tracing::trace!("loading project code blocks");
 
-        let blocks = match S::ProjectStorage::code_block_table(&storage.entities)? {
-            Some(blocks) => blocks,
+        let blocks_builder = || match S::ProjectStorage::code_block_table(&storage.entities)? {
+            Some(blocks) => Ok(blocks),
             None => {
                 <S::ProjectStorage as ProjectStorage>::CodeBlockTable::default_from_entity_storage(
                     &storage.entities,
-                )?
+                )
+                .map_err(ProjectError::from)
+            }
+        };
+
+        let blocks = match blocks_builder() {
+            Ok(table) => table,
+            Err(e) => {
+                tracing::error!("failed to load code block table: {}", e);
+                return Err(e);
             }
         };
 
