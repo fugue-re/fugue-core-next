@@ -181,6 +181,10 @@ impl Function {
         self.id
     }
 
+    pub fn set_id(&mut self, id: FunctionId) {
+        self.id = id;
+    }
+
     pub fn set_frame(&mut self, frame: FunctionFrame) {
         self.frame = frame;
     }
@@ -231,6 +235,14 @@ impl Function {
     pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
         self.blocks.extend(blocks);
         self.blocks.sort_by_key(|(addr, _)| *addr);
+    }
+
+    pub(crate) fn with_blocks(
+        mut self,
+        blocks: impl IntoIterator<Item = (Address, CodeBlockId)>,
+    ) -> Self {
+        self.add_blocks(blocks);
+        self
     }
 
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, CodeBlockId)> + '_ {

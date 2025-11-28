@@ -5,18 +5,21 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTable as _;
+use crate::ir::Address;
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};
-use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
+use crate::storage::project::{
+    InMemoryProvider, PersistableProjectEntity, ProjectEntityFromStorage,
+};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
     ProjectStorage, ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
 };
 use crate::types::AttributeMap;
-use crate::types::attributes::{ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
+use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 
-pub struct Project<S>
+pub struct Project<S = InMemoryProvider>
 where
     S: ProjectStorageProvider,
 {
@@ -331,6 +334,10 @@ where
 
     pub fn language(&self) -> &'static Language {
         self.language
+    }
+
+    pub fn entry(&self) -> Option<Address> {
+        self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
     }
 
     pub fn symbols(&self) -> &<S::ProjectStorage as ProjectStorage>::SymbolTable {

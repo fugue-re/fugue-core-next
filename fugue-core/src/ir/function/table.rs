@@ -83,7 +83,7 @@ impl FunctionTableT for IndexedFunctionTable {
 
     fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: Fn(Id<Function>, Address) -> Result<Function, Self::Error>,
+        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>,
     {
         if let Some(existing) = self.get_by_address_mut(addr) {
             let nf = f(existing.id(), addr)?;
@@ -181,6 +181,10 @@ impl FunctionTableT for IndexedFunctionTable {
             .get(&addr)
             .copied()
             .and_then(|id| self.get_by_id_mut(id))
+    }
+
+    fn addresses<'a>(&'a self) -> impl Iterator<Item = Address> + 'a {
+        self.addresses.keys().copied()
     }
 
     fn iter<'a>(&'a self) -> FunctionIter<'a> {

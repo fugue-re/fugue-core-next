@@ -900,12 +900,8 @@ impl IndexedSymbolTable {
     // Iterator over all symbol entries in (ascending) order by address.
     pub fn iter_by_address<'a>(
         &'a self,
-        address: impl Into<Address>,
     ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
-        let address = address.into();
-        self.addresses
-            .get(&address)
-            .into_iter()
+        self.addresses.values()
             .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
     }
 
@@ -1143,8 +1139,8 @@ impl SymbolTableT for IndexedSymbolTable {
         BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
     }
 
-    fn iter_by_address(&self, address: Address) -> Self::SymbolEntryIter<'_> {
-        BoxedSymbolEntryIter::new(self.iter_by_address(address))
+    fn iter_by_address(&self) -> Self::SymbolEntryIter<'_> {
+        BoxedSymbolEntryIter::new(self.iter_by_address())
     }
 
     fn iter_by_index(&self) -> Self::SymbolIndexAndEntryIter<'_> {

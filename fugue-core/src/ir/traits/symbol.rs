@@ -170,7 +170,7 @@ pub trait SymbolTable: FundamentalProjectEntity {
 
     fn iter<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
     fn iter_by_selector<'a>(&'a self, selector: usize) -> Self::SymbolEntryIter<'a>;
-    fn iter_by_address<'a>(&'a self, address: Address) -> Self::SymbolEntryIter<'a>;
+    fn iter_by_address<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
     fn iter_by_index<'a>(&'a self) -> Self::SymbolIndexAndEntryIter<'a>;
 
     fn is_empty(&self) -> bool;

@@ -62,7 +62,7 @@ pub trait AsCodeBlockMut<'a>: AsMut<CodeBlock> + DerefMut<Target = CodeBlock> {}
 impl<'a> AsCodeBlockMut<'a> for CodeBlockMut<'a> {}
 
 pub trait CodeBlockTable: FundamentalProjectEntity {
-    type Error: std::error::Error + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     type CodeBlockRef<'a>: AsCodeBlockRef<'a>
     where

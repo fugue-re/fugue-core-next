@@ -71,7 +71,7 @@ impl<'a> AsFunctionMut<'a> for FunctionMut<'a> {}
 // practice--they should be handled lower down the stack, e.g., by retries, etc.
 //
 pub trait FunctionTable: FundamentalProjectEntity {
-    type Error: std::error::Error + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     type FunctionRef<'a>: AsFunctionRef<'a>
     where
@@ -89,7 +89,7 @@ pub trait FunctionTable: FundamentalProjectEntity {
 
     fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: Fn(Id<Function>, Address) -> Result<Function, Self::Error>;
+        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<Function>) -> bool;
     fn remove_by_address(&mut self, addr: Address) -> bool;
@@ -99,6 +99,8 @@ pub trait FunctionTable: FundamentalProjectEntity {
 
     fn get_by_address<'a>(&'a self, addr: Address) -> Option<Self::FunctionRef<'a>>;
     fn get_by_address_mut<'a>(&'a mut self, addr: Address) -> Option<Self::FunctionMut<'a>>;
+
+    fn addresses<'a>(&'a self) -> impl Iterator<Item = Address> + 'a;
 
     fn iter<'a>(&'a self) -> Self::FunctionIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> Self::FunctionIterMut<'a>;

@@ -7,13 +7,15 @@ use thiserror::Error;
 use ustr::Ustr;
 
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::entities::flow_graph::{FlowKind, FlowTarget};
-use crate::entities::function::FunctionProperties;
-use crate::entities::instruction::InsnList;
-use crate::entities::{BasicBlock, Function, Insn};
-use crate::lifter::{ContextSet, LifterError};
+use crate::ir::traits::{FunctionTable, SymbolTable};
+use crate::ir::{
+    Address, AddressMap, CodeBlockProperties, FlowKind, FlowTarget, Function, FunctionProperties,
+    Id, Insn,
+};
+use crate::lifter::{ContextSet, Disassembler, Lifter, LifterError};
 use crate::project::Project;
-use crate::types::address::{Address, AddressMap};
+use crate::storage::ProjectStorageProvider;
+use crate::storage::project::InMemoryProvider;
 
 pub struct FunctionRecoveryConfig {
     pub max_blocks: usize,
@@ -27,9 +29,12 @@ impl Default for FunctionRecoveryConfig {
     }
 }
 
-pub struct FunctionRecovery<'a> {
+pub struct FunctionRecovery<'a, P = InMemoryProvider>
+where
+    P: ProjectStorageProvider,
+{
     candidates: VecDeque<(Address, ContextSet)>,
-    builder: FunctionBuilder<'a>,
+    builder: FunctionBuilder<'a, P>,
 }
 
 #[derive(Default)]
@@ -48,11 +53,108 @@ pub struct FunctionBuilderContext {
 }
 
 #[derive(Default)]
+pub struct PartialCodeBlock {
+    start: Address,
+    len: usize,
+    instructions: Vec<usize>, // indices into PartialFunction::instructions,
+    properties: CodeBlockProperties,
+    predecessors: Vec<usize>, // indices into PartialFunction::blocks,
+    successors: Vec<usize>,   // indices into PartialFunction::blocks,
+    context: ContextSet,
+}
+
+impl PartialCodeBlock {
+    pub fn new(start: Address, len: usize, insns: Vec<usize>, context: ContextSet) -> Self {
+        Self {
+            start,
+            len,
+            instructions: insns,
+            properties: CodeBlockProperties::NONE,
+            predecessors: Vec::new(),
+            successors: Vec::new(),
+            context,
+        }
+    }
+
+    pub fn start(&self) -> Address {
+        self.start
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn instructions(&self) -> &[usize] {
+        &self.instructions
+    }
+
+    pub fn instructions_mut(&mut self) -> &mut Vec<usize> {
+        &mut self.instructions
+    }
+
+    pub fn push_instruction(&mut self, insn_id: usize) {
+        self.instructions.push(insn_id);
+    }
+
+    pub fn context(&self) -> &ContextSet {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut ContextSet {
+        &mut self.context
+    }
+
+    pub fn properties(&self) -> CodeBlockProperties {
+        self.properties
+    }
+
+    pub fn mark_entry(&mut self) {
+        self.properties.insert(CodeBlockProperties::ENTRY);
+    }
+
+    pub fn mark_exit(&mut self) {
+        self.properties.insert(CodeBlockProperties::EXIT);
+    }
+
+    pub fn predecessors(&self) -> &[usize] {
+        &self.predecessors
+    }
+
+    pub fn add_predecessor(&mut self, block_id: usize) {
+        if !self.predecessors.contains(&block_id) {
+            self.predecessors.push(block_id);
+        }
+    }
+
+    pub fn remove_predecessor(&mut self, block_id: usize) {
+        if let Some(pos) = self.predecessors.iter().position(|&id| id == block_id) {
+            self.predecessors.remove(pos);
+        }
+    }
+
+    pub fn successors(&self) -> &[usize] {
+        &self.successors
+    }
+
+    pub fn add_successor(&mut self, block_id: usize) {
+        if !self.successors.contains(&block_id) {
+            self.successors.push(block_id);
+        }
+    }
+
+    pub fn remove_successor(&mut self, block_id: usize) {
+        if let Some(pos) = self.successors.iter().position(|&id| id == block_id) {
+            self.successors.remove(pos);
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct PartialFunction {
     name: Option<Ustr>,
     entry: Address,
-    blocks: Vec<BasicBlock>,
-    instructions: Vec<Insn>,
+    blocks: Vec<PartialCodeBlock>,
+    instructions: Vec<Insn>, // all instructions
     instructions_map: BTreeMap<Address, usize>,
     properties: FunctionProperties,
 }
@@ -89,12 +191,12 @@ impl PartialFunction {
         self.entry
     }
 
-    pub fn entry_block(&self) -> &BasicBlock {
+    pub fn entry_block(&self) -> &PartialCodeBlock {
         self.block_at(self.entry)
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn push_block(&mut self, block: BasicBlock) {
+    pub(crate) fn push_block(&mut self, block: PartialCodeBlock) {
         debug_assert!(
             self.blocks.is_empty() || self.blocks.last().unwrap().start() < block.start(),
             "blocks must be inserted in order",
@@ -102,11 +204,11 @@ impl PartialFunction {
         self.blocks.push(block);
     }
 
-    pub fn blocks(&self) -> &[BasicBlock] {
+    pub fn blocks(&self) -> &[PartialCodeBlock] {
         &self.blocks
     }
 
-    pub fn block_at(&self, address: Address) -> Option<&BasicBlock> {
+    pub fn block_at(&self, address: Address) -> Option<&PartialCodeBlock> {
         self.blocks
             .binary_search_by_key(&address, |blk| blk.start())
             .ok()
@@ -130,11 +232,14 @@ impl PartialFunction {
         }
     }
 
-    pub fn lift_block(
+    pub fn lift_block<S>(
         &mut self,
         id: usize,
-        project: &mut Project,
-    ) -> Result<(), FunctionBuilderError> {
+        project: &mut Project<S>,
+    ) -> Result<(), FunctionBuilderError>
+    where
+        S: ProjectStorageProvider,
+    {
         let block = self
             .blocks
             .get(id)
@@ -146,7 +251,7 @@ impl PartialFunction {
             .segments
             .view_segment_bytes_from(block.start())?;
 
-        for insn_id in block.instructions().iter() {
+        for insn_id in block.instructions().iter().copied() {
             let insn = &mut self.instructions[insn_id];
 
             if insn.is_lifted() {
@@ -159,13 +264,19 @@ impl PartialFunction {
                 .get(offset..)
                 .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
 
-            *insn = project.lifter.lift_insn(insn.address(), view)?;
+            *insn = project.lifter().lift(insn.address(), view)?;
         }
 
         Ok(())
     }
 
-    pub fn lift_all_blocks(&mut self, project: &mut Project) -> Result<(), FunctionBuilderError> {
+    pub fn lift_all_blocks<S>(
+        &mut self,
+        project: &mut Project<S>,
+    ) -> Result<(), FunctionBuilderError>
+    where
+        S: ProjectStorageProvider,
+    {
         let mut segment = project
             .storage
             .segments
@@ -183,7 +294,7 @@ impl PartialFunction {
                 .view_bytes_from_address(block.start())
                 .expect("block start must be in segment");
 
-            for insn_id in block.instructions().iter() {
+            for insn_id in block.instructions().iter().copied() {
                 let insn = &mut self.instructions[insn_id];
 
                 if insn.is_lifted() {
@@ -196,18 +307,21 @@ impl PartialFunction {
                     .get(offset..)
                     .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
 
-                *insn = project.lifter.lift_insn(insn.address(), view)?;
+                *insn = project.lifter().lift(insn.address(), view)?;
             }
         }
 
         Ok(())
     }
 
-    pub fn lift_insn(
+    pub fn lift_insn<S>(
         &mut self,
         id: usize,
-        project: &mut Project,
-    ) -> Result<Option<&mut Insn>, FunctionBuilderError> {
+        project: &mut Project<S>,
+    ) -> Result<Option<&mut Insn>, FunctionBuilderError>
+    where
+        S: ProjectStorageProvider,
+    {
         let insn = self
             .instructions
             .get_mut(id)
@@ -221,14 +335,13 @@ impl PartialFunction {
         let mut bytes = [0u8; 32];
 
         project
-            .storage
-            .segments
+            .segments()
             .read_bytes(address, &mut bytes)
             .expect("storage should be consistent");
 
         // TODO: should we use Rc<RefCell<...>>/Arc for Insn?
 
-        *insn = project.lifter_mut().lift_insn(address, bytes)?;
+        *insn = project.lifter().lift(address, &bytes)?;
 
         Ok(Some(insn))
     }
@@ -273,33 +386,18 @@ impl PartialFunction {
         self.properties.insert(FunctionProperties::EXTERNAL);
     }
 
-    pub fn into_function(
+    pub fn into_function<S>(
         mut self,
-        project: &mut Project,
-    ) -> Result<Function, FunctionBuilderError> {
+        project: &mut Project<S>,
+    ) -> Result<Function, FunctionBuilderError>
+    where
+        S: ProjectStorageProvider,
+    {
         self.lift_all_blocks(project)?;
 
-        Ok(Function::new_with(self.name, self.entry)
-            .with_blocks(self.blocks, self.instructions)
+        Ok(Function::new_with(Id::INVALID, self.entry, self.name)
+            // .with_blocks(self.blocks, self.instructions)
             .with_properties(self.properties))
-    }
-
-    pub fn from_function(function: &Function) -> Self {
-        let instructions = function.instructions().to_vec();
-        let instructions_map = instructions
-            .iter()
-            .enumerate()
-            .map(|(i, insn)| (insn.address(), i))
-            .collect::<BTreeMap<_, _>>();
-
-        PartialFunction {
-            name: function.name(),
-            entry: function.entry(),
-            blocks: function.blocks().to_vec(),
-            instructions,
-            instructions_map,
-            properties: function.properties(),
-        }
     }
 }
 
@@ -339,17 +437,20 @@ pub struct PartialFunctionWithContext {
     pub function: PartialFunction,
 }
 
-pub struct FunctionBuilder<'a> {
+pub struct FunctionBuilder<'a, P>
+where
+    P: ProjectStorageProvider,
+{
     // The configuration for the function recovery process.
     config: FunctionRecoveryConfig,
     // The context of the function being built.
     context: FunctionBuilderContext,
     // These passes run once per function prior to the main lifting loop.
-    initialisation_passes: AnalysisGroup<'a, FunctionBuilderContext>,
+    initialisation_passes: AnalysisGroup<'a, P, FunctionBuilderContext>,
     // These passes run each iteration of the main lifting loop after all candidates within the
     // pass have been lifted and the function's control-flow has been structured based on the
     // identified blocks and flows.
-    post_lifting_passes: AnalysisGroup<'a, PartialFunctionWithContext>,
+    post_lifting_passes: AnalysisGroup<'a, P, PartialFunctionWithContext>,
 }
 
 #[derive(Debug, Error)]
@@ -370,11 +471,16 @@ pub enum FunctionBuilderError {
     SegmentStorage(#[from] crate::storage::SegmentStorageError),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
+    #[error("invalid block size at {0} ({1}); must be non-zero and less than 65536")]
+    InvalidBlockSize(Address, usize),
     #[error("invalid instruction index: {0}")]
     InvalidInstructionId(usize),
 }
 
-impl<'a> FunctionRecovery<'a> {
+impl<'a, P> FunctionRecovery<'a, P>
+where
+    P: ProjectStorageProvider,
+{
     pub fn new() -> Self {
         FunctionRecovery::new_with(FunctionRecoveryConfig::default())
     }
@@ -416,7 +522,7 @@ impl<'a> FunctionRecovery<'a> {
     pub fn add_function_builder_initialisation_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+        pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
     ) {
         self.builder.add_initialisation_pass(name, pass);
     }
@@ -424,14 +530,17 @@ impl<'a> FunctionRecovery<'a> {
     pub fn add_function_builder_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, PartialFunctionWithContext> + 'a,
+        pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
     ) {
         self.builder.add_post_lifting_pass(name, pass);
     }
 }
 
-impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
-    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+impl<'a, P> AnalysisPass<'a, P> for FunctionRecovery<'a, P>
+where
+    P: ProjectStorageProvider,
+{
+    fn analyse(&mut self, project: &mut Project<P>) -> Result<(), AnalysisError> {
         tracing::debug!("starting function recovery");
 
         let t = Instant::now();
@@ -441,31 +550,17 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
             self.add_candidate(entry);
         }
 
-        for symbol in project.iter_local_symbols().filter(|s| s.is_function()) {
-            tracing::debug!(
-                "local function: {} (name: {:?})",
-                symbol.address(),
-                symbol.symbol()
-            );
-            self.add_candidate(symbol.address());
-        }
-
-        for symbol in project.iter_extern_symbols().filter(|s| s.is_function()) {
-            tracing::debug!(
-                "external function: {} (name: {:?})",
-                symbol.address(),
-                symbol.symbol()
-            );
-            self.add_candidate(symbol.address());
+        for (_, entry) in project
+            .symbols()
+            .iter_by_address()
+            .filter(|(_, s)| s.is_function())
+        {
+            tracing::debug!("function: {} (name: {})", entry.address(), entry.symbol(),);
+            self.add_candidate(entry.address());
         }
 
         let mut failures = BTreeSet::new();
-        let mut functions = project
-            .functions()
-            .keys()
-            .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
-            .collect::<Result<BTreeSet<_>, _>>()
-            .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+        let mut functions = project.functions().addresses().collect::<BTreeSet<_>>();
 
         tracing::debug!("existing functions: {}", functions.len());
 
@@ -485,7 +580,7 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
                 continue;
             }
 
-            let function = match self.builder.analyse(project, address, context) {
+            let mut function = match self.builder.analyse(project, address, context) {
                 Ok(f) => f,
                 Err(e) => {
                     failures.insert(address);
@@ -496,7 +591,10 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
 
             functions.insert(address);
 
-            if let Err(e) = project.functions().insert(address, function) {
+            if let Err(e) = project.functions_mut().insert(address, move |id, _| {
+                function.set_id(id);
+                Ok(function)
+            }) {
                 tracing::debug!("failed to persist function at {address}: {e}");
                 return Err(AnalysisError::pass_failed("function-recovery", e));
             }
@@ -528,7 +626,10 @@ impl<'a> AnalysisPass<'a> for FunctionRecovery<'a> {
     }
 }
 
-impl<'a> FunctionBuilder<'a> {
+impl<'a, P> FunctionBuilder<'a, P>
+where
+    P: ProjectStorageProvider,
+{
     pub fn new(config: FunctionRecoveryConfig) -> Self {
         FunctionBuilder {
             config,
@@ -538,21 +639,23 @@ impl<'a> FunctionBuilder<'a> {
         }
     }
 
-    pub fn initialisation_passes(&self) -> &AnalysisGroup<'a, FunctionBuilderContext> {
+    pub fn initialisation_passes(&self) -> &AnalysisGroup<'a, P, FunctionBuilderContext> {
         &self.initialisation_passes
     }
 
-    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<'a, FunctionBuilderContext> {
+    pub fn initialisation_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, P, FunctionBuilderContext> {
         &mut self.initialisation_passes
     }
 
-    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, PartialFunctionWithContext> {
+    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, P, PartialFunctionWithContext> {
         &self.post_lifting_passes
     }
 
     pub fn post_lifting_passes_mut(
         &mut self,
-    ) -> &mut AnalysisGroup<'a, PartialFunctionWithContext> {
+    ) -> &mut AnalysisGroup<'a, P, PartialFunctionWithContext> {
         &mut self.post_lifting_passes
     }
 
@@ -567,7 +670,7 @@ impl<'a> FunctionBuilder<'a> {
     pub fn add_initialisation_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, FunctionBuilderContext> + 'a,
+        pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
     ) {
         self.initialisation_passes.add_pass(name, pass);
     }
@@ -575,19 +678,24 @@ impl<'a> FunctionBuilder<'a> {
     pub fn add_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, PartialFunctionWithContext> + 'a,
+        pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
     ) {
         self.post_lifting_passes.add_pass(name, pass);
     }
 
     pub fn analyse(
         &mut self,
-        project: &mut Project,
+        project: &mut Project<P>,
         address: impl Into<Address>,
         context: ContextSet,
     ) -> Result<Function, FunctionBuilderError> {
+        let mut lifter = project.lifter();
+        let mut disas = project.architecture().disassembler();
+
         self.context.analyse(
             project,
+            &mut disas,
+            &mut lifter,
             address,
             context,
             &self.config,
@@ -670,7 +778,15 @@ impl FunctionBuilderContext {
         self.global_targets.clear();
     }
 
-    fn lift_insns(&mut self, project: &mut Project, f: &mut PartialFunction) {
+    fn lift_insns<S>(
+        &mut self,
+        project: &Project<S>,
+        disas: &mut Disassembler,
+        lifter: &mut Lifter,
+        f: &mut PartialFunction,
+    ) where
+        S: ProjectStorageProvider,
+    {
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
         // create a "cheap" view over the containing segment and use that to avoid lookups for each
         // address read from.
@@ -689,14 +805,14 @@ impl FunctionBuilderContext {
             // e.g., if we are in Thumb context or not for ARM.
             let Some((block, ncontext)) = project
                 .arch
-                .canonicalise_address_with(block, project.lifter.context())
+                .canonicalise_address_with(block, lifter.context())
             else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
             };
 
             if !segment.contains_address(block) {
-                if let Ok(nsegment) = project.storage.segments.find_segment_containing(block) {
+                if let Ok(nsegment) = project.segments().find_segment_containing(block) {
                     tracing::debug!("switching segment for {block} to segment {nsegment}");
                     segment = nsegment;
                 } else {
@@ -711,7 +827,7 @@ impl FunctionBuilderContext {
             context.merge(ncontext);
 
             // Applies the context updates to the lifter context.
-            context.apply(block, project.lifter.context_mut());
+            context.apply(block, lifter.context_mut());
 
             // Save the context so we can associate it with a block later.
             self.contexts.entry(block).or_insert(context);
@@ -748,7 +864,7 @@ impl FunctionBuilderContext {
 
                 tracing::trace!("lifting {address} ({size} bytes available)");
 
-                match project.lifter.disassemble_insn(address, bytes) {
+                match disas.disassemble(address, bytes, lifter.context_mut()) {
                     Ok(insn) => {
                         let insn = entry.insert(insn);
 
@@ -761,7 +877,8 @@ impl FunctionBuilderContext {
                             // relative jumps; these constructs will be handled in post lifting
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
-                                let Some((addr, context)) = project.arch.canonicalise_address(addr)
+                                let Some((addr, context)) =
+                                    project.architecture().canonicalise_address(addr)
                                 else {
                                     continue;
                                 };
@@ -849,7 +966,7 @@ impl FunctionBuilderContext {
         let get_next_cut = |idx: usize| self.cuts.get(idx).copied().unwrap_or(num_insns);
         let emit_block = |address, length, points| {
             let context = self.contexts.get(&address).cloned().unwrap_or_default();
-            BasicBlock::new_with(address, length, points, context)
+            PartialCodeBlock::new(address, length, points, context)
         };
 
         'cuts: for (cut_idx, cut) in self.cuts.iter().enumerate() {
@@ -863,9 +980,11 @@ impl FunctionBuilderContext {
             let mut expected = address;
             let mut length = 0usize;
 
-            let mut points = InsnList::new();
+            let mut points = Vec::<usize>::new();
 
             tracing::trace!("structuring block at {address}; start: {start}");
+
+            // NOTE: previously, InsnList was just ~ Vec<usize>
 
             for curr in start..num_insns {
                 let insn = &f.instructions[curr];
@@ -879,8 +998,8 @@ impl FunctionBuilderContext {
                         next_cut_idx += 1;
                         next_cut = get_next_cut(next_cut_idx);
                     } else {
-                        let last_insn =
-                            &f.instructions[points.last().expect("points must not be empty")];
+                        let last_insn = &f.instructions
+                            [points.last().copied().expect("points must not be empty")];
                         let last_address = last_insn.address();
 
                         debug_assert!(self.block_starts.insert(address, block_idx).is_none());
@@ -897,7 +1016,7 @@ impl FunctionBuilderContext {
                         insn.address(),
                         address
                     );
-                    points.insert(curr);
+                    points.push(curr);
                     expected = insn.next_address();
                     length += insn.len();
                 }
@@ -905,7 +1024,8 @@ impl FunctionBuilderContext {
 
             // NOTE: we should refactor this--we have a bit of duplication and we can
             // probably reduce lookups.
-            let last_insn = &f.instructions[points.last().expect("points must not be empty")];
+            let last_insn =
+                &f.instructions[points.last().copied().expect("points must not be empty")];
             let last_address = last_insn.address();
 
             debug_assert!(self.block_starts.insert(address, block_idx).is_none());
@@ -944,15 +1064,20 @@ impl FunctionBuilderContext {
         Ok(())
     }
 
-    pub fn analyse(
+    pub fn analyse<S>(
         &mut self,
-        project: &mut Project,
+        project: &mut Project<S>,
+        disas: &mut Disassembler,
+        lifter: &mut Lifter,
         address: impl Into<Address>,
         context: ContextSet,
         config: &FunctionRecoveryConfig,
-        initialisation_passes: &mut AnalysisGroup<'_, FunctionBuilderContext>,
-        post_lifting_passes: &mut AnalysisGroup<'_, PartialFunctionWithContext>,
-    ) -> Result<Function, FunctionBuilderError> {
+        initialisation_passes: &mut AnalysisGroup<'_, S, FunctionBuilderContext>,
+        post_lifting_passes: &mut AnalysisGroup<'_, S, PartialFunctionWithContext>,
+    ) -> Result<Function, FunctionBuilderError>
+    where
+        S: ProjectStorageProvider,
+    {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context
@@ -985,7 +1110,7 @@ impl FunctionBuilderContext {
         let mut partial = PartialFunction::new(self.entry);
 
         loop {
-            self.lift_insns(project, &mut partial);
+            self.lift_insns(project, disas, lifter, &mut partial);
 
             if !partial.has_insns() {
                 tracing::debug!("no instructions lifted; invalid function");
@@ -996,6 +1121,7 @@ impl FunctionBuilderContext {
 
             self.structure_blocks(config, &mut partial)?;
 
+            /*
             for block in partial.blocks.iter() {
                 tracing::debug!("blk@{}", block.start());
                 for insn in block
@@ -1006,6 +1132,7 @@ impl FunctionBuilderContext {
                     tracing::debug!("{}: {}", insn.address(), insn.display(project.language));
                 }
             }
+            */
 
             let num_local_targets = self.local_targets.len();
 
@@ -1041,7 +1168,6 @@ mod test {
     use crate::analysis::AnalysisPass;
     use crate::attributes;
     use crate::loader::Shellcode;
-    use crate::storage::TransientStorageProvider;
     use crate::types::attributes::*;
 
     #[test]
@@ -1054,7 +1180,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = Project::from_file_with::<TransientStorageProvider>(
+            let mut project = Project::<InMemoryProvider>::from_file_with(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
@@ -1093,7 +1219,7 @@ mod test {
                 0x5E, 0xC9, 0xC2, 0x08, 0x00,
             ];
 
-            let mut project = Project::new::<TransientStorageProvider>(&Shellcode::new(
+            let mut project = Project::<InMemoryProvider>::new(&Shellcode::new(
                 "x86:LE:64",
                 0x4EB14u64,
                 &shellcode,
