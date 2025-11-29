@@ -1,0 +1,509 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::mem;
+
+use crate::analysis::{AnalysisGroup, AnalysisPass};
+use crate::arch::Arch;
+use crate::ir::{Address, AddressMap, FlowKind, FlowTarget, Function};
+use crate::lifter::ContextSet;
+use crate::project::Project;
+use crate::storage::{ProjectStorageProvider, SegmentStorage};
+
+use super::{
+    FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
+};
+
+#[derive(Default)]
+pub struct FunctionBuilderContext {
+    entry: Address,
+    candidates: VecDeque<(Address, ContextSet)>,
+    contexts: BTreeMap<Address, ContextSet>,
+    local_targets: BTreeSet<FlowTarget>,
+    global_targets: BTreeSet<(Address, ContextSet)>,
+    // These are used to structure the blocks after lifting; we keep them here
+    // to avoid having to reallocate on each function analysis. They refer to
+    // the partial function being constructed.
+    block_starts: AddressMap<usize>,
+    block_ends: AddressMap<usize>,
+    cut_points: Vec<usize>,
+}
+
+pub struct CodeBlockStructuringContext<'a> {
+    pub block_starts: &'a mut AddressMap<usize>,
+    pub block_ends: &'a mut AddressMap<usize>,
+    pub cut_points: &'a mut Vec<usize>,
+    pub contexts: &'a BTreeMap<Address, ContextSet>,
+    pub local_targets: &'a BTreeSet<FlowTarget>,
+}
+
+pub struct PartialFunctionWithContext {
+    pub context: FunctionBuilderContext,
+    pub function: PartialFunction,
+}
+
+pub struct FunctionBuilder<'a, P>
+where
+    P: ProjectStorageProvider,
+{
+    // The configuration for the function recovery process.
+    config: FunctionRecoveryConfig,
+    // The context of the function being built.
+    context: FunctionBuilderContext,
+    // These passes run once per function prior to the main lifting loop.
+    initialisation_passes: AnalysisGroup<'a, P, FunctionBuilderContext>,
+    // These passes run each iteration of the main lifting loop after all candidates within the
+    // pass have been lifted and the function's control-flow has been structured based on the
+    // identified blocks and flows.
+    post_lifting_passes: AnalysisGroup<'a, P, PartialFunctionWithContext>,
+}
+
+impl<'a, P> FunctionBuilder<'a, P>
+where
+    P: ProjectStorageProvider,
+{
+    pub fn new(config: FunctionRecoveryConfig) -> Self {
+        FunctionBuilder {
+            config,
+            context: FunctionBuilderContext::new(),
+            initialisation_passes: AnalysisGroup::new(),
+            post_lifting_passes: AnalysisGroup::new(),
+        }
+    }
+
+    pub fn initialisation_passes(&self) -> &AnalysisGroup<'a, P, FunctionBuilderContext> {
+        &self.initialisation_passes
+    }
+
+    pub fn initialisation_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, P, FunctionBuilderContext> {
+        &mut self.initialisation_passes
+    }
+
+    pub fn post_lifting_passes(&self) -> &AnalysisGroup<'a, P, PartialFunctionWithContext> {
+        &self.post_lifting_passes
+    }
+
+    pub fn post_lifting_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, P, PartialFunctionWithContext> {
+        &mut self.post_lifting_passes
+    }
+
+    pub fn context(&self) -> &FunctionBuilderContext {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut FunctionBuilderContext {
+        &mut self.context
+    }
+
+    pub fn add_initialisation_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
+    ) {
+        self.initialisation_passes.add_pass(name, pass);
+    }
+
+    pub fn add_post_lifting_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
+    ) {
+        self.post_lifting_passes.add_pass(name, pass);
+    }
+
+    pub fn analyse(
+        &mut self,
+        project: &mut Project<P>,
+        address: impl Into<Address>,
+        context: ContextSet,
+    ) -> Result<Function, FunctionRecoveryError> {
+        let mut translator = Translator::new(project);
+
+        self.context.analyse(
+            project,
+            &mut translator,
+            address,
+            context,
+            &self.config,
+            &mut self.initialisation_passes,
+            &mut self.post_lifting_passes,
+        )
+    }
+
+    pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
+        &self.context.local_targets
+    }
+
+    pub fn global_targets(&self) -> &BTreeSet<(Address, ContextSet)> {
+        &self.context.global_targets
+    }
+}
+
+impl<'a> CodeBlockStructuringContext<'a> {
+    pub fn block_starts(&self) -> &AddressMap<usize> {
+        &self.block_starts
+    }
+
+    pub fn block_ends(&self) -> &AddressMap<usize> {
+        &self.block_ends
+    }
+
+    pub fn cut_points(&self) -> &[usize] {
+        &self.cut_points
+    }
+
+    pub fn mark_cut_point(&mut self, insn_idx: usize) {
+        self.cut_points.push(insn_idx);
+    }
+
+    pub fn is_flow_target(&self, address: Address) -> bool {
+        self.contexts.contains_key(&address)
+    }
+
+    pub fn contexts(&self) -> &BTreeMap<Address, ContextSet> {
+        self.contexts
+    }
+
+    pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
+        self.local_targets
+    }
+
+    pub fn clear(&mut self) {
+        self.block_starts.clear();
+        self.block_ends.clear();
+        self.cut_points.clear();
+    }
+}
+
+impl FunctionBuilderContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn entry(&self) -> Address {
+        self.entry
+    }
+
+    pub fn add_candidate(&mut self, address: impl Into<Address>) {
+        self.add_candidate_with_context(address, ContextSet::new());
+    }
+
+    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
+        self.candidates.push_back((address.into(), context));
+    }
+
+    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
+        self.add_candidates_with_context(
+            addresses
+                .into_iter()
+                .zip(std::iter::repeat(ContextSet::new())),
+        );
+    }
+
+    pub fn add_candidates_with_context(
+        &mut self,
+        candidates: impl IntoIterator<Item = (impl Into<Address>, ContextSet)>,
+    ) {
+        self.candidates.extend(
+            candidates
+                .into_iter()
+                .map(|(addr, context)| (addr.into(), context)),
+        );
+    }
+
+    pub fn add_local_target(
+        &mut self,
+        from: impl Into<Address>,
+        to: impl Into<Address>,
+        kind: FlowKind,
+    ) {
+        self.local_targets
+            .insert(FlowTarget::new(from.into(), to.into(), kind));
+    }
+
+    pub fn clear(&mut self) {
+        self.entry = Address::zero();
+        self.candidates.clear();
+        self.contexts.clear();
+        self.local_targets.clear();
+        self.global_targets.clear();
+    }
+
+    fn lift_insns(
+        &mut self,
+        arch: &Arch,
+        segments: &SegmentStorage,
+        translator: &mut Translator,
+        f: &mut PartialFunction,
+    ) {
+        // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
+        // create a "cheap" view over the containing segment and use that to avoid lookups for each
+        // address read from.
+
+        // We assume that most (all?) of a function's blocks will be in the same segment.
+        let mut segment = segments
+            .find_segment_containing(self.entry())
+            .expect("function entry is valid");
+
+        // This is the stage where we build blocks by collecting instructions and marking them.
+        'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
+            // This ensures correct alignment, to address is correctly wrapped with respect to
+            // the address space, and also extracts context updates indicated by the address,
+            // e.g., if we are in Thumb context or not for ARM.
+            let Some((block, ncontext)) =
+                arch.canonicalise_address_with(block, translator.context())
+            else {
+                tracing::trace!("skipping {block}: not a viable block start address");
+                continue 'outer;
+            };
+
+            if !segment.contains_address(block) {
+                if let Ok(nsegment) = segments.find_segment_containing(block) {
+                    tracing::debug!("switching segment for {block} to segment {nsegment}");
+                    segment = nsegment;
+                } else {
+                    tracing::trace!("skipping {block}: not mapped in any segment");
+                    continue 'outer;
+                }
+            }
+
+            tracing::trace!("lifting new block {block}");
+
+            // Merge the context updates with the specified context taking precedence.
+            context.merge(ncontext);
+
+            // Applies the context updates to the lifter context.
+            context.apply(block, translator.context_mut());
+
+            // Save the context so we can associate it with a block later.
+            self.contexts.entry(block).or_insert(context);
+
+            let mut offset = 0usize;
+
+            '_inner: loop {
+                let address = block + offset;
+
+                tracing::trace!("lifting at {address}");
+
+                // If we've already disassembled this instruction select the next candidate,
+                // otherwise get the entry ready for update.
+                let entry = match f.insn_entry(address) {
+                    InsnEntry::Vacant(entry) => entry,
+                    InsnEntry::Occupied(mut entry) => {
+                        // If two blocks overlap, then they may share a common suffix to account
+                        // for this we mark instructions that appear in multiple blocks as starts
+                        // so they're considered cut points when performing block structuring.
+                        entry.get_mut().mark_maybe_taken();
+                        self.contexts
+                            .entry(address)
+                            .or_insert_with(ContextSet::default);
+                        continue 'outer;
+                    }
+                };
+
+                let Some(bytes) = segment.view_bytes_from_address(address) else {
+                    tracing::trace!("skipping {address}: not mapped in segment");
+                    continue 'outer;
+                };
+
+                let size = bytes.len();
+
+                tracing::trace!("lifting {address} ({size} bytes available)");
+
+                match translator.disassemble(address, bytes) {
+                    Ok(insn) => {
+                        let insn = entry.insert(insn);
+
+                        // Explicit control-flow
+                        if insn.is_flow() {
+                            // We're done with this block; we schedule the next bit of work
+
+                            // These targets are what we can statically compute by scanning the
+                            // instruction's PCode branch operations--we will miss things like PC
+                            // relative jumps; these constructs will be handled in post lifting
+                            // passes.
+                            for (target, kind, addr) in insn.iter_targets() {
+                                let Some((addr, context)) = arch.canonicalise_address(addr) else {
+                                    continue;
+                                };
+
+                                if kind.is_local() {
+                                    let Some(target) =
+                                        FlowTarget::from_insn_target(insn, target, addr)
+                                    else {
+                                        continue;
+                                    };
+
+                                    if self.local_targets.insert(target) {
+                                        self.candidates.push_back((addr, context));
+                                    }
+                                } else {
+                                    self.global_targets.insert((addr, context));
+                                }
+                            }
+
+                            continue 'outer;
+                        }
+
+                        // Implicit control-flow (it is a halt, etc.)
+                        if !insn.has_fall() {
+                            // We're done with this block
+                            continue 'outer;
+                        }
+
+                        offset += insn.len();
+                    }
+                    Err(e) => {
+                        // Flows into bad data; we skip this block and remove its context
+                        tracing::debug!("skipping {address}; lifting failed: {e}");
+                        self.contexts.remove(&address);
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn contexts(&self) -> &BTreeMap<Address, ContextSet> {
+        &self.contexts
+    }
+
+    pub fn is_flow_target(&self, address: Address) -> bool {
+        self.contexts.contains_key(&address)
+    }
+
+    pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
+        &self.local_targets
+    }
+
+    pub fn global_targets(&self) -> &BTreeSet<(Address, ContextSet)> {
+        &self.global_targets
+    }
+
+    pub fn block_starts(&self) -> &AddressMap<usize> {
+        &self.block_starts
+    }
+
+    pub fn block_ends(&self) -> &AddressMap<usize> {
+        &self.block_ends
+    }
+
+    pub fn cut_points(&self) -> &Vec<usize> {
+        &self.cut_points
+    }
+
+    pub fn mark_cut_point(&mut self, insn_idx: usize) {
+        self.cut_points.push(insn_idx);
+    }
+
+    pub fn structuring_context(&mut self) -> CodeBlockStructuringContext {
+        CodeBlockStructuringContext {
+            block_starts: &mut self.block_starts,
+            block_ends: &mut self.block_ends,
+            cut_points: &mut self.cut_points,
+            contexts: &self.contexts,
+            local_targets: &self.local_targets,
+        }
+    }
+
+    pub fn analyse<S>(
+        &mut self,
+        project: &mut Project<S>,
+        translator: &mut Translator,
+        address: impl Into<Address>,
+        context: ContextSet,
+        config: &FunctionRecoveryConfig,
+        initialisation_passes: &mut AnalysisGroup<'_, S, FunctionBuilderContext>,
+        post_lifting_passes: &mut AnalysisGroup<'_, S, PartialFunctionWithContext>,
+    ) -> Result<Function, FunctionRecoveryError>
+    where
+        S: ProjectStorageProvider,
+    {
+        // We have three main stages:
+        //
+        // 1. We first initialise the function builder with the entry point and the context
+        //    of the entry block.
+        // 2. We enter the main loop where we lift instructions block by block, and add newly
+        //    discovered blocks (and edges) to the candidates queue.
+        // 3. We structure the blocks into a basic function-like structure; we use this
+        //    structure as input to resolve jump tables, indirect jumps, etc. this part of
+        //    the analysis provides new candidates and new edges.
+        //
+        // Stage 1 and 3 are hookable; we may register analysis passes to be run prior to the
+        // main loop and after each block discovery pass has completed within the main loop.
+        //
+        // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
+        // initialisation.
+
+        let candidate = address.into();
+
+        tracing::debug!("exploring from {candidate}");
+
+        self.clear();
+        self.entry = candidate;
+        self.candidates.push_back((candidate, context));
+
+        // Run the initialisation passes
+        initialisation_passes
+            .analyse_with(project, self)
+            .map_err(FunctionRecoveryError::InitialisationPass)?;
+
+        let mut partial = PartialFunction::new(self.entry);
+
+        loop {
+            let arch = project.arch();
+            let segments = project.segments();
+
+            self.lift_insns(arch, segments, translator, &mut partial);
+
+            if !partial.has_insns() {
+                tracing::debug!("no instructions lifted; invalid function");
+                return Err(FunctionRecoveryError::NoInstructions);
+            }
+
+            tracing::trace!("{:?}", self.local_targets);
+
+            partial.structure_blocks(config, self)?;
+
+            /*
+            for block in partial.blocks.iter() {
+                tracing::debug!("blk@{}", block.start());
+                for insn in block
+                    .instructions()
+                    .iter()
+                    .map(|i| &partial.instructions[i])
+                {
+                    tracing::debug!("{}: {}", insn.address(), insn.display(project.language));
+                }
+            }
+            */
+
+            let num_local_targets = self.local_targets.len();
+
+            let mut function_with_context = PartialFunctionWithContext {
+                context: mem::take(self),
+                function: mem::take(&mut partial),
+            };
+
+            // Run post-lifting passes
+            let result = post_lifting_passes.analyse_with(project, &mut function_with_context);
+
+            *self = function_with_context.context;
+            partial = function_with_context.function;
+
+            result.map_err(FunctionRecoveryError::PostLiftingPass)?;
+
+            if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
+                // No new candidates were added, and no new local targets were discovered.
+                // We can stop here.
+                tracing::debug!("no new candidates or local targets; stopping");
+                break;
+            }
+        }
+
+        // partial.into_function(project)
+        todo!()
+    }
+}

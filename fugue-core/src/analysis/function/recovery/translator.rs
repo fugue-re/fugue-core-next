@@ -1,10 +1,20 @@
+use crate::ir::{Address, Insn};
+use crate::lifter::{Disassembler, Lifter, LiftingContext};
+use crate::project::Project;
+use crate::storage::ProjectStorageProvider;
+
+use super::FunctionRecoveryError;
+
 pub struct Translator {
     disassembler: Disassembler,
     lifter: Lifter,
 }
 
 impl Translator {
-    pub fn new(project: &Project) -> Self {
+    pub fn new<P>(project: &Project<P>) -> Self
+    where
+        P: ProjectStorageProvider,
+    {
         let disassembler = project.arch().disassembler();
         let lifter = project.arch().lifter();
 
@@ -14,30 +24,31 @@ impl Translator {
         }
     }
 
-    pub fn disassemble_insn(
+    pub fn disassemble(
         &mut self,
         address: Address,
         bytes: impl AsRef<[u8]>,
-    ) -> Result<Insn, DisassemblerError> {
+    ) -> Result<Insn, FunctionRecoveryError> {
         let bytes = bytes.as_ref();
         let insn = self
             .disassembler
-            .disassemble_insn(address, bytes, self.lifter.context_mut())
-            .map_err(DisassemblerError::disassembler)?;
+            .disassemble(address, bytes, self.lifter.context_mut())?;
 
         if !insn.needs_lifting() && insn.len() != 0 {
             return Ok(insn);
         }
 
-        Ok(self.lifter.lift_insn(address, bytes)?)
+        self.lift(address, bytes)
     }
 
-    pub fn lift_insn(
+    pub fn lift(
         &mut self,
         address: Address,
         bytes: impl AsRef<[u8]>,
-    ) -> Result<Insn, LifterError> {
-        self.lifter.lift_insn(address, bytes.as_ref())
+    ) -> Result<Insn, FunctionRecoveryError> {
+        self.lifter
+            .lift(address, bytes.as_ref())
+            .map_err(FunctionRecoveryError::from)
     }
 
     pub fn context(&self) -> &LiftingContext {
@@ -46,22 +57,5 @@ impl Translator {
 
     pub fn context_mut(&mut self) -> &mut LiftingContext {
         self.lifter.context_mut()
-    }
-}
-
-impl DisassemblerImpl for Translator {
-    fn disassemble_insn(
-        &mut self,
-        address: Address,
-        bytes: &[u8],
-        context: &mut LiftingContext,
-    ) -> Result<Insn, DisassemblerError> {
-        self.disassembler.disassemble_insn(address, bytes, context)
-    }
-}
-
-impl LifterImpl for Translator {
-    fn lift_insn(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, LifterError> {
-        self.lifter.lift_insn(address, bytes)
     }
 }

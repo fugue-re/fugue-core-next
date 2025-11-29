@@ -9,7 +9,7 @@ use crate::storage::ProjectStorageProvider;
 use crate::storage::project::InMemoryProvider;
 
 pub mod core;
-// pub mod function;
+pub mod function;
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {

@@ -19,6 +19,8 @@ use crate::storage::{
 use crate::types::AttributeMap;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
 
+pub type InMemoryProject = Project<InMemoryProvider>;
+
 pub struct Project<S = InMemoryProvider>
 where
     S: ProjectStorageProvider,
@@ -324,7 +326,7 @@ where
         }
     }
 
-    pub fn architecture(&self) -> &Arch {
+    pub fn arch(&self) -> &Arch {
         &self.arch
     }
 

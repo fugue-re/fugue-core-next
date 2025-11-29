@@ -1,10 +1,8 @@
-use crate::entities::Insn;
+use crate::ir::{Address, Insn};
 use crate::lifter::{
     Disassembler, DisassemblerError, DisassemblerImpl, Lifter, LifterError, LifterImpl,
     LiftingContext,
 };
-
-use crate::types::Address;
 
 pub struct Translator {
     disassembler: Disassembler,

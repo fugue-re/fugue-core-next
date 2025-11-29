@@ -162,28 +162,56 @@ impl Insn {
         self.properties |= InsnProperties::BRANCH_DEST;
     }
 
+    pub fn unmark_branch_dest(&mut self) {
+        self.properties.remove(InsnProperties::BRANCH_DEST);
+    }
+
     pub fn mark_call_dest(&mut self) {
         self.properties |= InsnProperties::CALL_DEST;
+    }
+
+    pub fn unmark_call_dest(&mut self) {
+        self.properties.remove(InsnProperties::CALL_DEST);
     }
 
     pub fn mark_maybe_taken(&mut self) {
         self.properties |= InsnProperties::MAYBE_TAKEN;
     }
 
+    pub fn unmark_maybe_taken(&mut self) {
+        self.properties.remove(InsnProperties::MAYBE_TAKEN);
+    }
+
     pub fn mark_nonsense(&mut self) {
         self.properties |= InsnProperties::NONSENSE;
+    }
+
+    pub fn unmark_nonsense(&mut self) {
+        self.properties.remove(InsnProperties::NONSENSE);
     }
 
     pub fn mark_halt(&mut self) {
         self.properties |= InsnProperties::HALT;
     }
 
+    pub fn unmark_halt(&mut self) {
+        self.properties.remove(InsnProperties::HALT);
+    }
+
     pub fn mark_trap(&mut self) {
         self.properties |= InsnProperties::TRAP;
     }
 
+    pub fn unmark_trap(&mut self) {
+        self.properties.remove(InsnProperties::TRAP);
+    }
+
     pub fn mark_invalid(&mut self) {
         self.properties |= InsnProperties::INVALID;
+    }
+
+    pub fn unmark_invalid(&mut self) {
+        self.properties.remove(InsnProperties::INVALID);
     }
 
     pub fn mark_lifted(&mut self) {

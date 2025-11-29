@@ -690,7 +690,7 @@ where
         context: ContextSet,
     ) -> Result<Function, FunctionBuilderError> {
         let mut lifter = project.lifter();
-        let mut disas = project.architecture().disassembler();
+        let mut disas = project.arch().disassembler();
 
         self.context.analyse(
             project,
@@ -878,7 +878,7 @@ impl FunctionBuilderContext {
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
                                 let Some((addr, context)) =
-                                    project.architecture().canonicalise_address(addr)
+                                    project.arch().canonicalise_address(addr)
                                 else {
                                     continue;
                                 };
@@ -1166,9 +1166,8 @@ mod test {
     use super::*;
 
     use crate::analysis::AnalysisPass;
-    use crate::attributes;
     use crate::loader::Shellcode;
-    use crate::types::attributes::*;
+    use crate::project::InMemoryProject;
 
     #[test]
     fn test_control_flow_recovery() -> Result<(), Box<dyn std::error::Error>> {
@@ -1180,12 +1179,7 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = Project::<InMemoryProvider>::from_file_with(
-                "tests/ls.elf",
-                attributes![
-                    ATTRIBUTE_PROJECT_PATH => "/tmp/ls.fudb",
-                ],
-            )?;
+            let mut project = InMemoryProject::from_file("tests/ls.elf")?;
             let mut cfr = FunctionRecovery::new();
 
             cfr.add_candidate(0x4da0u64);
@@ -1219,11 +1213,8 @@ mod test {
                 0x5E, 0xC9, 0xC2, 0x08, 0x00,
             ];
 
-            let mut project = Project::<InMemoryProvider>::new(&Shellcode::new(
-                "x86:LE:64",
-                0x4EB14u64,
-                &shellcode,
-            )?)?;
+            let mut project =
+                InMemoryProject::new(&Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?)?;
             let mut cfr = FunctionRecovery::new();
 
             cfr.add_candidate(0x4EB14u64);
