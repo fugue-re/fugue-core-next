@@ -3,7 +3,11 @@ use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 
 use crate::analysis::function::recovery::builder::CodeBlockStructuringContext;
 use crate::analysis::function::recovery::{FunctionBuilderContext, FunctionRecoveryConfig};
-use crate::ir::{Address, CodeBlockProperties, FunctionProperties, Insn, Symbol};
+use crate::ir::traits::{CodeBlockTable, FunctionTable};
+use crate::ir::{
+    Address, CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn,
+    InsnList, Symbol,
+};
 use crate::lifter::{ContextSet, LifterError};
 use crate::storage::SegmentStorage;
 
@@ -474,6 +478,71 @@ impl PartialFunction {
 
     pub fn mark_external(&mut self) {
         self.properties.insert(FunctionProperties::EXTERNAL);
+    }
+
+    pub fn commit<FT, BT>(
+        self,
+        ftable: &mut FT,
+        cbtable: &mut BT,
+    ) -> Result<FunctionId, FunctionRecoveryError>
+    where
+        FT: FunctionTable,
+        BT: CodeBlockTable,
+    {
+        // first we create the code blocks
+        let mut bids = Vec::with_capacity(self.blocks.len());
+        for block in self.blocks.iter() {
+            let bid = cbtable
+                .insert(block.address(), |id, addr| {
+                    let len = block.len();
+                    let insns = InsnList::from_iter(
+                        block
+                            .insns()
+                            .iter()
+                            .map(|&insn_id| self.insns[insn_id].clone()),
+                    );
+
+                    Ok(CodeBlock::try_new(id, addr, len, insns)
+                        .expect("code block has non-zero length"))
+                })
+                .map_err(FunctionRecoveryError::block_creation)?;
+            bids.push(bid);
+        }
+
+        for (i, block) in self.blocks.iter().enumerate() {
+            let bid = bids[i];
+            let cb = cbtable.get_by_id_mut(bid).expect("code block exists");
+
+            for &succ_idx in block.successors().iter() {
+                let succ_bid = bids[succ_idx];
+                cb.add_successor(succ_bid);
+            }
+
+            for &pred_idx in block.predecessors().iter() {
+                let pred_bid = bids[pred_idx];
+                cb.add_predecessor(pred_bid);
+            }
+        }
+
+        // now we create the function
+        let fid = ftable
+            .insert(self.entry(), |id, addr| {
+                let mut function = Function::new(id, addr);
+
+                function.add_blocks(
+                    self.blocks
+                        .iter()
+                        .map(|blk| blk.address())
+                        .zip(bids.iter().copied()),
+                );
+
+                function.set_properties(self.properties);
+
+                Ok(function)
+            })
+            .map_err(FunctionRecoveryError::function_creation)?;
+
+        Ok(fid)
     }
 }
 

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use bincode::{Decode, Encode};
+use bincode::{BorrowDecode, Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
@@ -10,7 +10,7 @@ use crate::lifter::{Lifter, LifterError};
 pub type InsnId = Id<Insn>;
 
 // TODO: review the choice of Vec
-pub type InsnList = Vec<InsnId>;
+pub type InsnList = Vec<Insn>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Insn {
@@ -57,6 +57,34 @@ impl<C> Decode<C> for Insn {
         }
 
         let length = u8::decode(decoder)?;
+
+        Ok(Self {
+            address,
+            properties,
+            operations,
+            targets,
+            length,
+        })
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for Insn {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let address = Address::borrow_decode(decoder)?;
+        let properties = InsnProperties::borrow_decode(decoder)?;
+        let operations = Vec::<PCodeOp>::borrow_decode(decoder)?;
+
+        let targets_len = usize::borrow_decode(decoder)?;
+        let mut targets = SmallVec::with_capacity(targets_len);
+
+        for _ in 0..targets_len {
+            let target = <(u16, InsnTarget)>::borrow_decode(decoder)?;
+            targets.push(target);
+        }
+
+        let length = u8::borrow_decode(decoder)?;
 
         Ok(Self {
             address,
@@ -403,6 +431,15 @@ impl<C> Decode<C> for InsnProperties {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let bits = u16::decode(decoder)?;
+        Ok(InsnProperties::from_bits_truncate(bits))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for InsnProperties {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u16::borrow_decode(decoder)?;
         Ok(InsnProperties::from_bits_truncate(bits))
     }
 }

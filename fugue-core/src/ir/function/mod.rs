@@ -223,7 +223,7 @@ impl Function {
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn add_block(&mut self, address: Address, block: CodeBlockId) {
+    pub fn add_block(&mut self, address: Address, block: CodeBlockId) {
         self.blocks.insert(
             self.blocks
                 .binary_search_by_key(&address, |(addr, _)| *addr)
@@ -232,15 +232,12 @@ impl Function {
         );
     }
 
-    pub(crate) fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
+    pub fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
         self.blocks.extend(blocks);
         self.blocks.sort_by_key(|(addr, _)| *addr);
     }
 
-    pub(crate) fn with_blocks(
-        mut self,
-        blocks: impl IntoIterator<Item = (Address, CodeBlockId)>,
-    ) -> Self {
+    pub fn with_blocks(mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) -> Self {
         self.add_blocks(blocks);
         self
     }
@@ -254,6 +251,10 @@ impl Function {
             .binary_search_by_key(&address, |(addr, _)| *addr)
             .ok()
             .map(|idx| self.blocks[idx].1)
+    }
+
+    pub fn clear_blocks(&mut self) {
+        self.blocks.clear();
     }
 
     pub fn is_non_returning(&self) -> bool {

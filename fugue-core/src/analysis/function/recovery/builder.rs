@@ -3,7 +3,7 @@ use std::mem;
 
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::ir::{Address, AddressMap, FlowKind, FlowTarget, Function};
+use crate::ir::{Address, AddressMap, FlowKind, FlowTarget};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
@@ -116,14 +116,13 @@ where
     pub fn analyse(
         &mut self,
         project: &mut Project<P>,
+        translator: &mut Translator,
         address: impl Into<Address>,
         context: ContextSet,
-    ) -> Result<Function, FunctionRecoveryError> {
-        let mut translator = Translator::new(project);
-
+    ) -> Result<PartialFunction, FunctionRecoveryError> {
         self.context.analyse(
             project,
-            &mut translator,
+            translator,
             address,
             context,
             &self.config,
@@ -417,7 +416,7 @@ impl FunctionBuilderContext {
         config: &FunctionRecoveryConfig,
         initialisation_passes: &mut AnalysisGroup<'_, S, FunctionBuilderContext>,
         post_lifting_passes: &mut AnalysisGroup<'_, S, PartialFunctionWithContext>,
-    ) -> Result<Function, FunctionRecoveryError>
+    ) -> Result<PartialFunction, FunctionRecoveryError>
     where
         S: ProjectStorageProvider,
     {
@@ -503,7 +502,6 @@ impl FunctionBuilderContext {
             }
         }
 
-        // partial.into_function(project)
-        todo!()
+        Ok(partial)
     }
 }

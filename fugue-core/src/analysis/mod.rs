@@ -8,8 +8,14 @@ use crate::project::Project;
 use crate::storage::ProjectStorageProvider;
 use crate::storage::project::InMemoryProvider;
 
-pub mod core;
+// pub mod core;
 pub mod function;
+
+pub mod core {
+    pub use super::function::recovery::{
+        FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError,
+    };
+}
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
