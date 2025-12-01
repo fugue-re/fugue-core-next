@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::analysis::AnalysisError;
 use crate::ir::Address;
 use crate::lifter::{DisassemblerError, LifterError};
-use crate::storage::{EntityStorageError, SegmentStorageError};
+use crate::storage::SegmentStorageError;
 
 pub mod analysis;
 pub use analysis::FunctionRecovery;
@@ -17,32 +17,40 @@ pub use ir::{InsnEntry, PartialCodeBlock, PartialFunction};
 pub mod translator;
 pub use translator::Translator;
 
+pub const DEFAULT_MAX_BLOCK_SIZE: usize = u16::MAX as usize;
+pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
+
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
-    #[error("failed to create block: {0}")]
-    BlockCreation(anyhow::Error),
-    #[error("failed to create function: {0}")]
-    FunctionCreation(anyhow::Error),
+    // analysis pass errors
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
     #[error("post-lifting pass failed: {0}")]
     PostLiftingPass(AnalysisError),
-    #[error("failed to lift any instructions")]
-    NoInstructions,
-    #[error("failed to create function; number of blocks ({0}) exceeds limit ({1})")]
-    ExceededBlockLimit(usize, usize),
+
+    // creation issues due to table invariants or storage
+    #[error("failed to create block: {0}")]
+    BlockCreation(anyhow::Error),
+    #[error("failed to create function: {0}")]
+    FunctionCreation(anyhow::Error),
+
+    // translation and I/O errors
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
     #[error(transparent)]
     Lifting(#[from] LifterError),
-    #[error("failed persist function: {0}")]
-    EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
     SegmentStorage(#[from] SegmentStorageError),
+
+    // invariant violations
+    #[error("invalid function; failed to lift any instructions")]
+    InvalidFunction,
+    #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
+    InvalidFunctionSize(Address, usize, usize),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
-    #[error("invalid block size at {0} ({1}); must be non-zero and less than 65536")]
-    InvalidBlockSize(Address, usize),
+    #[error("invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}")]
+    InvalidBlockSize(Address, usize, usize),
     #[error("invalid instruction index: {0}")]
     InvalidInstructionId(usize),
 }
@@ -61,21 +69,58 @@ impl FunctionRecoveryError {
     {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
+
+    pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
+        FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
+    }
+
+    pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
+        FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionRecoveryConfig {
-    pub max_blocks: usize,
+    max_function_blocks: usize,
+    max_block_insns: usize,
 }
 
 impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
         FunctionRecoveryConfig {
-            max_blocks: 0x10000,
+            max_function_blocks: DEFAULT_MAX_FUNCTION_SIZE,
+            max_block_insns: DEFAULT_MAX_BLOCK_SIZE,
         }
     }
 }
 
+impl FunctionRecoveryConfig {
+    pub fn max_function_blocks(&self) -> usize {
+        self.max_function_blocks
+    }
+
+    pub fn max_block_insns(&self) -> usize {
+        self.max_block_insns
+    }
+
+    pub fn set_max_function_blocks(&mut self, max: usize) {
+        self.max_function_blocks = max.min(DEFAULT_MAX_FUNCTION_SIZE).max(1);
+    }
+
+    pub fn with_max_function_blocks(mut self, max: usize) -> Self {
+        self.set_max_function_blocks(max);
+        self
+    }
+
+    pub fn set_max_block_insns(&mut self, max: usize) {
+        self.max_block_insns = max.min(DEFAULT_MAX_BLOCK_SIZE).max(1);
+    }
+
+    pub fn with_max_block_insns(mut self, max: usize) -> Self {
+        self.set_max_block_insns(max);
+        self
+    }
+}
 
 #[cfg(test)]
 mod test {

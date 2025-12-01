@@ -13,6 +13,37 @@ use crate::storage::SegmentStorage;
 
 use super::{FunctionRecoveryError, Translator};
 
+pub enum InsnEntry<'a> {
+    Vacant(VacantInsnEntry<'a>),
+    Occupied(OccupiedInsnEntry<'a>),
+}
+
+pub struct VacantInsnEntry<'a> {
+    entry: VacantEntry<'a, Address, usize>,
+    insns: &'a mut Vec<Insn>,
+}
+
+impl<'a> VacantInsnEntry<'a> {
+    pub fn insert(self, insn: Insn) -> &'a mut Insn {
+        let id = self.insns.len();
+        self.insns.push(insn);
+        let id = self.entry.insert(id);
+        &mut self.insns[*id]
+    }
+}
+
+pub struct OccupiedInsnEntry<'a> {
+    entry: OccupiedEntry<'a, Address, usize>,
+    insns: &'a mut Vec<Insn>,
+}
+
+impl<'a> OccupiedInsnEntry<'a> {
+    pub fn get_mut(&mut self) -> &mut Insn {
+        let id = *self.entry.get();
+        self.insns.get_mut(id).expect("instruction must exist")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialCodeBlock {
     start: Address,
@@ -347,14 +378,17 @@ impl PartialFunction {
 
         let num_insns = self.insns.len();
         let num_blocks = ctxt.cut_points().len();
-        let max_blocks = config.max_blocks;
+        let max_blocks = config.max_function_blocks();
+        let max_insns = config.max_block_insns();
 
         if num_blocks > max_blocks {
             tracing::debug!(
                 "number of blocks ({num_blocks}) exceeds limit ({max_blocks}); skipping",
             );
-            return Err(FunctionRecoveryError::ExceededBlockLimit(
-                num_blocks, max_blocks,
+            return Err(FunctionRecoveryError::invalid_function_size(
+                self.entry(),
+                num_blocks,
+                max_blocks,
             ));
         }
 
@@ -382,6 +416,17 @@ impl PartialFunction {
             for curr in start..num_insns {
                 let insn = &self.insns[curr];
                 let next = curr + 1;
+
+                if points.len() >= max_insns {
+                    tracing::debug!(
+                        "block at {address} exceeds maximum instruction count ({max_insns})",
+                    );
+                    return Err(FunctionRecoveryError::invalid_block_size(
+                        address,
+                        points.len(),
+                        max_insns,
+                    ));
+                }
 
                 if curr == next_cut {
                     // potential end of block
@@ -544,35 +589,4 @@ impl PartialFunction {
 
         Ok(fid)
     }
-}
-
-pub struct VacantInsnEntry<'a> {
-    entry: VacantEntry<'a, Address, usize>,
-    insns: &'a mut Vec<Insn>,
-}
-
-impl<'a> VacantInsnEntry<'a> {
-    pub fn insert(self, insn: Insn) -> &'a mut Insn {
-        let id = self.insns.len();
-        self.insns.push(insn);
-        let id = self.entry.insert(id);
-        &mut self.insns[*id]
-    }
-}
-
-pub struct OccupiedInsnEntry<'a> {
-    entry: OccupiedEntry<'a, Address, usize>,
-    insns: &'a mut Vec<Insn>,
-}
-
-impl<'a> OccupiedInsnEntry<'a> {
-    pub fn get_mut(&mut self) -> &mut Insn {
-        let id = *self.entry.get();
-        self.insns.get_mut(id).expect("instruction must exist")
-    }
-}
-
-pub enum InsnEntry<'a> {
-    Vacant(VacantInsnEntry<'a>),
-    Occupied(OccupiedInsnEntry<'a>),
 }

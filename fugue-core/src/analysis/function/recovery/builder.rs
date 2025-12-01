@@ -459,7 +459,7 @@ impl FunctionBuilderContext {
 
             if !partial.has_insns() {
                 tracing::debug!("no instructions lifted; invalid function");
-                return Err(FunctionRecoveryError::NoInstructions);
+                return Err(FunctionRecoveryError::InvalidFunction);
             }
 
             tracing::trace!("{:?}", self.local_targets);
