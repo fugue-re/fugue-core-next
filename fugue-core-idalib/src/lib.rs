@@ -1,19 +1,20 @@
 use fallible_iterator::FallibleIterator;
 
-use fugue_core::analysis::core::functions::{FunctionBuilderContext, FunctionRecovery};
+use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
+use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
-use fugue_core::entities::flow_graph::FlowKind;
-use fugue_core::lifter::arm::context::T_MODE;
-use fugue_core::lifter::{ContextSet, LanguageVariant};
-use fugue_core::loader::symbols::{Symbol, SymbolProperties};
-use fugue_core::loader::{
-    ExternSymbols, Loadable, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
-    LocalSymbols,
+use fugue_core::ir::{
+    Address, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties, SymbolIndex,
+    SymbolProperties,
 };
-use fugue_core::memory::SegmentProperties;
+use fugue_core::lifter::{ContextSet, LanguageVariant};
+use fugue_core::loader::{
+    Loadable, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+};
 use fugue_core::project::Project;
-use fugue_core::types::{Address, AttributeMap};
+use fugue_core::storage::ProjectStorageProvider;
+use fugue_core::types::AttributeMap;
 
 use idalib::idb::{IDBOpenOptions, IDB};
 
@@ -21,47 +22,67 @@ pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
 pub const ATTRIBUTE_IDA_DATABASE_ANALYSE: &str = "ida.database.analyse";
 pub const ATTRIBUTE_IDA_DATABASE_PERSIST: &str = "ida.database.persist";
 
+const FUNCTIONS_SELECTOR: usize = 0;
+const NAMES_SELECTOR: usize = 1;
+
 pub struct IDABinary {
     database: IDB,
     architecture: Arch,
-    local_symbols: LocalSymbols,
-    extern_symbols: Option<ExternSymbols>,
+    symbols: IndexedSymbolTable,
+    extern_segm: Option<ExternSegment>,
     mark_thumb: bool,
     metadata: LoadableMetadata,
     attributes: AttributeMap,
 }
 
-fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
-    let mut locals = LocalSymbols::new();
+fn ida_symbols(
+    arch: &Arch,
+    db: &IDB,
+) -> Result<(IndexedSymbolTable, Option<ExternSegment>), LoaderError> {
+    let mut symbols = IndexedSymbolTable::new();
     let mut externs = db.segment_by_name("extern").map(|segm| {
         let addr = segm.start_address();
         let templ = arch.external_thunk_template();
         let bounds = addr..segm.end_address();
         (
-            ExternSymbols::new(addr, arch.language().address_size(), templ),
+            ExternSegment::new(
+                addr,
+                arch.language()
+                    .address_size()
+                    .max(arch.language().address_alignment()),
+                templ,
+            ),
             bounds,
         )
     });
 
-    // TODO: implement names API for globals
-
     for (n, fcn) in db.functions() {
         let addr = fcn.start_address();
-        let name = fcn.name().map(|s| s.into());
+        let name = fcn.name();
         let props = SymbolProperties::FUNCTION;
 
         if matches!(externs, Some((_, ref bounds)) if bounds.contains(&fcn.start_address())) {
             externs
                 .as_mut()
-                .unwrap()
+                .expect("extern segment exists")
                 .0
-                .add_symbol_with(n, addr, name, props);
+                .add_extern_at(addr)
+                .map_err(LoaderError::other)?;
+            symbols.insert_extern_with(
+                SymbolIndex::new(FUNCTIONS_SELECTOR, n),
+                addr,
+                name.unwrap_or_default(),
+                props,
+            );
         } else {
-            locals.add_symbol_with(n, addr, name, props);
+            symbols.insert_local_with(
+                SymbolIndex::new(FUNCTIONS_SELECTOR, n),
+                addr,
+                name.unwrap_or_default(),
+                props,
+            );
         }
     }
-
-    let next_index = locals.next_index();
 
     for (n, name) in db.names().iter().enumerate() {
         let addr = name.address();
@@ -73,15 +94,30 @@ fn ida_symbols(arch: &Arch, db: &IDB) -> (LocalSymbols, Option<ExternSymbols>) {
 
         let name = name.name();
 
-        locals.add_symbol_with(
-            n + next_index,
-            addr,
-            Symbol::from(name),
-            SymbolProperties::DATA,
-        );
+        if matches!(externs, Some((_, ref bounds)) if bounds.contains(&addr)) {
+            externs
+                .as_mut()
+                .expect("extern segment exists")
+                .0
+                .add_extern_at(addr)
+                .map_err(LoaderError::other)?;
+            symbols.insert_extern_with(
+                SymbolIndex::new(NAMES_SELECTOR, n),
+                addr,
+                name,
+                SymbolProperties::DATA,
+            );
+        } else {
+            symbols.insert(
+                SymbolIndex::new(NAMES_SELECTOR, n),
+                addr,
+                name,
+                SymbolProperties::DATA,
+            );
+        }
     }
 
-    (locals, externs.map(|(symbols, _)| symbols))
+    Ok((symbols, externs.map(|(symbols, _)| symbols)))
 }
 
 fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
@@ -92,9 +128,9 @@ fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
 
     if processor.family().is_arm() && is_64 {
         return Ok(if is_be {
-            fugue_core::lifter::aarch64::be::variants::DEFAULT
+            fugue_core::arch::aarch64::be::variants::DEFAULT
         } else {
-            fugue_core::lifter::aarch64::le::variants::DEFAULT
+            fugue_core::arch::aarch64::le::variants::DEFAULT
         });
     }
 
@@ -103,29 +139,29 @@ fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
             matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
         return Ok(if is_be {
             if is_thumb {
-                fugue_core::lifter::arm::be::variants::DEFAULT_THUMB
+                fugue_core::arch::arm::be::variants::DEFAULT_THUMB
             } else {
-                fugue_core::lifter::arm::be::variants::DEFAULT
+                fugue_core::arch::arm::be::variants::DEFAULT
             }
         } else {
             if is_thumb {
-                fugue_core::lifter::arm::le::variants::DEFAULT_THUMB
+                fugue_core::arch::arm::le::variants::DEFAULT_THUMB
             } else {
-                fugue_core::lifter::arm::le::variants::DEFAULT
+                fugue_core::arch::arm::le::variants::DEFAULT
             }
         });
     }
 
     if processor.family().is_386() {
         return Ok(if is_32 {
-            fugue_core::lifter::x86::variants::DEFAULT
+            fugue_core::arch::x86::variants::DEFAULT
         } else {
-            fugue_core::lifter::x86_64::variants::DEFAULT
+            fugue_core::arch::x86_64::variants::DEFAULT
         });
     }
 
     if processor.family().is_386() && is_64 {
-        return Ok(fugue_core::lifter::x86_64::variants::DEFAULT);
+        return Ok(fugue_core::arch::x86_64::variants::DEFAULT);
     }
 
     Err(LoaderError::UnsupportedArch)
@@ -136,12 +172,12 @@ impl IDABinary {
         &self.database
     }
 
-    pub fn locals(&self) -> &LocalSymbols {
-        &self.local_symbols
+    pub fn symbols(&self) -> &IndexedSymbolTable {
+        &self.symbols
     }
 
-    pub fn externs(&self) -> Option<&ExternSymbols> {
-        self.extern_symbols.as_ref()
+    pub fn extern_segment(&self) -> Option<&ExternSegment> {
+        self.extern_segm.as_ref()
     }
 
     pub fn function_recovery_pass(&self) -> IDAFunctionRecovery {
@@ -197,7 +233,7 @@ impl LoadableFromFile for IDABinary {
         let language = ida_language(&database)?;
         let architecture = Arch::new(language);
 
-        let (local_symbols, extern_symbols) = ida_symbols(&architecture, &database);
+        let (symbols, extern_segm) = ida_symbols(&architecture, &database)?;
 
         let version = idalib::version().map_err(LoaderError::other)?;
 
@@ -216,8 +252,8 @@ impl LoadableFromFile for IDABinary {
         Ok(IDABinary {
             database,
             architecture,
-            local_symbols,
-            extern_symbols,
+            symbols,
+            extern_segm,
             mark_thumb,
             metadata,
             attributes,
@@ -242,16 +278,8 @@ impl Loadable for IDABinary {
         &self.metadata
     }
 
-    fn entry(&self) -> Option<Address> {
-        self.database.meta().start_address().map(Address::from)
-    }
-
-    fn local_symbols(&self) -> Option<&LocalSymbols> {
-        Some(&self.local_symbols)
-    }
-
-    fn extern_symbols(&self) -> Option<&ExternSymbols> {
-        self.extern_symbols.as_ref()
+    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+        Some(&self.symbols)
     }
 
     fn segment_range(&self) -> (Address, Address) {
@@ -322,14 +350,14 @@ impl Loadable for IDABinary {
                 if aligned_template_len > address_size {
                     tracing::warn!("external thunk template is larger than available space in extern segment; skipping");
                 } else {
-                    tracing::trace!("patching extern segment with external thunk template ({} bytes)", aligned_template_len);
+                    tracing::trace!("patching extern segment with external thunk template ({aligned_template_len} bytes)");
                     for chunk in bytes.chunks_exact_mut(aligned_template_len) {
                         chunk[..template_len].copy_from_slice(template.bytes());
                     }
                 }
             }
 
-            Ok(LoadableSegment::from_parts(name, start, properties, bytes))
+            Ok(LoadableSegment::new(name, start, properties, bytes))
         }))
     }
 }
@@ -348,13 +376,26 @@ impl<'a> IDAFunctionRecovery<'a> {
     }
 }
 
-impl<'a> AnalysisPass<'a, FunctionRecovery<'a>> for IDAFunctionRecovery<'a> {
+impl<'a, P> AnalysisPass<'a, P, FunctionRecovery<'a>> for IDAFunctionRecovery<'a>
+where
+    P: ProjectStorageProvider,
+{
     fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &mut Project<P>,
         state: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        let extern_bounds = project.extern_symbols().map(|externs| externs.bounds());
+        let segms = project.segments();
+        let externs = segms
+            .metadata()
+            .map_err(|e| AnalysisError::pass_failed("ida-function-recovery", e))?
+            .find_map(|segm| {
+                segm.properties()
+                    .contains(SegmentProperties::EXTERNAL)
+                    .then_some(segm)
+            });
+
+        let extern_bounds = externs.map(|segm| segm.address()..=segm.last_address());
         for (_, f) in self.database.functions() {
             let addr = Address::from(f.start_address());
             if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
@@ -378,19 +419,26 @@ impl<'a> AnalysisPass<'a, FunctionRecovery<'a>> for IDAFunctionRecovery<'a> {
 }
 
 pub struct IDAFunctionBuilder<'a> {
+    last_insns: Vec<(u64, bool)>,
     database: &'a IDB,
 }
 
 impl<'a> IDAFunctionBuilder<'a> {
     pub fn new(database: &'a IDB) -> Self {
-        IDAFunctionBuilder { database }
+        IDAFunctionBuilder {
+            database,
+            last_insns: Vec::new(),
+        }
     }
 }
 
-impl<'a> AnalysisPass<'a, FunctionBuilderContext> for IDAFunctionBuilder<'a> {
+impl<'a, P> AnalysisPass<'a, P, FunctionBuilderContext> for IDAFunctionBuilder<'a>
+where
+    P: ProjectStorageProvider,
+{
     fn analyse_with(
         &mut self,
-        _project: &mut Project,
+        _project: &mut Project<P>,
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();
@@ -402,25 +450,25 @@ impl<'a> AnalysisPass<'a, FunctionBuilderContext> for IDAFunctionBuilder<'a> {
             return Ok(());
         };
 
-        let last_insns = cfg
-            .blocks()
-            .map(|b| {
-                let mut addr = b.start_address();
-                loop {
-                    let insn = self
-                        .database
-                        .insn_at(addr.into())
-                        .expect("valid instruction");
-                    if insn.is_basic_block_end(false) {
-                        return (insn.address(), insn.is_indirect_jump());
-                    }
-                    addr += insn.len() as u64;
+        self.last_insns.clear();
+        self.last_insns.reserve(cfg.blocks_count());
+
+        self.last_insns.extend(cfg.blocks().map(|b| {
+            let mut addr = b.start_address();
+            loop {
+                let insn = self
+                    .database
+                    .insn_at(addr.into())
+                    .expect("valid instruction");
+                if insn.is_basic_block_end(false) {
+                    return (insn.address(), insn.is_indirect_jump());
                 }
-            })
-            .collect::<Vec<_>>();
+                addr += insn.len() as u64;
+            }
+        }));
 
         for (i, block) in cfg.blocks().enumerate() {
-            let (last_insn, is_indirect) = last_insns[i];
+            let (last_insn, is_indirect) = self.last_insns[i];
 
             // NOTE: concrete edges will be automatically resolved, so we only use IDA's
             // edges to hint at indirect flows, e.g., jump tables, etc.

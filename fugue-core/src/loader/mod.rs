@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display};
+use std::ops::Range;
 use std::path::Path;
 
+use bincode::{Decode, Encode};
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
 
@@ -209,6 +211,43 @@ impl Display for LoadableSegment<'_> {
 
 impl<'a> LoadableSegment<'a> {
     /// Creates a new `LoadableSegment` with the given name, address, properties, and bytes.
+    pub fn new(
+        name: impl Into<Cow<'a, str>>,
+        address: Address,
+        properties: SegmentProperties,
+        bytes: impl Into<Cow<'a, [u8]>>,
+    ) -> LoadableSegment<'a> {
+        Self::from_parts(
+            name,
+            address,
+            properties,
+            bytes,
+            Cow::Owned(BTreeMap::new()),
+            Cow::Owned(BTreeSet::new()),
+        )
+    }
+
+    /// Creates a new `LoadableSegment` with the given name, address, properties, bytes, and hints.
+    pub fn new_with_hints(
+        name: impl Into<Cow<'a, str>>,
+        address: Address,
+        properties: SegmentProperties,
+        bytes: impl Into<Cow<'a, [u8]>>,
+        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
+        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
+    ) -> LoadableSegment<'a> {
+        Self::from_parts(
+            name,
+            address,
+            properties,
+            bytes,
+            mapping_hints,
+            function_hints,
+        )
+    }
+
+    /// Creates a new `LoadableSegment` with the given name, address, properties, and bytes, and
+    /// hints.
     pub fn from_parts(
         name: impl Into<Cow<'a, str>>,
         address: Address,
@@ -447,6 +486,72 @@ impl<'a> LoadableSegment<'a> {
             mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+pub struct LoadableSegmentMetadata {
+    name: String,
+    address: Address,
+    physical_offset: Option<usize>,
+    properties: SegmentProperties,
+    size: usize,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
+}
+
+impl LoadableSegmentMetadata {
+    pub fn new(segm: &LoadableSegment, physical_offset: impl Into<Option<usize>>) -> Self {
+        Self {
+            address: segm.address(),
+            name: segm.name().to_owned(),
+            physical_offset: physical_offset.into(),
+            properties: segm.properties(),
+            size: segm.len(),
+            mapping_hints: segm.mapping_hints().clone(),
+            function_hints: segm.function_hints().clone(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn last_address(&self) -> Address {
+        self.address + self.size as u64 - 1usize
+    }
+
+    pub fn next_address(&self) -> Address {
+        self.address + self.size
+    }
+
+    pub fn physical_offset(&self) -> Option<usize> {
+        self.physical_offset
+    }
+
+    pub fn physical_range(&self) -> Option<Range<usize>> {
+        self.physical_offset
+            .map(|offset| offset..offset + self.size)
+    }
+
+    pub fn properties(&self) -> SegmentProperties {
+        self.properties
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
+    }
+
+    pub fn len(&self) -> usize {
+        self.size
     }
 }
 

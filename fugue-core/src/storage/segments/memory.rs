@@ -3,7 +3,8 @@ use std::borrow::Cow;
 use fallible_iterator::FallibleIterator;
 
 use crate::ir::Address;
-use crate::loader::{Loadable, LoadableSegment};
+use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata};
+use crate::storage::segments::SegmentStorageMetadataIter;
 use crate::types::AttributeMap;
 
 use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
@@ -202,5 +203,11 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
         self.position(addr)
             .map(|pos| Cow::Borrowed(&self.segments[pos]))
             .ok_or(SegmentStorageError::InvalidAddress)
+    }
+
+    fn metadata(&self) -> Result<SegmentStorageMetadataIter, SegmentStorageError> {
+        Ok(SegmentStorageMetadataIter::new(self.segments.iter().map(
+            |segm| Cow::Owned(LoadableSegmentMetadata::new(segm, None)),
+        )))
     }
 }

@@ -1,8 +1,6 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
@@ -11,9 +9,9 @@ use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
-use crate::ir::{Address, SegmentProperties};
-use crate::lifter::ContextHint;
-use crate::loader::{Loadable, LoadableSegment, Loader};
+use crate::ir::Address;
+use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, Loader};
+use crate::storage::segments::SegmentStorageMetadataIter;
 use crate::storage::{self, PERSISTENT, StoragePersistence};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -42,6 +40,8 @@ pub enum MemoryMappedSegmentStorageError {
     CreateProjectMetadata(std::io::Error),
     #[error("invalid address")]
     InvalidAddress,
+    #[error("invalid segment metadata (no physical offset)")]
+    InvalidMetadata,
     #[error("invalid size")]
     InvalidSize,
     #[error("no project path specified")]
@@ -91,9 +91,8 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
         match e {
             MemoryMappedSegmentStorageError::CreateProject(_)
             | MemoryMappedSegmentStorageError::CreateProjectMapping(_)
-            | MemoryMappedSegmentStorageError::CreateProjectMetadata(_) => {
-                SegmentStorageError::backing(e)
-            }
+            | MemoryMappedSegmentStorageError::CreateProjectMetadata(_)
+            | MemoryMappedSegmentStorageError::InvalidMetadata => SegmentStorageError::backing(e),
             MemoryMappedSegmentStorageError::InvalidAddress => SegmentStorageError::InvalidAddress,
             MemoryMappedSegmentStorageError::InvalidSize => SegmentStorageError::InvalidSize,
             MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::InvalidAddress,
@@ -114,74 +113,9 @@ impl MemoryMappedSegmentStorageMetadata {
     pub fn expected_size(&self) -> usize {
         self.segments
             .iter()
-            .map(|segm| segm.physical_offset + segm.size)
+            .map(|segm| segm.physical_offset().expect("physical offset available") + segm.len())
             .max()
             .unwrap_or(0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
-pub struct LoadableSegmentMetadata {
-    name: String,
-    address: Address,
-    physical_offset: usize,
-    properties: SegmentProperties,
-    size: usize,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
-}
-
-impl LoadableSegmentMetadata {
-    pub fn new(segm: &LoadableSegment, physical_offset: usize) -> Self {
-        Self {
-            address: segm.address(),
-            name: segm.name().to_owned(),
-            physical_offset,
-            properties: segm.properties(),
-            size: segm.len(),
-            mapping_hints: segm.mapping_hints().clone(),
-            function_hints: segm.function_hints().clone(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn last_address(&self) -> Address {
-        self.address + self.size as u64 - 1usize
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.address + self.size
-    }
-
-    pub fn physical_offset(&self) -> usize {
-        self.physical_offset
-    }
-
-    pub fn physical_range(&self) -> Range<usize> {
-        self.physical_offset..self.physical_offset + self.size
-    }
-
-    pub fn properties(&self) -> SegmentProperties {
-        self.properties
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
-        &self.mapping_hints
-    }
-
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
-        &self.function_hints
-    }
-
-    pub fn len(&self) -> usize {
-        self.size
     }
 }
 
@@ -519,7 +453,10 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
             let segm_addr = segm.address();
             let segm_last_addr = segm.last_address();
 
-            let read_offset = segm.physical_offset() + usize::from(read_addr - segm_addr);
+            let read_offset = segm
+                .physical_offset()
+                .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?
+                + usize::from(read_addr - segm_addr);
             let read_size = size.min(usize::from(segm_last_addr - read_addr) + 1);
 
             let segm_bytes = self
@@ -577,7 +514,10 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
             let segm_addr = segm.address();
             let segm_last_addr = segm.last_address();
 
-            let write_offset = segm.physical_offset() + usize::from(write_addr - segm_addr);
+            let write_offset = segm
+                .physical_offset()
+                .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?
+                + usize::from(write_addr - segm_addr);
             let write_size = size.min(usize::from(segm_last_addr - write_addr) + 1);
 
             let segm_bytes = self
@@ -607,18 +547,29 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
         addr: Address,
     ) -> Result<Cow<LoadableSegment<'_>>, SegmentStorageError> {
         self.position(addr)
-            .map(|pos| {
+            .map(|pos| -> Result<_, SegmentStorageError> {
                 let segm = &self.segments[pos];
-                let bytes = Cow::Borrowed(&self.backing[segm.physical_range()]);
-                Cow::Owned(LoadableSegment::from_parts(
+                let bytes = Cow::Borrowed(
+                    &self.backing[segm
+                        .physical_range()
+                        .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?],
+                );
+                Ok(Cow::Owned(LoadableSegment::from_parts(
                     segm.name(),
                     segm.address(),
                     segm.properties(),
                     bytes,
                     Cow::Borrowed(segm.mapping_hints()),
                     Cow::Borrowed(segm.function_hints()),
-                ))
+                )))
             })
+            .transpose()?
             .ok_or(SegmentStorageError::InvalidAddress)
+    }
+
+    fn metadata(&self) -> Result<SegmentStorageMetadataIter, SegmentStorageError> {
+        Ok(SegmentStorageMetadataIter::new(
+            self.segments.iter().map(Cow::Borrowed),
+        ))
     }
 }

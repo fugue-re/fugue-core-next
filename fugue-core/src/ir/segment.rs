@@ -3,6 +3,7 @@ use std::ops::RangeInclusive;
 use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 use smallvec::SmallVec;
+use thiserror::Error;
 
 use crate::ir::Address;
 use crate::lifter::ContextSet;
@@ -159,6 +160,14 @@ pub struct ExternSegment {
     template: ExternFunctionTemplate,
 }
 
+#[derive(Debug, Error)]
+pub enum ExternSegmentError {
+    #[error("extern address {0} out of bounds")]
+    AddressOutOfBounds(Address),
+    #[error("extern address {0} is misaligned")]
+    AddressMisaligned(Address),
+}
+
 impl Encode for ExternSegment {
     fn encode<E: bincode::enc::Encoder>(
         &self,
@@ -208,6 +217,30 @@ impl ExternSegment {
         let addr = self.address() + self.size();
         self.symbols += 1;
         addr
+    }
+
+    pub fn add_extern_at(&mut self, address: impl Into<Address>) -> Result<(), ExternSegmentError> {
+        let address = address.into();
+        if address < self.address() {
+            return Err(ExternSegmentError::AddressOutOfBounds(address));
+        }
+
+        let diff = usize::try_from(address.offset() - self.address().offset())
+            .map_err(|_| ExternSegmentError::AddressOutOfBounds(address))?;
+
+        if diff % self.aligned_template_size() != 0 {
+            return Err(ExternSegmentError::AddressMisaligned(address));
+        }
+
+        let Some(required_symbols) = (diff / self.aligned_template_size()).checked_add(1) else {
+            return Err(ExternSegmentError::AddressOutOfBounds(address));
+        };
+
+        if required_symbols > self.symbols {
+            self.symbols = required_symbols;
+        }
+
+        Ok(())
     }
 
     pub fn address(&self) -> Address {

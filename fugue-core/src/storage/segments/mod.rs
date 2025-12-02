@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::loader::{Loadable, LoadableSegment, LoaderError};
 use crate::ir::Address;
+use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, LoaderError};
 use crate::types::AttributeMap;
 
 pub mod memory;
@@ -70,6 +70,32 @@ pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable 
     ) -> Result<Self, SegmentStorageError>
     where
         Self: Sized;
+}
+
+pub struct SegmentStorageMetadataIter<'a> {
+    iter: Box<dyn Iterator<Item = Cow<'a, LoadableSegmentMetadata>> + 'a>,
+}
+
+impl SegmentStorageMetadataIter<'_> {
+    pub fn new<'a>(
+        iter: impl Iterator<Item = Cow<'a, LoadableSegmentMetadata>> + 'a,
+    ) -> SegmentStorageMetadataIter<'a> {
+        SegmentStorageMetadataIter {
+            iter: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for SegmentStorageMetadataIter<'a> {
+    type Item = Cow<'a, LoadableSegmentMetadata>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
 }
 
 pub trait SegmentStorageProvider {
@@ -158,6 +184,9 @@ pub trait SegmentStorageProvider {
 
         Ok(bytes)
     }
+
+    // Returns an iterator over the metadata of all segments in the storage.
+    fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError>;
 }
 
 pub struct SegmentStorage {
@@ -224,5 +253,9 @@ impl SegmentStorage {
 
     pub fn view_segment_bytes_from(&self, addr: Address) -> Result<Cow<[u8]>, SegmentStorageError> {
         self.backing.view_segment_bytes_from(addr)
+    }
+
+    pub fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError> {
+        self.backing.metadata()
     }
 }
