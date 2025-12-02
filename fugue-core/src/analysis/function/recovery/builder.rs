@@ -12,6 +12,19 @@ use super::{
     FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
 };
 
+pub struct PartialFunctionWithContext {
+    pub config: FunctionRecoveryConfig,
+    pub context: FunctionBuilderContext,
+    pub function: PartialFunction,
+}
+
+pub(crate) struct CodeBlockStructuringContext<'a> {
+    pub(crate) block_starts: &'a mut AddressMap<usize>,
+    pub(crate) block_ends: &'a mut AddressMap<usize>,
+    pub(crate) cut_points: &'a mut Vec<usize>,
+    pub(crate) contexts: &'a BTreeMap<Address, ContextSet>,
+}
+
 #[derive(Default)]
 pub struct FunctionBuilderContext {
     entry: Address,
@@ -25,19 +38,6 @@ pub struct FunctionBuilderContext {
     block_starts: AddressMap<usize>,
     block_ends: AddressMap<usize>,
     cut_points: Vec<usize>,
-}
-
-pub struct CodeBlockStructuringContext<'a> {
-    pub block_starts: &'a mut AddressMap<usize>,
-    pub block_ends: &'a mut AddressMap<usize>,
-    pub cut_points: &'a mut Vec<usize>,
-    pub contexts: &'a BTreeMap<Address, ContextSet>,
-    pub local_targets: &'a BTreeSet<FlowTarget>,
-}
-
-pub struct PartialFunctionWithContext {
-    pub context: FunctionBuilderContext,
-    pub function: PartialFunction,
 }
 
 pub struct FunctionBuilder<'a, P>
@@ -141,18 +141,6 @@ where
 }
 
 impl<'a> CodeBlockStructuringContext<'a> {
-    pub fn block_starts(&self) -> &AddressMap<usize> {
-        &self.block_starts
-    }
-
-    pub fn block_ends(&self) -> &AddressMap<usize> {
-        &self.block_ends
-    }
-
-    pub fn cut_points(&self) -> &[usize] {
-        &self.cut_points
-    }
-
     pub fn mark_cut_point(&mut self, insn_idx: usize) {
         self.cut_points.push(insn_idx);
     }
@@ -161,18 +149,37 @@ impl<'a> CodeBlockStructuringContext<'a> {
         self.contexts.contains_key(&address)
     }
 
-    pub fn contexts(&self) -> &BTreeMap<Address, ContextSet> {
-        self.contexts
-    }
-
-    pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
-        self.local_targets
-    }
-
     pub fn clear(&mut self) {
         self.block_starts.clear();
         self.block_ends.clear();
         self.cut_points.clear();
+    }
+}
+
+impl PartialFunctionWithContext {
+    pub fn config(&self) -> &FunctionRecoveryConfig {
+        &self.config
+    }
+
+    pub fn context(&self) -> &FunctionBuilderContext {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut FunctionBuilderContext {
+        &mut self.context
+    }
+
+    pub fn function(&self) -> &PartialFunction {
+        &self.function
+    }
+
+    pub fn function_mut(&mut self) -> &mut PartialFunction {
+        &mut self.function
+    }
+
+    pub fn structure_blocks(&mut self) -> Result<(), FunctionRecoveryError> {
+        self.function
+            .structure_blocks(&self.config, &mut self.context)
     }
 }
 
@@ -397,13 +404,12 @@ impl FunctionBuilderContext {
         self.cut_points.push(insn_idx);
     }
 
-    pub fn structuring_context(&mut self) -> CodeBlockStructuringContext {
+    pub(crate) fn structuring_context(&mut self) -> CodeBlockStructuringContext {
         CodeBlockStructuringContext {
             block_starts: &mut self.block_starts,
             block_ends: &mut self.block_ends,
             cut_points: &mut self.cut_points,
             contexts: &self.contexts,
-            local_targets: &self.local_targets,
         }
     }
 
@@ -462,26 +468,12 @@ impl FunctionBuilderContext {
                 return Err(FunctionRecoveryError::InvalidFunction);
             }
 
-            tracing::trace!("{:?}", self.local_targets);
-
             partial.structure_blocks(config, self)?;
-
-            /*
-            for block in partial.blocks.iter() {
-                tracing::debug!("blk@{}", block.start());
-                for insn in block
-                    .instructions()
-                    .iter()
-                    .map(|i| &partial.instructions[i])
-                {
-                    tracing::debug!("{}: {}", insn.address(), insn.display(project.language));
-                }
-            }
-            */
 
             let num_local_targets = self.local_targets.len();
 
             let mut function_with_context = PartialFunctionWithContext {
+                config: *config,
                 context: mem::take(self),
                 function: mem::take(&mut partial),
             };

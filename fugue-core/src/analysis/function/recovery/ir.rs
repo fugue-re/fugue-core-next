@@ -377,7 +377,7 @@ impl PartialFunction {
         self.rebuild_insn_mappings(&mut ctxt);
 
         let num_insns = self.insns.len();
-        let num_blocks = ctxt.cut_points().len();
+        let num_blocks = ctxt.cut_points.len();
         let max_blocks = config.max_function_blocks();
         let max_insns = config.max_block_insns();
 

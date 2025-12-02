@@ -78,7 +78,7 @@ impl Any {
     }
 
     fn invalid_cast_to<T>(&self) -> ! {
-        panic!("invalid cast; enable `unstable-debug` feature to debug");
+        panic!("invalid cast");
     }
 }
 

@@ -27,13 +27,11 @@ pub enum FunctionRecoveryError {
     InitialisationPass(AnalysisError),
     #[error("post-lifting pass failed: {0}")]
     PostLiftingPass(AnalysisError),
-
     // creation issues due to table invariants or storage
     #[error("failed to create block: {0}")]
     BlockCreation(anyhow::Error),
     #[error("failed to create function: {0}")]
     FunctionCreation(anyhow::Error),
-
     // translation and I/O errors
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
@@ -41,7 +39,6 @@ pub enum FunctionRecoveryError {
     Lifting(#[from] LifterError),
     #[error(transparent)]
     SegmentStorage(#[from] SegmentStorageError),
-
     // invariant violations
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
@@ -49,7 +46,9 @@ pub enum FunctionRecoveryError {
     InvalidFunctionSize(Address, usize, usize),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
-    #[error("invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}")]
+    #[error(
+        "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
+    )]
     InvalidBlockSize(Address, usize, usize),
     #[error("invalid instruction index: {0}")]
     InvalidInstructionId(usize),

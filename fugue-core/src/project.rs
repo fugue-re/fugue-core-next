@@ -165,7 +165,7 @@ where
         let symbols = match symbols_builder() {
             Ok(table) => table,
             Err(e) => {
-                tracing::error!("failed to load symbol table: {}", e);
+                tracing::error!("failed to load symbol table: {e}");
                 return Err(e);
             }
         };
@@ -185,7 +185,7 @@ where
         let functions = match functions_builder() {
             Ok(table) => table,
             Err(e) => {
-                tracing::error!("failed to load function table: {}", e);
+                tracing::error!("failed to load function table: {e}");
                 return Err(e);
             }
         };
@@ -205,18 +205,10 @@ where
         let blocks = match blocks_builder() {
             Ok(table) => table,
             Err(e) => {
-                tracing::error!("failed to load code block table: {}", e);
+                tracing::error!("failed to load code block table: {e}");
                 return Err(e);
             }
         };
-
-        /*
-        let function_cache_size = attributes
-            .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
-            .unwrap_or(DEFAULT_FUNCTION_CACHE_SIZE);
-
-        let functions = EntityCache::new(storage.entities.clone(), function_cache_size)?;
-        */
 
         Ok(Self {
             arch,

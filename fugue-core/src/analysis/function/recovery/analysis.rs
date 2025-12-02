@@ -64,7 +64,7 @@ where
         );
     }
 
-    pub fn add_function_builder_initialisation_pass(
+    pub fn add_initialisation_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
@@ -72,7 +72,7 @@ where
         self.builder.add_initialisation_pass(name, pass);
     }
 
-    pub fn add_function_builder_post_lifting_pass(
+    pub fn add_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
