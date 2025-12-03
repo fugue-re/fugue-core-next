@@ -1,15 +1,13 @@
+use std::time::Instant;
+
 use fallible_iterator::FallibleIterator;
 
-use fugue_core::analysis::core::functions::FunctionRecovery;
+use fugue_core::analysis::function::FunctionRecovery;
 use fugue_core::analysis::AnalysisPass;
-use fugue_core::loader::{Loadable, LoadableFromFile};
-
 use fugue_core::attributes;
-use fugue_core::project::Project;
-use fugue_core::storage::entities::mdbx::ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS;
-use fugue_core::storage::entities::RocksDbEntityStorage;
-use fugue_core::storage::{DefaultPersistentSegmentStorage, PersistentStorageProvider};
-use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::ir::traits::FunctionTable;
+use fugue_core::loader::{Loadable, LoadableFromFile};
+use fugue_core::project::InMemoryProject;
 
 use fugue_core_idalib::{IDABinary, IDAFunctionBuilder, ATTRIBUTE_IDA_DATABASE_PATH};
 
@@ -24,24 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::with_default(subscriber, || {
         idalib::force_batch_mode();
 
+        tracing::info!("loading binary with idalib");
+
         let binary = IDABinary::from_file_with(
             "tests/dive",
             attributes! {
                 ATTRIBUTE_IDA_DATABASE_PATH => "tests/dive-non-clashing.idb",
-            },
-        )?;
-
-        let mut project = Project::new_with::<
-            PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
-        >(
-            &binary,
-            attributes! {
-                ATTRIBUTE_PROJECT_PATH => "/tmp/test-project.fdbz",
-                /*
-                ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS => {
-                    "size_upper": 4isize * 1024 * 1024 * 1024, // 4GB
-                },
-                */
             },
         )?;
 
@@ -56,27 +42,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tracing::info!("architecture: {}", binary.architecture());
 
-        for sym in binary.locals().iter() {
-            tracing::info!("local symbol {sym}");
+        for (_, sym) in binary.symbols().iter() {
+            if sym.is_local() {
+                tracing::info!("local symbol: {} at {:#x}", sym.symbol(), sym.address());
+            } else if sym.is_extern() {
+                tracing::info!("global symbol: {} at {:#x}", sym.symbol(), sym.address());
+            }
         }
 
-        for sym in binary
-            .externs()
-            .map(|externs| externs.iter())
-            .into_iter()
-            .flatten()
-        {
-            tracing::info!("external symbol {sym}");
-        }
-
+        let mut project = InMemoryProject::new(&binary)?;
         let mut analyser = FunctionRecovery::new();
 
-        analyser.add_function_builder_initialisation_pass(
-            "ida-blocks-and-edges",
+        analyser.add_initialisation_pass(
+            "ida-function-builder",
             IDAFunctionBuilder::new(binary.database()),
         );
 
+        let t0 = Instant::now();
+
+        tracing::info!("recovering functions via idalib");
+
         analyser.analyse(&mut project)?;
+
+        let tt = t0.elapsed();
+
+        tracing::info!(
+            "function recovery completed in {}ms; identified {} functions",
+            tt.as_millis(),
+            project.functions().len()
+        );
 
         Ok(())
     })

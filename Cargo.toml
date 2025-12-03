@@ -3,7 +3,7 @@ members = [
   "fugue",
   "fugue-arch",
   "fugue-core",
-  # "fugue-core-idalib",
+  "fugue-core-idalib",
   "fugue-bytes",
   "fugue-bv",
   "fugue-fp",

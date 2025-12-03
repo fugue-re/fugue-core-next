@@ -7,7 +7,7 @@ To use this crate, in downstream projects, add the following to your `Cargo.toml
 
 ```toml
 [build-dependencies]
-idalib-build = "0.5"
+idalib-build = "0.7"
 ```
 
 And supply the following environment variables for Linux/macOS:
@@ -32,4 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+```
+
+## Example(s)
+
+See the `examples/` directory for example usage of this crate, e.g.,:
+
+```sh
+NO_COLOR=1 RUST_LOG=info cargo run --release --example=basic_loader
 ```
