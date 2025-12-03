@@ -6,7 +6,6 @@ members = [
   "fugue-core-idalib",
   "fugue-bytes",
   "fugue-bv",
-  "fugue-fp",
   "fugue-lifter",
   "fugue-lifter-aarch64",
   "fugue-lifter-arm",
