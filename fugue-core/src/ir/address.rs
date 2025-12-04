@@ -1,12 +1,12 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
-use std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign};
+use std::ops::{Add, AddAssign, RangeBounds, RangeInclusive, Sub, SubAssign};
 
 use bincode::{Decode, Encode};
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
 use crate::il::pcode::Varnode;
-use crate::lifter::Language;
+use crate::lifter::{ContextSet, Language};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
@@ -387,16 +387,74 @@ impl ToAddress for Varnode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct AddressSet(RangeSetBlaze<u64>);
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+pub struct AddressWithContext {
+    address: Address,
+    context: ContextSet,
+}
 
-impl AddressSet {
+impl Display for AddressWithContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (context: {})", self.address, self.context)
+    }
+}
+
+impl From<Address> for AddressWithContext {
+    fn from(address: Address) -> Self {
+        Self::new(address, ContextSet::default())
+    }
+}
+
+impl<A> From<(A, ContextSet)> for AddressWithContext
+where
+    A: Into<Address>,
+{
+    fn from(parts: (A, ContextSet)) -> Self {
+        Self::new(parts.0.into(), parts.1)
+    }
+}
+
+impl AddressWithContext {
+    pub fn new(address: impl Into<Address>, context: ContextSet) -> Self {
+        Self {
+            address: address.into(),
+            context,
+        }
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn context(&self) -> &ContextSet {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut ContextSet {
+        &mut self.context
+    }
+
+    pub fn into_parts(self) -> (Address, ContextSet) {
+        (self.address, self.context)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct AddressRangeSet(RangeSetBlaze<u64>);
+
+impl AddressRangeSet {
     pub fn new() -> Self {
         Self(RangeSetBlaze::new())
     }
 
     pub fn insert(&mut self, address: impl Into<Address>) -> bool {
         self.0.insert(address.into().offset())
+    }
+
+    pub fn insert_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        let range = range.into();
+        self.0
+            .ranges_insert(range.start().offset()..=range.end().offset());
     }
 
     pub fn remove(&mut self, address: impl Into<Address>) {
@@ -413,6 +471,12 @@ impl AddressSet {
 
     pub fn iter(&self) -> impl Iterator<Item = Address> + use<'_> {
         self.0.iter().map(Address::from)
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = RangeInclusive<Address>> + use<'_> {
+        self.0
+            .ranges()
+            .map(|r| Address::from(*r.start())..=Address::from(*r.end()))
     }
 
     pub fn clear(&mut self) {

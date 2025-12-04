@@ -472,7 +472,7 @@ impl PartialFunction {
         }
 
         for target in context.local_targets().iter() {
-            let Some(from) = context.block_ends().get(target.from()).copied() else {
+            let Some(from) = context.block_ends().get(&target.from()).copied() else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block end",
                     target.from(),
@@ -482,7 +482,7 @@ impl PartialFunction {
                 continue;
             };
 
-            let Some(to) = context.block_starts().get(target.to()).copied() else {
+            let Some(to) = context.block_starts().get(&target.to()).copied() else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block start",
                     target.from(),

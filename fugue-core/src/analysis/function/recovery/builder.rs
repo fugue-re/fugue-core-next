@@ -3,7 +3,7 @@ use std::mem;
 
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::ir::{Address, AddressMap, FlowKind, FlowTarget};
+use crate::ir::{Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
@@ -19,8 +19,8 @@ pub struct PartialFunctionWithContext {
 }
 
 pub(crate) struct CodeBlockStructuringContext<'a> {
-    pub(crate) block_starts: &'a mut AddressMap<usize>,
-    pub(crate) block_ends: &'a mut AddressMap<usize>,
+    pub(crate) block_starts: &'a mut BTreeMap<Address, usize>,
+    pub(crate) block_ends: &'a mut BTreeMap<Address, usize>,
     pub(crate) cut_points: &'a mut Vec<usize>,
     pub(crate) contexts: &'a BTreeMap<Address, ContextSet>,
 }
@@ -28,15 +28,16 @@ pub(crate) struct CodeBlockStructuringContext<'a> {
 #[derive(Default)]
 pub struct FunctionBuilderContext {
     entry: Address,
-    candidates: VecDeque<(Address, ContextSet)>,
+    avoids: AddressRangeSet,
+    candidates: VecDeque<AddressWithContext>,
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
-    global_targets: BTreeSet<(Address, ContextSet)>,
+    global_targets: BTreeSet<AddressWithContext>,
     // These are used to structure the blocks after lifting; we keep them here
     // to avoid having to reallocate on each function analysis. They refer to
     // the partial function being constructed.
-    block_starts: AddressMap<usize>,
-    block_ends: AddressMap<usize>,
+    block_starts: BTreeMap<Address, usize>,
+    block_ends: BTreeMap<Address, usize>,
     cut_points: Vec<usize>,
 }
 
@@ -67,6 +68,10 @@ where
             initialisation_passes: AnalysisGroup::new(),
             post_lifting_passes: AnalysisGroup::new(),
         }
+    }
+
+    pub fn config(&self) -> &FunctionRecoveryConfig {
+        &self.config
     }
 
     pub fn initialisation_passes(&self) -> &AnalysisGroup<'a, P, FunctionBuilderContext> {
@@ -117,25 +122,31 @@ where
         &mut self,
         project: &mut Project<P>,
         translator: &mut Translator,
-        address: impl Into<Address>,
-        context: ContextSet,
+        candidate: impl Into<AddressWithContext>,
     ) -> Result<PartialFunction, FunctionRecoveryError> {
         self.context.analyse(
             project,
             translator,
-            address,
-            context,
+            candidate,
             &self.config,
             &mut self.initialisation_passes,
             &mut self.post_lifting_passes,
         )
     }
 
+    pub fn avoids(&self) -> &AddressRangeSet {
+        &self.context.avoids
+    }
+
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+        &mut self.context.avoids
+    }
+
     pub fn local_targets(&self) -> &BTreeSet<FlowTarget> {
         &self.context.local_targets
     }
 
-    pub fn global_targets(&self) -> &BTreeSet<(Address, ContextSet)> {
+    pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.context.global_targets
     }
 }
@@ -192,31 +203,29 @@ impl FunctionBuilderContext {
         self.entry
     }
 
+    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
+        &self.candidates
+    }
+
     pub fn add_candidate(&mut self, address: impl Into<Address>) {
         self.add_candidate_with_context(address, ContextSet::new());
     }
 
     pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
-        self.candidates.push_back((address.into(), context));
+        self.candidates
+            .push_back(AddressWithContext::new(address, context));
     }
 
     pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.add_candidates_with_context(
-            addresses
-                .into_iter()
-                .zip(std::iter::repeat(ContextSet::new())),
-        );
+        self.add_candidates_with_context(addresses.into_iter().map(|addr| addr.into()));
     }
 
     pub fn add_candidates_with_context(
         &mut self,
-        candidates: impl IntoIterator<Item = (impl Into<Address>, ContextSet)>,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
-        self.candidates.extend(
-            candidates
-                .into_iter()
-                .map(|(addr, context)| (addr.into(), context)),
-        );
+        self.candidates
+            .extend(candidates.into_iter().map(|candidate| candidate.into()));
     }
 
     pub fn add_local_target(
@@ -254,7 +263,9 @@ impl FunctionBuilderContext {
             .expect("function entry is valid");
 
         // This is the stage where we build blocks by collecting instructions and marking them.
-        'outer: while let Some((block, mut context)) = self.candidates.pop_front() {
+        'outer: while let Some(candidate) = self.candidates.pop_front() {
+            let (block, mut context) = candidate.into_parts();
+
             // This ensures correct alignment, to address is correctly wrapped with respect to
             // the address space, and also extracts context updates indicated by the address,
             // e.g., if we are in Thumb context or not for ARM.
@@ -273,6 +284,11 @@ impl FunctionBuilderContext {
                     tracing::trace!("skipping {block}: not mapped in any segment");
                     continue 'outer;
                 }
+            }
+
+            if self.avoids.contains(block) {
+                tracing::trace!("skipping {block}: in avoidance set");
+                continue 'outer;
             }
 
             tracing::trace!("lifting new block {block}");
@@ -314,6 +330,11 @@ impl FunctionBuilderContext {
                     continue 'outer;
                 };
 
+                if self.avoids.contains(address) {
+                    tracing::trace!("skipping {address}: in avoidance set");
+                    continue 'outer;
+                }
+
                 let size = bytes.len();
 
                 tracing::trace!("lifting {address} ({size} bytes available)");
@@ -343,10 +364,12 @@ impl FunctionBuilderContext {
                                     };
 
                                     if self.local_targets.insert(target) {
-                                        self.candidates.push_back((addr, context));
+                                        self.candidates
+                                            .push_back(AddressWithContext::new(addr, context));
                                     }
                                 } else {
-                                    self.global_targets.insert((addr, context));
+                                    self.global_targets
+                                        .insert(AddressWithContext::new(addr, context));
                                 }
                             }
 
@@ -384,15 +407,15 @@ impl FunctionBuilderContext {
         &self.local_targets
     }
 
-    pub fn global_targets(&self) -> &BTreeSet<(Address, ContextSet)> {
+    pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.global_targets
     }
 
-    pub fn block_starts(&self) -> &AddressMap<usize> {
+    pub fn block_starts(&self) -> &BTreeMap<Address, usize> {
         &self.block_starts
     }
 
-    pub fn block_ends(&self) -> &AddressMap<usize> {
+    pub fn block_ends(&self) -> &BTreeMap<Address, usize> {
         &self.block_ends
     }
 
@@ -417,8 +440,7 @@ impl FunctionBuilderContext {
         &mut self,
         project: &mut Project<S>,
         translator: &mut Translator,
-        address: impl Into<Address>,
-        context: ContextSet,
+        candidate: impl Into<AddressWithContext>,
         config: &FunctionRecoveryConfig,
         initialisation_passes: &mut AnalysisGroup<'_, S, FunctionBuilderContext>,
         post_lifting_passes: &mut AnalysisGroup<'_, S, PartialFunctionWithContext>,
@@ -442,13 +464,13 @@ impl FunctionBuilderContext {
         // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
         // initialisation.
 
-        let candidate = address.into();
+        let candidate = candidate.into();
 
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
-        self.entry = candidate;
-        self.candidates.push_back((candidate, context));
+        self.entry = candidate.address();
+        self.candidates.push_back(candidate);
 
         // Run the initialisation passes
         initialisation_passes

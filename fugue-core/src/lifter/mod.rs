@@ -51,6 +51,18 @@ impl ContextUpdate {
 #[repr(transparent)]
 pub struct ContextSet(ArrayVec<ContextUpdate, 2>);
 
+impl Display for ContextSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some((first, rest)) = self.0.split_first() {
+            write!(f, "{first}")?;
+            for update in rest.iter() {
+                write!(f, ", {update}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Encode for ContextSet {
     fn encode<E: bincode::enc::Encoder>(
         &self,

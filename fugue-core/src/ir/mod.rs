@@ -5,7 +5,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod address;
-pub use address::{Address, AddressMap, ToAddress};
+pub use address::{Address, AddressMap, AddressRangeSet, AddressWithContext, ToAddress};
 
 pub mod block;
 pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};

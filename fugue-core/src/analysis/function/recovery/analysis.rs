@@ -1,9 +1,11 @@
 use std::collections::{BTreeSet, VecDeque};
+use std::mem;
+use std::ops::RangeInclusive;
 use std::time::Instant;
 
-use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::ir::Address;
+use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{FunctionTable, SymbolTable};
+use crate::ir::{Address, AddressRangeSet, AddressWithContext};
 use crate::lifter::ContextSet;
 use crate::project::{Project, ProjectMut};
 use crate::storage::ProjectStorageProvider;
@@ -18,8 +20,142 @@ pub struct FunctionRecovery<'a, P = InMemoryProvider>
 where
     P: ProjectStorageProvider,
 {
-    candidates: VecDeque<(Address, ContextSet)>,
+    candidates: VecDeque<AddressWithContext>,
     builder: FunctionBuilder<'a, P>,
+    discovery_passes: AnalysisGroup<'a, P, FunctionDiscoveryContext>,
+    structuring_passes: AnalysisGroup<'a, P, FunctionStructuringContext>,
+}
+
+#[derive(Default)]
+pub struct FunctionDiscoveryContext {
+    config: FunctionRecoveryConfig,
+    candidates: VecDeque<AddressWithContext>,
+    avoids: AddressRangeSet,
+    failures: BTreeSet<Address>,
+    functions: BTreeSet<Address>,
+    new_functions: BTreeSet<Address>,
+}
+
+#[derive(Default)]
+pub struct FunctionStructuringContext {
+    config: FunctionRecoveryConfig,
+    avoids: AddressRangeSet,
+    failures: BTreeSet<Address>,
+    functions: BTreeSet<Address>,
+    new_functions: BTreeSet<Address>,
+}
+
+impl FunctionDiscoveryContext {
+    pub fn config(&self) -> &FunctionRecoveryConfig {
+        &self.config
+    }
+
+    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
+        &self.candidates
+    }
+
+    pub fn add_candidate(&mut self, address: impl Into<Address>) {
+        self.add_candidate_with_context(address, ContextSet::new());
+    }
+
+    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
+        self.candidates
+            .push_back(AddressWithContext::new(address, context));
+    }
+
+    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
+        self.add_candidates_with_context(addresses.into_iter().map(|addr| addr.into()));
+    }
+
+    pub fn add_candidates_with_context(
+        &mut self,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+    ) {
+        self.candidates
+            .extend(candidates.into_iter().map(|candidate| candidate.into()));
+    }
+
+    pub fn avoids(&self) -> &AddressRangeSet {
+        &self.avoids
+    }
+
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+        &mut self.avoids
+    }
+
+    pub fn add_avoid(&mut self, address: impl Into<Address>) {
+        self.avoids.insert(address.into());
+    }
+
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_range(range);
+    }
+
+    pub fn failures(&self) -> &BTreeSet<Address> {
+        &self.failures
+    }
+
+    pub fn add_failure(&mut self, address: impl Into<Address>) {
+        self.failures.insert(address.into());
+    }
+
+    pub fn functions(&self) -> &BTreeSet<Address> {
+        &self.functions
+    }
+
+    pub fn new_functions(&self) -> &BTreeSet<Address> {
+        &self.new_functions
+    }
+}
+
+impl FunctionStructuringContext {
+    pub fn config(&self) -> &FunctionRecoveryConfig {
+        &self.config
+    }
+
+    pub fn avoids(&self) -> &AddressRangeSet {
+        &self.avoids
+    }
+
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+        &mut self.avoids
+    }
+
+    pub fn add_avoid(&mut self, address: impl Into<Address>) {
+        self.avoids.insert(address.into());
+    }
+
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_range(range);
+    }
+
+    pub fn failures(&self) -> &BTreeSet<Address> {
+        &self.failures
+    }
+
+    pub fn add_failure(&mut self, address: impl Into<Address>) {
+        self.failures.insert(address.into());
+    }
+
+    pub fn functions(&self) -> &BTreeSet<Address> {
+        &self.functions
+    }
+
+    pub fn new_functions(&self) -> &BTreeSet<Address> {
+        &self.new_functions
+    }
+
+    pub fn add_function(&mut self, address: impl Into<Address>) {
+        let address = address.into();
+        self.new_functions.insert(address);
+        self.functions.insert(address);
+    }
+
+    pub fn remove_function(&mut self, address: impl Into<Address>) {
+        let address = address.into();
+        self.functions.remove(&address);
+        self.new_functions.remove(&address);
+    }
 }
 
 impl<'a, P> FunctionRecovery<'a, P>
@@ -34,6 +170,8 @@ where
         FunctionRecovery {
             candidates: VecDeque::new(),
             builder: FunctionBuilder::new(config),
+            discovery_passes: AnalysisGroup::new(),
+            structuring_passes: AnalysisGroup::new(),
         }
     }
 
@@ -42,7 +180,8 @@ where
     }
 
     pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
-        self.candidates.push_back((address.into(), context));
+        self.candidates
+            .push_back(AddressWithContext::new(address, context));
     }
 
     pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
@@ -55,16 +194,55 @@ where
 
     pub fn add_candidates_with_context(
         &mut self,
-        candidates: impl IntoIterator<Item = (impl Into<Address>, ContextSet)>,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
-        self.candidates.extend(
-            candidates
-                .into_iter()
-                .map(|(addr, context)| (addr.into(), context)),
-        );
+        self.candidates
+            .extend(candidates.into_iter().map(|candidate| candidate.into()));
     }
 
-    pub fn add_initialisation_pass(
+    // project-level passes
+
+    pub fn add_candidate_discovery_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, P, FunctionDiscoveryContext> + 'a,
+    ) {
+        self.discovery_passes.add_pass(name, pass);
+    }
+
+    pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<'a, P, FunctionDiscoveryContext> {
+        &self.discovery_passes
+    }
+
+    pub fn candidate_discovery_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, P, FunctionDiscoveryContext> {
+        &mut self.discovery_passes
+    }
+
+    pub fn add_inter_function_structuring_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<'a, P, FunctionStructuringContext> + 'a,
+    ) {
+        self.structuring_passes.add_pass(name, pass);
+    }
+
+    pub fn inter_function_structuring_passes(
+        &self,
+    ) -> &AnalysisGroup<'a, P, FunctionStructuringContext> {
+        &self.structuring_passes
+    }
+
+    pub fn inter_function_structuring_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<'a, P, FunctionStructuringContext> {
+        &mut self.structuring_passes
+    }
+
+    // function-level passes
+
+    pub fn add_function_initialisation_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
@@ -72,7 +250,7 @@ where
         self.builder.add_initialisation_pass(name, pass);
     }
 
-    pub fn add_post_lifting_pass(
+    pub fn add_function_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
@@ -106,67 +284,127 @@ where
 
         let mut failures = BTreeSet::new();
         let mut functions = project.functions().addresses().collect::<BTreeSet<_>>();
+        let mut new_functions = BTreeSet::new();
         let mut translator = Translator::new(project);
 
         tracing::debug!("existing functions: {}", functions.len());
 
-        while let Some((address, context)) = self.candidates.pop_front() {
-            if !project.storage.segments.contains_segment(address) {
-                tracing::trace!("skipping {address}: not mapped");
-                continue;
-            }
+        loop {
+            while let Some(candidate) = self.candidates.pop_front() {
+                let address = candidate.address();
 
-            if failures.contains(&address) {
-                tracing::trace!("skipping {address}: already failed");
-                continue;
-            }
-
-            if functions.contains(&address) {
-                tracing::trace!("skipping {address}: already analysed");
-                continue;
-            }
-
-            let function = match self
-                .builder
-                .analyse(project, &mut translator, address, context)
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    failures.insert(address);
-                    tracing::trace!("failed to analyse {address}: {e}");
+                if !project.storage.segments.contains_segment(address) {
+                    tracing::trace!("skipping {address}: not mapped");
                     continue;
                 }
-            };
 
-            let ProjectMut {
-                functions: ftable,
-                blocks: cbtable,
-                ..
-            } = project.fields_mut();
+                if self.builder.avoids().contains(address) {
+                    tracing::trace!("skipping {address}: in avoidance set");
+                    continue;
+                }
 
-            if let Err(e) = function.commit(ftable, cbtable) {
-                tracing::debug!("failed to commit function at {address}: {e}");
-                return Err(AnalysisError::pass_failed("function-recovery", e));
+                if failures.contains(&address) {
+                    tracing::trace!("skipping {address}: already failed");
+                    continue;
+                }
+
+                if functions.contains(&address) {
+                    tracing::trace!("skipping {address}: already analysed");
+                    continue;
+                }
+
+                let function = match self.builder.analyse(project, &mut translator, candidate) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        failures.insert(address);
+                        tracing::trace!("failed to analyse {address}: {e}");
+                        continue;
+                    }
+                };
+
+                let ProjectMut {
+                    functions: ftable,
+                    blocks: cbtable,
+                    ..
+                } = project.fields_mut();
+
+                if let Err(e) = function.commit(ftable, cbtable) {
+                    tracing::debug!("failed to commit function at {address}: {e}");
+
+                    // flush pass functions
+                    functions.extend(new_functions);
+
+                    return Err(AnalysisError::pass_failed("function-recovery", e));
+                }
+
+                new_functions.insert(address);
+
+                self.candidates.extend(
+                    self.builder
+                        .global_targets()
+                        .iter()
+                        .filter(|candidate| {
+                            let start = candidate.address();
+                            !functions.contains(&start) && !failures.contains(&start)
+                        })
+                        .cloned(),
+                );
             }
 
-            functions.insert(address);
+            // flush pass functions
+            functions.extend(new_functions.iter().copied());
 
-            self.candidates.extend(
-                self.builder
-                    .global_targets()
-                    .iter()
-                    .filter(|(start, _)| !functions.contains(start) && !failures.contains(start))
-                    .cloned(),
-            );
-        }
+            // perform a restructuring pass over existing functions, which may split
+            // or merge newly found functions, check for overlaps, etc.
+            let mut context = FunctionStructuringContext {
+                config: *self.builder.config(),
+                avoids: mem::take(self.builder.avoids_mut()),
+                failures: mem::take(&mut failures),
+                functions: mem::take(&mut functions),
+                new_functions: mem::take(&mut new_functions),
+            };
 
-        let num_functions = functions.len();
+            let result = self
+                .structuring_passes
+                .analyse_with(project, &mut context)
+                .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
 
-        for f in functions {
-            tracing::debug!("function: {f}");
+            if let Err(e) = result {
+                // restore state
+                *self.builder.avoids_mut() = context.avoids;
+                return Err(e);
+            }
+
+            // perform a candidate discovery pass
+            let mut context = FunctionDiscoveryContext {
+                config: context.config,
+                candidates: mem::take(&mut self.candidates),
+                avoids: context.avoids,
+                failures: context.failures,
+                functions: context.functions,
+                new_functions: context.new_functions,
+            };
+
+            let result = self
+                .discovery_passes
+                .analyse_with(project, &mut context)
+                .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
+
+            self.candidates = context.candidates;
+            *self.builder.avoids_mut() = context.avoids;
+
+            failures = context.failures;
+            functions = context.functions;
+
+            let _ = result?;
+
+            if self.candidates.is_empty() {
+                break;
+            }
         }
 
         let elapsed = t.elapsed();
+        let num_functions = functions.len();
 
         tracing::debug!(
             "function recovery completed in {}s ({}ms) with {num_functions} functions",
