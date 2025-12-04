@@ -242,7 +242,7 @@ where
 
     // function-level passes
 
-    pub fn add_function_initialisation_pass(
+    pub fn add_builder_initialisation_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
@@ -250,7 +250,7 @@ where
         self.builder.add_initialisation_pass(name, pass);
     }
 
-    pub fn add_function_post_lifting_pass(
+    pub fn add_builder_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
@@ -308,10 +308,12 @@ where
                     continue;
                 }
 
-                if functions.contains(&address) {
+                if functions.contains(&address) || new_functions.contains(&address) {
                     tracing::trace!("skipping {address}: already analysed");
                     continue;
                 }
+
+                tracing::debug!("analysing function candidate at {candidate}");
 
                 let function = match self.builder.analyse(project, &mut translator, candidate) {
                     Ok(f) => f,

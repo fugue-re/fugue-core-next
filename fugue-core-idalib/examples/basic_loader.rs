@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = InMemoryProject::new(&binary)?;
         let mut analyser = FunctionRecovery::new();
 
-        analyser.add_initialisation_pass(
+        analyser.add_builder_initialisation_pass(
             "ida-function-builder",
             IDAFunctionBuilder::new(binary.database()),
         );
