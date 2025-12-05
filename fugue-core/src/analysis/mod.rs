@@ -8,7 +8,6 @@ use crate::project::Project;
 use crate::storage::ProjectStorageProvider;
 use crate::storage::project::InMemoryProvider;
 
-// pub mod core;
 pub mod function;
 
 pub mod core {
@@ -475,6 +474,51 @@ where
     }
 }
 
+pub struct OneShotAnalysis<'a, P = InMemoryProvider, S = NoState>
+where
+    P: ProjectStorageProvider,
+{
+    pass: Box<dyn AnalysisPass<'a, P, S> + 'a>,
+    executed: bool,
+}
+
+impl<'a, P, S> OneShotAnalysis<'a, P, S>
+where
+    P: ProjectStorageProvider,
+{
+    pub fn new(pass: impl AnalysisPass<'a, P, S> + 'a) -> Self {
+        OneShotAnalysis {
+            pass: Box::new(pass),
+            executed: false,
+        }
+    }
+}
+
+impl<'a, P, S> AnalysisPass<'a, P, S> for OneShotAnalysis<'a, P, S>
+where
+    P: ProjectStorageProvider,
+{
+    fn analyse_with(
+        &mut self,
+        project: &mut Project<P>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
+        if !self.executed {
+            self.executed = true;
+            self.pass.analyse_with(project, state)?;
+        }
+        Ok(())
+    }
+
+    fn as_group(&self) -> Option<&AnalysisGroup<'a, P, S>> {
+        self.pass.as_group()
+    }
+
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<'a, P, S>> {
+        self.pass.as_group_mut()
+    }
+}
+
 pub trait AnalysisPassExt<'a, P, S>
 where
     P: ProjectStorageProvider,
@@ -504,6 +548,13 @@ where
         Self: AnalysisPass<'a, P, S> + Sized + 'a,
     {
         StatefulAnalysis::new(self, state)
+    }
+
+    fn one_shot(self) -> OneShotAnalysis<'a, P, S>
+    where
+        Self: AnalysisPass<'a, P, S> + Sized + 'a,
+    {
+        OneShotAnalysis::new(self)
     }
 }
 

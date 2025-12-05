@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display};
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
 use bincode::{Decode, Encode};
@@ -527,6 +527,14 @@ impl LoadableSegmentMetadata {
 
     pub fn next_address(&self) -> Address {
         self.address + self.size
+    }
+
+    pub fn range(&self) -> Range<Address> {
+        self.address()..self.next_address()
+    }
+
+    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+        self.address()..=self.last_address()
     }
 
     pub fn physical_offset(&self) -> Option<usize> {

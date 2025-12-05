@@ -442,6 +442,26 @@ impl AddressWithContext {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AddressRangeSet(RangeSetBlaze<u64>);
 
+impl FromIterator<Address> for AddressRangeSet {
+    fn from_iter<T: IntoIterator<Item = Address>>(iter: T) -> Self {
+        Self(
+            iter.into_iter()
+                .map(|addr| addr.offset())
+                .collect(),
+        )
+    }
+}
+
+impl FromIterator<RangeInclusive<Address>> for AddressRangeSet {
+    fn from_iter<T: IntoIterator<Item = RangeInclusive<Address>>>(iter: T) -> Self {
+        Self(
+            iter.into_iter()
+                .map(|r| r.start().offset()..=r.end().offset())
+                .collect(),
+        )
+    }
+}
+
 impl AddressRangeSet {
     pub fn new() -> Self {
         Self(RangeSetBlaze::new())
@@ -455,6 +475,22 @@ impl AddressRangeSet {
         let range = range.into();
         self.0
             .ranges_insert(range.start().offset()..=range.end().offset());
+    }
+
+    pub fn difference(&self, other: &Self) -> Self {
+        Self(&self.0 - &other.0)
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        Self(&self.0 | &other.0)
+    }
+
+    pub fn intersection(&self, other: &Self) -> Self {
+        Self(&self.0 & &other.0)
+    }
+
+    pub fn symmetric_difference(&self, other: &Self) -> Self {
+        Self(&self.0 ^ &other.0)
     }
 
     pub fn remove(&mut self, address: impl Into<Address>) {

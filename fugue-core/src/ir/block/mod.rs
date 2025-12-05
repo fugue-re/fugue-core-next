@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use bincode::{BorrowDecode, Decode, Encode};
 
@@ -153,12 +153,28 @@ impl CodeBlock {
         self.start
     }
 
+    pub fn address(&self) -> Address {
+        self.start
+    }
+
+    pub fn last_address(&self) -> Address {
+        self.start + self.len() - 1usize
+    }
+
+    pub fn next_address(&self) -> Address {
+        self.start + self.len()
+    }
+
     pub fn len(&self) -> usize {
         self.len as _
     }
 
     pub fn range(&self) -> Range<Address> {
-        self.start..(self.start + self.len())
+        self.address()..self.next_address()
+    }
+
+    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+        self.address()..=self.last_address()
     }
 
     pub fn instructions(&self) -> &InsnList {

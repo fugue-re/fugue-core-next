@@ -251,7 +251,11 @@ impl ExternSegment {
         (self.symbols != 0).then(|| self.address() + self.size() - 1usize)
     }
 
-    pub fn bounds(&self) -> Option<RangeInclusive<Address>> {
+    pub fn range(&self) -> Option<std::ops::Range<Address>> {
+        self.last_address().map(|last| self.address()..(last + 1usize))
+    }
+
+    pub fn range_inclusive(&self) -> Option<RangeInclusive<Address>> {
         self.last_address().map(|last| self.address()..=last)
     }
 

@@ -3,13 +3,16 @@ use std::mem;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
+use itertools::{Itertools, MinMaxResult};
+
+use crate::analysis::core::FunctionRecoveryError;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::ir::traits::{FunctionTable, SymbolTable};
+use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{Address, AddressRangeSet, AddressWithContext};
 use crate::lifter::ContextSet;
 use crate::project::{Project, ProjectMut};
-use crate::storage::ProjectStorageProvider;
 use crate::storage::project::InMemoryProvider;
+use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 use super::{
     FunctionBuilder, FunctionBuilderContext, FunctionRecoveryConfig, PartialFunctionWithContext,
@@ -105,6 +108,58 @@ impl FunctionDiscoveryContext {
 
     pub fn new_functions(&self) -> &BTreeSet<Address> {
         &self.new_functions
+    }
+
+    pub fn covered(
+        &self,
+        ftable: &impl FunctionTable,
+        cbtable: &impl CodeBlockTable,
+    ) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+
+        for function in ftable.iter() {
+            let mm = function.blocks().minmax_by_key(|&(addr, _)| addr);
+
+            match mm {
+                MinMaxResult::OneElement((_, bid)) => {
+                    let block = cbtable
+                        .get_by_id(bid)
+                        .expect("block should exist in code block table");
+                    covered.insert_range(block.range_inclusive());
+                }
+                MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
+                    let min_block = cbtable
+                        .get_by_id(min_bid)
+                        .expect("block should exist in code block table");
+                    let max_block = cbtable
+                        .get_by_id(max_bid)
+                        .expect("block should exist in code block table");
+                    covered.insert_range(min_block.address()..=max_block.last_address());
+                }
+                _ => { /* no blocks, skip */ }
+            }
+        }
+
+        covered
+    }
+
+    pub fn gaps(
+        &self,
+        ftable: &impl FunctionTable,
+        cbtable: &impl CodeBlockTable,
+        segments: &SegmentStorage,
+    ) -> Result<AddressRangeSet, FunctionRecoveryError> {
+        let covered = self.covered(ftable, cbtable);
+
+        let avail = segments
+            .metadata()?
+            .filter_map(|segm| {
+                (segm.properties().is_executable() && !segm.properties().is_external())
+                    .then(|| segm.range_inclusive())
+            })
+            .collect::<AddressRangeSet>();
+
+        Ok(avail.difference(&covered))
     }
 }
 
