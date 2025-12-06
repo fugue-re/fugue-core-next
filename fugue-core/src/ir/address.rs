@@ -434,6 +434,10 @@ impl AddressWithContext {
         &mut self.context
     }
 
+    pub fn merge_context(&mut self, other: &ContextSet) {
+        self.context.merge(other);
+    }
+
     pub fn into_parts(self) -> (Address, ContextSet) {
         (self.address, self.context)
     }

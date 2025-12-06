@@ -78,10 +78,30 @@ impl FunctionRecoveryError {
     }
 }
 
+// NOTE: we use the following conventions for function recovery configuration:
+// - If an option is a flag (boolean), then we use `enable_<option>` to set it and
+//   `with_<option>` to create a new config with the option set.
+// - If an option is a value (e.g., usize), then we use `set_<option>` to set it and
+//   `with_<option>` to create a new config with the option set.
+// - For accessors, we use the option name directly (e.g., `max_function_blocks()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionRecoveryConfig {
+    // This value controls the maximum number of basic blocks allowed in a single function.
     max_function_blocks: usize,
+    // This value controls the maximum number of instructions allowed in a single basic block.
     max_block_insns: usize,
+    // This flag controls whether to use fine-grained block coverage when computing function
+    // coverage and gaps during recovery. We consider fine-grained block coverage to be coverage
+    // tracked at the level of individual blocks, rather than at the function level, i.e., whether
+    // to track the coverage of a function based on block bounds or by the minimum and maximum
+    // addresses of the function's blocks.
+    use_fine_grained_block_coverage: bool,
+    // This flag controls whether to use segment function hints when recovering functions.
+    use_segment_function_hints: bool,
+    // This flag controls whether to use segment mapping hints when recovering functions.
+    use_segment_mapping_hints: bool,
+    // This flag controls whether to use symbol table function hints when recovering functions.
+    use_symbol_table_function_hints: bool,
 }
 
 impl Default for FunctionRecoveryConfig {
@@ -89,6 +109,10 @@ impl Default for FunctionRecoveryConfig {
         FunctionRecoveryConfig {
             max_function_blocks: DEFAULT_MAX_FUNCTION_SIZE,
             max_block_insns: DEFAULT_MAX_BLOCK_SIZE,
+            use_fine_grained_block_coverage: false,
+            use_segment_function_hints: true,
+            use_segment_mapping_hints: true,
+            use_symbol_table_function_hints: true,
         }
     }
 }
@@ -117,6 +141,58 @@ impl FunctionRecoveryConfig {
 
     pub fn with_max_block_insns(mut self, max: usize) -> Self {
         self.set_max_block_insns(max);
+        self
+    }
+
+    pub fn use_fine_grained_block_coverage(&self) -> bool {
+        self.use_fine_grained_block_coverage
+    }
+
+    pub fn enable_fine_grained_block_coverage(&mut self, enabled: bool) {
+        self.use_fine_grained_block_coverage = enabled;
+    }
+
+    pub fn with_fine_grained_block_coverage(mut self, enabled: bool) -> Self {
+        self.enable_fine_grained_block_coverage(enabled);
+        self
+    }
+
+    pub fn use_segment_function_hints(&self) -> bool {
+        self.use_segment_function_hints
+    }
+
+    pub fn enable_segment_function_hints(&mut self, enabled: bool) {
+        self.use_segment_function_hints = enabled;
+    }
+
+    pub fn with_segment_function_hints(mut self, enabled: bool) -> Self {
+        self.enable_segment_function_hints(enabled);
+        self
+    }
+
+    pub fn use_segment_mapping_hints(&self) -> bool {
+        self.use_segment_mapping_hints
+    }
+
+    pub fn enable_segment_mapping_hints(&mut self, enabled: bool) {
+        self.use_segment_mapping_hints = enabled;
+    }
+
+    pub fn with_segment_mapping_hints(mut self, enabled: bool) -> Self {
+        self.enable_segment_mapping_hints(enabled);
+        self
+    }
+
+    pub fn use_symbol_table_function_hints(&self) -> bool {
+        self.use_symbol_table_function_hints
+    }
+
+    pub fn enable_symbol_table_function_hints(&mut self, enabled: bool) {
+        self.use_symbol_table_function_hints = enabled;
+    }
+
+    pub fn with_symbol_table_function_hints(mut self, enabled: bool) -> Self {
+        self.enable_symbol_table_function_hints(enabled);
         self
     }
 }

@@ -131,19 +131,19 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn merge(&mut self, other: Self) {
+    pub fn merge(&mut self, other: &Self) {
         if other.is_empty() {
             return;
         }
 
         if self.is_empty() {
-            *self = other;
+            self.clone_from(other);
             return;
         }
 
-        for update in other.0 {
+        for update in other.0.iter() {
             if !self.0.iter().any(|existing| existing.bits == update.bits) {
-                self.0.push(update);
+                self.0.push(update.to_owned());
             }
         }
     }
@@ -279,6 +279,14 @@ impl ContextHint {
 
     pub fn kind(&self) -> &ContextHintKind {
         &self.kind
+    }
+
+    pub fn is_code(&self) -> bool {
+        self.kind.is_code()
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.kind.is_data()
     }
 
     pub fn context(&self) -> Option<&ContextSet> {

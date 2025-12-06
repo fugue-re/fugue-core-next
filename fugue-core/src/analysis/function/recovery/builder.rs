@@ -294,7 +294,7 @@ impl FunctionBuilderContext {
             tracing::trace!("lifting new block {block}");
 
             // Merge the context updates with the specified context taking precedence.
-            context.merge(ncontext);
+            context.merge(&ncontext);
 
             // Applies the context updates to the lifter context.
             context.apply(block, translator.context_mut());
@@ -326,6 +326,8 @@ impl FunctionBuilderContext {
                 };
 
                 let Some(bytes) = segment.view_bytes_from_address(address) else {
+                    // NOTE: we should not reach this point if we're following a local flow, since
+                    // we check segment membership when adding local targets.
                     tracing::trace!("skipping {address}: not mapped in segment");
                     continue 'outer;
                 };
@@ -356,7 +358,7 @@ impl FunctionBuilderContext {
                                     continue;
                                 };
 
-                                if kind.is_local() {
+                                if kind.is_local() && segment.contains_address(addr) {
                                     let Some(target) =
                                         FlowTarget::from_insn_target(insn, target, addr)
                                     else {
@@ -388,6 +390,7 @@ impl FunctionBuilderContext {
                         // Flows into bad data; we skip this block and remove its context
                         tracing::debug!("skipping {address}; lifting failed: {e}");
                         self.contexts.remove(&address);
+                        self.avoids.insert(address);
                         continue 'outer;
                     }
                 }
@@ -464,12 +467,35 @@ impl FunctionBuilderContext {
         // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
         // initialisation.
 
-        let candidate = candidate.into();
+        let mut candidate = candidate.into();
 
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
         self.entry = candidate.address();
+
+        if config.use_segment_mapping_hints() {
+            // NOTE: this expect is safe because the entry address must be valid to reach this
+            // point under normal usage.
+            let segm = project
+                .segments()
+                .find_segment_containing(self.entry)
+                .expect("valid entry");
+
+            if let Some(hint) = segm.mapping_hints().get(&self.entry) {
+                if hint.is_data() {
+                    tracing::debug!(
+                        "entry {candidate} is marked as data in segment mapping hints; skipping"
+                    );
+                    return Err(FunctionRecoveryError::InvalidFunction);
+                }
+
+                if let Some(ctxt) = hint.context() {
+                    candidate.merge_context(ctxt);
+                }
+            }
+        }
+
         self.candidates.push_back(candidate);
 
         // Run the initialisation passes

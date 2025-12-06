@@ -4,8 +4,8 @@ use std::ops::RangeInclusive;
 use std::time::Instant;
 
 use itertools::{Itertools, MinMaxResult};
+use tracing::Level;
 
-use crate::analysis::core::FunctionRecoveryError;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{Address, AddressRangeSet, AddressWithContext};
@@ -15,8 +15,8 @@ use crate::storage::project::InMemoryProvider;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 use super::{
-    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryConfig, PartialFunctionWithContext,
-    Translator,
+    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryConfig, FunctionRecoveryError,
+    PartialFunctionWithContext, Translator,
 };
 
 pub struct FunctionRecovery<'a, P = InMemoryProvider>
@@ -110,7 +110,7 @@ impl FunctionDiscoveryContext {
         &self.new_functions
     }
 
-    pub fn covered(
+    fn covered_by_minmax_block_bounds(
         &self,
         ftable: &impl FunctionTable,
         cbtable: &impl CodeBlockTable,
@@ -134,6 +134,8 @@ impl FunctionDiscoveryContext {
                     let max_block = cbtable
                         .get_by_id(max_bid)
                         .expect("block should exist in code block table");
+                    // we should probably have a threshold here to avoid huge ranges, where
+                    // we have a function that has non-contiguous blocks
                     covered.insert_range(min_block.address()..=max_block.last_address());
                 }
                 _ => { /* no blocks, skip */ }
@@ -141,6 +143,37 @@ impl FunctionDiscoveryContext {
         }
 
         covered
+    }
+
+    fn covered_by_all_block_bounds(
+        &self,
+        ftable: &impl FunctionTable,
+        cbtable: &impl CodeBlockTable,
+    ) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+
+        for function in ftable.iter() {
+            for (_, bid) in function.blocks() {
+                let block = cbtable
+                    .get_by_id(bid)
+                    .expect("block should exist in code block table");
+                covered.insert_range(block.range_inclusive());
+            }
+        }
+
+        covered
+    }
+
+    pub fn covered(
+        &self,
+        ftable: &impl FunctionTable,
+        cbtable: &impl CodeBlockTable,
+    ) -> AddressRangeSet {
+        if self.config.use_fine_grained_block_coverage() {
+            self.covered_by_all_block_bounds(ftable, cbtable)
+        } else {
+            self.covered_by_minmax_block_bounds(ftable, cbtable)
+        }
     }
 
     pub fn gaps(
@@ -230,6 +263,10 @@ where
         }
     }
 
+    pub fn config(&self) -> &FunctionRecoveryConfig {
+        self.builder.config()
+    }
+
     pub fn add_candidate(&mut self, address: impl Into<Address>) {
         self.add_candidate_with_context(address, ContextSet::new());
     }
@@ -255,7 +292,7 @@ where
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
     }
 
-    // project-level passes
+    // global passes
 
     pub fn add_candidate_discovery_pass(
         &mut self,
@@ -295,7 +332,7 @@ where
         &mut self.structuring_passes
     }
 
-    // function-level passes
+    // function creation passes
 
     pub fn add_builder_initialisation_pass(
         &mut self,
@@ -321,6 +358,9 @@ where
     fn analyse(&mut self, project: &mut Project<P>) -> Result<(), AnalysisError> {
         tracing::debug!("starting function recovery");
 
+        let span = tracing::span!(Level::TRACE, "function-recovery");
+        let function_recovery_span = span.enter();
+
         let t = Instant::now();
 
         if let Some(entry) = project.entry() {
@@ -328,13 +368,31 @@ where
             self.add_candidate(entry);
         }
 
-        for (_, entry) in project
-            .symbols()
-            .iter_by_address()
-            .filter(|(_, s)| s.is_function())
-        {
-            tracing::debug!("function: {} (name: {})", entry.address(), entry.symbol(),);
-            self.add_candidate(entry.address());
+        if self.config().use_symbol_table_function_hints() {
+            for (_, entry) in project
+                .symbols()
+                .iter_by_address()
+                .filter(|(_, s)| s.is_function())
+            {
+                tracing::debug!(
+                    source = "symbol-table",
+                    "function hint: {} (name: {})",
+                    entry.address(),
+                    entry.symbol(),
+                );
+                self.add_candidate(entry.address());
+            }
+        }
+
+        if self.config().use_segment_function_hints() {
+            for segm in project.segments().metadata().map_err(|e| {
+                AnalysisError::pass_failed("function-recovery", FunctionRecoveryError::from(e))
+            })? {
+                for addr in segm.function_hints().iter() {
+                    tracing::debug!(source = "segment", "function hint: {addr}");
+                    self.add_candidate(*addr);
+                }
+            }
         }
 
         let mut failures = BTreeSet::new();
@@ -348,7 +406,7 @@ where
             while let Some(candidate) = self.candidates.pop_front() {
                 let address = candidate.address();
 
-                if !project.storage.segments.contains_segment(address) {
+                if !project.segments().contains_segment(address) {
                     tracing::trace!("skipping {address}: not mapped");
                     continue;
                 }
@@ -412,7 +470,7 @@ where
             functions.extend(new_functions.iter().copied());
 
             // perform a restructuring pass over existing functions, which may split
-            // or merge newly found functions, check for overlaps, etc.
+            // or merge functions, check for overlaps and/or conflicts, etc.
             let mut context = FunctionStructuringContext {
                 config: *self.builder.config(),
                 avoids: mem::take(self.builder.avoids_mut()),
@@ -462,6 +520,9 @@ where
 
         let elapsed = t.elapsed();
         let num_functions = functions.len();
+
+        drop(function_recovery_span);
+        drop(span);
 
         tracing::debug!(
             "function recovery completed in {}s ({}ms) with {num_functions} functions",
