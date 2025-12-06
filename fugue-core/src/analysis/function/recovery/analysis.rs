@@ -454,13 +454,16 @@ where
 
                 new_functions.insert(address);
 
+                // avoids shouldn't make it into the candidate set
                 self.candidates.extend(
                     self.builder
                         .global_targets()
                         .iter()
                         .filter(|candidate| {
                             let start = candidate.address();
-                            !functions.contains(&start) && !failures.contains(&start)
+                            !functions.contains(&start)
+                                && !new_functions.contains(&start)
+                                && !failures.contains(&start)
                         })
                         .cloned(),
                 );
@@ -519,10 +522,11 @@ where
         }
 
         let elapsed = t.elapsed();
-        let num_functions = functions.len();
 
         drop(function_recovery_span);
         drop(span);
+
+        let num_functions = functions.len();
 
         tracing::debug!(
             "function recovery completed in {}s ({}ms) with {num_functions} functions",

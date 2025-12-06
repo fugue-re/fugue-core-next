@@ -355,6 +355,10 @@ impl FunctionBuilderContext {
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
                                 let Some((addr, context)) = arch.canonicalise_address(addr) else {
+                                    tracing::trace!(
+                                        "skipping target {target} of instruction at {address}: \
+                                         not a viable target address"
+                                    );
                                     continue;
                                 };
 
@@ -369,7 +373,7 @@ impl FunctionBuilderContext {
                                         self.candidates
                                             .push_back(AddressWithContext::new(addr, context));
                                     }
-                                } else {
+                                } else if !self.avoids.contains(addr) {
                                     self.global_targets
                                         .insert(AddressWithContext::new(addr, context));
                                 }
