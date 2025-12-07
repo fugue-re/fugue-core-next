@@ -8,6 +8,8 @@ use crate::storage::SegmentStorageError;
 pub mod analysis;
 pub use analysis::FunctionRecovery;
 
+pub mod core;
+
 pub mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
 
