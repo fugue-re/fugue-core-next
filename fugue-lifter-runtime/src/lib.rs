@@ -8,6 +8,7 @@ pub mod lifter;
 pub mod partmap;
 pub mod pattern;
 pub mod pcode;
+pub mod resolve;
 pub mod symbol;
 pub mod template;
 

@@ -1,9 +1,7 @@
-use std::mem::size_of;
-
 use fugue_sleigh_language::construct::{ConstructTpl, HandleTpl};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
-    Context, ContextPattern, DecisionPair, DisjointPattern, InstructionPattern,
+    Context, DecisionPair, DisjointPattern, PatternBlock,
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
 use fugue_sleigh_language::Language;
@@ -308,6 +306,7 @@ impl<'a> LifterGenerator<'a> {
         format_ident!("__SYM{id}_IN{scope}_CTOR{cid}")
     }
 
+    /*
     fn generate_dtree_pmatch_ctxt(&self, cpat: &ContextPattern) -> TokenStream {
         let pat = cpat.mask_value();
 
@@ -503,6 +502,92 @@ impl<'a> LifterGenerator<'a> {
             }
         }
     }
+    */
+
+    fn generate_dtree_pattern(pattern: &PatternBlock) -> TokenStream {
+        let non_zero_size = pattern
+            .non_zero_size()
+            .map(|s| quote! { Some(#s) })
+            .unwrap_or(quote! { None });
+        let masks = pattern.masks().iter().map(|m| quote! { #m });
+        let values = pattern.values().iter().map(|v| quote! { #v });
+        let offset = pattern.offset();
+
+        quote! {
+            fugue_lifter_runtime::resolve::Pattern {
+                offset: #offset,
+                non_zero_size: #non_zero_size,
+                masks: &[#(#masks),*],
+                values: &[#(#values),*],
+            }
+        }
+    }
+
+    fn generate_dtree_decision(id: usize, scope: usize, pat: &DecisionPair) -> TokenStream {
+        let ctor = Self::ctor_vname(id, scope, pat.id());
+
+        let pattern = match pat.pattern() {
+            DisjointPattern::Instruction(pat) => {
+                let pat = Self::generate_dtree_pattern(pat.mask_value());
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Instruction(#pat)
+                }
+            }
+            DisjointPattern::Context(pat) => {
+                let pat = Self::generate_dtree_pattern(pat.mask_value());
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Context(#pat)
+                }
+            }
+            DisjointPattern::Combine {
+                context,
+                instruction,
+            } => {
+                let context = Self::generate_dtree_pattern(context.mask_value());
+                let instruction = Self::generate_dtree_pattern(instruction.mask_value());
+
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Combine {
+                        context: #context,
+                        instruction: #instruction,
+                    }
+                }
+            }
+        };
+
+        quote! {
+            fugue_lifter_runtime::resolve::DecisionPair {
+                pattern: #pattern,
+                constructor: & #ctor,
+            }
+        }
+    }
+
+    fn generate_dtree_simplified(id: usize, scope: usize, dtree: &DecisionNode) -> TokenStream {
+        let mut patterns = Vec::new();
+        for pattern in dtree.patterns() {
+            patterns.push(Self::generate_dtree_decision(id, scope, pattern));
+        }
+
+        let mut children = Vec::new();
+        for child in dtree.children() {
+            children.push(Self::generate_dtree_simplified(id, scope, child));
+        }
+
+        let start_bit = dtree.start_bit() as u32;
+        let size = dtree.size() as u32;
+        let context_decision = dtree.context_decision();
+
+        quote! {
+            fugue_lifter_runtime::resolve::DecisionNode {
+                start_bit: #start_bit,
+                size: #size,
+                context_decision: #context_decision,
+                patterns: &[#(#patterns),*],
+                children: &[#(#children),*],
+            }
+        }
+    }
 
     fn generate_subtable(
         &self,
@@ -512,11 +597,15 @@ impl<'a> LifterGenerator<'a> {
         dtree: &DecisionNode,
     ) -> Result<TokenStream, LifterGeneratorError> {
         let tname = format_ident!("SubTable{id}In{scope}");
-        let mut trees = Vec::new();
+        let cname = format_ident!("__SUBTABLE_{id}_IN_{scope}");
+
+        // let mut trees = Vec::new();
 
         let ctor_tokens = self.generate_constructors(id, scope, ctors);
-        let dtree_tokens = self.generate_dtree(id, scope, dtree, &mut trees);
+        // let dtree_tokens = self.generate_dtree(id, scope, dtree, &mut trees);
+        let dtree_tokens = Self::generate_dtree_simplified(id, scope, dtree);
 
+        /*
         let tokens = quote! {
             #(#ctor_tokens)*
 
@@ -528,6 +617,24 @@ impl<'a> LifterGenerator<'a> {
             impl #tname {
                 #[allow(unused_parens)]
                 #dtree_tokens
+            }
+        };
+        */
+
+        let tokens = quote! {
+            #(#ctor_tokens)*
+
+            pub static #cname: fugue_lifter_runtime::resolve::DecisionNode = #dtree_tokens;
+
+            pub struct #tname;
+
+            impl #tname {
+                #[inline]
+                pub fn resolve(
+                    input: &mut fugue_lifter_runtime::LiftingContextState,
+                ) -> Option<&'static fugue_lifter_runtime::Constructor> {
+                    #cname.resolve(input)
+                }
             }
         };
 
