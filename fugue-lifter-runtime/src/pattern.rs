@@ -44,14 +44,57 @@ pub enum PatternExpression {
     Plus(&'static Self, &'static Self),
     Sub(&'static Self, &'static Self),
     Mult(&'static Self, &'static Self),
+    Div(&'static Self, &'static Self),
     LeftShift(&'static Self, &'static Self),
     RightShift(&'static Self, &'static Self),
     And(&'static Self, &'static Self),
     Or(&'static Self, &'static Self),
     Xor(&'static Self, &'static Self),
-    Div(&'static Self, &'static Self),
     Minus(&'static Self),
     Not(&'static Self),
+}
+
+#[derive(Clone)]
+pub enum PatternOp {
+    TokenField {
+        big_endian: bool,
+        sign_bit: bool,
+        bit_start: usize,
+        bit_end: usize,
+        byte_start: usize,
+        byte_end: usize,
+        shift: u32,
+    },
+    ContextField {
+        sign_bit: bool,
+        bit_start: usize,
+        bit_end: usize,
+        byte_start: usize,
+        byte_end: usize,
+        shift: u32,
+    },
+    Constant {
+        value: i64,
+    },
+    Operand {
+        constructor: &'static Constructor,
+        offset: OperandOffset,
+        value: &'static [Self],
+    },
+    StartInstruction,
+    EndInstruction,
+    Next2Instruction,
+    Plus,
+    Sub,
+    Mult,
+    LeftShift,
+    RightShift,
+    And,
+    Or,
+    Xor,
+    Div,
+    Minus,
+    Not,
 }
 
 impl PatternExpression {
