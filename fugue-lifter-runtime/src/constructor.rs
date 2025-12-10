@@ -2,7 +2,7 @@ use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::pattern::PatternExpression;
+use crate::pattern::PatternOp;
 use crate::pcode::LiftingContextState;
 use crate::symbol::Symbol;
 use crate::template::{ConstructTpl, HandleTpl};
@@ -16,15 +16,18 @@ pub enum OperandResolver {
 }
 
 pub struct OperandFilter {
-    pub pattern: PatternExpression,
+    pub pattern: &'static [PatternOp],
     pub indices: &'static [usize],
     pub limit: usize,
 }
 
 impl OperandFilter {
     #[inline]
-    pub unsafe fn validate<R: ConstructorResolver>(&self, input: &mut LiftingContextState) -> Option<()> {
-        let index = self.pattern.resolve::<R>(input)? as usize;
+    pub unsafe fn validate<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState,
+    ) -> Option<()> {
+        let index = PatternOp::resolve::<R>(self.pattern, input)? as usize;
         if index >= self.limit || self.indices.contains(&index) {
             None
         } else {
@@ -36,7 +39,7 @@ impl OperandFilter {
 pub enum OperandHandleResolver {
     None,
     Symbol(&'static Symbol),
-    Expression(PatternExpression),
+    Expression(&'static [PatternOp]),
 }
 
 pub struct Operand {
@@ -222,7 +225,7 @@ impl Constructor {
                         state.input().set_parent_handle(handle);
                     }
                     OperandHandleResolver::Expression(ref expr) => {
-                        let offset = expr.resolve::<R>(state)? as u64;
+                        let offset = PatternOp::resolve::<R>(expr, state)? as u64;
 
                         if let Some(handle) = state.input().parent_handle_mut() {
                             handle.space = 0;
@@ -293,7 +296,7 @@ impl Constructor {
                         symbol.format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.format::<R, _>(state, writer)?;
+                        PatternOp::format::<R, _>(expr, state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -348,7 +351,7 @@ impl Constructor {
                         symbol.format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.format::<R, _>(state, writer)?;
+                        PatternOp::format::<R, _>(expr, state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -377,7 +380,7 @@ impl Constructor {
                             symbol.format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Expression(expr) => {
-                            expr.format::<R, _>(state, writer)?;
+                            PatternOp::format::<R, _>(expr, state, writer)?;
                         }
                     }
                     state.input().pop_operand();

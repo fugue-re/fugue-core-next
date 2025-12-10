@@ -27,24 +27,29 @@ impl<'a> PatternExpressionAdaptor<'a> {
         }
     }
 
-    // To translate, we need to do the following:
+    // To translate, we do the following:
     //
-    // Add(Add(B, C), Sub(D, E))
+    // Input: Add(Add(B, C), Sub(D, E))
     //
-    // push(Add), push(rhs), push(lhs)
-    // push(Add), push(Sub), push(E), push(D), push(Add), push(C), push(B)
+    // Output:
     //
-    // Then we need to evaluate from right to left (reversing the list):
+    // [push(Add), push(rhs), push(lhs)]
     //
-    // push B
-    // push C
-    // add    | stack = [B, C]
-    // push D
-    // push E
-    // add    | stack = [(B + C), (D - E)]
+    // Expands to:
+    //
+    // [push(Add), push(Sub), push(E), push(D), push(Add), push(C), push(B)]
+    //
+    // We evaluate from right to left (reversing the list):
+    //
+    // push B | stack = [B]
+    // push C | stack = [B, C]
+    // add    | stack = [B + C]
+    // push D | stack = [B + C, D]
+    // push E | stack = [B + C, D, E]
+    // add    | stack = [B + C, D - E]
     // add    | stack = [(B + C) + (D - E)]
     //
-    fn to_stack_machine(&self) -> Vec<TokenStream> {
+    fn to_stack(&self) -> Vec<TokenStream> {
         let mut stack = Vec::new();
         let mut queue = vec![self.expression];
 
@@ -179,64 +184,64 @@ impl<'a> PatternExpressionAdaptor<'a> {
                     });
                 }
                 E::Plus(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Plus
                     });
                 }
                 E::Sub(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Sub
                     });
                 }
                 E::Mult(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Mult
                     });
                 }
                 E::Div(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Div
                     });
                 }
                 E::LeftShift(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::LeftShift
                     });
                 }
                 E::RightShift(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::RightShift
                     });
                 }
                 E::And(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::And
                     });
                 }
                 E::Or(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Or
                     });
                 }
                 E::Xor(lhs, rhs) => {
-                    queue.push(rhs);
                     queue.push(lhs);
+                    queue.push(rhs);
                     stack.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Xor
                     });
@@ -261,19 +266,16 @@ impl<'a> PatternExpressionAdaptor<'a> {
     }
 }
 
-/*
 impl<'a> ToTokens for PatternExpressionAdaptor<'a> {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let stack_machine = self.to_stack_machine();
+        let ops = self.to_stack();
         tokens.extend(quote! {
-            &[#(#stack_machine),*]
+            &[#(#ops),*]
         });
     }
 }
-*/
 
-// stack machine:
-
+/*
 impl<'a> ToTokens for PatternExpressionAdaptor<'a> {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         use PatternExpression as E;
@@ -484,3 +486,4 @@ impl<'a> ToTokens for PatternExpressionAdaptor<'a> {
         value.to_tokens(tokens)
     }
 }
+*/

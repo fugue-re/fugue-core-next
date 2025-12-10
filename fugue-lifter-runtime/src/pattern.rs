@@ -382,3 +382,303 @@ impl PatternExpression {
         }
     }
 }
+
+impl PatternOp {
+    pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
+        operations: &[Self],
+        state: &mut LiftingContextState<'_>,
+        writer: &mut W,
+    ) -> fmt::Result {
+        let value = Self::resolve::<R>(operations, state).expect("value previously resolved");
+        if value < 0 {
+            write!(writer, "-{:#x}", -(value as i128))
+        } else {
+            write!(writer, "{:#x}", value)
+        }
+    }
+
+    pub unsafe fn resolve<R: ConstructorResolver>(
+        operations: &[Self],
+        input: &mut LiftingContextState<'_>,
+    ) -> Option<i64> {
+        let mut stack = Vec::new();
+
+        // for xor(lhs, rhs), the operations will be [lhs, rhs, Xor]
+        //
+        // hence we will push lhs, push rhs, then pop lhs and rhs and compute lhs ^ rhs
+
+        'outer: for op in operations {
+            match op {
+                Self::TokenField {
+                    big_endian,
+                    sign_bit,
+                    bit_start,
+                    bit_end,
+                    byte_start,
+                    byte_end,
+                    shift,
+                } => {
+                    let size = byte_end - byte_start + 1;
+                    let mut res = 0i64;
+                    let mut start = *byte_start as isize;
+                    let mut tsize = size as isize;
+
+                    while tsize >= size_of::<u32>() as isize {
+                        let tmp = input
+                            .input()
+                            .instruction_bytes(start as usize, size_of::<u32>())?;
+                        res = res.checked_shl(8 * size_of::<u32>() as u32).unwrap_or(0);
+                        res = (res as u64 | tmp as u64) as i64;
+                        start += size_of::<u32>() as isize;
+                        tsize = (*byte_end as isize) - start + 1;
+                    }
+                    if tsize > 0 {
+                        let tmp = input
+                            .input()
+                            .instruction_bytes(start as usize, tsize as usize)?;
+                        res = res.checked_shl(8 * tsize as u32).unwrap_or(0);
+                        res = (res as u64 | tmp as u64) as i64;
+                    }
+
+                    res = if !big_endian {
+                        byte_swap(res, size)
+                    } else {
+                        res
+                    };
+                    res = res
+                        .checked_shr(*shift)
+                        .unwrap_or(if res < 0 { -1 } else { 0 });
+
+                    stack.push(if *sign_bit {
+                        sign_extend(res, bit_end - bit_start)
+                    } else {
+                        zero_extend(res, bit_end - bit_start)
+                    });
+                }
+                Self::ContextField {
+                    sign_bit,
+                    bit_start,
+                    bit_end,
+                    byte_start,
+                    byte_end,
+                    shift,
+                } => {
+                    let mut res = 0i64;
+                    let mut size = (*byte_end as isize) - (*byte_start as isize) + 1;
+                    let mut start = *byte_start as isize;
+
+                    while size >= size_of::<u32>() as isize {
+                        let tmp = input
+                            .input()
+                            .context_bytes(start as usize, size_of::<u32>());
+                        res = res.checked_shl(8 * size_of::<u32>() as u32).unwrap_or(0);
+                        res = (res as u64 | tmp as u64) as i64;
+                        start += size_of::<u32>() as isize;
+                        size = (*byte_end as isize) - start + 1;
+                    }
+                    if size > 0 {
+                        let tmp = input.input().context_bytes(start as usize, size as usize);
+                        res = res.checked_shl(8 * size as u32).unwrap_or(0);
+                        res = (res as u64 | tmp as u64) as i64;
+                    }
+
+                    res = res
+                        .checked_shr(*shift)
+                        .unwrap_or(if res < 0 { -1 } else { 0 });
+
+                    stack.push(if *sign_bit {
+                        sign_extend(res, bit_end - bit_start)
+                    } else {
+                        zero_extend(res, bit_end - bit_start)
+                    });
+                }
+                Self::Constant { value } => stack.push(*value),
+                Self::Operand {
+                    constructor,
+                    offset,
+                    value,
+                } => {
+                    let mut cur_depth = input.inputs.input.depth;
+                    let mut point =
+                        &input.inputs.input.context.constructors[input.inputs.input.point as usize];
+
+                    let ctor_id = constructor.id;
+
+                    while point.constructor.map(|ctor| ctor.id) != Some(ctor_id) {
+                        if cur_depth <= 0 {
+                            let old_point = input.inputs.input.point;
+                            let old_depth = std::mem::take(&mut input.inputs.input.depth);
+                            let old_breadcrumb = std::mem::replace(
+                                &mut input.inputs.input.breadcrumb,
+                                [0u8; BREADCRUMBS],
+                            );
+
+                            input.inputs.input.point = input.inputs.input.context.alloc;
+                            {
+                                let cstate = &mut input.inputs.input.context.constructors
+                                    [input.inputs.input.point as usize];
+
+                                cstate.constructor = Some(*constructor);
+                                cstate.handle = None;
+                                cstate.parent = INVALID_HANDLE;
+                                cstate.operands = INVALID_HANDLE;
+                                cstate.offset = 0;
+                                cstate.length = 0;
+                            }
+
+                            // compute the value in the modified context
+                            let value = Self::resolve::<R>(value, input)?;
+
+                            // restore old state
+                            {
+                                let cstate = &mut input.inputs.input.context.constructors
+                                    [input.inputs.input.point as usize];
+
+                                cstate.constructor = None;
+                                cstate.handle = None;
+                                cstate.parent = INVALID_HANDLE;
+                                cstate.operands = INVALID_HANDLE;
+                                cstate.offset = 0;
+                                cstate.length = 0;
+                            }
+
+                            input.inputs.input.point = old_point;
+                            input.inputs.input.depth = old_depth;
+                            input.inputs.input.breadcrumb = old_breadcrumb;
+
+                            stack.push(value);
+                            continue 'outer;
+                        }
+
+                        cur_depth -= 1;
+                        point = &input.inputs.input.context.constructors[point.parent as usize];
+                    }
+
+                    // if we reach here, we've resolved the ctor in the current tree
+                    let offset = match offset {
+                        OperandOffset::Relative(offset) => point.offset + *offset,
+                        OperandOffset::Operand(index) => {
+                            input.inputs.input.context.constructors
+                                [point.operands as usize + *index as usize]
+                                .offset
+                        }
+                    };
+                    let length = point.length;
+
+                    // preserve old and init new state
+                    let old_point = input.inputs.input.point;
+                    let old_depth = std::mem::take(&mut input.inputs.input.depth);
+                    let old_breadcrumb =
+                        std::mem::replace(&mut input.inputs.input.breadcrumb, [0u8; BREADCRUMBS]);
+
+                    input.inputs.input.point = input.inputs.input.context.alloc;
+                    {
+                        let cstate = &mut input.inputs.input.context.constructors
+                            [input.inputs.input.point as usize];
+
+                        cstate.constructor = Some(*&constructor);
+                        cstate.handle = None;
+                        cstate.parent = INVALID_HANDLE;
+                        cstate.operands = INVALID_HANDLE;
+                        cstate.offset = offset;
+                        cstate.length = length;
+                    }
+
+                    // compute the value in the modified context
+                    let value = Self::resolve::<R>(value, input)?;
+
+                    // restore old state
+                    {
+                        let cstate = &mut input.inputs.input.context.constructors
+                            [input.inputs.input.point as usize];
+
+                        cstate.constructor = None;
+                        cstate.handle = None;
+                        cstate.parent = INVALID_HANDLE;
+                        cstate.operands = INVALID_HANDLE;
+                        cstate.offset = 0;
+                        cstate.length = 0;
+                    }
+
+                    input.inputs.input.point = old_point;
+                    input.inputs.input.depth = old_depth;
+                    input.inputs.input.breadcrumb = old_breadcrumb;
+
+                    stack.push(value);
+                }
+                Self::StartInstruction => stack.push(input.address() as i64),
+                Self::EndInstruction => stack.push(input.next_address() as i64),
+                Self::Next2Instruction => {
+                    let value = input.next2_address().map_or_else(
+                        || {
+                            let mut ninput = input.next_input()?;
+                            R::resolve(&mut ninput)?;
+                            Some(ninput.next_address() as i64)
+                        },
+                        |v| Some(v as i64),
+                    )?;
+                    stack.push(value);
+                }
+                Self::And => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs & rhs);
+                }
+                Self::Or => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs | rhs);
+                }
+                Self::Xor => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs ^ rhs);
+                }
+                Self::Plus => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs.wrapping_add(rhs));
+                }
+                Self::Sub => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs.wrapping_sub(rhs));
+                }
+                Self::Div => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    (rhs != 0).then(|| stack.push(lhs.wrapping_div(rhs)))?;
+                }
+                Self::Mult => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs.wrapping_mul(rhs));
+                }
+                Self::LeftShift => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs.checked_shl(rhs as u8 as u32).unwrap_or(0));
+                }
+                Self::RightShift => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs.checked_shr(rhs as u8 as u32).unwrap_or(if lhs < 0 {
+                        -1
+                    } else {
+                        0
+                    }));
+                }
+                Self::Not => {
+                    let rhs = stack.pop()?;
+                    stack.push(!rhs);
+                }
+                Self::Minus => {
+                    let rhs = stack.pop()?;
+                    stack.push(-rhs);
+                }
+            }
+        }
+
+        stack.pop()
+    }
+}
