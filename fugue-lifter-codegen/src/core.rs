@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use fugue_sleigh_language::construct::{ConstructTpl, HandleTpl};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
@@ -20,6 +22,14 @@ pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
     symbols: Vec<TokenStream>,
     language: &'a Language,
+    tables: Tables,
+}
+
+#[derive(Default)]
+struct Tables {
+    // ctors: Vec<TokenStream>,
+    dtrees: Vec<TokenStream>,
+    subtable_id_mapping: BTreeMap<(usize, usize), usize>,
 }
 
 impl<'a> LifterGenerator<'a> {
@@ -28,6 +38,7 @@ impl<'a> LifterGenerator<'a> {
             context_variables: Vec::new(),
             symbols: Vec::new(),
             language,
+            tables: Tables::default(),
         };
 
         slf.build()?;
@@ -38,6 +49,26 @@ impl<'a> LifterGenerator<'a> {
     pub fn build(&mut self) -> Result<(), LifterGeneratorError> {
         let symtab = self.language.symbol_table();
 
+        let mut i = 0;
+        for (id, scope, dtree) in symtab
+            .symbols()
+            .iter()
+            .filter_map(|s| {
+                if let Symbol::Subtable { id, scope, decision_tree, .. } = s {
+                    Some((*id, *scope, decision_tree))
+                } else {
+                    None
+                }
+            })
+        {
+            let number_of_children = dtree.count_children();
+            let offset = i + number_of_children;
+
+            self.tables.subtable_id_mapping.insert((id, scope), offset);
+
+            i = offset + 1;
+        }
+
         for symbol in symtab.symbols().iter() {
             if let Symbol::Subtable {
                 id,
@@ -47,12 +78,8 @@ impl<'a> LifterGenerator<'a> {
                 ..
             } = symbol
             {
-                self.symbols.push(self.generate_subtable(
-                    *id,
-                    *scope,
-                    constructors,
-                    decision_tree,
-                )?);
+                let tokens = self.generate_subtable(*id, *scope, constructors, decision_tree)?;
+                self.symbols.push(tokens);
             } else {
                 self.symbols
                     .push(SymbolAdaptor::new(&self.language, symbol).to_token_stream());
@@ -103,8 +130,8 @@ impl<'a> LifterGenerator<'a> {
             {
                 match tsym {
                     Symbol::Subtable { id, scope, .. } => {
-                        let stname = format_ident!("SubTable{id}In{scope}");
-                        let resolver = quote! { fugue_lifter_runtime::OperandResolver::Constructor(<#stname>::resolve) };
+                        let dtree_id = self.tables.subtable_id_mapping[&(*id, *scope)];
+                        let resolver = quote! { fugue_lifter_runtime::OperandResolver::Constructor(#dtree_id) };
                         let handle_resolver =
                             quote! { fugue_lifter_runtime::OperandHandleResolver::None };
 
@@ -504,7 +531,7 @@ impl<'a> LifterGenerator<'a> {
     }
     */
 
-    fn generate_dtree_pattern(pattern: &PatternBlock) -> TokenStream {
+    fn generate_dtree_pattern(&self, pattern: &PatternBlock) -> TokenStream {
         let non_zero_size = pattern
             .non_zero_size()
             .map(|s| quote! { Some(#s) })
@@ -523,18 +550,18 @@ impl<'a> LifterGenerator<'a> {
         }
     }
 
-    fn generate_dtree_decision(id: usize, scope: usize, pat: &DecisionPair) -> TokenStream {
+    fn generate_dtree_decision(&self, id: usize, scope: usize, pat: &DecisionPair) -> TokenStream {
         let ctor = Self::ctor_vname(id, scope, pat.id());
 
         let pattern = match pat.pattern() {
             DisjointPattern::Instruction(pat) => {
-                let pat = Self::generate_dtree_pattern(pat.mask_value());
+                let pat = self.generate_dtree_pattern(pat.mask_value());
                 quote! {
                     fugue_lifter_runtime::resolve::DisjointPattern::Instruction(#pat)
                 }
             }
             DisjointPattern::Context(pat) => {
-                let pat = Self::generate_dtree_pattern(pat.mask_value());
+                let pat = self.generate_dtree_pattern(pat.mask_value());
                 quote! {
                     fugue_lifter_runtime::resolve::DisjointPattern::Context(#pat)
                 }
@@ -543,8 +570,8 @@ impl<'a> LifterGenerator<'a> {
                 context,
                 instruction,
             } => {
-                let context = Self::generate_dtree_pattern(context.mask_value());
-                let instruction = Self::generate_dtree_pattern(instruction.mask_value());
+                let context = self.generate_dtree_pattern(context.mask_value());
+                let instruction = self.generate_dtree_pattern(instruction.mask_value());
 
                 quote! {
                     fugue_lifter_runtime::resolve::DisjointPattern::Combine {
@@ -563,22 +590,24 @@ impl<'a> LifterGenerator<'a> {
         }
     }
 
-    fn generate_dtree_simplified(id: usize, scope: usize, dtree: &DecisionNode) -> TokenStream {
+    fn generate_dtree_simplified(&mut self, id: usize, scope: usize, dtree: &DecisionNode) -> usize {
         let mut patterns = Vec::new();
         for pattern in dtree.patterns() {
-            patterns.push(Self::generate_dtree_decision(id, scope, pattern));
+            patterns.push(self.generate_dtree_decision(id, scope, pattern));
         }
 
         let mut children = Vec::new();
         for child in dtree.children() {
-            children.push(Self::generate_dtree_simplified(id, scope, child));
+            children.push(self.generate_dtree_simplified(id, scope, child));
         }
 
         let start_bit = dtree.start_bit() as u32;
         let size = dtree.size() as u32;
         let context_decision = dtree.context_decision();
 
-        quote! {
+        let dtree_id = self.tables.dtrees.len();
+
+        self.tables.dtrees.push(quote! {
             fugue_lifter_runtime::resolve::DecisionNode {
                 start_bit: #start_bit,
                 size: #size,
@@ -586,24 +615,26 @@ impl<'a> LifterGenerator<'a> {
                 patterns: &[#(#patterns),*],
                 children: &[#(#children),*],
             }
-        }
+        });
+
+        dtree_id
     }
 
     fn generate_subtable(
-        &self,
+        &mut self,
         id: usize,
         scope: usize,
         ctors: &[Constructor],
         dtree: &DecisionNode,
     ) -> Result<TokenStream, LifterGeneratorError> {
+        /*
         let tname = format_ident!("SubTable{id}In{scope}");
         let cname = format_ident!("__SUBTABLE_{id}_IN_{scope}");
+        */
 
         // let mut trees = Vec::new();
 
-        let ctor_tokens = self.generate_constructors(id, scope, ctors);
         // let dtree_tokens = self.generate_dtree(id, scope, dtree, &mut trees);
-        let dtree_tokens = Self::generate_dtree_simplified(id, scope, dtree);
 
         /*
         let tokens = quote! {
@@ -621,9 +652,12 @@ impl<'a> LifterGenerator<'a> {
         };
         */
 
+        let ctor_tokens = self.generate_constructors(id, scope, ctors);
+
         let tokens = quote! {
             #(#ctor_tokens)*
 
+            /*
             pub static #cname: fugue_lifter_runtime::resolve::DecisionNode = #dtree_tokens;
 
             pub struct #tname;
@@ -636,7 +670,10 @@ impl<'a> LifterGenerator<'a> {
                     #cname.resolve(input)
                 }
             }
+            */
         };
+
+        self.generate_dtree_simplified(id, scope, dtree);
 
         Ok(tokens)
     }
@@ -795,6 +832,9 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let little_endian = self.language.architecture().endian().is_little();
         let variant = self.language.architecture().variant();
 
+        let root_dtree = self.tables.subtable_id_mapping[&(0, 0)];
+        let dtrees = &self.tables.dtrees;
+
         tokens.append_all(quote! {
             pub const LANGUAGE_ID: &'static str = #language_id;
 
@@ -924,6 +964,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 }
             }
 
+            static DTREES: &[fugue_lifter_runtime::resolve::DecisionNode] = &[
+                #(#dtrees,)*
+            ];
+
             struct Instruction;
 
             impl fugue_lifter_runtime::ConstructorResolver for Instruction {
@@ -931,11 +975,21 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
                 const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
 
+                const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DTREES;
+
                 #[inline(always)]
                 fn resolve(
                     state: &mut fugue_lifter_runtime::LiftingContextState,
                 ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                     resolve_constructor(state)
+                }
+
+                #[inline(always)]
+                fn resolve_constructor(
+                    id: usize,
+                    state: &mut fugue_lifter_runtime::LiftingContextState,
+                ) -> Option<&'static fugue_lifter_runtime::Constructor> {
+                    resolve_constructo_by_id(id, state)
                 }
 
                 #[inline(always)]
@@ -964,7 +1018,19 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = SubTable0In0::resolve(state)?;
+                    let ctor = DTREES[#root_dtree].resolve::<Instruction>(state)?;
+                    ctor.resolve_operands::<Instruction>(state)?;
+                    Some(ctor)
+                }
+            }
+
+            #[inline(always)]
+            pub fn resolve_constructo_by_id(
+                id: usize,
+                state: &mut fugue_lifter_runtime::LiftingContextState,
+            ) -> Option<&'static fugue_lifter_runtime::Constructor> {
+                unsafe {
+                    let ctor = DTREES[id].resolve::<Instruction>(state)?;
                     ctor.resolve_operands::<Instruction>(state)?;
                     Some(ctor)
                 }

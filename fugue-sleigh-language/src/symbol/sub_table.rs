@@ -376,6 +376,10 @@ impl DecisionNode {
         &self.children
     }
 
+    pub fn count_children(&self) -> usize {
+        self.children.iter().map(|node| 1 + node.count_children()).sum()
+    }
+
     pub fn from_decoder<D: Decoder>(
         input: &mut D,
     ) -> Result<Self, DeserialiseError> {

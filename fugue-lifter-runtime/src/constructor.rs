@@ -4,6 +4,7 @@ use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
 use crate::pattern::PatternOp;
 use crate::pcode::LiftingContextState;
+use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
 use crate::template::{ConstructTpl, HandleTpl};
 
@@ -11,7 +12,8 @@ pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
 pub enum OperandResolver {
     None,
-    Constructor(fn(&mut LiftingContextState<'_>) -> Option<&'static Constructor>),
+    // Constructor(fn(&mut LiftingContextState<'_>) -> Option<&'static Constructor>),
+    Constructor(usize),
     Filter(&'static OperandFilter),
 }
 
@@ -55,7 +57,13 @@ pub trait ConstructorResolver {
     const DEFAULT_SPACE: u8;
     const UNIQUE_SPACE: u8;
 
+    const DECISION_TREES: &'static [DecisionNode];
+
     fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
+    fn resolve_constructor(
+        id: usize,
+        input: &mut LiftingContextState,
+    ) -> Option<&'static Constructor>;
     fn resolve_upper_bound(space: u8) -> u64;
     fn resolve_word_size(space: u8) -> usize;
     fn resolve_location_offset(unique_offset: u64, space: u8, offset: u64, size: u16) -> u64;
@@ -170,8 +178,8 @@ impl Constructor {
                     OperandResolver::Filter(filter) => {
                         filter.validate::<R>(state)?;
                     }
-                    OperandResolver::Constructor(resolver) => {
-                        let ctor = (resolver)(state)?;
+                    OperandResolver::Constructor(id) => {
+                        let ctor = R::resolve_constructor(id, state)?;
 
                         state.input().set_constructor(ctor);
 

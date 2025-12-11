@@ -1,5 +1,6 @@
 use crate::constructor::Constructor;
 use crate::pcode::LiftingContextState;
+use crate::ConstructorResolver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionNode {
@@ -7,7 +8,7 @@ pub struct DecisionNode {
     pub size: u32,
     pub context_decision: bool,
     pub patterns: &'static [DecisionPair],
-    pub children: &'static [DecisionNode],
+    pub children: &'static [usize],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +36,10 @@ pub struct Pattern {
 }
 
 impl DecisionNode {
-    pub fn resolve(&self, input: &mut LiftingContextState) -> Option<&'static Constructor> {
+    pub fn resolve<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState,
+    ) -> Option<&'static Constructor> {
         let mut curr = self;
 
         // traverse down the tree until we hit a leaf
@@ -54,7 +58,7 @@ impl DecisionNode {
                 }
             };
 
-            curr = curr.children.get(index as usize)?;
+            curr = &R::DECISION_TREES[*curr.children.get(index as usize)?];
         }
 
         // size is 0, we are at a leaf
