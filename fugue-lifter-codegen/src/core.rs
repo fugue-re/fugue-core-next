@@ -20,23 +20,34 @@ use crate::LifterGeneratorError;
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
-    symbols: Vec<TokenStream>,
     language: &'a Language,
     tables: Tables,
 }
 
 #[derive(Default)]
-struct Tables {
+pub(crate) struct Tables {
     // ctors: Vec<TokenStream>,
     dtrees: Vec<TokenStream>,
-    subtable_id_mapping: BTreeMap<(usize, usize), usize>,
+    operand_filters: Vec<TokenStream>,
+    subtables: Vec<TokenStream>,
+    symbols: Vec<TokenStream>,
+
+    operand_filter_id_mapping: BTreeMap<usize, usize>, // sym -> filter
+    // FIXME: (id, scope) is not needed--id should be unique across scopes
+    subtable_id_mapping: BTreeMap<(usize, usize), usize>, // (id, scope) -> dtree
+    symbol_id_mapping: BTreeMap<usize, usize>,            // sym -> sym
+}
+
+impl Tables {
+    pub(crate) fn symbol_for(&self, sym_id: usize) -> usize {
+        self.symbol_id_mapping[&sym_id]
+    }
 }
 
 impl<'a> LifterGenerator<'a> {
     pub fn new(language: &'a Language) -> Result<Self, LifterGeneratorError> {
         let mut slf = Self {
             context_variables: Vec::new(),
-            symbols: Vec::new(),
             language,
             tables: Tables::default(),
         };
@@ -49,24 +60,47 @@ impl<'a> LifterGenerator<'a> {
     pub fn build(&mut self) -> Result<(), LifterGeneratorError> {
         let symtab = self.language.symbol_table();
 
-        let mut i = 0;
-        for (id, scope, dtree) in symtab
-            .symbols()
-            .iter()
-            .filter_map(|s| {
-                if let Symbol::Subtable { id, scope, decision_tree, .. } = s {
-                    Some((*id, *scope, decision_tree))
-                } else {
-                    None
+        let mut operand_filter_idx = 0;
+        let mut subtable_idx = 0;
+        let mut symbol_idx = 0;
+
+        for symbol in symtab.symbols().iter() {
+            match symbol {
+                Symbol::Subtable {
+                    id,
+                    scope,
+                    decision_tree,
+                    ..
+                } => {
+                    let number_of_children = decision_tree.count_children();
+                    let offset = subtable_idx + number_of_children;
+
+                    self.tables
+                        .subtable_id_mapping
+                        .insert((*id, *scope), offset);
+
+                    subtable_idx = offset + 1;
                 }
-            })
-        {
-            let number_of_children = dtree.count_children();
-            let offset = i + number_of_children;
+                Symbol::UserOp { .. }
+                | Symbol::Context { .. }
+                | Symbol::FlowDest { .. }
+                | Symbol::FlowRef { .. } => {
+                    // no mapping
+                }
+                _ => {
+                    self.tables
+                        .symbol_id_mapping
+                        .insert(symbol.id(), symbol_idx);
+                    symbol_idx += 1;
 
-            self.tables.subtable_id_mapping.insert((id, scope), offset);
-
-            i = offset + 1;
+                    if symbol.has_filter() {
+                        self.tables
+                            .operand_filter_id_mapping
+                            .insert(symbol.id(), operand_filter_idx);
+                        operand_filter_idx += 1;
+                    }
+                }
+            }
         }
 
         for symbol in symtab.symbols().iter() {
@@ -79,10 +113,20 @@ impl<'a> LifterGenerator<'a> {
             } = symbol
             {
                 let tokens = self.generate_subtable(*id, *scope, constructors, decision_tree)?;
-                self.symbols.push(tokens);
+                self.tables.subtables.push(tokens);
             } else {
-                self.symbols
-                    .push(SymbolAdaptor::new(&self.language, symbol).to_token_stream());
+                let resolver = SymbolAdaptor::new(&self.language, symbol, &self.tables);
+
+                let symbol = resolver.symbol_tokens();
+                let filter = resolver.operand_filter_tokens();
+
+                if let Some(symbol) = symbol {
+                    self.tables.symbols.push(symbol);
+                }
+
+                if let Some(filter) = filter {
+                    self.tables.operand_filters.push(filter);
+                }
             }
         }
 
@@ -145,13 +189,13 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = self.tables.operand_filter_id_mapping[&id];
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = self.tables.symbol_id_mapping[&id];
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -163,13 +207,13 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = self.tables.operand_filter_id_mapping[&id];
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = self.tables.symbol_id_mapping[&id];
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -181,13 +225,13 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = self.tables.operand_filter_id_mapping[&id];
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = self.tables.symbol_id_mapping[&id];
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -195,9 +239,9 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = quote! { fugue_lifter_runtime::OperandResolver::None };
 
                         let id = symbol.id();
-                        let ident = format_ident!("__SYM{id}");
+                        let index = self.tables.symbol_id_mapping[&id];
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -590,7 +634,12 @@ impl<'a> LifterGenerator<'a> {
         }
     }
 
-    fn generate_dtree_simplified(&mut self, id: usize, scope: usize, dtree: &DecisionNode) -> usize {
+    fn generate_dtree_simplified(
+        &mut self,
+        id: usize,
+        scope: usize,
+        dtree: &DecisionNode,
+    ) -> usize {
         let mut patterns = Vec::new();
         for pattern in dtree.patterns() {
             patterns.push(self.generate_dtree_decision(id, scope, pattern));
@@ -834,6 +883,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
         let root_dtree = self.tables.subtable_id_mapping[&(0, 0)];
         let dtrees = &self.tables.dtrees;
+        let operand_filters = &self.tables.operand_filters;
+        let symbols = &self.tables.symbols;
 
         tokens.append_all(quote! {
             pub const LANGUAGE_ID: &'static str = #language_id;
@@ -964,8 +1015,16 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 }
             }
 
-            static DTREES: &[fugue_lifter_runtime::resolve::DecisionNode] = &[
+            static DECISION_TREES: &[fugue_lifter_runtime::resolve::DecisionNode] = &[
                 #(#dtrees,)*
+            ];
+
+            static OPERAND_FILTERS: &[fugue_lifter_runtime::constructor::OperandFilter] = &[
+                #(#operand_filters,)*
+            ];
+
+            static SYMBOLS: &[fugue_lifter_runtime::symbol::Symbol] = &[
+                #(#symbols,)*
             ];
 
             struct Instruction;
@@ -975,7 +1034,9 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
                 const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
 
-                const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DTREES;
+                const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DECISION_TREES;
+                const OPERAND_FILTERS: &'static [fugue_lifter_runtime::constructor::OperandFilter] = OPERAND_FILTERS;
+                const SYMBOLS: &'static [fugue_lifter_runtime::symbol::Symbol] = SYMBOLS;
 
                 #[inline(always)]
                 fn resolve(
@@ -1018,7 +1079,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = DTREES[#root_dtree].resolve::<Instruction>(state)?;
+                    let ctor = DECISION_TREES[#root_dtree].resolve::<Instruction>(state)?;
                     ctor.resolve_operands::<Instruction>(state)?;
                     Some(ctor)
                 }
@@ -1030,7 +1091,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = DTREES[id].resolve::<Instruction>(state)?;
+                    let ctor = DECISION_TREES[id].resolve::<Instruction>(state)?;
                     ctor.resolve_operands::<Instruction>(state)?;
                     Some(ctor)
                 }
@@ -1271,6 +1332,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             pub static LANGUAGE: &'static fugue_lifter_runtime::language::Language = &fugue_lifter_runtime::language::Language::new::<L>();
         });
 
-        tokens.append_all(&self.symbols);
+        tokens.append_all(&self.tables.subtables);
     }
 }

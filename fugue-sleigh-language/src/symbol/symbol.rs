@@ -241,6 +241,21 @@ impl Symbol {
             _ => unreachable!(),
         }
     }
+
+    pub fn has_filter(&self) -> bool {
+        match self {
+            Self::Name {
+                table_is_filled, ..
+            }
+            | Self::ValueMap {
+                table_is_filled, ..
+            }
+            | Self::VarnodeList {
+                table_is_filled, ..
+            } => !*table_is_filled,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,7 +408,8 @@ impl SymbolBuilder {
                     return Err(DeserialiseError::ElementUnexpected(symbol_id));
                 }
 
-                let AddressSpaceRef::Other(space_id) = input.read_space_with_id(&ATTRIB_SPACE)? else {
+                let AddressSpaceRef::Other(space_id) = input.read_space_with_id(&ATTRIB_SPACE)?
+                else {
                     return Err(DeserialiseError::Invariant("varnode space not supported"));
                 };
 
@@ -573,7 +589,11 @@ impl SymbolBuilder {
 
                     match dtree_id {
                         ELEM_CONSTRUCTOR_ID => {
-                            constructors.push(Constructor::from_decoder(spaces, input, (self.id, id))?);
+                            constructors.push(Constructor::from_decoder(
+                                spaces,
+                                input,
+                                (self.id, id),
+                            )?);
                         }
                         ELEM_DECISION_ID => {
                             if decision_root.is_none() {

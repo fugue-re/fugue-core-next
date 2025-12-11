@@ -12,9 +12,8 @@ pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
 pub enum OperandResolver {
     None,
-    // Constructor(fn(&mut LiftingContextState<'_>) -> Option<&'static Constructor>),
     Constructor(usize),
-    Filter(&'static OperandFilter),
+    Filter(usize),
 }
 
 pub struct OperandFilter {
@@ -40,7 +39,7 @@ impl OperandFilter {
 
 pub enum OperandHandleResolver {
     None,
-    Symbol(&'static Symbol),
+    Symbol(usize),
     Expression(&'static [PatternOp]),
 }
 
@@ -58,6 +57,8 @@ pub trait ConstructorResolver {
     const UNIQUE_SPACE: u8;
 
     const DECISION_TREES: &'static [DecisionNode];
+    const OPERAND_FILTERS: &'static [OperandFilter];
+    const SYMBOLS: &'static [Symbol];
 
     fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
     fn resolve_constructor(
@@ -176,7 +177,7 @@ impl Constructor {
                 match opnd.resolver {
                     OperandResolver::None => (),
                     OperandResolver::Filter(filter) => {
-                        filter.validate::<R>(state)?;
+                        R::OPERAND_FILTERS[filter].validate::<R>(state)?;
                     }
                     OperandResolver::Constructor(id) => {
                         let ctor = R::resolve_constructor(id, state)?;
@@ -228,8 +229,8 @@ impl Constructor {
                     OperandHandleResolver::None => {
                         continue 'outer;
                     }
-                    OperandHandleResolver::Symbol(ref symbol) => {
-                        let handle = symbol.resolve_handle::<R>(state)?;
+                    OperandHandleResolver::Symbol(symbol) => {
+                        let handle = R::SYMBOLS[symbol].resolve_handle::<R>(state)?;
                         state.input().set_parent_handle(handle);
                     }
                     OperandHandleResolver::Expression(ref expr) => {
@@ -301,7 +302,7 @@ impl Constructor {
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        symbol.format::<R, _>(state, writer)?;
+                        R::SYMBOLS[*symbol].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
                         PatternOp::format::<R, _>(expr, state, writer)?;
@@ -356,7 +357,7 @@ impl Constructor {
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        symbol.format::<R, _>(state, writer)?;
+                        R::SYMBOLS[*symbol].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
                         PatternOp::format::<R, _>(expr, state, writer)?;
@@ -385,7 +386,7 @@ impl Constructor {
                             state.input().constructor().format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Symbol(symbol) => {
-                            symbol.format::<R, _>(state, writer)?;
+                            R::SYMBOLS[*symbol].format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Expression(expr) => {
                             PatternOp::format::<R, _>(expr, state, writer)?;
