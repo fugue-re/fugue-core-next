@@ -3,18 +3,24 @@ use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, ToTokens};
+use quote::{quote, ToTokens};
 
+use crate::core::Tables;
 use crate::types::pattern::PatternExpressionAdaptor;
 
-pub struct ContextAdaptor<'a> {
+pub(crate) struct ContextAdaptor<'a> {
     language: &'a Language,
     context: &'a Context,
+    tables: &'a Tables,
 }
 
 impl<'a> ContextAdaptor<'a> {
-    pub fn new(language: &'a Language, context: &'a Context) -> Self {
-        Self { language, context }
+    pub(crate) fn new(language: &'a Language, context: &'a Context, tables: &'a Tables) -> Self {
+        Self {
+            language,
+            context,
+            tables,
+        }
     }
 }
 
@@ -32,7 +38,8 @@ impl<'a> ToTokens for ContextAdaptor<'a> {
                 let num = *num;
                 let shift = *shift;
                 let mask = *mask;
-                let value = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let value =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
 
                 quote! {
                     fugue_lifter_runtime::context::ContextPreAction {
@@ -59,8 +66,8 @@ impl<'a> ToTokens for ContextAdaptor<'a> {
                     let opid = *handle_index;
                     quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Operand(#opid) }
                 } else {
-                    let ident = format_ident!("__SYM{symbol_id}");
-                    quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Symbol(&#ident) }
+                    let symbol = self.tables.symbol_for(*symbol_id);
+                    quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Symbol(#symbol) }
                 };
 
                 let space = self.language.spaces().default_space_ref();

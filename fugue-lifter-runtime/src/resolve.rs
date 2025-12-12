@@ -8,12 +8,12 @@ pub struct DecisionNode {
     pub size: u32,
     pub context_decision: bool,
     pub patterns: &'static [DecisionPair],
-    pub children: &'static [usize],
+    pub children: &'static [u16],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionPair {
-    pub constructor: &'static Constructor,
+    pub constructor: u16,
     pub pattern: DisjointPattern,
 }
 
@@ -58,13 +58,13 @@ impl DecisionNode {
                 }
             };
 
-            curr = &R::DECISION_TREES[*curr.children.get(index as usize)?];
+            curr = &R::DECISION_TREES[*curr.children.get(index as usize)? as usize];
         }
 
         // size is 0, we are at a leaf
         for pattern in curr.patterns.iter() {
             if pattern.matches(input) {
-                return Some(pattern.constructor());
+                return Some(pattern.constructor::<R>());
             }
         }
 
@@ -84,8 +84,8 @@ impl DecisionPair {
         }
     }
 
-    pub fn constructor(&self) -> &'static Constructor {
-        self.constructor
+    pub fn constructor<R: ConstructorResolver>(&self) -> &'static Constructor {
+        &R::CONSTRUCTORS[self.constructor as usize]
     }
 }
 

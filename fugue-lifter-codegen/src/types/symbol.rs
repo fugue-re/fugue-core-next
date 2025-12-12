@@ -29,7 +29,10 @@ impl<'a> SymbolAdaptor<'a> {
         indices: impl Iterator<Item = usize>,
         limit: usize,
     ) -> TokenStream {
-        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern);
+        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern, self.tables);
+        let indices = indices.map(|i| u16::try_from(i).expect("index fits in u16"));
+        let limit = u16::try_from(limit).expect("limit fits in u16");
+
         quote! {
             fugue_lifter_runtime::constructor::OperandFilter {
                 pattern: #pvalue,
@@ -106,7 +109,8 @@ impl<'a> SymbolAdaptor<'a> {
                 fugue_lifter_runtime::symbol::Symbol::Epsilon
             },
             S::Value { pattern_value, .. } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
                 quote! {
                     fugue_lifter_runtime::symbol::Symbol::Value {
                         pattern_value: #pvalue,
@@ -119,7 +123,8 @@ impl<'a> SymbolAdaptor<'a> {
                 table_is_filled,
                 ..
             } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
 
                 if *table_is_filled {
                     let values = value_table.iter().copied();
@@ -135,7 +140,7 @@ impl<'a> SymbolAdaptor<'a> {
                         if v == 0xbadbeef {
                             None
                         } else {
-                            Some(v)
+                            Some(u16::try_from(v).expect("value fits in u16"))
                         }
                     });
 
@@ -153,7 +158,8 @@ impl<'a> SymbolAdaptor<'a> {
                 ..
             } => {
                 // NOTE: we could merge those cases that are behaviourally similar
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
                 let symbols = name_table.iter().map(|v| {
                     if v == "\t" {
                         quote! { None }
@@ -196,7 +202,8 @@ impl<'a> SymbolAdaptor<'a> {
                 table_is_filled,
                 ..
             } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
 
                 if *table_is_filled {
                     let values = varnode_table.iter().copied().map(|id| {

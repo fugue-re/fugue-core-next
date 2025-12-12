@@ -31,12 +31,12 @@ pub enum Symbol {
     },
     VarnodeList {
         pattern_value: &'static [PatternOp],
-        varnode_table: &'static [Option<usize>],
+        varnode_table: &'static [Option<u16>],
         symbol_table: &'static [Option<&'static str>],
     },
     VarnodeListFilled {
         pattern_value: &'static [PatternOp],
-        varnode_table: &'static [usize],
+        varnode_table: &'static [u16],
         symbol_table: &'static [&'static str],
     },
     Operand {
@@ -178,7 +178,7 @@ impl Symbol {
                 ..
             } => {
                 let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
-                let symbol = &R::SYMBOLS[varnode_table.get(index).copied()??];
+                let symbol = &R::SYMBOLS[varnode_table.get(index).copied()?? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
             Symbol::VarnodeListFilled {
@@ -187,7 +187,7 @@ impl Symbol {
                 ..
             } => {
                 let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
-                let symbol = &R::SYMBOLS[*varnode_table.get(index)?];
+                let symbol = &R::SYMBOLS[*varnode_table.get(index)? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
             Symbol::ValueMap {

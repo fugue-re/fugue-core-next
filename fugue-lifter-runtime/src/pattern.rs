@@ -77,7 +77,7 @@ pub enum PatternOp {
         value: i64,
     },
     Operand {
-        constructor: &'static Constructor,
+        constructor: u16,
         offset: OperandOffset,
         value: &'static [Self],
     },
@@ -502,8 +502,11 @@ impl PatternOp {
                     let mut point =
                         &input.inputs.input.context.constructors[input.inputs.input.point as usize];
 
-                    let ctor_id = constructor.id;
+                    let ctor_id = *constructor;
+                    let constructor = &R::CONSTRUCTORS[ctor_id as usize];
 
+                    // TODO: recheck this logic--the constructor IDs are different from the
+                    // original implementation, it should be fine...
                     while point.constructor.map(|ctor| ctor.id) != Some(ctor_id) {
                         if cur_depth <= 0 {
                             let old_point = input.inputs.input.point;
@@ -518,7 +521,7 @@ impl PatternOp {
                                 let cstate = &mut input.inputs.input.context.constructors
                                     [input.inputs.input.point as usize];
 
-                                cstate.constructor = Some(*constructor);
+                                cstate.constructor = Some(constructor);
                                 cstate.handle = None;
                                 cstate.parent = INVALID_HANDLE;
                                 cstate.operands = INVALID_HANDLE;
@@ -576,7 +579,7 @@ impl PatternOp {
                         let cstate = &mut input.inputs.input.context.constructors
                             [input.inputs.input.point as usize];
 
-                        cstate.constructor = Some(*&constructor);
+                        cstate.constructor = Some(&constructor);
                         cstate.handle = None;
                         cstate.parent = INVALID_HANDLE;
                         cstate.operands = INVALID_HANDLE;
