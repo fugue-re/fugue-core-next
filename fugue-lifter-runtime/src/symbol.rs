@@ -2,25 +2,24 @@ use std::fmt;
 
 use crate::constructor::ConstructorResolver;
 use crate::input::FixedHandle;
-use crate::pattern::PatternOp;
+use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
-#[derive(Clone)]
 pub enum Symbol {
     Epsilon,
     Value {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
     },
     ValueMap {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
         value_table: &'static [Option<i64>],
     },
     ValueMapFilled {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
         value_table: &'static [i64],
     },
     Name {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
         symbol_table: &'static [Option<&'static str>],
     },
     Varnode {
@@ -30,12 +29,12 @@ pub enum Symbol {
         size: u16,
     },
     VarnodeList {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
         varnode_table: &'static [Option<u16>],
         symbol_table: &'static [Option<&'static str>],
     },
     VarnodeListFilled {
-        pattern_value: &'static [PatternOp],
+        pattern_value: PatternExpression,
         varnode_table: &'static [u16],
         symbol_table: &'static [&'static str],
     },
@@ -75,7 +74,7 @@ impl Symbol {
                 symbol_table,
                 ..
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, state).expect("resolved");
+                let index = pattern_value.resolve::<R>(state).expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
                     writer.write_str(name)?;
                 }
@@ -85,7 +84,7 @@ impl Symbol {
                 symbol_table,
                 ..
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, state).expect("resolved");
+                let index = pattern_value.resolve::<R>(state).expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied() {
                     writer.write_str(name)?;
                 }
@@ -94,7 +93,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, state).expect("resolved");
+                let index = pattern_value.resolve::<R>(state).expect("resolved");
                 if let Some(value) = value_table.get(index as usize).copied().flatten() {
                     if value < 0 {
                         write!(writer, "-{:#x}", -(value as i128))?;
@@ -127,7 +126,7 @@ impl Symbol {
                 ..Default::default()
             },
             Symbol::Name { pattern_value, .. } | Symbol::Value { pattern_value } => {
-                let value = PatternOp::resolve::<R>(pattern_value, input)?;
+                let value = pattern_value.resolve::<R>(input)?;
                 FixedHandle {
                     space: 0,
                     offset_offset: value as u64,
@@ -177,7 +176,7 @@ impl Symbol {
                 varnode_table,
                 ..
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
+                let index = pattern_value.resolve::<R>(input)? as usize;
                 let symbol = &R::SYMBOLS[varnode_table.get(index).copied()?? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
@@ -186,7 +185,7 @@ impl Symbol {
                 varnode_table,
                 ..
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
+                let index = pattern_value.resolve::<R>(input)? as usize;
                 let symbol = &R::SYMBOLS[*varnode_table.get(index)? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
@@ -194,7 +193,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
+                let index = pattern_value.resolve::<R>(input)? as usize;
                 let value = *value_table.get(index)?.as_ref()? as u64;
 
                 FixedHandle {
@@ -207,7 +206,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = PatternOp::resolve::<R>(pattern_value, input)? as usize;
+                let index = pattern_value.resolve::<R>(input)? as usize;
                 let value = *value_table.get(index)? as u64;
 
                 FixedHandle {

@@ -29,6 +29,7 @@ pub(crate) struct Tables {
     ctors: Vec<TokenStream>,
     dtrees: Vec<TokenStream>,
     operand_filters: Vec<TokenStream>,
+    pattern_ops: Vec<TokenStream>,
     symbols: Vec<TokenStream>,
 
     ctor_id_mapping: BTreeMap<(usize, usize, usize), usize>, // (id, scope, ctor) -> ctor
@@ -46,6 +47,18 @@ impl Tables {
 
     pub(crate) fn symbol_for(&self, sym_id: usize) -> u16 {
         u16::try_from(self.symbol_id_mapping[&sym_id]).expect("symbol id fits in u16")
+    }
+
+    pub(crate) fn pattern_ops(&self) -> &[TokenStream] {
+        &self.pattern_ops
+    }
+
+    pub(crate) fn pattern_ops_mut(&mut self) -> &mut [TokenStream] {
+        &mut self.pattern_ops
+    }
+
+    pub(crate) fn push_pattern_op(&mut self, op: TokenStream) {
+        self.pattern_ops.push(op);
     }
 }
 
@@ -127,7 +140,7 @@ impl<'a> LifterGenerator<'a> {
             {
                 self.generate_subtable(*id, *scope, constructors, decision_tree);
             } else {
-                let resolver = SymbolAdaptor::new(&self.language, symbol, &self.tables);
+                let mut resolver = SymbolAdaptor::new(&self.language, symbol, &mut self.tables);
 
                 let symbol = resolver.symbol_tokens();
                 let filter = resolver.operand_filter_tokens();
@@ -163,7 +176,7 @@ impl<'a> LifterGenerator<'a> {
         Ok(())
     }
 
-    fn generate_constructor_operand_resolvers(&self, ctor: &Constructor) -> Vec<TokenStream> {
+    fn generate_constructor_operand_resolvers(&mut self, ctor: &Constructor) -> Vec<TokenStream> {
         let mut operands = Vec::new();
 
         for oid in 0..ctor.operand_count() {
@@ -271,7 +284,8 @@ impl<'a> LifterGenerator<'a> {
                 let resolver = quote! { fugue_lifter_runtime::OperandResolver::None };
 
                 let pexp = operand.defining_expression().unwrap();
-                let value = PatternExpressionAdaptor::new(&self.language, pexp, &self.tables);
+                let value = PatternExpressionAdaptor::new(&self.language, pexp, &mut self.tables)
+                    .pattern_expression_tokens();
                 let handle_resolver =
                     quote! { fugue_lifter_runtime::OperandHandleResolver::Expression(#value) };
 
@@ -293,7 +307,7 @@ impl<'a> LifterGenerator<'a> {
     }
 
     fn generate_constructor_context_actions(
-        &self,
+        &mut self,
         ctor: &Constructor,
     ) -> (Vec<TokenStream>, Vec<TokenStream>) {
         let mut pre_actions = Vec::new();
@@ -303,12 +317,14 @@ impl<'a> LifterGenerator<'a> {
             match action {
                 Context::Operator { .. } => {
                     pre_actions.push(
-                        ContextAdaptor::new(&self.language, action, &self.tables).to_token_stream(),
+                        ContextAdaptor::new(&self.language, action, &mut self.tables)
+                            .context_action_tokens(),
                     );
                 }
                 Context::Commit { .. } => {
                     post_actions.push(
-                        ContextAdaptor::new(&self.language, action, &self.tables).to_token_stream(),
+                        ContextAdaptor::new(&self.language, action, &mut self.tables)
+                            .context_action_tokens(),
                     );
                 }
             }
@@ -865,6 +881,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             .expect("root decision tree id fits in u16");
         let dtrees = &self.tables.dtrees;
         let operand_filters = &self.tables.operand_filters;
+        let pattern_ops = &self.tables.pattern_ops;
         let symbols = &self.tables.symbols;
 
         tokens.append_all(quote! {
@@ -1008,6 +1025,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 #(#operand_filters,)*
             ];
 
+            static PATTERN_EXPRESSIONS: &[fugue_lifter_runtime::pattern::PatternOp] = &[
+                #(#pattern_ops,)*
+            ];
+
             static SYMBOLS: &[fugue_lifter_runtime::symbol::Symbol] = &[
                 #(#symbols,)*
             ];
@@ -1022,6 +1043,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const CONSTRUCTORS: &'static [fugue_lifter_runtime::Constructor] = CONSTRUCTORS;
                 const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DECISION_TREES;
                 const OPERAND_FILTERS: &'static [fugue_lifter_runtime::constructor::OperandFilter] = OPERAND_FILTERS;
+                const PATTERN_EXPRESSIONS: &'static [fugue_lifter_runtime::pattern::PatternOp] = PATTERN_EXPRESSIONS;
                 const SYMBOLS: &'static [fugue_lifter_runtime::symbol::Symbol] = SYMBOLS;
 
                 #[inline(always)]

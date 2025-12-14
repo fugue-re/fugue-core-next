@@ -11,11 +11,11 @@ use crate::types::pattern::PatternExpressionAdaptor;
 pub(crate) struct SymbolAdaptor<'a> {
     language: &'a Language,
     symbol: &'a Symbol,
-    tables: &'a Tables,
+    tables: &'a mut Tables,
 }
 
 impl<'a> SymbolAdaptor<'a> {
-    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'a Tables) -> Self {
+    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'a mut Tables) -> Self {
         Self {
             language,
             symbol,
@@ -24,12 +24,13 @@ impl<'a> SymbolAdaptor<'a> {
     }
 
     fn build_filter(
-        &self,
+        &mut self,
         pattern: &PatternExpression,
         indices: impl Iterator<Item = usize>,
         limit: usize,
     ) -> TokenStream {
-        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern, self.tables);
+        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern, &mut self.tables)
+            .pattern_expression_tokens();
         let indices = indices.map(|i| u16::try_from(i).expect("index fits in u16"));
         let limit = u16::try_from(limit).expect("limit fits in u16");
 
@@ -42,7 +43,7 @@ impl<'a> SymbolAdaptor<'a> {
         }
     }
 
-    pub(crate) fn operand_filter_tokens(&self) -> Option<TokenStream> {
+    pub(crate) fn operand_filter_tokens(&mut self) -> Option<TokenStream> {
         use Symbol as S;
 
         match self.symbol {
@@ -101,7 +102,7 @@ impl<'a> SymbolAdaptor<'a> {
         }
     }
 
-    pub(crate) fn symbol_tokens(&self) -> Option<TokenStream> {
+    pub(crate) fn symbol_tokens(&mut self) -> Option<TokenStream> {
         use Symbol as S;
 
         let value = match self.symbol {
@@ -110,7 +111,8 @@ impl<'a> SymbolAdaptor<'a> {
             },
             S::Value { pattern_value, .. } => {
                 let pvalue =
-                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
                 quote! {
                     fugue_lifter_runtime::symbol::Symbol::Value {
                         pattern_value: #pvalue,
@@ -124,7 +126,8 @@ impl<'a> SymbolAdaptor<'a> {
                 ..
             } => {
                 let pvalue =
-                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
 
                 if *table_is_filled {
                     let values = value_table.iter().copied();
@@ -159,7 +162,8 @@ impl<'a> SymbolAdaptor<'a> {
             } => {
                 // NOTE: we could merge those cases that are behaviourally similar
                 let pvalue =
-                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
                 let symbols = name_table.iter().map(|v| {
                     if v == "\t" {
                         quote! { None }
@@ -203,7 +207,8 @@ impl<'a> SymbolAdaptor<'a> {
                 ..
             } => {
                 let pvalue =
-                    PatternExpressionAdaptor::new(&self.language, pattern_value, self.tables);
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
 
                 if *table_is_filled {
                     let values = varnode_table.iter().copied().map(|id| {

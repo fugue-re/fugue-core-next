@@ -10,16 +10,15 @@ use itertools::Itertools;
 use crate::constructor::ConstructorResolver;
 use crate::input::{ContextCommit, FixedHandle};
 use crate::partmap::{BoundKind, PartMap};
-use crate::pattern::PatternOp;
+use crate::pattern::PatternExpression;
 use crate::pcode::{LiftingContextState, Varnode};
 use crate::wrap_offset;
 
-#[derive(Clone)]
 pub struct ContextPreAction {
     pub num: usize,
     pub shift: u32,
     pub mask: u32,
-    pub value: &'static [PatternOp],
+    pub value: PatternExpression,
 }
 
 impl ContextPreAction {
@@ -28,19 +27,17 @@ impl ContextPreAction {
         &self,
         input: &mut LiftingContextState<'_>,
     ) -> Option<()> {
-        let value = (PatternOp::resolve::<R>(self.value, input)? as u32) << self.shift;
+        let value = (self.value.resolve::<R>(input)? as u32) << self.shift;
         input.input().set_context_word(self.num, value, self.mask);
         Some(())
     }
 }
 
-#[derive(Clone)]
 pub enum ContextPostActionHandle {
     Operand(u16),
     Symbol(u16),
 }
 
-#[derive(Clone)]
 pub struct ContextPostAction {
     pub handle: ContextPostActionHandle,
     pub num: usize,

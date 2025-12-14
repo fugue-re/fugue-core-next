@@ -89,7 +89,10 @@ pub struct ConstructTpl {
 
 impl ConstructTpl {
     #[inline]
-    pub unsafe fn build<R: ConstructorResolver>(&self, input: &mut LiftingContextState<'_>) -> Option<()> {
+    pub unsafe fn build<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState<'_>,
+    ) -> Option<()> {
         let old_base = input.context.label_base;
 
         input.context.label_base = input.context.label_count;
@@ -162,7 +165,10 @@ impl ConstTpl {
 
     // fix space
     #[inline]
-    pub unsafe fn space_via<R: ConstructorResolver>(&self, input: &mut LiftingContextState<'_>) -> u8 {
+    pub unsafe fn space_via<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState<'_>,
+    ) -> u8 {
         match self {
             Self::CurrentSpace => R::DEFAULT_SPACE,
             Self::Handle(index, HandleKind::Space) => {
@@ -286,7 +292,10 @@ pub struct OpTpl {
 }
 
 impl OpTpl {
-    pub unsafe fn build<R: ConstructorResolver>(&self, input: &mut LiftingContextState) -> Option<()> {
+    pub unsafe fn build<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState,
+    ) -> Option<()> {
         match self.op {
             Op::Build => self.append_build_action::<R>(input),
             Op::DelaySlot => self.delay_slot_action::<R>(input),

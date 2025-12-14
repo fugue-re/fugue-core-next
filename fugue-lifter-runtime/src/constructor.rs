@@ -2,7 +2,7 @@ use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::pattern::PatternOp;
+use crate::pattern::{PatternExpression, PatternOp};
 use crate::pcode::LiftingContextState;
 use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
@@ -17,7 +17,7 @@ pub enum OperandResolver {
 }
 
 pub struct OperandFilter {
-    pub pattern: &'static [PatternOp],
+    pub pattern: PatternExpression,
     pub indices: &'static [u16],
     pub limit: u16,
 }
@@ -28,7 +28,7 @@ impl OperandFilter {
         &self,
         input: &mut LiftingContextState,
     ) -> Option<()> {
-        let index = u16::try_from(PatternOp::resolve::<R>(self.pattern, input)?).ok()?;
+        let index = u16::try_from(self.pattern.resolve::<R>(input)?).ok()?;
         if index >= self.limit || self.indices.contains(&index) {
             None
         } else {
@@ -40,7 +40,7 @@ impl OperandFilter {
 pub enum OperandHandleResolver {
     None,
     Symbol(u16),
-    Expression(&'static [PatternOp]),
+    Expression(PatternExpression),
 }
 
 pub struct Operand {
@@ -59,6 +59,7 @@ pub trait ConstructorResolver {
     const CONSTRUCTORS: &'static [Constructor];
     const DECISION_TREES: &'static [DecisionNode];
     const OPERAND_FILTERS: &'static [OperandFilter];
+    const PATTERN_EXPRESSIONS: &'static [PatternOp];
     const SYMBOLS: &'static [Symbol];
 
     fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
@@ -233,7 +234,7 @@ impl Constructor {
                         state.input().set_parent_handle(handle);
                     }
                     OperandHandleResolver::Expression(ref expr) => {
-                        let offset = PatternOp::resolve::<R>(expr, state)? as u64;
+                        let offset = expr.resolve::<R>(state)? as u64;
 
                         if let Some(handle) = state.input().parent_handle_mut() {
                             handle.space = 0;
@@ -294,7 +295,8 @@ impl Constructor {
 
         for p in pieces {
             match p {
-                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver {
+                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver
+                {
                     OperandHandleResolver::None => {
                         state.input().push_operand(*index as usize);
                         state.input().constructor().format::<R, _>(state, writer)?;
@@ -304,7 +306,7 @@ impl Constructor {
                         R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        PatternOp::format::<R, _>(expr, state, writer)?;
+                        expr.format::<R, _>(state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -349,7 +351,8 @@ impl Constructor {
 
         for p in pieces {
             match p {
-                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver {
+                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver
+                {
                     OperandHandleResolver::None => {
                         state.input().push_operand(*index as usize);
                         state.input().constructor().format::<R, _>(state, writer)?;
@@ -359,7 +362,7 @@ impl Constructor {
                         R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        PatternOp::format::<R, _>(expr, state, writer)?;
+                        expr.format::<R, _>(state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -388,7 +391,7 @@ impl Constructor {
                             R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Expression(expr) => {
-                            PatternOp::format::<R, _>(expr, state, writer)?;
+                            expr.format::<R, _>(state, writer)?;
                         }
                     }
                     state.input().pop_operand();
