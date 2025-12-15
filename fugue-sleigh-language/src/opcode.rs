@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::deserialise::DeserialiseError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 #[repr(u16)]
 pub enum Opcode {
     Copy,

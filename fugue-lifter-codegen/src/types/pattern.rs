@@ -7,10 +7,10 @@ use quote::quote;
 
 use crate::core::Tables;
 
-pub(crate) struct PatternExpressionAdaptor<'a> {
+pub(crate) struct PatternExpressionAdaptor<'a, 'b> {
     language: &'a Language,
     expression: &'a PatternExpression,
-    tables: &'a mut Tables,
+    tables: &'b mut Tables<'a>,
 }
 
 // NOTE: we need to return:
@@ -19,11 +19,11 @@ pub(crate) struct PatternExpressionAdaptor<'a> {
 // - &[PatternOp] which is the actual list of pattern operations that should be appended
 // to the global pattern operations table.
 
-impl<'a> PatternExpressionAdaptor<'a> {
+impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
     pub(crate) fn new(
         language: &'a Language,
         expression: &'a PatternExpression,
-        tables: &'a mut Tables,
+        tables: &'b mut Tables<'a>,
     ) -> Self {
         Self {
             language,

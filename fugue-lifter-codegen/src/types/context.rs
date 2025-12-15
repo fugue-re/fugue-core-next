@@ -8,17 +8,17 @@ use quote::quote;
 use crate::core::Tables;
 use crate::types::pattern::PatternExpressionAdaptor;
 
-pub(crate) struct ContextAdaptor<'a> {
+pub(crate) struct ContextAdaptor<'a, 'b> {
     language: &'a Language,
     context: &'a Context,
-    tables: &'a mut Tables,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a> ContextAdaptor<'a> {
+impl<'a, 'b> ContextAdaptor<'a, 'b> {
     pub(crate) fn new(
         language: &'a Language,
         context: &'a Context,
-        tables: &'a mut Tables,
+        tables: &'b mut Tables<'a>,
     ) -> Self {
         Self {
             language,
@@ -66,7 +66,7 @@ impl<'a> ContextAdaptor<'a> {
                     .expect("valid symbol");
 
                 let handle = if let Symbol::Operand { handle_index, .. } = symbol {
-                    let opid = *handle_index;
+                    let opid = u16::try_from(*handle_index).expect("handle_index fits in u16");
                     quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Operand(#opid) }
                 } else {
                     let symbol = self.tables.symbol_for(*symbol_id);

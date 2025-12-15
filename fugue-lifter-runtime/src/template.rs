@@ -346,8 +346,8 @@ impl OpTpl {
         if let Some(operand) = unsafe { input.operand_constructor(index) } {
             input.input().push_operand(index);
 
-            if let Some(builder) = &operand.build_action {
-                builder.build::<R>(input)?;
+            if let Some(builder) = operand.build_action {
+                construct_tpl::<R>(builder).build::<R>(input)?;
             }
 
             input.input().pop_operand();

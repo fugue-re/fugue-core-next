@@ -8,14 +8,14 @@ use quote::quote;
 use crate::core::Tables;
 use crate::types::pattern::PatternExpressionAdaptor;
 
-pub(crate) struct SymbolAdaptor<'a> {
+pub(crate) struct SymbolAdaptor<'a, 'b> {
     language: &'a Language,
     symbol: &'a Symbol,
-    tables: &'a mut Tables,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a> SymbolAdaptor<'a> {
-    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'a mut Tables) -> Self {
+impl<'a, 'b> SymbolAdaptor<'a, 'b> {
+    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'b mut Tables<'a>) -> Self {
         Self {
             language,
             symbol,
@@ -25,7 +25,7 @@ impl<'a> SymbolAdaptor<'a> {
 
     fn build_filter(
         &mut self,
-        pattern: &PatternExpression,
+        pattern: &'a PatternExpression,
         indices: impl Iterator<Item = usize>,
         limit: usize,
     ) -> TokenStream {

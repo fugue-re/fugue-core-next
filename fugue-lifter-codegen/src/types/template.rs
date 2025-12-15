@@ -4,39 +4,42 @@ use fugue_sleigh_language::construct::{
 use fugue_sleigh_language::opcode::Opcode;
 use fugue_sleigh_language::Language;
 
-use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::quote;
 
-pub struct TplAdaptor<'a, T> {
+use crate::core::Tables;
+
+pub(crate) struct TplAdaptor<'a, 'b, T> {
     language: &'a Language,
     tpl: &'a T,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a, T> TplAdaptor<'a, T> {
-    pub fn new(language: &'a Language, tpl: &'a T) -> Self {
-        Self { language, tpl }
-    }
-
-    pub fn wrap<U>(&self, tpl: &'a U) -> TplAdaptor<'a, U> {
-        TplAdaptor {
-            language: &self.language,
+impl<'a, 'b, T> TplAdaptor<'a, 'b, T> {
+    pub(crate) fn new(language: &'a Language, tpl: &'a T, tables: &'b mut Tables<'a>) -> Self {
+        Self {
+            language,
             tpl,
+            tables,
         }
     }
 }
 
-impl<'a> ToTokens for TplAdaptor<'a, ConstructTpl> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let delay_slot = self.tpl.delay_slot();
-        let labels = self.tpl.labels() as u8;
+impl<'a, 'b> TplAdaptor<'a, 'b, ConstructTpl> {
+    pub(crate) fn tokens(&mut self) -> u16 {
+        let delay_slot = u8::try_from(self.tpl.delay_slot()).expect("delay slot fits in u8");
+        let labels = u8::try_from(self.tpl.labels()).expect("labels fits in u8");
         let result = self.tpl.result().map_or_else(
             || quote! { None },
             |tpl| {
-                let tpl = self.wrap(tpl);
+                let tpl = TplAdaptor::new(&self.language, tpl, &mut self.tables).tokens();
                 quote! { Some(#tpl) }
             },
         );
-        let operations = self.tpl.operations().iter().map(|tpl| self.wrap(tpl));
+        let operations = self
+            .tpl
+            .operations()
+            .iter()
+            .map(|tpl| TplAdaptor::new(&self.language, tpl, &mut self.tables).tokens());
 
         let tpl = quote! {
             fugue_lifter_runtime::template::ConstructTpl {
@@ -47,21 +50,26 @@ impl<'a> ToTokens for TplAdaptor<'a, ConstructTpl> {
             }
         };
 
-        tpl.to_tokens(tokens);
+        self.tables.push_construct_tpl(self.tpl, tpl)
     }
 }
 
-impl<'a> ToTokens for TplAdaptor<'a, HandleTpl> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let space = self.wrap(self.tpl.space());
-        let size = self.wrap(self.tpl.size());
-        let ptr_space = self.wrap(self.tpl.ptr_space());
-        let ptr_offset = self.wrap(self.tpl.ptr_offset());
-        let ptr_size = self.wrap(self.tpl.ptr_size());
-        let tmp_space = self.wrap(self.tpl.tmp_space());
-        let tmp_offset = self.wrap(self.tpl.tmp_offset());
+impl<'a, 'b> TplAdaptor<'a, 'b, HandleTpl> {
+    pub(crate) fn tokens(&mut self) -> u16 {
+        let space = TplAdaptor::new(&self.language, self.tpl.space(), &mut self.tables).tokens();
+        let size = TplAdaptor::new(&self.language, self.tpl.size(), &mut self.tables).tokens();
+        let ptr_space =
+            TplAdaptor::new(&self.language, self.tpl.ptr_space(), &mut self.tables).tokens();
+        let ptr_offset =
+            TplAdaptor::new(&self.language, self.tpl.ptr_offset(), &mut self.tables).tokens();
+        let ptr_size =
+            TplAdaptor::new(&self.language, self.tpl.ptr_size(), &mut self.tables).tokens();
+        let tmp_space =
+            TplAdaptor::new(&self.language, self.tpl.tmp_space(), &mut self.tables).tokens();
+        let tmp_offset =
+            TplAdaptor::new(&self.language, self.tpl.tmp_offset(), &mut self.tables).tokens();
 
-        let tpl = quote! {
+        self.tables.push_handle_tpl(self.tpl, quote! {
             fugue_lifter_runtime::template::HandleTpl {
                 space: #space,
                 size: #size,
@@ -71,18 +79,16 @@ impl<'a> ToTokens for TplAdaptor<'a, HandleTpl> {
                 tmp_space: #tmp_space,
                 tmp_offset: #tmp_offset,
             }
-        };
-
-        tpl.to_tokens(tokens);
+        })
     }
 }
 
-impl<'a> ToTokens for TplAdaptor<'a, ConstTpl> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
+impl<'a, 'b> TplAdaptor<'a, 'b, ConstTpl> {
+    pub(crate) fn tokens(&mut self) -> u16 {
         use ConstTpl as C;
         use HandleKind as H;
 
-        let tpl = match self.tpl {
+        self.tables.push_const_tpl(self.tpl, match self.tpl {
             C::Real(val) => quote! { fugue_lifter_runtime::template::ConstTpl::Real(#val) },
             C::Handle(index, kind) => {
                 let kind = match kind {
@@ -110,14 +116,12 @@ impl<'a> ToTokens for TplAdaptor<'a, ConstTpl> {
                 quote! { fugue_lifter_runtime::template::ConstTpl::Relative(#val) }
             }
             _ => unimplemented!("flow operations not supported"),
-        };
-
-        tpl.to_tokens(tokens);
+        })
     }
 }
 
-impl<'a> ToTokens for TplAdaptor<'a, OpTpl> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
+impl<'a, 'b> TplAdaptor<'a, 'b, OpTpl> {
+    pub(crate) fn tokens(&mut self) -> u16 {
         use Opcode as O;
 
         let op = match self.tpl.opcode() {
@@ -195,14 +199,19 @@ impl<'a> ToTokens for TplAdaptor<'a, OpTpl> {
             O::LZCount => quote! { fugue_lifter_runtime::template::Op::LZCount },
         };
 
-        let inputs = self.tpl.inputs().iter().map(|tpl| self.wrap(tpl));
         let output = self.tpl.output().map_or_else(
             || quote! { None },
             |tpl| {
-                let tpl = self.wrap(tpl);
+                let tpl = TplAdaptor::new(&self.language, tpl, &mut self.tables).tokens();
                 quote! { Some(#tpl) }
             },
         );
+
+        let inputs = self
+            .tpl
+            .inputs()
+            .iter()
+            .map(|tpl| TplAdaptor::new(&self.language, tpl, &mut self.tables).tokens());
 
         let tpl = quote! {
             fugue_lifter_runtime::template::OpTpl {
@@ -212,24 +221,22 @@ impl<'a> ToTokens for TplAdaptor<'a, OpTpl> {
             }
         };
 
-        tpl.to_tokens(tokens);
+        self.tables.push_op_tpl(self.tpl, tpl)
     }
 }
 
-impl<'a> ToTokens for TplAdaptor<'a, VarnodeTpl> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        let space = self.wrap(self.tpl.space());
-        let offset = self.wrap(self.tpl.offset());
-        let size = self.wrap(self.tpl.size());
+impl<'a, 'b> TplAdaptor<'a, 'b, VarnodeTpl> {
+    pub(crate) fn tokens(&mut self) -> u16 {
+        let space = TplAdaptor::new(&self.language, self.tpl.space(), &mut self.tables).tokens();
+        let offset = TplAdaptor::new(&self.language, self.tpl.offset(), &mut self.tables).tokens();
+        let size = TplAdaptor::new(&self.language, self.tpl.size(), &mut self.tables).tokens();
 
-        let tpl = quote! {
+        self.tables.push_varnode_tpl(self.tpl, quote! {
             fugue_lifter_runtime::template::VarnodeTpl {
                 space: #space,
                 offset: #offset,
                 size: #size,
             }
-        };
-
-        tpl.to_tokens(tokens);
+        })
     }
 }
