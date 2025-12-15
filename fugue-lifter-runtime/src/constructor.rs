@@ -6,7 +6,7 @@ use crate::pattern::{PatternExpression, PatternOp};
 use crate::pcode::LiftingContextState;
 use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
-use crate::template::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
+use crate::template::{handle_tpl, ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 
 // pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
@@ -87,8 +87,8 @@ pub struct Constructor {
     pub context_pre_actions: &'static [ContextPreAction],
     pub context_post_actions: &'static [ContextPostAction],
     pub operands: &'static [Operand],
-    pub result: Option<HandleTpl>,
-    pub build_action: Option<ConstructTpl>,
+    pub result: Option<u16>, // HandleTpl
+    pub build_action: Option<u16>, // ConstructTpl
     pub print_pieces: &'static [PrintPiece],
     pub first_whitespace: Option<usize>,
     pub flow_through_index: Option<usize>,
@@ -260,8 +260,8 @@ impl Constructor {
                 state.input().pop_operand();
             }
 
-            if let Some(tmpl) = &ctor.result {
-                let handle = tmpl.build::<R>(state)?;
+            if let Some(tmpl) = ctor.result {
+                let handle = handle_tpl::<R>(tmpl).build::<R>(state)?;
                 state.input().set_parent_handle(handle);
             }
 

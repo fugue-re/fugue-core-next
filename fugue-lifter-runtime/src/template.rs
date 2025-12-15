@@ -87,6 +87,11 @@ pub struct ConstructTpl {
     pub operations: &'static [u16], // OpTpl
 }
 
+#[inline(always)]
+pub(crate) fn construct_tpl<R: ConstructorResolver>(idx: u16) -> &'static ConstructTpl {
+    &R::CONSTRUCT_TEMPLATES[idx as usize]
+}
+
 impl ConstructTpl {
     #[inline]
     pub unsafe fn build<R: ConstructorResolver>(
@@ -480,7 +485,7 @@ pub struct HandleTpl {
 }
 
 #[inline(always)]
-fn handle_tpl<R: ConstructorResolver>(idx: u16) -> &'static HandleTpl {
+pub(crate) fn handle_tpl<R: ConstructorResolver>(idx: u16) -> &'static HandleTpl {
     &R::HANDLE_TEMPLATES[idx as usize]
 }
 

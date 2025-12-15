@@ -9,6 +9,7 @@ use crate::constructor::{Constructor, ConstructorResolver};
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageFormatter};
+use crate::template::construct_tpl;
 
 pub const MAX_LABELS: usize = 256;
 pub const MAX_INPUTS_SPILL: usize = 8;
@@ -302,8 +303,8 @@ impl<'a> LiftingContextState<'a> {
         self.inputs.input.base_state();
         self.issued.clear();
 
-        if let Some(builder) = &self.inputs.input.constructor().build_action {
-            builder.build::<R>(self)?;
+        if let Some(builder) = self.inputs.input.constructor().build_action {
+            construct_tpl::<R>(builder).build::<R>(self)?;
         }
 
         self.resolve_relatives();
@@ -334,8 +335,8 @@ impl<'a> LiftingContextState<'a> {
 
                 nself.inputs.input.base_state();
 
-                if let Some(builder) = &nself.inputs.input.constructor().build_action {
-                    builder.build::<R>(&mut nself)?;
+                if let Some(builder) = nself.inputs.input.constructor().build_action {
+                    construct_tpl::<R>(builder).build::<R>(&mut nself)?;
                 }
 
                 length
