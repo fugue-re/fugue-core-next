@@ -6,9 +6,9 @@ use crate::pattern::{PatternExpression, PatternOp};
 use crate::pcode::LiftingContextState;
 use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
-use crate::template::{ConstructTpl, HandleTpl};
+use crate::template::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 
-pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
+// pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
 pub enum OperandResolver {
     None,
@@ -61,6 +61,12 @@ pub trait ConstructorResolver {
     const OPERAND_FILTERS: &'static [OperandFilter];
     const PATTERN_EXPRESSIONS: &'static [PatternOp];
     const SYMBOLS: &'static [Symbol];
+
+    const CONST_TEMPLATES: &'static [ConstTpl];
+    const CONSTRUCT_TEMPLATES: &'static [ConstructTpl];
+    const HANDLE_TEMPLATES: &'static [HandleTpl];
+    const OP_TEMPLATES: &'static [OpTpl];
+    const VARNODE_TEMPLATES: &'static [VarnodeTpl];
 
     fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
     fn resolve_constructor(

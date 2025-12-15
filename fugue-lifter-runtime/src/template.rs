@@ -81,10 +81,10 @@ pub enum Op {
 
 #[derive(Debug)]
 pub struct ConstructTpl {
-    pub delay_slot: usize,
+    pub delay_slot: u8, // usize
     pub labels: u8,
-    pub result: Option<HandleTpl>,
-    pub operations: &'static [OpTpl],
+    pub result: Option<u16>,        // HandleTpl
+    pub operations: &'static [u16], // OpTpl
 }
 
 impl ConstructTpl {
@@ -98,8 +98,8 @@ impl ConstructTpl {
         input.context.label_base = input.context.label_count;
         input.context.label_count += self.labels;
 
-        for operation in self.operations {
-            operation.build::<R>(input)?;
+        for &operation in self.operations {
+            op_tpl::<R>(operation).build::<R>(input)?;
         }
 
         input.context.label_base = old_base;
@@ -111,7 +111,8 @@ impl ConstructTpl {
         &self,
         input: &mut LiftingContextState<'_>,
     ) -> Option<FixedHandle> {
-        self.result.as_ref()?.build::<R>(input)
+        self.result
+            .and_then(|handle| handle_tpl::<R>(handle).build::<R>(input))
     }
 }
 
@@ -134,6 +135,11 @@ pub enum ConstTpl {
     CurrentSpaceSize,
     SpaceId(u8),
     Relative(u64),
+}
+
+#[inline(always)]
+fn const_tpl<R: ConstructorResolver>(idx: u16) -> &'static ConstTpl {
+    &R::CONST_TEMPLATES[idx as usize]
 }
 
 impl ConstTpl {
@@ -287,8 +293,13 @@ impl ConstTpl {
 #[derive(Debug)]
 pub struct OpTpl {
     pub op: Op,
-    pub inputs: &'static [VarnodeTpl],
-    pub output: Option<VarnodeTpl>,
+    pub inputs: &'static [u16], // VarnodeTpl
+    pub output: Option<u16>,    // VarnodeTpl
+}
+
+#[inline(always)]
+fn op_tpl<R: ConstructorResolver>(idx: u16) -> &'static OpTpl {
+    &R::OP_TEMPLATES[idx as usize]
 }
 
 impl OpTpl {
@@ -305,7 +316,7 @@ impl OpTpl {
                 // labels. Since we have a fixed allocation, we get this by default, so we
                 // can just set the label value.
                 //
-                let offset = self.inputs[0].offset.real() as usize;
+                let offset = varnode_tpl_offset::<R>(self.inputs[0]).real() as usize;
                 unsafe {
                     *input
                         .context
@@ -326,7 +337,7 @@ impl OpTpl {
         &self,
         input: &mut LiftingContextState,
     ) -> Option<()> {
-        let index = self.inputs[0].offset.real() as usize;
+        let index = varnode_tpl_offset::<R>(self.inputs[0]).real() as usize;
         if let Some(operand) = unsafe { input.operand_constructor(index) } {
             input.input().push_operand(index);
 
@@ -352,8 +363,8 @@ impl OpTpl {
     ) -> Option<()> {
         let (index, op) = self.build_op::<R>(state)?;
 
-        for input in &self.inputs[index..] {
-            input.build_input::<R>(state)?;
+        for &input in &self.inputs[index..] {
+            varnode_tpl::<R>(input).build_input::<R>(state)?;
         }
 
         if !self.inputs.is_empty() {
@@ -364,7 +375,7 @@ impl OpTpl {
             });
         }
 
-        let Some(ref output) = self.output else {
+        let Some(output) = self.output.map(varnode_tpl::<R>) else {
             state.issue(op, pcode::Varnode::INVALID);
             return Some(());
         };
@@ -379,17 +390,17 @@ impl OpTpl {
     ) -> Option<(usize, pcode::Op)> {
         let (index, op) = match self.op {
             Op::Load => {
-                let space = self.inputs[0].offset.value::<R>(input)? as u8;
+                let space = varnode_tpl_offset_value::<R>(self.inputs[0], input)? as u8;
                 (1, pcode::Op::Load(space))
             }
             Op::Store => {
-                let space = self.inputs[0].offset.value::<R>(input)? as u8;
+                let space = varnode_tpl_offset_value::<R>(self.inputs[0], input)? as u8;
                 (1, pcode::Op::Store(space))
             }
             Op::CallOther => {
                 // NOTE: we could resolve the UserOp here at the cost of a larger
                 // representation for Op...
-                let index = self.inputs[0].offset.value::<R>(input)? as u16;
+                let index = varnode_tpl_offset_value::<R>(self.inputs[0], input)? as u16;
                 let count = self.inputs.len() as u8 - 1;
                 (1, pcode::Op::UserOp(index, count))
             }
@@ -459,13 +470,18 @@ impl OpTpl {
 
 #[derive(Debug)]
 pub struct HandleTpl {
-    pub space: ConstTpl,
-    pub size: ConstTpl,
-    pub ptr_space: ConstTpl,
-    pub ptr_offset: ConstTpl,
-    pub ptr_size: ConstTpl,
-    pub tmp_space: ConstTpl,
-    pub tmp_offset: ConstTpl,
+    pub space: u16,      // ConstTpl
+    pub size: u16,       // ConstTpl
+    pub ptr_space: u16,  // ConstTpl
+    pub ptr_offset: u16, // ConstTpl
+    pub ptr_size: u16,   // ConstTpl
+    pub tmp_space: u16,  // ConstTpl
+    pub tmp_offset: u16, // ConstTpl
+}
+
+#[inline(always)]
+fn handle_tpl<R: ConstructorResolver>(idx: u16) -> &'static HandleTpl {
+    &R::HANDLE_TEMPLATES[idx as usize]
 }
 
 impl HandleTpl {
@@ -473,9 +489,10 @@ impl HandleTpl {
         &self,
         input: &mut LiftingContextState,
     ) -> Option<FixedHandle> {
-        let handle = if self.ptr_space.is_real() {
-            let space = self.space.space::<R>(input);
-            let size = self.size.value::<R>(input)? as u16;
+        let ptr_space = const_tpl::<R>(self.ptr_space);
+        let handle = if ptr_space.is_real() {
+            let space = const_tpl::<R>(self.space).space::<R>(input);
+            let size = const_tpl::<R>(self.size).value::<R>(input)? as u16;
 
             let mut handle = FixedHandle {
                 space,
@@ -483,15 +500,15 @@ impl HandleTpl {
                 ..Default::default()
             };
 
-            self.ptr_offset.update_offset::<R>(input, &mut handle)?;
+            const_tpl::<R>(self.ptr_offset).update_offset::<R>(input, &mut handle)?;
 
             handle
         } else {
-            let space = self.space.space_via::<R>(input);
-            let size = self.size.value::<R>(input)? as u16;
+            let space = const_tpl::<R>(self.space).space_via::<R>(input);
+            let size = const_tpl::<R>(self.size).value::<R>(input)? as u16;
 
-            let offset_offset = self.ptr_offset.value::<R>(input)?;
-            let offset_space = self.ptr_space.space_via::<R>(input);
+            let offset_offset = const_tpl::<R>(self.ptr_offset).value::<R>(input)?;
+            let offset_space = ptr_space.space_via::<R>(input);
 
             let mut handle = FixedHandle {
                 space,
@@ -508,10 +525,10 @@ impl HandleTpl {
                 handle.offset_space = INVALID_HANDLE;
                 handle.offset_offset = wrap_offset(hoffset, handle.offset_offset * word_size);
             } else {
-                handle.offset_size = self.ptr_size.value::<R>(input)? as u16;
+                handle.offset_size = const_tpl::<R>(self.ptr_size).value::<R>(input)? as u16;
 
-                handle.temporary_offset = self.tmp_offset.value::<R>(input)?;
-                handle.temporary_space = self.tmp_space.space_via::<R>(input);
+                handle.temporary_offset = const_tpl::<R>(self.tmp_offset).value::<R>(input)?;
+                handle.temporary_space = const_tpl::<R>(self.tmp_space).space_via::<R>(input);
             }
 
             handle
@@ -522,18 +539,40 @@ impl HandleTpl {
 
 #[derive(Debug)]
 pub struct VarnodeTpl {
-    pub space: ConstTpl,
-    pub offset: ConstTpl,
-    pub size: ConstTpl,
+    pub space: u16,  // ConstTpl
+    pub offset: u16, // ConstTpl
+    pub size: u16,   // ConstTpl
+}
+
+#[inline(always)]
+fn varnode_tpl<R: ConstructorResolver>(idx: u16) -> &'static VarnodeTpl {
+    &R::VARNODE_TEMPLATES[idx as usize]
+}
+
+#[inline(always)]
+fn varnode_tpl_offset<R: ConstructorResolver>(idx: u16) -> &'static ConstTpl {
+    R::VARNODE_TEMPLATES[idx as usize].offset::<R>()
+}
+
+#[inline(always)]
+unsafe fn varnode_tpl_offset_value<R: ConstructorResolver>(
+    idx: u16,
+    input: &mut LiftingContextState<'_>,
+) -> Option<u64> {
+    varnode_tpl_offset::<R>(idx).value::<R>(input)
 }
 
 impl VarnodeTpl {
-    fn is_dynamic(&self, input: &LiftingContextState<'_>) -> bool {
-        let ConstTpl::Handle(index, _) = self.offset else {
+    fn offset<R: ConstructorResolver>(&self) -> &'static ConstTpl {
+        const_tpl::<R>(self.offset)
+    }
+
+    fn is_dynamic<R: ConstructorResolver>(&self, input: &LiftingContextState<'_>) -> bool {
+        let ConstTpl::Handle(index, _) = const_tpl::<R>(self.offset) else {
             return false;
         };
 
-        let handle = unsafe { input.operand_handle(index) };
+        let handle = unsafe { input.operand_handle(*index) };
 
         handle.offset_space != INVALID_HANDLE
     }
@@ -542,12 +581,12 @@ impl VarnodeTpl {
         &self,
         input: &mut LiftingContextState<'_>,
     ) -> Option<pcode::Varnode> {
-        let space = self.space.space_via::<R>(input);
-        let size = self.size.value::<R>(input)? as u16;
+        let space = const_tpl::<R>(self.space).space_via::<R>(input);
+        let size = const_tpl::<R>(self.size).value::<R>(input)? as u16;
         let offset = R::resolve_location_offset(
             input.unique_offset,
             space,
-            self.offset.value::<R>(input)?,
+            const_tpl::<R>(self.offset).value::<R>(input)?,
             size,
         );
 
@@ -562,7 +601,7 @@ impl VarnodeTpl {
         &self,
         input: &mut LiftingContextState<'_>,
     ) -> Option<(u8, pcode::Varnode)> {
-        let index = self.offset.handle_index().expect("handle");
+        let index = const_tpl::<R>(self.offset).handle_index().expect("handle");
         let handle = input.operand_handle(index);
 
         let space = handle.offset_space;
@@ -586,7 +625,7 @@ impl VarnodeTpl {
     ) -> Option<()> {
         let location = self.location::<R>(input)?;
 
-        if self.is_dynamic(input) {
+        if self.is_dynamic::<R>(input) {
             let (space, pointer) = self.pointer::<R>(input)?;
             input.issue_with(
                 pcode::Op::Load(space),
@@ -608,7 +647,7 @@ impl VarnodeTpl {
         let out = self.location::<R>(input)?;
         input.issue(op, out);
 
-        if self.is_dynamic(input) {
+        if self.is_dynamic::<R>(input) {
             let (space, pointer) = self.pointer::<R>(input)?;
             input.issue_with(
                 pcode::Op::Store(space),
