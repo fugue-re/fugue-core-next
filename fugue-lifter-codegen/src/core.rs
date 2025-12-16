@@ -9,9 +9,8 @@ use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
 use fugue_sleigh_language::Language;
 
 use indexmap::IndexMap;
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
-use syn::Ident;
 
 use crate::types::context::ContextAdaptor;
 use crate::types::pattern::PatternExpressionAdaptor;

@@ -1,10 +1,11 @@
 use std::env;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use fugue_sleigh_language::{Language, LanguageDB};
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
-use prettyplease::unparse;
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use thiserror::Error;
@@ -33,12 +34,36 @@ pub enum CodegenError {
     LanguageDB(anyhow::Error),
 }
 
+impl CodegenError {
+    fn format<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        CodegenError::Format(anyhow::Error::new(err))
+    }
+
+    fn format_with<M>(msg: M) -> Self
+    where
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
+        CodegenError::Format(anyhow::Error::msg(msg))
+    }
+}
+
 pub fn from_language(language: &Language) -> Result<TokenStream, LifterGeneratorError> {
     LifterGenerator::new(language).map(ToTokens::into_token_stream)
 }
 
 pub fn build(root: impl AsRef<Path>, language: impl AsRef<str>) -> Result<String, CodegenError> {
     build_with(root, language, false)
+}
+
+fn out_or_temp_dir() -> PathBuf {
+    if let Ok(out_dir) = env::var("OUT_DIR") {
+        PathBuf::from(out_dir)
+    } else {
+        env::temp_dir()
+    }
 }
 
 pub fn build_with(
@@ -68,7 +93,7 @@ pub fn build_with(
         ));
         #[cfg(feature = "bundled-compiler")]
         {
-            let slaf = Path::new(&env::var("OUT_DIR").expect("OUR_DIR set"))
+            let slaf = out_or_temp_dir()
                 .join(sla_file.file_name().expect("sla file name"));
             let spec = sla_file.with_extension("");
             let slac = SleighCompiler::new()?
@@ -82,13 +107,33 @@ pub fn build_with(
         language.map_err(|e| CodegenError::LanguageBuild(language_def.to_owned(), e.into()))?;
 
     let tokens = from_language(&language).map_err(CodegenError::Generate)?;
-    let output = tokens.to_string();
 
     if pretty {
-        Ok(unparse(
-            &syn::parse_file(&output).map_err(|e| CodegenError::Format(e.into()))?,
-        ))
+        let mut child = Command::new("rustfmt")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(CodegenError::format)?;
+
+        let stdin = child.stdin.as_mut().expect("stdin available");
+
+        write!(stdin, "{tokens}").map_err(CodegenError::format)?;
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| CodegenError::Format(e.into()))?;
+
+        if !output.status.success() {
+            return Err(CodegenError::format_with(format!(
+                "rustfmt exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        String::from_utf8(output.stdout).map_err(CodegenError::format)
     } else {
-        Ok(output)
+        Ok(tokens.to_string())
     }
 }
