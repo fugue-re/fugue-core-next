@@ -1135,7 +1135,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 fn resolve(
                     state: &mut fugue_lifter_runtime::LiftingContextState,
                 ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                    resolve_constructor(state)
+                    resolve_instruction(state)
                 }
 
                 #[inline(always)]
@@ -1143,7 +1143,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     id: u16,
                     state: &mut fugue_lifter_runtime::LiftingContextState,
                 ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                    resolve_constructor_by_id(id, state)
+                    let ctor = DECISION_TREES[id as usize].resolve::<Instruction>(state)?;
+                    Some(ctor)
                 }
 
                 #[inline(always)]
@@ -1168,7 +1169,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
 
             #[inline(always)]
-            pub fn resolve_constructor(
+            pub fn resolve_instruction(
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
@@ -1179,23 +1180,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
 
             #[inline(always)]
-            pub fn resolve_constructor_by_id(
-                id: u16,
-                state: &mut fugue_lifter_runtime::LiftingContextState,
-            ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                unsafe {
-                    let ctor = DECISION_TREES[id as usize].resolve::<Instruction>(state)?;
-                    ctor.resolve_operands::<Instruction>(state)?;
-                    Some(ctor)
-                }
-            }
-
-            #[inline(always)]
             pub fn resolve_state(
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = resolve_constructor(state)?;
+                    let ctor = resolve_instruction(state)?;
                     ctor.resolve_handles::<Instruction>(state)?;
                     state.inputs.input.base_state();
                     state.apply_commits::<Instruction>();
@@ -1214,7 +1203,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     let mut nop_issued = Vec::with_capacity(0);
                     let mut state = context.state_for(address, bytes, &mut nop_issued)?;
 
-                    let ctor = resolve_constructor(&mut state)?;
+                    let ctor = resolve_instruction(&mut state)?;
 
                     let buffer_limit = bytes.len();
                     let length = state.len();
@@ -1261,7 +1250,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         return Ok(None);
                     };
 
-                    let Some(ctor) = resolve_constructor(&mut state) else {
+                    let Some(ctor) = resolve_instruction(&mut state) else {
                         return Ok(None);
                     };
 
