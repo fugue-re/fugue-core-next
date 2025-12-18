@@ -56,16 +56,15 @@ impl<'a> Tables<'a> {
         u16::try_from(self.symbol_id_mapping[&sym_id]).expect("symbol id fits in u16")
     }
 
-    pub(crate) fn pattern_ops(&self) -> &[TokenStream] {
-        &self.pattern_ops
-    }
+    pub(crate) fn extend_pattern_ops(&mut self, iter: impl ExactSizeIterator<Item = TokenStream>) -> (u16, u16) {
+        let spos = self.pattern_ops.len();
+        self.pattern_ops.extend(iter);
+        let epos = self.pattern_ops.len();
 
-    pub(crate) fn pattern_ops_mut(&mut self) -> &mut [TokenStream] {
-        &mut self.pattern_ops
-    }
+        let spos = u16::try_from(spos).expect("spos fits in u16");
+        let epos = u16::try_from(epos).expect("epos fits in u16");
 
-    pub(crate) fn push_pattern_op(&mut self, op: TokenStream) {
-        self.pattern_ops.push(op);
+        (spos, epos)
     }
 
     pub(crate) fn push_const_tpl(&mut self, v: &'a ConstTpl, tpl: TokenStream) -> u16 {

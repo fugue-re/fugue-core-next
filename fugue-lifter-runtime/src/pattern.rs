@@ -6,14 +6,16 @@ use crate::input::{BREADCRUMBS, INVALID_HANDLE};
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum OperandOffset {
     Relative(u8),
     Operand(u8),
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct PatternExpression(u16, u16);
 
+#[derive(Debug)]
 pub enum PatternOp {
     TokenField {
         big_endian: bool,
@@ -196,8 +198,8 @@ impl PatternExpression {
                     let mut point =
                         &input.inputs.input.context.constructors[input.inputs.input.point as usize];
 
-                    let ctor_id = *constructor;
-                    let constructor = &R::CONSTRUCTORS[ctor_id as usize];
+                    let ctor = &R::CONSTRUCTORS[*constructor as usize];
+                    let ctor_id = ctor.id;
 
                     // TODO: recheck this logic--the constructor IDs are different from the
                     // original implementation, it should be fine...
@@ -215,7 +217,7 @@ impl PatternExpression {
                                 let cstate = &mut input.inputs.input.context.constructors
                                     [input.inputs.input.point as usize];
 
-                                cstate.constructor = Some(constructor);
+                                cstate.constructor = Some(ctor);
                                 cstate.handle = None;
                                 cstate.parent = INVALID_HANDLE;
                                 cstate.operands = INVALID_HANDLE;
@@ -273,7 +275,7 @@ impl PatternExpression {
                         let cstate = &mut input.inputs.input.context.constructors
                             [input.inputs.input.point as usize];
 
-                        cstate.constructor = Some(&constructor);
+                        cstate.constructor = Some(ctor);
                         cstate.handle = None;
                         cstate.parent = INVALID_HANDLE;
                         cstate.operands = INVALID_HANDLE;

@@ -55,8 +55,8 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
     // add    | stack = [(B + C) + (D - E)]
     //
     pub fn pattern_expression_tokens(&mut self) -> TokenStream {
-        let spos = self.tables.pattern_ops().len();
         let mut queue = vec![self.expression];
+        let mut nops = Vec::new();
 
         while let Some(expr) = queue.pop() {
             use PatternExpression as E;
@@ -77,7 +77,7 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                     let byte_end = u8::try_from(*byte_end).expect("byte_end fits in u8");
                     let shift = u8::try_from(*shift).expect("shift fits in u8");
 
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::TokenField {
                             big_endian: #big_endian,
                             sign_bit: #sign_bit,
@@ -103,7 +103,7 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                     let byte_end = u8::try_from(*byte_end).expect("byte_end fits in u8");
                     let shift = u8::try_from(*shift).expect("shift fits in u8");
 
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::ContextField {
                             sign_bit: #sign_bit,
                             bit_start: #bit_start,
@@ -115,7 +115,7 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                     });
                 }
                 E::Constant { value } => {
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Constant { value: #value }
                     });
                 }
@@ -151,7 +151,7 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                         let sym = symbols.symbol(*subsym_id).unwrap();
                         sym.pattern_value()
                     } else {
-                        self.tables.push_pattern_op(quote! {
+                        nops.push(quote! {
                             fugue_lifter_runtime::pattern::PatternOp::Constant { value: 0i64 }
                         });
                         continue;
@@ -178,7 +178,7 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                         }
                     };
 
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Operand {
                             constructor: #ctor_id,
                             offset: #offset,
@@ -187,105 +187,99 @@ impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
                     });
                 }
                 E::StartInstruction => {
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::StartInstruction
                     });
                 }
                 E::EndInstruction => {
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::EndInstruction
                     });
                 }
                 E::Next2Instruction => {
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Next2Instruction
                     });
                 }
                 E::Plus(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Plus
                     });
                 }
                 E::Sub(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Sub
                     });
                 }
                 E::Mult(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Mult
                     });
                 }
                 E::Div(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Div
                     });
                 }
                 E::LeftShift(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::LeftShift
                     });
                 }
                 E::RightShift(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::RightShift
                     });
                 }
                 E::And(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::And
                     });
                 }
                 E::Or(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Or
                     });
                 }
                 E::Xor(lhs, rhs) => {
                     queue.push(lhs);
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Xor
                     });
                 }
                 E::Minus(rhs) => {
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Minus
                     });
                 }
                 E::Not(rhs) => {
                     queue.push(rhs);
-                    self.tables.push_pattern_op(quote! {
+                    nops.push(quote! {
                         fugue_lifter_runtime::pattern::PatternOp::Not
                     });
                 }
             }
         }
 
-        let ops = self.tables.pattern_ops_mut();
-        let epos = ops.len();
-
-        ops[spos..epos].reverse();
-
-        let spos = u16::try_from(spos).expect("spos fits in u16");
-        let epos = u16::try_from(epos).expect("epos fits in u16");
+        let (spos, epos) = self.tables.extend_pattern_ops(nops.into_iter().rev());
 
         quote! {
             fugue_lifter_runtime::pattern::PatternExpression::new(#spos, #epos)
