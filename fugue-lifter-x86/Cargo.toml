@@ -5,15 +5,18 @@ edition = "2021"
 build = "build.rs"
 
 [features]
+bundled = ["fugue-lifter-packager"]
+compiled = ["fugue-lifter-codegen", "fugue-lifter-codegen/bundled-compiler"]
 x86 = []
 x86-64 = []
-default = ["x86", "x86-64"]
+default = ["bundled", "x86", "x86-64"]
 
 [dependencies]
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
 
 [build-dependencies]
-fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
+fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen", default-features = false, optional = true }
+fugue-lifter-packager = { version = "0.3", path = "../fugue-lifter-packager", optional = true }
 
 [lints]
 workspace = true

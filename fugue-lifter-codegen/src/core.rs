@@ -1,16 +1,16 @@
-use std::mem::size_of;
+use std::collections::BTreeMap;
 
-use fugue_sleigh_language::construct::{ConstructTpl, HandleTpl};
+use fugue_sleigh_language::construct::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
-    Context, ContextPattern, DecisionPair, DisjointPattern, InstructionPattern,
+    Context, DecisionPair, DisjointPattern, PatternBlock,
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
 use fugue_sleigh_language::Language;
 
-use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote, ToTokens, TokenStreamExt};
-use syn::Ident;
+use indexmap::IndexMap;
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{quote, ToTokens, TokenStreamExt};
 
 use crate::types::context::ContextAdaptor;
 use crate::types::pattern::PatternExpressionAdaptor;
@@ -20,16 +20,105 @@ use crate::LifterGeneratorError;
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
-    symbols: Vec<TokenStream>,
     language: &'a Language,
+    tables: Tables<'a>,
+}
+
+#[derive(Default)]
+pub(crate) struct Tables<'a> {
+    ctors: Vec<TokenStream>,
+    dtrees: Vec<TokenStream>,
+    operand_filters: Vec<TokenStream>,
+    pattern_ops: Vec<TokenStream>,
+    symbols: Vec<TokenStream>,
+
+    // NOTE: we could attempt to dedup. these templates
+    const_tpls: IndexMap<&'a ConstTpl, TokenStream>,
+    construct_tpls: IndexMap<&'a ConstructTpl, TokenStream>,
+    handle_tpls: IndexMap<&'a HandleTpl, TokenStream>,
+    op_tpls: IndexMap<&'a OpTpl, TokenStream>,
+    varnode_tpls: IndexMap<&'a VarnodeTpl, TokenStream>,
+
+    ctor_id_mapping: BTreeMap<(usize, usize, usize), usize>, // (id, scope, ctor) -> ctor
+    operand_filter_id_mapping: BTreeMap<usize, usize>,       // sym -> filter
+    // FIXME: (id, scope) is not needed--id should be unique across scopes
+    subtable_id_mapping: BTreeMap<(usize, usize), usize>, // (id, scope) -> dtree
+    symbol_id_mapping: BTreeMap<usize, usize>,            // sym -> sym
+}
+
+impl<'a> Tables<'a> {
+    pub(crate) fn ctor_for(&self, id: usize, scope: usize, ctor: usize) -> u16 {
+        let key = (id, scope, ctor);
+        u16::try_from(self.ctor_id_mapping[&key]).expect("constructor id fits in u16")
+    }
+
+    pub(crate) fn symbol_for(&self, sym_id: usize) -> u16 {
+        u16::try_from(self.symbol_id_mapping[&sym_id]).expect("symbol id fits in u16")
+    }
+
+    pub(crate) fn extend_pattern_ops(&mut self, iter: impl ExactSizeIterator<Item = TokenStream>) -> (u16, u16) {
+        let spos = self.pattern_ops.len();
+        self.pattern_ops.extend(iter);
+        let epos = self.pattern_ops.len();
+
+        let spos = u16::try_from(spos).expect("spos fits in u16");
+        let epos = u16::try_from(epos).expect("epos fits in u16");
+
+        (spos, epos)
+    }
+
+    pub(crate) fn push_const_tpl(&mut self, v: &'a ConstTpl, tpl: TokenStream) -> u16 {
+        let idx = if let Some(idx) = self.const_tpls.get_index_of(v) {
+            idx
+        } else {
+            self.const_tpls.insert_full(v, tpl).0
+        };
+        u16::try_from(idx).expect("const tpl id fits in u16")
+    }
+
+    pub(crate) fn push_construct_tpl(&mut self, v: &'a ConstructTpl, tpl: TokenStream) -> u16 {
+        let idx = if let Some(idx) = self.construct_tpls.get_index_of(v) {
+            idx
+        } else {
+            self.construct_tpls.insert_full(v, tpl).0
+        };
+        u16::try_from(idx).expect("construct tpl id fits in u16")
+    }
+
+    pub(crate) fn push_handle_tpl(&mut self, v: &'a HandleTpl, tpl: TokenStream) -> u16 {
+        let idx = if let Some(idx) = self.handle_tpls.get_index_of(v) {
+            idx
+        } else {
+            self.handle_tpls.insert_full(v, tpl).0
+        };
+        u16::try_from(idx).expect("handle tpl id fits in u16")
+    }
+
+    pub(crate) fn push_op_tpl(&mut self, v: &'a OpTpl, tpl: TokenStream) -> u16 {
+        let idx = if let Some(idx) = self.op_tpls.get_index_of(v) {
+            idx
+        } else {
+            self.op_tpls.insert_full(v, tpl).0
+        };
+        u16::try_from(idx).expect("op tpl id fits in u16")
+    }
+
+    pub(crate) fn push_varnode_tpl(&mut self, v: &'a VarnodeTpl, tpl: TokenStream) -> u16 {
+        let idx = if let Some(idx) = self.varnode_tpls.get_index_of(v) {
+            idx
+        } else {
+            self.varnode_tpls.insert_full(v, tpl).0
+        };
+        u16::try_from(idx).expect("varnode tpl id fits in u16")
+    }
 }
 
 impl<'a> LifterGenerator<'a> {
     pub fn new(language: &'a Language) -> Result<Self, LifterGeneratorError> {
         let mut slf = Self {
             context_variables: Vec::new(),
-            symbols: Vec::new(),
             language,
+            tables: Tables::default(),
         };
 
         slf.build()?;
@@ -40,6 +129,57 @@ impl<'a> LifterGenerator<'a> {
     pub fn build(&mut self) -> Result<(), LifterGeneratorError> {
         let symtab = self.language.symbol_table();
 
+        let mut ctor_idx = 0;
+        let mut operand_filter_idx = 0;
+        let mut subtable_idx = 0;
+        let mut symbol_idx = 0;
+
+        for symbol in symtab.symbols().iter() {
+            match symbol {
+                Symbol::Subtable {
+                    id,
+                    scope,
+                    decision_tree,
+                    constructors,
+                    ..
+                } => {
+                    let number_of_children = decision_tree.count_children();
+                    let offset = subtable_idx + number_of_children;
+
+                    self.tables
+                        .subtable_id_mapping
+                        .insert((*id, *scope), offset);
+
+                    subtable_idx = offset + 1;
+
+                    for cidx in 0..constructors.len() {
+                        let key = (*id, *scope, cidx);
+                        self.tables.ctor_id_mapping.insert(key, ctor_idx);
+                        ctor_idx += 1;
+                    }
+                }
+                Symbol::UserOp { .. }
+                | Symbol::Context { .. }
+                | Symbol::FlowDest { .. }
+                | Symbol::FlowRef { .. } => {
+                    // no mapping
+                }
+                _ => {
+                    self.tables
+                        .symbol_id_mapping
+                        .insert(symbol.id(), symbol_idx);
+                    symbol_idx += 1;
+
+                    if symbol.has_filter() {
+                        self.tables
+                            .operand_filter_id_mapping
+                            .insert(symbol.id(), operand_filter_idx);
+                        operand_filter_idx += 1;
+                    }
+                }
+            }
+        }
+
         for symbol in symtab.symbols().iter() {
             if let Symbol::Subtable {
                 id,
@@ -49,15 +189,20 @@ impl<'a> LifterGenerator<'a> {
                 ..
             } = symbol
             {
-                self.symbols.push(self.generate_subtable(
-                    *id,
-                    *scope,
-                    constructors,
-                    decision_tree,
-                )?);
+                self.generate_subtable(*id, *scope, constructors, decision_tree);
             } else {
-                self.symbols
-                    .push(SymbolAdaptor::new(&self.language, symbol).to_token_stream());
+                let mut resolver = SymbolAdaptor::new(&self.language, symbol, &mut self.tables);
+
+                let symbol = resolver.symbol_tokens();
+                let filter = resolver.operand_filter_tokens();
+
+                if let Some(symbol) = symbol {
+                    self.tables.symbols.push(symbol);
+                }
+
+                if let Some(filter) = filter {
+                    self.tables.operand_filters.push(filter);
+                }
             }
         }
 
@@ -82,7 +227,7 @@ impl<'a> LifterGenerator<'a> {
         Ok(())
     }
 
-    fn generate_constructor_operand_resolvers(&self, ctor: &Constructor) -> Vec<TokenStream> {
+    fn generate_constructor_operand_resolvers(&mut self, ctor: &Constructor) -> Vec<TokenStream> {
         let mut operands = Vec::new();
 
         for oid in 0..ctor.operand_count() {
@@ -105,8 +250,10 @@ impl<'a> LifterGenerator<'a> {
             {
                 match tsym {
                     Symbol::Subtable { id, scope, .. } => {
-                        let stname = format_ident!("SubTable{id}In{scope}");
-                        let resolver = quote! { fugue_lifter_runtime::OperandResolver::Constructor(<#stname>::resolve) };
+                        let dtree_id =
+                            u16::try_from(self.tables.subtable_id_mapping[&(*id, *scope)])
+                                .expect("decision tree id fits in u16");
+                        let resolver = quote! { fugue_lifter_runtime::OperandResolver::Constructor(#dtree_id) };
                         let handle_resolver =
                             quote! { fugue_lifter_runtime::OperandHandleResolver::None };
 
@@ -120,13 +267,15 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = u16::try_from(self.tables.operand_filter_id_mapping[&id])
+                                .expect("operand filter id fits in u16");
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = u16::try_from(self.tables.symbol_id_mapping[&id])
+                            .expect("symbol id fits in u16");
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -138,13 +287,15 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = u16::try_from(self.tables.operand_filter_id_mapping[&id])
+                                .expect("operand filter id fits in u16");
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = u16::try_from(self.tables.symbol_id_mapping[&id])
+                            .expect("symbol id fits in u16");
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -156,13 +307,15 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = if *table_is_filled {
                             quote! { fugue_lifter_runtime::OperandResolver::None }
                         } else {
-                            let ident = format_ident!("__SYM{id}_FILTER");
-                            quote! { fugue_lifter_runtime::OperandResolver::Filter(&#ident) }
+                            let index = u16::try_from(self.tables.operand_filter_id_mapping[&id])
+                                .expect("operand filter id fits in u16");
+                            quote! { fugue_lifter_runtime::OperandResolver::Filter(#index) }
                         };
 
-                        let ident = format_ident!("__SYM{id}");
+                        let index = u16::try_from(self.tables.symbol_id_mapping[&id])
+                            .expect("symbol id fits in u16");
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -170,9 +323,10 @@ impl<'a> LifterGenerator<'a> {
                         let resolver = quote! { fugue_lifter_runtime::OperandResolver::None };
 
                         let id = symbol.id();
-                        let ident = format_ident!("__SYM{id}");
+                        let index = u16::try_from(self.tables.symbol_id_mapping[&id])
+                            .expect("symbol id fits in u16");
                         let handle_resolver =
-                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(&#ident) };
+                            quote! { fugue_lifter_runtime::OperandHandleResolver::Symbol(#index) };
 
                         (resolver, handle_resolver)
                     }
@@ -181,7 +335,8 @@ impl<'a> LifterGenerator<'a> {
                 let resolver = quote! { fugue_lifter_runtime::OperandResolver::None };
 
                 let pexp = operand.defining_expression().unwrap();
-                let value = PatternExpressionAdaptor::new(&self.language, pexp);
+                let value = PatternExpressionAdaptor::new(&self.language, pexp, &mut self.tables)
+                    .pattern_expression_tokens();
                 let handle_resolver =
                     quote! { fugue_lifter_runtime::OperandHandleResolver::Expression(#value) };
 
@@ -203,8 +358,8 @@ impl<'a> LifterGenerator<'a> {
     }
 
     fn generate_constructor_context_actions(
-        &self,
-        ctor: &Constructor,
+        &mut self,
+        ctor: &'a Constructor,
     ) -> (Vec<TokenStream>, Vec<TokenStream>) {
         let mut pre_actions = Vec::new();
         let mut post_actions = Vec::new();
@@ -212,11 +367,16 @@ impl<'a> LifterGenerator<'a> {
         for action in ctor.context().iter() {
             match action {
                 Context::Operator { .. } => {
-                    pre_actions.push(ContextAdaptor::new(&self.language, action).to_token_stream());
+                    pre_actions.push(
+                        ContextAdaptor::new(&self.language, action, &mut self.tables)
+                            .context_action_tokens(),
+                    );
                 }
                 Context::Commit { .. } => {
-                    post_actions
-                        .push(ContextAdaptor::new(&self.language, action).to_token_stream());
+                    post_actions.push(
+                        ContextAdaptor::new(&self.language, action, &mut self.tables)
+                            .context_action_tokens(),
+                    );
                 }
             }
         }
@@ -224,11 +384,11 @@ impl<'a> LifterGenerator<'a> {
         (pre_actions, post_actions)
     }
 
-    fn generate_handle_template(&self, tmpl: &HandleTpl) -> TokenStream {
-        TplAdaptor::new(&self.language, tmpl).to_token_stream()
+    fn generate_handle_template(&mut self, tmpl: &'a HandleTpl) -> u16 {
+        TplAdaptor::new(&self.language, tmpl, &mut self.tables).tokens()
     }
 
-    fn generate_constructor_template_resolvers(&self, ctor: &Constructor) -> TokenStream {
+    fn generate_constructor_template_resolvers(&mut self, ctor: &'a Constructor) -> TokenStream {
         if let Some(templ) = ctor.template().and_then(ConstructTpl::result) {
             let action = self.generate_handle_template(templ);
             quote! {
@@ -239,11 +399,11 @@ impl<'a> LifterGenerator<'a> {
         }
     }
 
-    fn generate_constructor_build_action(&self, tmpl: &ConstructTpl) -> TokenStream {
-        TplAdaptor::new(&self.language, tmpl).to_token_stream()
+    fn generate_constructor_build_action(&mut self, tmpl: &'a ConstructTpl) -> u16 {
+        TplAdaptor::new(&self.language, tmpl, &mut self.tables).tokens()
     }
 
-    fn generate_constructor_lifting_actions(&self, ctor: &Constructor) -> TokenStream {
+    fn generate_constructor_lifting_actions(&mut self, ctor: &'a Constructor) -> TokenStream {
         if let Some(tmpl) = ctor.template() {
             let template = self.generate_constructor_build_action(tmpl);
             quote! { Some(#template) }
@@ -252,32 +412,35 @@ impl<'a> LifterGenerator<'a> {
         }
     }
 
-    fn generate_constructors<'b>(
-        &'b self,
-        id: usize,
-        scope: usize,
-        ctors: &'a [Constructor],
-    ) -> impl Iterator<Item = TokenStream> + 'b {
-        ctors.iter().enumerate().map(move |(cid, ctor)| {
-            let ctor_vname = Self::ctor_vname(id, scope, cid);
-
+    fn generate_constructors(&mut self, id: usize, scope: usize, ctors: &'a [Constructor]) {
+        ctors.iter().enumerate().for_each(move |(cid, ctor)| {
+            /*
             let (ctor_id1, ctor_id2) = ctor.id();
             let ctor_id = (ctor_id1 as u32 & 0xffff) << 16 | (ctor_id2 as u32 & 0xffff);
+            */
 
-            let delay_slot_length = ctor.template().map(|tpl| tpl.delay_slot()).unwrap_or_default();
+            let delay_slot_length = ctor
+                .template()
+                .map(|tpl| tpl.delay_slot())
+                .unwrap_or_default();
             let minimum_length = ctor.minimum_length();
 
-            let pieces = ctor.print_pieces().iter().map(|piece| if piece.as_bytes()[0] == b'\n' {
-                let index = (piece.as_bytes()[1] - b'A') as usize;
-                quote! { fugue_lifter_runtime::constructor::PrintPiece::Operand(#index) }
-            } else {
-                quote! { fugue_lifter_runtime::constructor::PrintPiece::Token(#piece) }
+            let pieces = ctor.print_pieces().iter().map(|piece| {
+                if piece.as_bytes()[0] == b'\n' {
+                    let index = u16::try_from(piece.as_bytes()[1] - b'A')
+                        .expect("operand index fits in u16");
+                    quote! { fugue_lifter_runtime::constructor::PrintPiece::Operand(#index) }
+                } else {
+                    quote! { fugue_lifter_runtime::constructor::PrintPiece::Token(#piece) }
+                }
             });
 
-            let first_whitespace = ctor.first_whitespace()
+            let first_whitespace = ctor
+                .first_whitespace()
                 .map_or_else(|| quote! { None }, |index| quote! { Some(#index) });
 
-            let flow_through_index = ctor.flow_through_index()
+            let flow_through_index = ctor
+                .flow_through_index()
                 .map_or_else(|| quote! { None }, |index| quote! { Some(#index) });
 
             let operands = self.generate_constructor_operand_resolvers(ctor);
@@ -286,9 +449,11 @@ impl<'a> LifterGenerator<'a> {
             let template_result = self.generate_constructor_template_resolvers(ctor);
             let lifting_action = self.generate_constructor_lifting_actions(ctor);
 
-            quote! {
-                pub static #ctor_vname: fugue_lifter_runtime::Constructor = fugue_lifter_runtime::Constructor {
-                    id: #ctor_id,
+            let cid = self.tables.ctor_for(id, scope, cid);
+
+            self.tables.ctors.push(quote! {
+                fugue_lifter_runtime::Constructor {
+                    id: #cid,
                     context_pre_actions: &[#(#pre_actions),*],
                     context_post_actions: &[#(#post_actions),*],
                     operands: &[#(#operands),*],
@@ -299,11 +464,12 @@ impl<'a> LifterGenerator<'a> {
                     flow_through_index: #flow_through_index,
                     delay_slot_length: #delay_slot_length,
                     minimum_length: #minimum_length,
-                };
-            }
+                }
+            });
         })
     }
 
+    /*
     pub(crate) fn ctor_vname(id: usize, scope: usize, cid: usize) -> Ident {
         format_ident!("__SYM{id}_IN{scope}_CTOR{cid}")
     }
@@ -503,35 +669,108 @@ impl<'a> LifterGenerator<'a> {
             }
         }
     }
+    */
 
-    fn generate_subtable(
-        &self,
-        id: usize,
-        scope: usize,
-        ctors: &[Constructor],
-        dtree: &DecisionNode,
-    ) -> Result<TokenStream, LifterGeneratorError> {
-        let tname = format_ident!("SubTable{id}In{scope}");
-        let mut trees = Vec::new();
+    fn generate_dtree_pattern(&self, pattern: &PatternBlock) -> TokenStream {
+        let non_zero_size = pattern
+            .non_zero_size()
+            .map(|s| quote! { Some(#s) })
+            .unwrap_or(quote! { None });
+        let masks = pattern.masks().iter().map(|m| quote! { #m });
+        let values = pattern.values().iter().map(|v| quote! { #v });
+        let offset = pattern.offset();
 
-        let ctor_tokens = self.generate_constructors(id, scope, ctors);
-        let dtree_tokens = self.generate_dtree(id, scope, dtree, &mut trees);
+        quote! {
+            fugue_lifter_runtime::resolve::Pattern {
+                offset: #offset,
+                non_zero_size: #non_zero_size,
+                masks: &[#(#masks),*],
+                values: &[#(#values),*],
+            }
+        }
+    }
 
-        let tokens = quote! {
-            #(#ctor_tokens)*
+    fn generate_dtree_decision(&self, id: usize, scope: usize, pat: &DecisionPair) -> TokenStream {
+        let ctor = self.tables.ctor_for(id, scope, pat.id());
 
-            #(#trees)*
+        let pattern = match pat.pattern() {
+            DisjointPattern::Instruction(pat) => {
+                let pat = self.generate_dtree_pattern(pat.mask_value());
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Instruction(#pat)
+                }
+            }
+            DisjointPattern::Context(pat) => {
+                let pat = self.generate_dtree_pattern(pat.mask_value());
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Context(#pat)
+                }
+            }
+            DisjointPattern::Combine {
+                context,
+                instruction,
+            } => {
+                let context = self.generate_dtree_pattern(context.mask_value());
+                let instruction = self.generate_dtree_pattern(instruction.mask_value());
 
-            #[derive(Debug, Clone, Copy)]
-            struct #tname;
-
-            impl #tname {
-                #[allow(unused_parens)]
-                #dtree_tokens
+                quote! {
+                    fugue_lifter_runtime::resolve::DisjointPattern::Combine {
+                        context: #context,
+                        instruction: #instruction,
+                    }
+                }
             }
         };
 
-        Ok(tokens)
+        quote! {
+            fugue_lifter_runtime::resolve::DecisionPair {
+                pattern: #pattern,
+                constructor: #ctor,
+            }
+        }
+    }
+
+    fn generate_dtree_simplified(&mut self, id: usize, scope: usize, dtree: &DecisionNode) -> u16 {
+        let mut patterns = Vec::new();
+        for pattern in dtree.patterns() {
+            patterns.push(self.generate_dtree_decision(id, scope, pattern));
+        }
+
+        let mut children = Vec::new();
+        for child in dtree.children() {
+            children.push(self.generate_dtree_simplified(id, scope, child));
+        }
+
+        let start_bit = dtree.start_bit() as u32;
+        let size = dtree.size() as u32;
+        let context_decision = dtree.context_decision();
+
+        let dtree_id = self.tables.dtrees.len();
+
+        self.tables.dtrees.push(quote! {
+            fugue_lifter_runtime::resolve::DecisionNode {
+                start_bit: #start_bit,
+                size: #size,
+                context_decision: #context_decision,
+                patterns: &[#(#patterns),*],
+                children: &[#(#children),*],
+            }
+        });
+
+        u16::try_from(dtree_id).expect("decision tree id fits in u16")
+    }
+
+    fn generate_subtable(
+        &mut self,
+        id: usize,
+        scope: usize,
+        ctors: &'a [Constructor],
+        dtree: &DecisionNode,
+    ) {
+        // NOTE: constructors must be generated before decision trees, since dtrees refer to
+        // constructors...
+        self.generate_constructors(id, scope, ctors);
+        self.generate_dtree_simplified(id, scope, dtree);
     }
 }
 
@@ -688,6 +927,20 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let little_endian = self.language.architecture().endian().is_little();
         let variant = self.language.architecture().variant();
 
+        let constructors = &self.tables.ctors;
+        let root_dtree = u16::try_from(self.tables.subtable_id_mapping[&(0, 0)])
+            .expect("root decision tree id fits in u16");
+        let dtrees = &self.tables.dtrees;
+        let operand_filters = &self.tables.operand_filters;
+        let pattern_ops = &self.tables.pattern_ops;
+        let symbols = &self.tables.symbols;
+
+        let const_tpls = self.tables.const_tpls.values();
+        let construct_tpls = self.tables.construct_tpls.values();
+        let handle_tpls = self.tables.handle_tpls.values();
+        let op_tpls = self.tables.op_tpls.values();
+        let varnode_tpls = self.tables.varnode_tpls.values();
+
         tokens.append_all(quote! {
             pub const LANGUAGE_ID: &'static str = #language_id;
 
@@ -817,6 +1070,46 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 }
             }
 
+            static CONSTRUCTORS: &[fugue_lifter_runtime::Constructor] = &[
+                #(#constructors,)*
+            ];
+
+            static DECISION_TREES: &[fugue_lifter_runtime::resolve::DecisionNode] = &[
+                #(#dtrees,)*
+            ];
+
+            static OPERAND_FILTERS: &[fugue_lifter_runtime::constructor::OperandFilter] = &[
+                #(#operand_filters,)*
+            ];
+
+            static PATTERN_EXPRESSIONS: &[fugue_lifter_runtime::pattern::PatternOp] = &[
+                #(#pattern_ops,)*
+            ];
+
+            static SYMBOLS: &[fugue_lifter_runtime::symbol::Symbol] = &[
+                #(#symbols,)*
+            ];
+
+            static CONST_TEMPLATES: &[fugue_lifter_runtime::template::ConstTpl] = &[
+                #(#const_tpls,)*
+            ];
+
+            static CONSTRUCT_TEMPLATES: &[fugue_lifter_runtime::template::ConstructTpl] = &[
+                #(#construct_tpls,)*
+            ];
+
+            static HANDLE_TEMPLATES: &[fugue_lifter_runtime::template::HandleTpl] = &[
+                #(#handle_tpls,)*
+            ];
+
+            static OP_TEMPLATES: &[fugue_lifter_runtime::template::OpTpl] = &[
+                #(#op_tpls,)*
+            ];
+
+            static VARNODE_TEMPLATES: &[fugue_lifter_runtime::template::VarnodeTpl] = &[
+                #(#varnode_tpls,)*
+            ];
+
             struct Instruction;
 
             impl fugue_lifter_runtime::ConstructorResolver for Instruction {
@@ -824,11 +1117,33 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
                 const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
 
+                const CONSTRUCTORS: &'static [fugue_lifter_runtime::Constructor] = CONSTRUCTORS;
+                const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DECISION_TREES;
+                const OPERAND_FILTERS: &'static [fugue_lifter_runtime::constructor::OperandFilter] = OPERAND_FILTERS;
+                const PATTERN_EXPRESSIONS: &'static [fugue_lifter_runtime::pattern::PatternOp] = PATTERN_EXPRESSIONS;
+                const SYMBOLS: &'static [fugue_lifter_runtime::symbol::Symbol] = SYMBOLS;
+
+                const CONST_TEMPLATES: &'static [fugue_lifter_runtime::template::ConstTpl] = CONST_TEMPLATES;
+                const CONSTRUCT_TEMPLATES: &'static [fugue_lifter_runtime::template::ConstructTpl] = CONSTRUCT_TEMPLATES;
+                const HANDLE_TEMPLATES: &'static [fugue_lifter_runtime::template::HandleTpl] = HANDLE_TEMPLATES;
+                const OP_TEMPLATES: &'static [fugue_lifter_runtime::template::OpTpl] = OP_TEMPLATES;
+                const VARNODE_TEMPLATES: &'static [fugue_lifter_runtime::template::VarnodeTpl] = VARNODE_TEMPLATES;
+
+
                 #[inline(always)]
                 fn resolve(
                     state: &mut fugue_lifter_runtime::LiftingContextState,
                 ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                    resolve_constructor(state)
+                    resolve_instruction(state)
+                }
+
+                #[inline(always)]
+                fn resolve_constructor(
+                    id: u16,
+                    state: &mut fugue_lifter_runtime::LiftingContextState,
+                ) -> Option<&'static fugue_lifter_runtime::Constructor> {
+                    let ctor = DECISION_TREES[id as usize].resolve::<Instruction>(state)?;
+                    Some(ctor)
                 }
 
                 #[inline(always)]
@@ -853,11 +1168,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
 
             #[inline(always)]
-            pub fn resolve_constructor(
+            pub fn resolve_instruction(
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = SubTable0In0::resolve(state)?;
+                    let ctor = DECISION_TREES[#root_dtree as usize].resolve::<Instruction>(state)?;
                     ctor.resolve_operands::<Instruction>(state)?;
                     Some(ctor)
                 }
@@ -868,7 +1183,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 state: &mut fugue_lifter_runtime::LiftingContextState,
             ) -> Option<&'static fugue_lifter_runtime::Constructor> {
                 unsafe {
-                    let ctor = resolve_constructor(state)?;
+                    let ctor = resolve_instruction(state)?;
                     ctor.resolve_handles::<Instruction>(state)?;
                     state.inputs.input.base_state();
                     state.apply_commits::<Instruction>();
@@ -887,7 +1202,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     let mut nop_issued = Vec::with_capacity(0);
                     let mut state = context.state_for(address, bytes, &mut nop_issued)?;
 
-                    let ctor = resolve_constructor(&mut state)?;
+                    let ctor = resolve_instruction(&mut state)?;
 
                     let buffer_limit = bytes.len();
                     let length = state.len();
@@ -934,7 +1249,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         return Ok(None);
                     };
 
-                    let Some(ctor) = resolve_constructor(&mut state) else {
+                    let Some(ctor) = resolve_instruction(&mut state) else {
                         return Ok(None);
                     };
 
@@ -1097,7 +1412,5 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
             pub static LANGUAGE: &'static fugue_lifter_runtime::language::Language = &fugue_lifter_runtime::language::Language::new::<L>();
         });
-
-        tokens.append_all(&self.symbols);
     }
 }

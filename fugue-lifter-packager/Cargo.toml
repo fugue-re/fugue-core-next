@@ -1,0 +1,16 @@
+[package]
+name = "fugue-lifter-packager"
+version = "0.3.0"
+edition = "2021"
+
+[[bin]]
+name = "lifter-packager"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
+flate2 = "1.1"
+
+[lints]
+workspace = true

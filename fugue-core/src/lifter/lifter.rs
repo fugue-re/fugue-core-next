@@ -141,6 +141,16 @@ impl Lifter {
         self.0.user_op_by_id(id)
     }
 
+    pub fn resolve(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        apply_commits: bool,
+    ) -> Option<usize> {
+        let address = address.into();
+        self.0.resolve(address.into(), bytes, apply_commits)
+    }
+
     pub fn disassemble(
         &mut self,
         address: impl Into<Address>,

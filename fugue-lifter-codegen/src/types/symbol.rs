@@ -3,65 +3,106 @@ use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, ToTokens};
-use syn::Ident;
+use quote::quote;
 
+use crate::core::Tables;
 use crate::types::pattern::PatternExpressionAdaptor;
 
-pub struct SymbolAdaptor<'a> {
+pub(crate) struct SymbolAdaptor<'a, 'b> {
     language: &'a Language,
     symbol: &'a Symbol,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a> SymbolAdaptor<'a> {
-    pub fn new(language: &'a Language, symbol: &'a Symbol) -> Self {
-        Self { language, symbol }
-    }
-
-    pub fn wrap(&self, symbol: &'a Symbol) -> Self {
+impl<'a, 'b> SymbolAdaptor<'a, 'b> {
+    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'b mut Tables<'a>) -> Self {
         Self {
-            language: self.language,
+            language,
             symbol,
+            tables,
         }
-    }
-
-    pub(crate) fn identifier(&self) -> Ident {
-        self.identifier_for(self.symbol.id())
-    }
-
-    pub(crate) fn filter_identifier(&self) -> Ident {
-        self.filter_identifier_for(self.symbol.id())
-    }
-
-    fn filter_identifier_for(&self, id: usize) -> Ident {
-        format_ident!("__SYM{id}_FILTER")
-    }
-
-    fn identifier_for(&self, id: usize) -> Ident {
-        format_ident!("__SYM{id}")
     }
 
     fn build_filter(
-        &self,
-        pattern: &PatternExpression,
+        &mut self,
+        pattern: &'a PatternExpression,
         indices: impl Iterator<Item = usize>,
         limit: usize,
     ) -> TokenStream {
-        let ident = self.filter_identifier();
-        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern);
+        let pvalue = PatternExpressionAdaptor::new(&self.language, pattern, &mut self.tables)
+            .pattern_expression_tokens();
+        let indices = indices.map(|i| u16::try_from(i).expect("index fits in u16"));
+        let limit = u16::try_from(limit).expect("limit fits in u16");
+
         quote! {
-            pub(crate) const #ident: fugue_lifter_runtime::constructor::OperandFilter =
-                fugue_lifter_runtime::constructor::OperandFilter {
-                    pattern: #pvalue,
-                    indices: &[#(#indices),*],
-                    limit: #limit,
-                };
+            fugue_lifter_runtime::constructor::OperandFilter {
+                pattern: #pvalue,
+                indices: &[#(#indices),*],
+                limit: #limit,
+            }
         }
     }
-}
 
-impl<'a> ToTokens for SymbolAdaptor<'a> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
+    pub(crate) fn operand_filter_tokens(&mut self) -> Option<TokenStream> {
+        use Symbol as S;
+
+        match self.symbol {
+            S::Name {
+                pattern_value,
+                name_table,
+                table_is_filled,
+                ..
+            } if !*table_is_filled => {
+                let bad_indices = name_table.iter().enumerate().filter_map(|(i, v)| {
+                    if v == "\t" {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                });
+                let limit = name_table.len();
+
+                Some(self.build_filter(pattern_value, bad_indices, limit))
+            }
+            S::ValueMap {
+                pattern_value,
+                value_table,
+                table_is_filled,
+                ..
+            } if !*table_is_filled => {
+                let bad_indices = value_table.iter().enumerate().filter_map(|(i, v)| {
+                    if *v == 0xbadbeef {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                });
+                let limit = value_table.len();
+
+                Some(self.build_filter(pattern_value, bad_indices, limit))
+            }
+            S::VarnodeList {
+                pattern_value,
+                varnode_table,
+                table_is_filled,
+                ..
+            } if !*table_is_filled => {
+                let bad_indices = varnode_table.iter().enumerate().filter_map(|(i, v)| {
+                    if v.is_none() {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                });
+                let limit = varnode_table.len();
+
+                Some(self.build_filter(pattern_value, bad_indices, limit))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn symbol_tokens(&mut self) -> Option<TokenStream> {
         use Symbol as S;
 
         let value = match self.symbol {
@@ -69,7 +110,9 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                 fugue_lifter_runtime::symbol::Symbol::Epsilon
             },
             S::Value { pattern_value, .. } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
                 quote! {
                     fugue_lifter_runtime::symbol::Symbol::Value {
                         pattern_value: #pvalue,
@@ -82,7 +125,9 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                 table_is_filled,
                 ..
             } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
 
                 if *table_is_filled {
                     let values = value_table.iter().copied();
@@ -94,23 +139,11 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                         }
                     }
                 } else {
-                    let bad_indices = value_table.iter().enumerate().filter_map(|(i, v)| {
-                        if *v == 0xbadbeef {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    });
-                    let limit = value_table.len();
-
-                    self.build_filter(pattern_value, bad_indices, limit)
-                        .to_tokens(tokens);
-
                     let values = value_table.iter().copied().map(|v| {
                         if v == 0xbadbeef {
                             None
                         } else {
-                            Some(v)
+                            Some(u16::try_from(v).expect("value fits in u16"))
                         }
                     });
 
@@ -125,25 +158,12 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
             S::Name {
                 pattern_value,
                 name_table,
-                table_is_filled,
                 ..
             } => {
-                if !*table_is_filled {
-                    let bad_indices = name_table.iter().enumerate().filter_map(|(i, v)| {
-                        if v == "\t" {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    });
-                    let limit = name_table.len();
-
-                    self.build_filter(pattern_value, bad_indices, limit)
-                        .to_tokens(tokens);
-                }
-
                 // NOTE: we could merge those cases that are behaviourally similar
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
                 let symbols = name_table.iter().map(|v| {
                     if v == "\t" {
                         quote! { None }
@@ -186,14 +206,17 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                 table_is_filled,
                 ..
             } => {
-                let pvalue = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let pvalue =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
 
                 if *table_is_filled {
-                    let values = varnode_table
-                        .iter()
-                        .copied()
-                        .map(|id| self.identifier_for(id.expect("table is filled") as usize));
+                    let values = varnode_table.iter().copied().map(|id| {
+                        self.tables
+                            .symbol_for(id.expect("table is filled") as usize)
+                    });
 
+                    // TODO: avoid the need to store the symbols
                     let symbols = varnode_table.iter().copied().map(|id| {
                         let name = self
                             .language
@@ -207,27 +230,15 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                     quote! {
                         fugue_lifter_runtime::symbol::Symbol::VarnodeListFilled {
                             pattern_value: #pvalue,
-                            varnode_table: &[#(& #values),*],
+                            varnode_table: &[#(#values),*],
                             symbol_table: &[#(#symbols),*],
                         }
                     }
                 } else {
-                    let bad_indices = varnode_table.iter().enumerate().filter_map(|(i, v)| {
-                        if v.is_none() {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    });
-                    let limit = varnode_table.len();
-
-                    self.build_filter(pattern_value, bad_indices, limit)
-                        .to_tokens(tokens);
-
                     let values = varnode_table.iter().copied().map(|id| {
                         if let Some(id) = id {
-                            let ident = self.identifier_for(id as usize);
-                            quote! { Some(& #ident) }
+                            let index = self.tables.symbol_for(id as usize);
+                            quote! { Some(#index) }
                         } else {
                             quote! { None }
                         }
@@ -302,15 +313,10 @@ impl<'a> ToTokens for SymbolAdaptor<'a> {
                 }
             }
             _ => {
-                return;
+                return None;
             }
         };
 
-        let ident = self.identifier();
-        let declaration = quote! {
-            pub(crate) const #ident: fugue_lifter_runtime::symbol::Symbol = #value;
-        };
-
-        declaration.to_tokens(tokens)
+        Some(value)
     }
 }

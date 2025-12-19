@@ -3,238 +3,286 @@ use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
 
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens};
+use quote::quote;
 
-use crate::LifterGenerator;
+use crate::core::Tables;
 
-pub struct PatternExpressionAdaptor<'a> {
+pub(crate) struct PatternExpressionAdaptor<'a, 'b> {
     language: &'a Language,
     expression: &'a PatternExpression,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a> PatternExpressionAdaptor<'a> {
-    pub fn new(language: &'a Language, expression: &'a PatternExpression) -> Self {
+// NOTE: we need to return:
+// - PatternExpression(start, end) which gives the start/end (exclusive) offsets of the
+// pattern operations in the global pattern operations table.
+// - &[PatternOp] which is the actual list of pattern operations that should be appended
+// to the global pattern operations table.
+
+impl<'a, 'b> PatternExpressionAdaptor<'a, 'b> {
+    pub(crate) fn new(
+        language: &'a Language,
+        expression: &'a PatternExpression,
+        tables: &'b mut Tables<'a>,
+    ) -> Self {
         Self {
             language,
             expression,
+            tables,
         }
     }
 
-    pub fn wrap(&self, expression: &'a PatternExpression) -> Self {
-        Self {
-            language: self.language,
-            expression,
+    // To translate, we do the following:
+    //
+    // Input: Add(Add(B, C), Sub(D, E))
+    //
+    // Output:
+    //
+    // [push(Add), push(rhs), push(lhs)]
+    //
+    // Expands to:
+    //
+    // [push(Add), push(Sub), push(E), push(D), push(Add), push(C), push(B)]
+    //
+    // We evaluate from right to left (reversing the list):
+    //
+    // push B | stack = [B]
+    // push C | stack = [B, C]
+    // add    | stack = [B + C]
+    // push D | stack = [B + C, D]
+    // push E | stack = [B + C, D, E]
+    // add    | stack = [B + C, D - E]
+    // add    | stack = [(B + C) + (D - E)]
+    //
+    pub fn pattern_expression_tokens(&mut self) -> TokenStream {
+        let mut queue = vec![self.expression];
+        let mut nops = Vec::new();
+
+        while let Some(expr) = queue.pop() {
+            use PatternExpression as E;
+
+            match expr {
+                E::TokenField {
+                    big_endian,
+                    sign_bit,
+                    bit_start,
+                    bit_end,
+                    byte_start,
+                    byte_end,
+                    shift,
+                } => {
+                    let bit_start = u8::try_from(*bit_start).expect("bit_start fits in u8");
+                    let bit_end = u8::try_from(*bit_end).expect("bit_end fits in u8");
+                    let byte_start = u8::try_from(*byte_start).expect("byte_start fits in u8");
+                    let byte_end = u8::try_from(*byte_end).expect("byte_end fits in u8");
+                    let shift = u8::try_from(*shift).expect("shift fits in u8");
+
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::TokenField {
+                            big_endian: #big_endian,
+                            sign_bit: #sign_bit,
+                            bit_start: #bit_start,
+                            bit_end: #bit_end,
+                            byte_start: #byte_start,
+                            byte_end: #byte_end,
+                            shift: #shift,
+                        }
+                    });
+                }
+                E::ContextField {
+                    sign_bit,
+                    bit_start,
+                    bit_end,
+                    byte_start,
+                    byte_end,
+                    shift,
+                } => {
+                    let bit_start = u8::try_from(*bit_start).expect("bit_start fits in u8");
+                    let bit_end = u8::try_from(*bit_end).expect("bit_end fits in u8");
+                    let byte_start = u8::try_from(*byte_start).expect("byte_start fits in u8");
+                    let byte_end = u8::try_from(*byte_end).expect("byte_end fits in u8");
+                    let shift = u8::try_from(*shift).expect("shift fits in u8");
+
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::ContextField {
+                            sign_bit: #sign_bit,
+                            bit_start: #bit_start,
+                            bit_end: #bit_end,
+                            byte_start: #byte_start,
+                            byte_end: #byte_end,
+                            shift: #shift,
+                        }
+                    });
+                }
+                E::Constant { value } => {
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Constant { value: #value }
+                    });
+                }
+                E::Operand {
+                    index,
+                    table_id,
+                    constructor_id,
+                } => {
+                    let symbols = self.language.symbol_table();
+                    let table = symbols.symbol(*table_id).unwrap();
+                    let Symbol::Subtable {
+                        constructors,
+                        scope,
+                        ..
+                    } = table
+                    else {
+                        unreachable!("this state should not be reachable");
+                    };
+                    let ctor = &constructors[*constructor_id];
+
+                    let Symbol::Operand {
+                        def_expr,
+                        subsym_id,
+                        ..
+                    } = symbols.symbol(ctor.operand(*index)).unwrap()
+                    else {
+                        unreachable!("this state should not be reachable");
+                    };
+
+                    let pexpr = if let Some(def_expr) = def_expr.as_ref() {
+                        def_expr
+                    } else if let Some(subsym_id) = subsym_id.as_ref() {
+                        let sym = symbols.symbol(*subsym_id).unwrap();
+                        sym.pattern_value()
+                    } else {
+                        nops.push(quote! {
+                            fugue_lifter_runtime::pattern::PatternOp::Constant { value: 0i64 }
+                        });
+                        continue;
+                    };
+
+                    let index = *index;
+                    let symbol = ctor.operand(index);
+                    let operand = self.language.symbol_table().symbol(symbol).unwrap();
+
+                    let ctor_id = self.tables.ctor_for(*table_id, *scope, *constructor_id);
+                    let value =
+                        PatternExpressionAdaptor::new(&self.language, pexpr, &mut self.tables)
+                            .pattern_expression_tokens();
+
+                    let rel_offset = operand.relative_offset() as u8;
+                    let offset = if operand.offset_base().is_none() {
+                        quote! {
+                            fugue_lifter_runtime::pattern::OperandOffset::Relative(#rel_offset)
+                        }
+                    } else {
+                        let index = index as u8;
+                        quote! {
+                            fugue_lifter_runtime::pattern::OperandOffset::Operand(#index)
+                        }
+                    };
+
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Operand {
+                            constructor: #ctor_id,
+                            offset: #offset,
+                            value: #value,
+                        }
+                    });
+                }
+                E::StartInstruction => {
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::StartInstruction
+                    });
+                }
+                E::EndInstruction => {
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::EndInstruction
+                    });
+                }
+                E::Next2Instruction => {
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Next2Instruction
+                    });
+                }
+                E::Plus(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Plus
+                    });
+                }
+                E::Sub(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Sub
+                    });
+                }
+                E::Mult(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Mult
+                    });
+                }
+                E::Div(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Div
+                    });
+                }
+                E::LeftShift(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::LeftShift
+                    });
+                }
+                E::RightShift(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::RightShift
+                    });
+                }
+                E::And(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::And
+                    });
+                }
+                E::Or(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Or
+                    });
+                }
+                E::Xor(lhs, rhs) => {
+                    queue.push(lhs);
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Xor
+                    });
+                }
+                E::Minus(rhs) => {
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Minus
+                    });
+                }
+                E::Not(rhs) => {
+                    queue.push(rhs);
+                    nops.push(quote! {
+                        fugue_lifter_runtime::pattern::PatternOp::Not
+                    });
+                }
+            }
         }
-    }
-}
 
-impl<'a> ToTokens for PatternExpressionAdaptor<'a> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        use PatternExpression as E;
+        let (spos, epos) = self.tables.extend_pattern_ops(nops.into_iter().rev());
 
-        let value = match self.expression {
-            E::StartInstruction => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::StartInstruction
-                }
-            }
-            E::EndInstruction => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::EndInstruction
-                }
-            }
-            E::Next2Instruction => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Next2Instruction
-                }
-            }
-            E::Constant { value } => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Constant { value: #value }
-                }
-            }
-            E::And(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::And(&#lhs, &#rhs)
-                }
-            }
-            E::Or(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Or(&#lhs, &#rhs)
-                }
-            }
-            E::Xor(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Xor(&#lhs, &#rhs)
-                }
-            }
-            E::Plus(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Plus(&#lhs, &#rhs)
-                }
-            }
-            E::Sub(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Sub(&#lhs, &#rhs)
-                }
-            }
-            E::Mult(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Mult(&#lhs, &#rhs)
-                }
-            }
-            E::Div(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Div(&#lhs, &#rhs)
-                }
-            }
-            E::LeftShift(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::LeftShift(&#lhs, &#rhs)
-                }
-            }
-            E::RightShift(lhs, rhs) => {
-                let lhs = self.wrap(lhs);
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::RightShift(&#lhs, &#rhs)
-                }
-            }
-            E::Minus(rhs) => {
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Minus(&#rhs)
-                }
-            }
-            E::Not(rhs) => {
-                let rhs = self.wrap(rhs);
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Not(&#rhs)
-                }
-            }
-            E::TokenField {
-                big_endian,
-                sign_bit,
-                bit_start,
-                bit_end,
-                byte_start,
-                byte_end,
-                shift,
-            } => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::TokenField {
-                        big_endian: #big_endian,
-                        sign_bit: #sign_bit,
-                        bit_start: #bit_start,
-                        bit_end: #bit_end,
-                        byte_start: #byte_start,
-                        byte_end: #byte_end,
-                        shift: #shift,
-                    }
-                }
-            }
-            E::ContextField {
-                sign_bit,
-                bit_start,
-                bit_end,
-                byte_start,
-                byte_end,
-                shift,
-            } => {
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::ContextField {
-                        sign_bit: #sign_bit,
-                        bit_start: #bit_start,
-                        bit_end: #bit_end,
-                        byte_start: #byte_start,
-                        byte_end: #byte_end,
-                        shift: #shift,
-                    }
-                }
-            }
-            E::Operand {
-                index,
-                table_id,
-                constructor_id,
-            } => {
-                let symbols = self.language.symbol_table();
-                let table = symbols.symbol(*table_id).unwrap();
-                let Symbol::Subtable {
-                    constructors,
-                    scope,
-                    ..
-                } = table
-                else {
-                    unreachable!("this state should not be reachable");
-                };
-                let ctor = &constructors[*constructor_id];
-
-                let Symbol::Operand {
-                    def_expr,
-                    subsym_id,
-                    ..
-                } = symbols.symbol(ctor.operand(*index)).unwrap()
-                else {
-                    unreachable!("this state should not be reachable");
-                };
-
-                let pexpr = if let Some(def_expr) = def_expr.as_ref() {
-                    def_expr
-                } else if let Some(subsym_id) = subsym_id.as_ref() {
-                    let sym = symbols.symbol(*subsym_id).unwrap();
-                    sym.pattern_value()
-                } else {
-                    quote! {
-                        fugue_lifter_runtime::pattern::PatternExpression::Constant { value: 0i64 }
-                    }
-                    .to_tokens(tokens);
-                    return;
-                };
-
-                let index = *index;
-                let symbol = ctor.operand(index);
-                let operand = self.language.symbol_table().symbol(symbol).unwrap();
-
-                let ctor_vname = LifterGenerator::ctor_vname(*table_id, *scope, *constructor_id);
-                let value = self.wrap(pexpr);
-
-                let rel_offset = operand.relative_offset() as u8;
-                let offset = if operand.offset_base().is_none() {
-                    quote! {
-                        fugue_lifter_runtime::pattern::OperandOffset::Relative(#rel_offset)
-                    }
-                } else {
-                    let index = index as u8;
-                    quote! {
-                        fugue_lifter_runtime::pattern::OperandOffset::Operand(#index)
-                    }
-                };
-
-                quote! {
-                    fugue_lifter_runtime::pattern::PatternExpression::Operand {
-                        constructor: &#ctor_vname,
-                        offset: #offset,
-                        value: &#value,
-                    }
-                }
-            }
-        };
-        value.to_tokens(tokens)
+        quote! {
+            fugue_lifter_runtime::pattern::PatternExpression::new(#spos, #epos)
+        }
     }
 }

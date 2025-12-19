@@ -7,7 +7,7 @@ use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::opcode::Opcode;
 use crate::spaces::{AddressSpaceId, AddressSpaces};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum HandleKind {
     Space,
     Offset,
@@ -15,7 +15,7 @@ pub enum HandleKind {
     OffsetPlus(u64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum ConstTpl {
     Real(u64),
     Handle(usize, HandleKind),
@@ -148,7 +148,7 @@ impl ConstTpl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct HandleTpl {
     space: ConstTpl,
     size: ConstTpl,
@@ -246,7 +246,7 @@ impl HandleTpl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct VarnodeTpl {
     space: ConstTpl,
     offset: ConstTpl,
@@ -312,7 +312,7 @@ impl VarnodeTpl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct OpTpl {
     opcode: Opcode,
     inputs: Vec<VarnodeTpl>,
@@ -407,7 +407,7 @@ impl OpTpl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct ConstructTpl {
     delay_slot: usize,
     labels: usize,

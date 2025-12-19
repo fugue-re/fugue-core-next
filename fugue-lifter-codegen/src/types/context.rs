@@ -3,23 +3,31 @@ use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, ToTokens};
+use quote::quote;
 
+use crate::core::Tables;
 use crate::types::pattern::PatternExpressionAdaptor;
 
-pub struct ContextAdaptor<'a> {
+pub(crate) struct ContextAdaptor<'a, 'b> {
     language: &'a Language,
     context: &'a Context,
+    tables: &'b mut Tables<'a>,
 }
 
-impl<'a> ContextAdaptor<'a> {
-    pub fn new(language: &'a Language, context: &'a Context) -> Self {
-        Self { language, context }
+impl<'a, 'b> ContextAdaptor<'a, 'b> {
+    pub(crate) fn new(
+        language: &'a Language,
+        context: &'a Context,
+        tables: &'b mut Tables<'a>,
+    ) -> Self {
+        Self {
+            language,
+            context,
+            tables,
+        }
     }
-}
 
-impl<'a> ToTokens for ContextAdaptor<'a> {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
+    pub(crate) fn context_action_tokens(&mut self) -> TokenStream {
         use Context as C;
 
         let value = match self.context {
@@ -32,7 +40,9 @@ impl<'a> ToTokens for ContextAdaptor<'a> {
                 let num = *num;
                 let shift = *shift;
                 let mask = *mask;
-                let value = PatternExpressionAdaptor::new(&self.language, pattern_value);
+                let value =
+                    PatternExpressionAdaptor::new(&self.language, pattern_value, &mut self.tables)
+                        .pattern_expression_tokens();
 
                 quote! {
                     fugue_lifter_runtime::context::ContextPreAction {
@@ -56,11 +66,11 @@ impl<'a> ToTokens for ContextAdaptor<'a> {
                     .expect("valid symbol");
 
                 let handle = if let Symbol::Operand { handle_index, .. } = symbol {
-                    let opid = *handle_index;
+                    let opid = u16::try_from(*handle_index).expect("handle_index fits in u16");
                     quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Operand(#opid) }
                 } else {
-                    let ident = format_ident!("__SYM{symbol_id}");
-                    quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Symbol(&#ident) }
+                    let symbol = self.tables.symbol_for(*symbol_id);
+                    quote! { fugue_lifter_runtime::context::ContextPostActionHandle::Symbol(#symbol) }
                 };
 
                 let space = self.language.spaces().default_space_ref();
@@ -83,6 +93,6 @@ impl<'a> ToTokens for ContextAdaptor<'a> {
             }
         };
 
-        value.to_tokens(tokens)
+        value
     }
 }

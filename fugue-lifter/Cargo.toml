@@ -14,11 +14,23 @@ aarch64 = ["aarch64-be", "aarch64-le"]
 x86 = ["fugue-lifter-x86/x86"]
 x86-64 = ["fugue-lifter-x86/x86-64"]
 
+# Features for lifter compilation
+bundled = [
+  "fugue-lifter-arm?/bundled",
+  "fugue-lifter-aarch64?/bundled",
+  "fugue-lifter-x86?/bundled"
+]
+compiled = [
+  "fugue-lifter-arm?/compiled",
+  "fugue-lifter-aarch64?/compiled",
+  "fugue-lifter-x86?/compiled"
+]
+
 # Features for serialisation
 bincode = ["fugue-lifter-runtime/bincode"]
 serde = ["fugue-lifter-runtime/serde"]
 
-default = ["arm", "aarch64", "x86", "x86-64"]
+default = ["arm", "aarch64", "bundled", "x86", "x86-64"]
 
 [dependencies]
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
@@ -27,9 +39,6 @@ fugue-lifter-aarch64 =  { version = "0.3", path = "../fugue-lifter-aarch64", def
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
 fugue-lifter-x86 =  { version = "0.3", path = "../fugue-lifter-x86", default-features = false, optional = true }
 thiserror = "2"
-
-[build-dependencies]
-fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
 
 [lints]
 workspace = true

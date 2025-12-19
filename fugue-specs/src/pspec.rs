@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::fs::File;
-use std::io;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

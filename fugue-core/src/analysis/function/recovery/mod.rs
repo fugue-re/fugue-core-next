@@ -208,7 +208,7 @@ mod test {
     use crate::project::InMemoryProject;
 
     #[test]
-    fn test_control_flow_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_control_flow_recovery_ls() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
             .with_line_number(true)

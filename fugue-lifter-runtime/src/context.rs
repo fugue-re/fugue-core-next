@@ -12,10 +12,8 @@ use crate::input::{ContextCommit, FixedHandle};
 use crate::partmap::{BoundKind, PartMap};
 use crate::pattern::PatternExpression;
 use crate::pcode::{LiftingContextState, Varnode};
-use crate::symbol::Symbol;
 use crate::wrap_offset;
 
-#[derive(Clone)]
 pub struct ContextPreAction {
     pub num: usize,
     pub shift: u32,
@@ -35,13 +33,11 @@ impl ContextPreAction {
     }
 }
 
-#[derive(Clone)]
 pub enum ContextPostActionHandle {
-    Operand(usize),
-    Symbol(&'static Symbol),
+    Operand(u16),
+    Symbol(u16),
 }
 
-#[derive(Clone)]
 pub struct ContextPostAction {
     pub handle: ContextPostActionHandle,
     pub num: usize,
@@ -68,11 +64,13 @@ impl ContextPostAction {
             offset_offset: mut offset,
             ..
         } = match self.handle {
-            ContextPostActionHandle::Symbol(symbol) => symbol.resolve_handle::<R>(input)?,
+            ContextPostActionHandle::Symbol(symbol) => {
+                R::SYMBOLS[symbol as usize].resolve_handle::<R>(input)?
+            }
             ContextPostActionHandle::Operand(index) => unsafe {
                 input
                     .input()
-                    .unchecked_operand_via(commit.point as usize, index)
+                    .unchecked_operand_via(commit.point as usize, index as usize)
                     .handle
                     .unwrap_or_default()
             },

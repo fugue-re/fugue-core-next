@@ -2,29 +2,33 @@ use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::pattern::PatternExpression;
+use crate::pattern::{PatternExpression, PatternOp};
 use crate::pcode::LiftingContextState;
+use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
-use crate::template::{ConstructTpl, HandleTpl};
+use crate::template::{handle_tpl, ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 
-pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
+// pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
 pub enum OperandResolver {
     None,
-    Constructor(fn(&mut LiftingContextState<'_>) -> Option<&'static Constructor>),
-    Filter(&'static OperandFilter),
+    Constructor(u16),
+    Filter(u16),
 }
 
 pub struct OperandFilter {
     pub pattern: PatternExpression,
-    pub indices: &'static [usize],
-    pub limit: usize,
+    pub indices: &'static [u16],
+    pub limit: u16,
 }
 
 impl OperandFilter {
     #[inline]
-    pub unsafe fn validate<R: ConstructorResolver>(&self, input: &mut LiftingContextState) -> Option<()> {
-        let index = self.pattern.resolve::<R>(input)? as usize;
+    pub unsafe fn validate<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState,
+    ) -> Option<()> {
+        let index = u16::try_from(self.pattern.resolve::<R>(input)?).ok()?;
         if index >= self.limit || self.indices.contains(&index) {
             None
         } else {
@@ -35,7 +39,7 @@ impl OperandFilter {
 
 pub enum OperandHandleResolver {
     None,
-    Symbol(&'static Symbol),
+    Symbol(u16),
     Expression(PatternExpression),
 }
 
@@ -52,7 +56,23 @@ pub trait ConstructorResolver {
     const DEFAULT_SPACE: u8;
     const UNIQUE_SPACE: u8;
 
+    const CONSTRUCTORS: &'static [Constructor];
+    const DECISION_TREES: &'static [DecisionNode];
+    const OPERAND_FILTERS: &'static [OperandFilter];
+    const PATTERN_EXPRESSIONS: &'static [PatternOp];
+    const SYMBOLS: &'static [Symbol];
+
+    const CONST_TEMPLATES: &'static [ConstTpl];
+    const CONSTRUCT_TEMPLATES: &'static [ConstructTpl];
+    const HANDLE_TEMPLATES: &'static [HandleTpl];
+    const OP_TEMPLATES: &'static [OpTpl];
+    const VARNODE_TEMPLATES: &'static [VarnodeTpl];
+
     fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
+    fn resolve_constructor(
+        id: u16,
+        input: &mut LiftingContextState,
+    ) -> Option<&'static Constructor>;
     fn resolve_upper_bound(space: u8) -> u64;
     fn resolve_word_size(space: u8) -> usize;
     fn resolve_location_offset(unique_offset: u64, space: u8, offset: u64, size: u16) -> u64;
@@ -63,12 +83,12 @@ pub type ConstructorResult = fn(&mut LiftingContextState<'_>) -> FixedHandle;
 pub type PCodeBuildAction = fn(&mut LiftingContextState<'_>) -> Option<()>;
 
 pub struct Constructor {
-    pub id: u32,
+    pub id: u16,
     pub context_pre_actions: &'static [ContextPreAction],
     pub context_post_actions: &'static [ContextPostAction],
     pub operands: &'static [Operand],
-    pub result: Option<HandleTpl>,
-    pub build_action: Option<ConstructTpl>,
+    pub result: Option<u16>, // HandleTpl
+    pub build_action: Option<u16>, // ConstructTpl
     pub print_pieces: &'static [PrintPiece],
     pub first_whitespace: Option<usize>,
     pub flow_through_index: Option<usize>,
@@ -77,7 +97,7 @@ pub struct Constructor {
 }
 
 pub enum PrintPiece {
-    Operand(usize),
+    Operand(u16),
     Token(&'static str),
 }
 
@@ -87,9 +107,7 @@ pub enum PrintPiece {
 
 impl Debug for Constructor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let p0 = self.id & 0xff;
-        let p1 = self.id >> 16;
-        write!(f, "Constructor{p0}In{p1}")
+        write!(f, "Constructor{}", self.id)
     }
 }
 
@@ -165,10 +183,10 @@ impl Constructor {
                 match opnd.resolver {
                     OperandResolver::None => (),
                     OperandResolver::Filter(filter) => {
-                        filter.validate::<R>(state)?;
+                        R::OPERAND_FILTERS[filter as usize].validate::<R>(state)?;
                     }
-                    OperandResolver::Constructor(resolver) => {
-                        let ctor = (resolver)(state)?;
+                    OperandResolver::Constructor(id) => {
+                        let ctor = R::resolve_constructor(id, state)?;
 
                         state.input().set_constructor(ctor);
 
@@ -217,8 +235,8 @@ impl Constructor {
                     OperandHandleResolver::None => {
                         continue 'outer;
                     }
-                    OperandHandleResolver::Symbol(ref symbol) => {
-                        let handle = symbol.resolve_handle::<R>(state)?;
+                    OperandHandleResolver::Symbol(symbol) => {
+                        let handle = R::SYMBOLS[symbol as usize].resolve_handle::<R>(state)?;
                         state.input().set_parent_handle(handle);
                     }
                     OperandHandleResolver::Expression(ref expr) => {
@@ -242,8 +260,8 @@ impl Constructor {
                 state.input().pop_operand();
             }
 
-            if let Some(tmpl) = &ctor.result {
-                let handle = tmpl.build::<R>(state)?;
+            if let Some(tmpl) = ctor.result {
+                let handle = handle_tpl::<R>(tmpl).build::<R>(state)?;
                 state.input().set_parent_handle(handle);
             }
 
@@ -283,14 +301,15 @@ impl Constructor {
 
         for p in pieces {
             match p {
-                PrintPiece::Operand(index) => match &self.operands[*index].handle_resolver {
+                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver
+                {
                     OperandHandleResolver::None => {
-                        state.input().push_operand(*index);
+                        state.input().push_operand(*index as usize);
                         state.input().constructor().format::<R, _>(state, writer)?;
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        symbol.format::<R, _>(state, writer)?;
+                        R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
                         expr.format::<R, _>(state, writer)?;
@@ -338,14 +357,15 @@ impl Constructor {
 
         for p in pieces {
             match p {
-                PrintPiece::Operand(index) => match &self.operands[*index].handle_resolver {
+                PrintPiece::Operand(index) => match &self.operands[*index as usize].handle_resolver
+                {
                     OperandHandleResolver::None => {
-                        state.input().push_operand(*index);
+                        state.input().push_operand(*index as usize);
                         state.input().constructor().format::<R, _>(state, writer)?;
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        symbol.format::<R, _>(state, writer)?;
+                        R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
                         expr.format::<R, _>(state, writer)?;
@@ -368,13 +388,13 @@ impl Constructor {
         for p in self.print_pieces {
             match p {
                 PrintPiece::Operand(index) => {
-                    state.input().push_operand(*index);
-                    match &self.operands[*index].handle_resolver {
+                    state.input().push_operand(*index as usize);
+                    match &self.operands[*index as usize].handle_resolver {
                         OperandHandleResolver::None => {
                             state.input().constructor().format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Symbol(symbol) => {
-                            symbol.format::<R, _>(state, writer)?;
+                            R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
                         }
                         OperandHandleResolver::Expression(expr) => {
                             expr.format::<R, _>(state, writer)?;

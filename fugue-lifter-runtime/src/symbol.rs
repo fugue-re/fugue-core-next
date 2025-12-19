@@ -5,7 +5,6 @@ use crate::input::FixedHandle;
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
-#[derive(Clone)]
 pub enum Symbol {
     Epsilon,
     Value {
@@ -31,12 +30,12 @@ pub enum Symbol {
     },
     VarnodeList {
         pattern_value: PatternExpression,
-        varnode_table: &'static [Option<&'static Self>],
+        varnode_table: &'static [Option<u16>],
         symbol_table: &'static [Option<&'static str>],
     },
     VarnodeListFilled {
         pattern_value: PatternExpression,
-        varnode_table: &'static [&'static Self],
+        varnode_table: &'static [u16],
         symbol_table: &'static [&'static str],
     },
     Operand {
@@ -178,7 +177,7 @@ impl Symbol {
                 ..
             } => {
                 let index = pattern_value.resolve::<R>(input)? as usize;
-                let symbol = varnode_table.get(index)?.as_ref()?;
+                let symbol = &R::SYMBOLS[varnode_table.get(index).copied()?? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
             Symbol::VarnodeListFilled {
@@ -187,7 +186,7 @@ impl Symbol {
                 ..
             } => {
                 let index = pattern_value.resolve::<R>(input)? as usize;
-                let symbol = varnode_table.get(index)?;
+                let symbol = &R::SYMBOLS[*varnode_table.get(index)? as usize];
                 symbol.resolve_handle::<R>(input)?
             }
             Symbol::ValueMap {
