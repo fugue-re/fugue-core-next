@@ -367,10 +367,25 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
     }
 }
 
+#[ouroboros::self_referencing]
+struct SqliteEntityBytesIteratorRows<'conn> {
+    stmt: rusqlite::Statement<'conn>,
+    #[borrows(mut stmt)]
+    #[not_covariant]
+    rows: rusqlite::Rows<'this>,
+}
+
+#[ouroboros::self_referencing]
+struct SqliteEntityKeyBytesIteratorInner {
+    conn: r2d2::PooledConnection<SqliteConnectionManager>,
+    #[borrows(conn)]
+    #[not_covariant]
+    rows: SqliteEntityBytesIteratorRows<'this>,
+}
+
 struct SqliteEntityKeyBytesIterator<'a> {
-    rows: Vec<Vec<u8>>,
+    inner: SqliteEntityKeyBytesIteratorInner,
     prefix: EntityKeyPrefix,
-    position: usize,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -381,16 +396,15 @@ impl<'a> SqliteEntityKeyBytesIterator<'a> {
     ) -> Result<EntityKeyBytesIterator<'a>, EntityStorageError> {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
         let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = conn.prepare(&format!("SELECT key FROM {table_name} ORDER BY key"))?;
 
-        let rows = stmt
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let inner = SqliteEntityKeyBytesIteratorInner::try_new(conn, |conn| {
+            let stmt = conn.prepare(&format!("SELECT key FROM {table_name} ORDER BY key"))?;
+            SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
+        })?;
 
         Ok(Box::new(Self {
-            rows,
+            inner,
             prefix,
-            position: 0,
             _marker: PhantomData,
         }))
     }
@@ -400,25 +414,38 @@ impl<'a> Iterator for SqliteEntityKeyBytesIterator<'a> {
     type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.rows.len() {
-            return None;
+        fn mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<u8>> {
+            row.get(0)
         }
 
-        let key = &self.rows[self.position];
-        self.position += 1;
-
-        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
-        full_key.extend_from_slice(&self.prefix);
-        full_key.extend_from_slice(key);
-
-        Some(Ok(BytesOrSlice::from(full_key)))
+        self.inner.with_rows_mut(|rows| {
+            rows.with_rows_mut(|rows| {
+                let value = match rows.next().transpose()?.and_then(mapper) {
+                    Ok(key) => {
+                        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
+                        full_key.extend_from_slice(&self.prefix);
+                        full_key.extend_from_slice(&key);
+                        Ok(BytesOrSlice::from(full_key))
+                    }
+                    Err(e) => Err(EntityStorageError::from(e)),
+                };
+                Some(value)
+            })
+        })
     }
 }
 
+#[ouroboros::self_referencing]
+struct SqliteEntityBytesIteratorInner {
+    conn: r2d2::PooledConnection<SqliteConnectionManager>,
+    #[borrows(conn)]
+    #[not_covariant]
+    rows: SqliteEntityBytesIteratorRows<'this>,
+}
+
 struct SqliteEntityBytesIterator<'a> {
-    rows: Vec<(Vec<u8>, Vec<u8>)>,
+    inner: SqliteEntityBytesIteratorInner,
     prefix: EntityKeyPrefix,
-    position: usize,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -429,17 +456,16 @@ impl<'a> SqliteEntityBytesIterator<'a> {
     ) -> Result<EntityBytesIterator<'a>, EntityStorageError> {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
         let table_name = table_name_for_prefix(&prefix);
-        let mut stmt =
-            conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
 
-        let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let inner = SqliteEntityBytesIteratorInner::try_new(conn, |conn| {
+            let stmt =
+                conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
+            SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
+        })?;
 
         Ok(Box::new(Self {
-            rows,
+            inner,
             prefix,
-            position: 0,
             _marker: PhantomData,
         }))
     }
@@ -449,28 +475,30 @@ impl<'a> Iterator for SqliteEntityBytesIterator<'a> {
     type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.rows.len() {
-            return None;
+        fn mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
+            Ok((row.get(0)?, row.get(1)?))
         }
 
-        let (key, value) = &self.rows[self.position];
-        self.position += 1;
-
-        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
-        full_key.extend_from_slice(&self.prefix);
-        full_key.extend_from_slice(key);
-
-        Some(Ok((
-            BytesOrSlice::from(full_key),
-            BytesOrSlice::from(value.clone()),
-        )))
+        self.inner.with_rows_mut(|rows| {
+            rows.with_rows_mut(|rows| {
+                let value = match rows.next().transpose()?.and_then(mapper) {
+                    Ok((key, value)) => {
+                        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
+                        full_key.extend_from_slice(&self.prefix);
+                        full_key.extend_from_slice(&key);
+                        Ok((BytesOrSlice::from(full_key), BytesOrSlice::from(value)))
+                    }
+                    Err(e) => Err(EntityStorageError::from(e)),
+                };
+                Some(value)
+            })
+        })
     }
 }
 
 struct SqliteEntityBytesAsIterator<'a, T> {
-    rows: Vec<(Vec<u8>, Vec<u8>)>,
+    inner: SqliteEntityBytesIteratorInner,
     prefix: EntityKeyPrefix,
-    position: usize,
     f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
 }
 
@@ -485,17 +513,16 @@ impl<'a, T: 'a> SqliteEntityBytesAsIterator<'a, T> {
     {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
         let table_name = table_name_for_prefix(&prefix);
-        let mut stmt =
-            conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
 
-        let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let inner = SqliteEntityBytesIteratorInner::try_new(conn, |conn| {
+            let stmt =
+                conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
+            SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
+        })?;
 
         Ok(Box::new(Self {
-            rows,
+            inner,
             prefix,
-            position: 0,
             f: Box::new(f),
         }))
     }
@@ -505,18 +532,24 @@ impl<T> Iterator for SqliteEntityBytesAsIterator<'_, T> {
     type Item = Result<T, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.position >= self.rows.len() {
-            return None;
+        fn mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
+            Ok((row.get(0)?, row.get(1)?))
         }
 
-        let (key, value) = &self.rows[self.position];
-        self.position += 1;
-
-        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
-        full_key.extend_from_slice(&self.prefix);
-        full_key.extend_from_slice(key);
-
-        Some((self.f)(&full_key, value))
+        self.inner.with_rows_mut(|rows| {
+            rows.with_rows_mut(|rows| {
+                let value = match rows.next().transpose()?.and_then(mapper) {
+                    Ok((key, value)) => {
+                        let mut full_key = Vec::with_capacity(ENTITY_PREFIX_SIZE + key.len());
+                        full_key.extend_from_slice(&self.prefix);
+                        full_key.extend_from_slice(&key);
+                        (self.f)(&full_key, &value)
+                    }
+                    Err(e) => Err(EntityStorageError::from(e)),
+                };
+                Some(value)
+            })
+        })
     }
 }
 
