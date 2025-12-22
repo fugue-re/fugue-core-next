@@ -1132,7 +1132,6 @@ impl EntityStorage {
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-
         self.backing.get_as(&key, |bytes| {
             bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
                 .map(|(entity, _)| entity)

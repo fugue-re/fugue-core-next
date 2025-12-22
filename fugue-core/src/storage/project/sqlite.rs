@@ -1,19 +1,17 @@
 use std::path::Path;
 
 use crate::loader::Loadable;
-use crate::storage::entities::{
-    EntityStorageProviderFromLoadable, SqliteEntityStorage,
-};
+use crate::storage::entities::{EntityStorageProviderFromLoadable, SqliteEntityStorage};
 use crate::storage::segments::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageProviderFromLoadable,
 };
 use crate::storage::{
-    EntityStorage, PERSISTENT, PersistentStorageProvider, SegmentStorage,
-    StorageContainer, StoragePersistence, StorageProvider, StorageProviderError, TRANSIENT,
+    EntityStorage, PERSISTENT, PersistentStorageProvider, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError, TRANSIENT,
 };
 use crate::types::AttributeMap;
 
-use super::{ProjectStorageProvider, InMemoryProjectStorage};
+use super::{DefaultProjectStorage, InMemoryProjectStorage, ProjectStorageProvider};
 
 pub struct SqliteProvider<const PERSISTENCE: StoragePersistence>;
 
@@ -45,7 +43,7 @@ impl ProjectStorageProvider for SqliteProvider<TRANSIENT> {
 }
 
 impl ProjectStorageProvider for SqliteProvider<PERSISTENT> {
-    type ProjectStorage = InMemoryProjectStorage;
+    type ProjectStorage = DefaultProjectStorage;
     type StorageProvider = PersistentStorageProvider<
         SqliteEntityStorage<PERSISTENT>,
         MemoryMappedSegmentStorage<PERSISTENT>,

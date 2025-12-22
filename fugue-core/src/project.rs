@@ -121,11 +121,14 @@ where
 
         tracing::trace!("loading project architecture and lifter");
 
-        let arch = storage
+        let Some(arch) = storage
             .entities
             .get(&ProjectEntity::Architecture)?
             .or_else(|| loadable.map(|l| l.architecture()))
-            .ok_or(StorageProviderError::NotAStandaloneProject)?;
+        else {
+            tracing::error!("project not standalone and no loadable instance available");
+            return Err(StorageProviderError::NotAStandaloneProject.into());
+        };
 
         let language = arch.language();
 
@@ -143,7 +146,7 @@ where
             Some(symbols) => Ok(symbols),
             None => {
                 let Some(loadable) = loadable else {
-                    tracing::error!("project not a standalone and no loadable instance available");
+                    tracing::error!("project not standalone and no loadable instance available");
                     return Err(StorageProviderError::NotAStandaloneProject.into());
                 };
 
