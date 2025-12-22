@@ -39,9 +39,11 @@ pub mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
 
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "sqlite")]
+pub type DefaultPersistentEntityStorage = SqliteEntityStorage<PERSISTENT>;
+#[cfg(all(feature = "rocksdb", not(feature = "sqlite")))]
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(all(not(feature = "rocksdb"), not(feature = "sqlite")))]
 pub type DefaultPersistentEntityStorage = InMemoryEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
 

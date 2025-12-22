@@ -3,8 +3,11 @@ use std::io;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread::sleep;
+use std::time::Duration;
 
-use r2d2::Pool;
+use arrayvec::ArrayString;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
@@ -49,10 +52,6 @@ impl From<SqliteEntityStorageError> for EntityStorageError {
     }
 }
 
-fn table_name_for_prefix(prefix: &EntityKeyPrefix) -> String {
-    format!("entity_{:02x}{:02x}", prefix[0], prefix[1])
-}
-
 fn extract_key_parts(key: &[u8]) -> Option<(EntityKeyPrefix, &[u8])> {
     if key.len() < ENTITY_PREFIX_SIZE {
         return None;
@@ -60,26 +59,110 @@ fn extract_key_parts(key: &[u8]) -> Option<(EntityKeyPrefix, &[u8])> {
     Some(([key[0], key[1]], &key[ENTITY_PREFIX_SIZE..]))
 }
 
+const fn hex_digit(n: u8) -> char {
+    match n & 0xf {
+        0..=9 => (b'0' + n) as char,
+        _ => (b'a' + n - 10) as char,
+    }
+}
+
+fn push_table_name<const N: usize>(s: &mut ArrayString<N>, prefix: &EntityKeyPrefix) {
+    s.push_str("entity_");
+    s.push(hex_digit(prefix[0] >> 4));
+    s.push(hex_digit(prefix[0] & 0xf));
+    s.push(hex_digit(prefix[1] >> 4));
+    s.push(hex_digit(prefix[1] & 0xf));
+}
+
+fn build_create_table_query(prefix: &EntityKeyPrefix) -> ArrayString<128> {
+    let mut query = ArrayString::new();
+    query.push_str("CREATE TABLE IF NOT EXISTS ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL) WITHOUT ROWID");
+    query
+}
+
+fn build_select_value_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
+    let mut query = ArrayString::new();
+    query.push_str("SELECT value FROM ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" WHERE key = ?1");
+    query
+}
+
+fn build_insert_query(prefix: &EntityKeyPrefix) -> ArrayString<80> {
+    let mut query = ArrayString::new();
+    query.push_str("INSERT OR REPLACE INTO ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" (key, value) VALUES (?1, ?2)");
+    query
+}
+
+fn build_delete_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
+    let mut query = ArrayString::new();
+    query.push_str("DELETE FROM ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" WHERE key = ?1");
+    query
+}
+
+fn build_select_keys_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
+    let mut query = ArrayString::new();
+    query.push_str("SELECT key FROM ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" ORDER BY key");
+    query
+}
+
+fn build_select_all_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
+    let mut query = ArrayString::new();
+    query.push_str("SELECT key, value FROM ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" ORDER BY key");
+    query
+}
+
+fn build_contains_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
+    let mut query = ArrayString::new();
+    query.push_str("SELECT EXISTS(SELECT 1 FROM ");
+    push_table_name(&mut query, prefix);
+    query.push_str(" WHERE key = ?1)");
+    query
+}
+
 fn create_table(
     conn: &rusqlite::Connection,
     prefix: &EntityKeyPrefix,
 ) -> Result<(), rusqlite::Error> {
-    let table_name = table_name_for_prefix(prefix);
-    conn.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} (
-            key BLOB PRIMARY KEY NOT NULL,
-            value BLOB NOT NULL
-        ) WITHOUT ROWID"
-    ))
+    let query = build_create_table_query(prefix);
+    conn.execute_batch(&query)
 }
 
 fn init_database(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 1000;
          PRAGMA synchronous = NORMAL;
-         PRAGMA cache_size = -64000;
-         PRAGMA busy_timeout = 5000;",
+         PRAGME wal_checkpoint(TRUNCATE);
+         PRAGMA cache_size = -64000;",
     )
+}
+
+#[derive(Debug, Default)]
+struct SqliteConnectionCustomiser;
+
+impl SqliteConnectionCustomiser {
+    fn busy_handler(_: i32) -> bool {
+        sleep(Duration::from_millis(250));
+        true
+    }
+}
+
+impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for SqliteConnectionCustomiser {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        conn.busy_handler(Some(Self::busy_handler))?;
+        Ok(())
+    }
 }
 
 pub struct SqliteEntityStorage<const P: StoragePersistence> {
@@ -114,6 +197,7 @@ impl SqliteEntityStorage<PERSISTENT> {
         let manager = SqliteConnectionManager::file(&db_path);
         let pool = Pool::builder()
             .max_size(DEFAULT_POOL_SIZE)
+            .connection_customizer(Box::new(SqliteConnectionCustomiser::default()))
             .build(manager)
             .map_err(SqliteEntityStorageError::Pool)?;
 
@@ -168,6 +252,15 @@ impl EntityStorageProviderFromLoadable for SqliteEntityStorage<PERSISTENT> {
     }
 }
 
+impl EntityStorageProviderFromLoadable for SqliteEntityStorage<TRANSIENT> {
+    fn from_loadable(
+        _loader: &impl Loadable,
+        _attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError> {
+        Self::new().map_err(EntityStorageError::backing)
+    }
+}
+
 impl EntityStorageProviderFromStorage for SqliteEntityStorage<PERSISTENT> {
     fn from_storage(
         path: impl AsRef<Path>,
@@ -190,6 +283,20 @@ impl EntityStorageProviderFromStorage for SqliteEntityStorage<PERSISTENT> {
     }
 }
 
+impl EntityStorageProviderFromStorage for SqliteEntityStorage<TRANSIENT> {
+    fn from_storage(
+        _path: impl AsRef<Path>,
+        _attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError>
+    where
+        Self: Sized,
+    {
+        Err(EntityStorageError::unsupported_with(
+            "transient sqlite entity storage cannot be loaded from existing storage",
+        ))
+    }
+}
+
 impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<P> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let (prefix, key_rest) =
@@ -200,9 +307,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         }
 
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt =
-            conn.prepare_cached(&format!("SELECT value FROM {table_name} WHERE key = ?1"))?;
+        let query = build_select_value_query(&prefix);
+        let mut stmt = conn.prepare_cached(&query)?;
 
         let result = stmt
             .query_row(params![key_rest], |row| row.get::<_, Vec<u8>>(0))
@@ -223,9 +329,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         }
 
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt =
-            conn.prepare_cached(&format!("SELECT value FROM {table_name} WHERE key = ?1"))?;
+        let query = build_select_value_query(&prefix);
+        let mut stmt = conn.prepare_cached(&query)?;
 
         let result = stmt
             .query_row(params![key_rest], |row| row.get::<_, Vec<u8>>(0))
@@ -241,10 +346,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
         self.ensure_table(&conn, &prefix)?;
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = conn.prepare_cached(&format!(
-            "INSERT OR REPLACE INTO {table_name} (key, value) VALUES (?1, ?2)"
-        ))?;
+        let query = build_insert_query(&prefix);
+        let mut stmt = conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest, value.as_slice()])?;
 
         Ok(())
@@ -259,8 +362,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         }
 
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = conn.prepare_cached(&format!("DELETE FROM {table_name} WHERE key = ?1"))?;
+        let query = build_delete_query(&prefix);
+        let mut stmt = conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest])?;
 
         Ok(())
@@ -275,16 +378,11 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         }
 
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = conn.prepare_cached(&format!(
-            "SELECT 1 FROM {table_name} WHERE key = ?1 LIMIT 1"
-        ))?;
+        let query = build_contains_query(&prefix);
+        let mut stmt = conn.prepare_cached(&query)?;
 
-        let exists = stmt
-            .query_row(params![key_rest], |row| row.get::<_, i32>(0))
-            .optional()?;
-
-        Ok(exists.is_some())
+        let exists = stmt.query_row(params![key_rest], |row| row.get::<_, bool>(0))?;
+        Ok(exists)
     }
 
     fn iter_prefix_keys<'a>(
@@ -395,10 +493,10 @@ impl<'a> SqliteEntityKeyBytesIterator<'a> {
         prefix: EntityKeyPrefix,
     ) -> Result<EntityKeyBytesIterator<'a>, EntityStorageError> {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
+        let query = build_select_keys_query(&prefix);
 
         let inner = SqliteEntityKeyBytesIteratorInner::try_new(conn, |conn| {
-            let stmt = conn.prepare(&format!("SELECT key FROM {table_name} ORDER BY key"))?;
+            let stmt = conn.prepare(&query)?;
             SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
         })?;
 
@@ -455,11 +553,10 @@ impl<'a> SqliteEntityBytesIterator<'a> {
         prefix: EntityKeyPrefix,
     ) -> Result<EntityBytesIterator<'a>, EntityStorageError> {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
+        let query = build_select_all_query(&prefix);
 
         let inner = SqliteEntityBytesIteratorInner::try_new(conn, |conn| {
-            let stmt =
-                conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
+            let stmt = conn.prepare(&query)?;
             SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
         })?;
 
@@ -512,11 +609,10 @@ impl<'a, T: 'a> SqliteEntityBytesAsIterator<'a, T> {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
     {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
-        let table_name = table_name_for_prefix(&prefix);
+        let query = build_select_all_query(&prefix);
 
         let inner = SqliteEntityBytesIteratorInner::try_new(conn, |conn| {
-            let stmt =
-                conn.prepare(&format!("SELECT key, value FROM {table_name} ORDER BY key"))?;
+            let stmt = conn.prepare(&query)?;
             SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query([]))
         })?;
 
@@ -621,10 +717,8 @@ impl<'a, const P: StoragePersistence> EntityStorageBulkInserter<'a>
 
         self.storage.ensure_table(&self.conn, &prefix)?;
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "INSERT OR REPLACE INTO {table_name} (key, value) VALUES (?1, ?2)"
-        ))?;
+        let query = build_insert_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest, value.as_slice()])?;
 
         self.batch_size += 1;
@@ -668,10 +762,8 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
             return Ok(None);
         }
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT value FROM {table_name} WHERE key = ?1"))?;
+        let query = build_select_value_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
 
         let result = stmt
             .query_row(params![key_rest], |row| row.get::<_, Vec<u8>>(0))
@@ -688,16 +780,11 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
             return Ok(false);
         }
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT 1 FROM {table_name} WHERE key = ?1 LIMIT 1"
-        ))?;
+        let query = build_contains_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
 
-        let exists = stmt
-            .query_row(params![key_rest], |row| row.get::<_, i32>(0))
-            .optional()?;
-
-        Ok(exists.is_some())
+        let exists = stmt.query_row(params![key_rest], |row| row.get::<_, bool>(0))?;
+        Ok(exists)
     }
 }
 
@@ -751,10 +838,8 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
             return Ok(None);
         }
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT value FROM {table_name} WHERE key = ?1"))?;
+        let query = build_select_value_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
 
         let result = stmt
             .query_row(params![key_rest], |row| row.get::<_, Vec<u8>>(0))
@@ -771,16 +856,11 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
             return Ok(false);
         }
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT 1 FROM {table_name} WHERE key = ?1 LIMIT 1"
-        ))?;
+        let query = build_contains_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
 
-        let exists = stmt
-            .query_row(params![key_rest], |row| row.get::<_, i32>(0))
-            .optional()?;
-
-        Ok(exists.is_some())
+        let exists = stmt.query_row(params![key_rest], |row| row.get::<_, bool>(0))?;
+        Ok(exists)
     }
 }
 
@@ -793,10 +873,8 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
 
         self.storage.ensure_table(&self.conn, &prefix)?;
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "INSERT OR REPLACE INTO {table_name} (key, value) VALUES (?1, ?2)"
-        ))?;
+        let query = build_insert_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest, value.as_slice()])?;
 
         Ok(())
@@ -810,10 +888,8 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
             return Ok(());
         }
 
-        let table_name = table_name_for_prefix(&prefix);
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("DELETE FROM {table_name} WHERE key = ?1"))?;
+        let query = build_delete_query(&prefix);
+        let mut stmt = self.conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest])?;
 
         Ok(())

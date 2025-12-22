@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::traits::SymbolTable as _;
 use crate::ir::Address;
+use crate::ir::traits::SymbolTable as _;
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};
@@ -17,7 +17,9 @@ use crate::storage::{
     ProjectStorage, ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
 };
 use crate::types::AttributeMap;
-use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH};
+use crate::types::attributes::{
+    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
+};
 
 pub type InMemoryProject = Project<InMemoryProvider>;
 
@@ -448,6 +450,7 @@ mod test {
     use crate::attributes;
     #[cfg(feature = "mdbx")]
     use crate::storage::entities::MdbxEntityStorage;
+    #[cfg(feature = "rocksdb")]
     use crate::storage::entities::RocksDbEntityStorage;
     use crate::storage::project::{
         DefaultPersistentProjectStorageProvider, DefaultTransientProjectStorageProvider,
@@ -536,6 +539,7 @@ mod test {
         })
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
