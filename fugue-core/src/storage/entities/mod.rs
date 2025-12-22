@@ -39,9 +39,11 @@ pub mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
 
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "sqlite")]
+pub type DefaultPersistentEntityStorage = SqliteEntityStorage<PERSISTENT>;
+#[cfg(all(feature = "rocksdb", not(feature = "sqlite")))]
 pub type DefaultPersistentEntityStorage = RocksDbEntityStorage;
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(all(not(feature = "rocksdb"), not(feature = "sqlite")))]
 pub type DefaultPersistentEntityStorage = InMemoryEntityStorage;
 pub type DefaultTransientEntityStorage = InMemoryEntityStorage;
 
@@ -1130,7 +1132,6 @@ impl EntityStorage {
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-
         self.backing.get_as(&key, |bytes| {
             bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
                 .map(|(entity, _)| entity)
