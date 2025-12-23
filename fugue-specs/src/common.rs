@@ -369,7 +369,7 @@ impl<T> GroupOrValue<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ArchSpec {
+pub struct LanguageSpec {
     processor: String,
     endian: Endian,
     bits: Option<u32>,
@@ -377,7 +377,7 @@ pub struct ArchSpec {
     convention: Option<String>,
 }
 
-impl ArchSpec {
+impl LanguageSpec {
     pub fn new(processor: impl Into<String>, endian: Endian) -> Self {
         Self::new_with(processor, endian, None, None, None)
     }
@@ -440,7 +440,7 @@ impl ArchSpec {
 
 #[derive(Debug, Error)]
 pub enum LanguageParseError {
-    #[error("architecture format is invalid")]
+    #[error("language format is invalid")]
     Format,
     #[error("invalid architecture processor (should be non-empty string and not '*')")]
     Processor,
@@ -450,11 +450,11 @@ pub enum LanguageParseError {
     Bits,
     #[error("invalid architecture variant (should be non-empty string or '*')")]
     Variant,
-    #[error("invalid architecture convention (should be non-empty string or '*')")]
+    #[error("invalid language convention (should be non-empty string or '*')")]
     Convention,
 }
 
-impl FromStr for ArchSpec {
+impl FromStr for LanguageSpec {
     type Err = LanguageParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -504,7 +504,7 @@ impl FromStr for ArchSpec {
             Some(parts[4].to_owned())
         };
 
-        Ok(ArchSpec {
+        Ok(LanguageSpec {
             processor,
             endian,
             bits,
@@ -514,7 +514,7 @@ impl FromStr for ArchSpec {
     }
 }
 
-impl Display for ArchSpec {
+impl Display for LanguageSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let endian = match self.endian {
             Endian::Big => "BE",
@@ -538,17 +538,17 @@ impl Display for ArchSpec {
     }
 }
 
-impl<'de> Deserialize<'de> for ArchSpec {
+impl<'de> Deserialize<'de> for LanguageSpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        ArchSpec::from_str(&s).map_err(D::Error::custom)
+        LanguageSpec::from_str(&s).map_err(D::Error::custom)
     }
 }
 
-impl Serialize for ArchSpec {
+impl Serialize for LanguageSpec {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -560,7 +560,7 @@ impl Serialize for ArchSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlatformConstraint {
-    Arch(ArchSpec),
+    Language(LanguageSpec),
     Platform(String),
 }
 
@@ -571,15 +571,15 @@ impl<'de> Deserialize<'de> for PlatformConstraint {
     {
         let av = AttrWithVal::<String, String>::deserialize(deserializer)?;
         match av.attr.as_ref() {
-            "arch" => {
-                Ok(Self::Arch(ArchSpec::deserialize(StringDeserializer::new(av.val))?))
+            "language" => {
+                Ok(Self::Language(LanguageSpec::deserialize(StringDeserializer::new(av.val))?))
             }
             "platform" => {
                 Ok(Self::Platform(av.val))
             }
             _ => {
                 Err(<D::Error as serde::de::Error>::custom(
-                    "invalid arch/platform constraint (should be of the form arch: ... or platform: ...)",
+                    "invalid language/platform constraint (should be of the form language: ... or platform: ...)",
                 ))
             }
         }
@@ -592,9 +592,9 @@ impl Serialize for PlatformConstraint {
         S: Serializer,
     {
         match self {
-            Self::Arch(arch) => AttrWithVal {
-                attr: "arch",
-                val: arch,
+            Self::Language(lang) => AttrWithVal {
+                attr: "language",
+                val: lang,
             }
             .serialize(serializer),
             Self::Platform(platform) => AttrWithVal {

@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::common::{
-    ArchSpec, AttrOptWithVal, AttrWithVal, GroupOrValue, GroupOrValueVisitor, OneOrMany,
+    LanguageSpec, AttrOptWithVal, AttrWithVal, GroupOrValue, GroupOrValueVisitor, OneOrMany,
     PlatformConstraint, PlatformConstraints,
 };
 use crate::pattern::PatternsWithContext;
@@ -79,14 +79,14 @@ impl From<FunctionProperties> for OneOrMany<FunctionProperty> {
 }
 
 #[derive(Clone, Default)]
-pub struct FunctionPatterns(BTreeMap<Option<ArchSpec>, Vec<PatternsWithContext>>);
+pub struct FunctionPatterns(BTreeMap<Option<LanguageSpec>, Vec<PatternsWithContext>>);
 
 impl<'de> Deserialize<'de> for FunctionPatterns {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let d = Vec::<AttrOptWithVal<ArchSpec, PatternsWithContext>>::deserialize(deserializer)?;
+        let d = Vec::<AttrOptWithVal<LanguageSpec, PatternsWithContext>>::deserialize(deserializer)?;
         let mut m = BTreeMap::new();
 
         for d in d.into_iter() {
@@ -353,11 +353,11 @@ mod test {
 
     #[test]
     fn test_constraint() -> Result<(), Box<dyn std::error::Error>> {
-        let input1 = "arch: x86:LE:32";
+        let input1 = "language: x86:LE:32";
         let input2 = "platform: posix";
 
         assert_eq!(
-            PlatformConstraint::Arch(ArchSpec::new_with("x86", Endian::Little, 32, None, None)),
+            PlatformConstraint::Language(LanguageSpec::new_with("x86", Endian::Little, 32, None, None)),
             serde_yaml::from_str(input1)?
         );
 
@@ -377,8 +377,8 @@ properties: non-returning
 where:
   all:
   - any:
-    - arch: x86:LE:32
-    - arch: x86:LE:64
+    - language: x86:LE:32
+    - language: x86:LE:64
   - platform: posix
 patterns:
 - x86:LE:32:
@@ -403,27 +403,27 @@ patterns:
         let constraints = fspec.constraints.unwrap();
 
         // test group matching via where
-        struct ArchWithPlatform {
-            arch: ArchSpec,
+        struct LangWithPlatform {
+            language: LanguageSpec,
             platform: &'static str,
         }
 
-        impl GroupOrValueVisitor<PlatformConstraint> for ArchWithPlatform {
+        impl GroupOrValueVisitor<PlatformConstraint> for LangWithPlatform {
             fn matches_value(&self, value: &PlatformConstraint) -> bool {
                 match value {
+                    PlatformConstraint::Language(lang) => lang.matches(&self.language),
                     PlatformConstraint::Platform(platform) => platform == self.platform,
-                    PlatformConstraint::Arch(arch) => arch.matches(&self.arch),
                 }
             }
         }
 
-        assert!(constraints.matches(&ArchWithPlatform {
-            arch: ArchSpec::new("x86", Endian::Little),
+        assert!(constraints.matches(&LangWithPlatform {
+            language: LanguageSpec::new("x86", Endian::Little),
             platform: "posix",
         }));
 
-        assert!(!constraints.matches(&ArchWithPlatform {
-            arch: ArchSpec::new("x86", Endian::Little),
+        assert!(!constraints.matches(&LangWithPlatform {
+            language: LanguageSpec::new("x86", Endian::Little),
             platform: "uefi",
         }));
 
@@ -436,7 +436,7 @@ patterns:
 name: get_pc_thunk_bx
 where:
   all:
-  - arch: x86:LE:32
+  - language: x86:LE:32
   - platform: posix
 patterns:
   - 8B 1C 24 C3

@@ -1,11 +1,11 @@
-use yaxpeax_arch::*;
-use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
-
 use fugue_lifter::x86::register::{
     AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
 };
 use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 pub use fugue_lifter::x86::*;
+
+use yaxpeax_arch::*;
+use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};

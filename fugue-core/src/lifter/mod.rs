@@ -15,6 +15,8 @@ pub use lifter::{Lifter, LifterError};
 
 pub mod traits;
 
+pub const MAX_CONTEXT_UPDATES: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct ContextUpdate {
     bits: ContextBitRange,
@@ -49,7 +51,7 @@ impl ContextUpdate {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct ContextSet(ArrayVec<ContextUpdate, 2>);
+pub struct ContextSet(ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>);
 
 impl Display for ContextSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,10 +85,18 @@ impl<C> Decode<C> for ContextSet {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let len = usize::decode(decoder)?;
+
+        if len > MAX_CONTEXT_UPDATES {
+            return Err(bincode::error::DecodeError::OtherString(
+                "too many context updates".to_owned(),
+            ));
+        }
+
         let mut context = ArrayVec::new();
         for _ in 0..len {
             context.push(ContextUpdate::decode(decoder)?);
         }
+
         Ok(Self(context))
     }
 }
@@ -96,10 +106,18 @@ impl<'de, C> BorrowDecode<'de, C> for ContextSet {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let len = usize::borrow_decode(decoder)?;
+
+        if len > MAX_CONTEXT_UPDATES {
+            return Err(bincode::error::DecodeError::OtherString(
+                "too many context updates".to_owned(),
+            ));
+        }
+
         let mut context = ArrayVec::new();
         for _ in 0..len {
             context.push(ContextUpdate::borrow_decode(decoder)?);
         }
+
         Ok(Self(context))
     }
 }
@@ -107,6 +125,23 @@ impl<'de, C> BorrowDecode<'de, C> for ContextSet {
 impl From<ContextUpdate> for ContextSet {
     fn from(value: ContextUpdate) -> Self {
         Self(ArrayVec::from_iter([value]))
+    }
+}
+
+impl FromIterator<(ContextBitRange, u32)> for ContextSet {
+    fn from_iter<T: IntoIterator<Item = (ContextBitRange, u32)>>(iter: T) -> Self {
+        Self::from_iter(
+            iter.into_iter()
+                .map(|(bits, value)| ContextUpdate::new(bits, value)),
+        )
+    }
+}
+
+impl FromIterator<ContextUpdate> for ContextSet {
+    fn from_iter<T: IntoIterator<Item = ContextUpdate>>(iter: T) -> Self {
+        Self(ArrayVec::from_iter(
+            iter.into_iter().take(MAX_CONTEXT_UPDATES),
+        ))
     }
 }
 
@@ -127,6 +162,12 @@ impl ContextSet {
 
     #[inline]
     pub fn push(&mut self, value: ContextUpdate) {
+        for update in self.0.iter_mut() {
+            if update.bits == value.bits {
+                *update = value;
+                return;
+            }
+        }
         self.0.push(value);
     }
 
@@ -142,9 +183,7 @@ impl ContextSet {
         }
 
         for update in other.0.iter() {
-            if !self.0.iter().any(|existing| existing.bits == update.bits) {
-                self.0.push(update.to_owned());
-            }
+            self.push(update.to_owned());
         }
     }
 

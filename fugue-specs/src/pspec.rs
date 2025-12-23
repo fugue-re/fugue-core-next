@@ -140,7 +140,7 @@ mod test {
 
     const PAT: &'static str = r#"
 constraints:
-- arch: ARM:LE:32
+- language: ARM:LE:32
 patterns:
 - pattern-group:
     post:

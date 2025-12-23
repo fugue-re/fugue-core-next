@@ -1,5 +1,7 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use fugue_specs::PatternsWithContext;
@@ -8,15 +10,18 @@ use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::ir::Address;
+use crate::lifter::ContextSet;
+use crate::loader::LoadableSegment;
 use crate::project::Project;
-use crate::storage::ProjectStorageProvider;
+use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryPatternMatcherError {
-    #[error("failed to parse patterns: {0}")]
-    Parse(#[from] serde_saphyr::Error),
     #[error("failed to read patterns from {0}: {1}")]
     Io(PathBuf, anyhow::Error),
+    #[error("failed to parse patterns: {0}")]
+    Parse(#[from] serde_saphyr::Error),
 }
 
 impl FunctionRecoveryPatternMatcherError {
@@ -62,6 +67,59 @@ impl FunctionRecoveryPatternMatcher {
         self.add_patterns_from_reader(reader)
             .map_err(|e| FunctionRecoveryPatternMatcherError::io(path, e))
     }
+
+    fn for_each_segment<'a>(
+        segments: &'a SegmentStorage,
+        segm: &mut Option<Cow<'a, LoadableSegment<'a>>>,
+        gap: RangeInclusive<Address>,
+        mut f: impl FnMut(RangeInclusive<Address>, &[u8]),
+    ) {
+        let current_segment = segm;
+        let gap_end = *gap.end();
+
+        let mut current_start = *gap.start();
+        let calculate_end = |segm: &LoadableSegment| -> Address {
+            let segm_end = segm.last_address();
+            if segm_end <= gap_end {
+                segm_end
+            } else {
+                gap_end
+            }
+        };
+
+        while current_start <= gap_end {
+            let (range, segm) = if let Some(segm) = current_segment.as_ref()
+                && segm.contains_address(current_start)
+            {
+                let match_end = calculate_end(&*segm);
+                let range = current_start..=match_end;
+
+                current_start = match_end + 1usize;
+
+                (range, segm)
+            } else {
+                let Ok(segment) = segments.find_segment_containing(current_start) else {
+                    break;
+                };
+
+                let match_end = calculate_end(&segment);
+                let range = current_start..=match_end;
+
+                current_start = match_end + 1usize;
+
+                let segm = current_segment.insert(segment);
+
+                (range, &*segm)
+            };
+
+            let size = 1usize + range.end().absolute_difference(range.start()) as usize;
+            let Some(bytes) = segm.view_bytes_at_address(*range.start(), size) else {
+                break;
+            };
+
+            f(range, bytes);
+        }
+    }
 }
 
 impl<P> AnalysisPass<'_, P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
@@ -73,21 +131,48 @@ where
         project: &mut Project<P>,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
+        let segments = project.segments();
+
         let gaps = state
-            .gaps(project.functions(), project.blocks(), project.segments())
+            .gaps(project.functions(), project.blocks(), segments)
             .map_err(|e| AnalysisError::pass_failed("function-recovery-pattern-matcher", e))?;
 
         if gaps.is_empty() {
             return Ok(());
         }
 
-        for gap in gaps.ranges() {
-            // NOTE: we may overlaps segments; need to handle this case by splitting across them
-            // that said, this is not really an issue--we will just split them.
+        let arch = project.arch();
+        let language = project.language();
 
-            for pat in self.patterns.iter() {
-                // TODO: apply the patterns
-            }
+        let mut current_segm = None::<Cow<LoadableSegment>>;
+
+        for gap in gaps.ranges() {
+            Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
+                for pat in self.patterns.iter() {
+                    for (range, ctx) in pat.matches(&*bytes) {
+                        let start = *gap.start() + range.start;
+
+                        if arch.canonicalise_address(start).is_none() {
+                            continue;
+                        }
+
+                        if state.avoids().contains(start) || state.failures().contains(&start) {
+                            continue;
+                        }
+
+                        let ctx = ctx
+                            .variables()
+                            .filter_map(|(var, val)| {
+                                let bits = language.context_variable_by_name(var)?;
+                                Some((bits, val))
+                            })
+                            .collect::<ContextSet>();
+
+                        // NOTE: we should add confidence here based on pattern quality
+                        state.add_candidate_with_context(start, ctx);
+                    }
+                }
+            });
         }
 
         Ok(())

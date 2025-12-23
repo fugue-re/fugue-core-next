@@ -351,6 +351,14 @@ impl Address {
         Address(offset)
     }
 
+    pub fn absolute_difference(&self, other: &Address) -> u64 {
+        if self >= other {
+            self.offset().wrapping_sub(other.offset())
+        } else {
+            other.offset().wrapping_sub(self.offset())
+        }
+    }
+
     pub fn wrap(&self, language: &Language) -> Address {
         language.wrap_offset_in_default_space(self.offset()).into()
     }

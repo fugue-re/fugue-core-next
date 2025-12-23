@@ -319,19 +319,21 @@ impl Serialize for Pattern {
     }
 }
 
-pub struct PatternMatchIter<'a>(Box<dyn Iterator<Item = (Range<usize>, &'a PatternContext)> + 'a>);
+pub struct PatternMatchIter<'a>(
+    Box<dyn Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a>,
+);
 
 impl<'a> PatternMatchIter<'a> {
     pub(crate) fn new<I>(iter: I) -> Self
     where
-        I: Iterator<Item = (Range<usize>, &'a PatternContext)> + 'a,
+        I: Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a,
     {
         Self(Box::new(iter))
     }
 }
 
 impl<'a> Iterator for PatternMatchIter<'a> {
-    type Item = (Range<usize>, &'a PatternContext);
+    type Item = (Range<usize>, &'a PatternContext, f32);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
@@ -504,7 +506,7 @@ impl PatternGroup {
     pub fn matches<'a>(
         &'a self,
         bytes: &'a [u8],
-    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext)> + 'a {
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a {
         let bytes = bytes.as_ref();
 
         self.post_patterns.patterns.iter().flat_map(|pattern| {
@@ -528,7 +530,11 @@ impl PatternGroup {
                                 && pre_pattern.bits() + post_bits >= self.total_bits
                         })
                     {
-                        Some((m.range(), &self.post_patterns.context))
+                        Some((
+                            m.range(),
+                            &self.post_patterns.context,
+                            self.post_patterns.confidence,
+                        ))
                     } else {
                         None
                     }
@@ -542,6 +548,8 @@ pub struct PatternsWithContext {
     patterns: Vec<Pattern>,
     #[serde(default)]
     context: PatternContext,
+    #[serde(default)]
+    confidence: f32,
 }
 
 impl<'de> Deserialize<'de> for PatternsWithContext {
@@ -557,6 +565,8 @@ impl<'de> Deserialize<'de> for PatternsWithContext {
                 patterns: Vec<Pattern>,
                 #[serde(default)]
                 context: PatternContext,
+                #[serde(default)]
+                confidence: f32,
             },
         }
 
@@ -564,9 +574,23 @@ impl<'de> Deserialize<'de> for PatternsWithContext {
             PatternWithContexT::Pattern(pattern) => Self {
                 patterns: vec![pattern],
                 context: PatternContext::default(),
+                confidence: 1.0,
             },
-            PatternWithContexT::PatternWithContext { patterns, context } => {
-                Self { patterns, context }
+            PatternWithContexT::PatternWithContext {
+                patterns,
+                context,
+                confidence,
+            } => {
+                if confidence < 0.0 || confidence > 1.0 {
+                    return Err(serde::de::Error::custom(
+                        "confidence must be between 0.0 and 1.0",
+                    ));
+                }
+                Self {
+                    patterns,
+                    context,
+                    confidence,
+                }
             }
         };
 
@@ -578,7 +602,7 @@ impl PatternsWithContext {
     pub fn matches<'a>(
         &'a self,
         bytes: &'a [u8],
-    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext)> + 'a {
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a {
         let bytes = bytes.as_ref();
 
         self.patterns.iter().flat_map(|pattern| {
@@ -587,7 +611,7 @@ impl PatternsWithContext {
                 .find_iter(bytes)
                 .filter_map(|m| {
                     if pattern.is_match(m.as_bytes()) {
-                        Some((m.range(), &self.context))
+                        Some((m.range(), &self.context, self.confidence))
                     } else {
                         None
                     }

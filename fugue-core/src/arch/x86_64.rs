@@ -1,12 +1,12 @@
-use yaxpeax_arch::*;
-use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
-
 use fugue_lifter::x86_64::register::{
     AF, CF, DF, OF, PF, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI,
     RSP, SF, ZF,
 };
 use fugue_lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 pub use fugue_lifter::x86_64::*;
+
+use yaxpeax_arch::*;
+use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};

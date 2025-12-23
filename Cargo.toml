@@ -2,10 +2,10 @@
 members = [
   "fugue",
   "fugue-arch",
-  "fugue-core",
-  "fugue-core-idalib",
   "fugue-bytes",
   "fugue-bv",
+  "fugue-core",
+  "fugue-core-idalib",
   "fugue-lifter",
   "fugue-lifter-aarch64",
   "fugue-lifter-arm",
