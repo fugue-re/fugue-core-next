@@ -92,24 +92,24 @@ pub enum IndexedCodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Custom(anyhow::Error),
+    Other(anyhow::Error),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
 
 impl IndexedCodeBlockTableError {
-    pub fn custom<E>(error: E) -> Self
+    pub fn other<E>(error: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        Self::Custom(anyhow::Error::new(error))
+        Self::Other(anyhow::Error::new(error))
     }
 
-    pub fn custom_with<M>(msg: M) -> Self
+    pub fn other_with<M>(msg: M) -> Self
     where
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
-        Self::Custom(anyhow::Error::msg(msg))
+        Self::Other(anyhow::Error::msg(msg))
     }
 }
 

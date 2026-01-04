@@ -149,7 +149,7 @@ where
         for gap in gaps.ranges() {
             Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
-                    for (range, ctx) in pat.matches(&*bytes) {
+                    for (range, ctx, _confidence) in pat.matches(&*bytes) {
                         let start = *gap.start() + range.start;
 
                         if arch.canonicalise_address(start).is_none() {
