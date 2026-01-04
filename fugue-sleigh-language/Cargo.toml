@@ -19,7 +19,7 @@ fugue-bytes = { path = "../fugue-bytes", version = "0.3" }
 fugue-sleigh-marshal = { path = "../fugue-sleigh-marshal", version = "0.3" }
 iset = { version = "0.3", features = ["serde"] }
 itertools = "0.14"
-roxmltree = "0.20"
+roxmltree = "0.21"
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
 tracing = { version = "0.1", optional = true }

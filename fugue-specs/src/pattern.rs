@@ -10,7 +10,7 @@ use nom::character::complete::space0;
 use nom::error::{Error, ErrorKind};
 use nom::multi::fold_many1;
 use nom::sequence::delimited;
-use nom::{Err, Finish, IResult};
+use nom::{Err, Finish, IResult, Parser};
 
 use regex::bytes::RegexBuilder;
 pub use regex::bytes::{Match, Regex};
@@ -166,7 +166,7 @@ impl Pattern {
     }
 
     fn parse_one(input: &str) -> IResult<&str, (u8, u8)> {
-        alt((Self::parse_hex, Self::parse_bin))(input)
+        alt((Self::parse_hex, Self::parse_bin)).parse(input)
     }
 
     fn parse(input: &str) -> IResult<&str, Pattern> {
@@ -185,7 +185,8 @@ impl Pattern {
                 }
                 (acc_v, acc_m, acc_r)
             },
-        )(input)?;
+        )
+        .parse(input)?;
 
         let norm = RegexBuilder::new(regex.as_ref())
             .unicode(false)
