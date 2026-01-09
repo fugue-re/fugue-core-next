@@ -201,10 +201,8 @@ impl FunctionRecoveryConfig {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-
     use crate::analysis::AnalysisPass;
-    use crate::loader::Shellcode;
+    use crate::loader::{Loadable, LoadableAnalysers, Loader, Shellcode};
     use crate::project::InMemoryProject;
 
     #[test]
@@ -217,8 +215,9 @@ mod test {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            let mut project = InMemoryProject::from_file("tests/ls.elf")?;
-            let mut cfr = FunctionRecovery::new();
+            let loader = Loader::from_file("tests/ls.elf")?;
+            let mut project = InMemoryProject::new(&loader)?;
+            let mut cfr = loader.analysers().function_recovery();
 
             cfr.add_candidate(0x4da0u64);
             cfr.add_candidate(0x6dd0u64);
@@ -251,9 +250,9 @@ mod test {
                 0x5E, 0xC9, 0xC2, 0x08, 0x00,
             ];
 
-            let mut project =
-                InMemoryProject::new(&Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?)?;
-            let mut cfr = FunctionRecovery::new();
+            let loader = Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?;
+            let mut project = InMemoryProject::new(&loader)?;
+            let mut cfr = loader.analysers().function_recovery();
 
             cfr.add_candidate(0x4EB14u64);
             cfr.analyse(&mut project)?;

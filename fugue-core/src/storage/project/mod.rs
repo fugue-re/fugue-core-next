@@ -104,7 +104,7 @@ impl ProjectStorage for InMemoryProjectStorage {
     }
 }
 
-pub trait ProjectStorageProvider {
+pub trait ProjectStorageProvider: 'static {
     type ProjectStorage: ProjectStorage;
     type StorageProvider: StorageProvider;
 }

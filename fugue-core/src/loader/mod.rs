@@ -13,10 +13,12 @@ use fugue_bytes::{BE, LE};
 
 use thiserror::Error;
 
+use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
+use crate::storage::ProjectStorageProvider;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -613,6 +615,59 @@ pub trait Loadable {
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a;
 
     fn segment_range(&self) -> (Address, Address);
+
+    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    where
+        P: ProjectStorageProvider,
+    {
+        DefaultLoadableAnalysers::default()
+    }
+}
+
+pub trait LoadableAnalysers<'a, P>
+where
+    P: ProjectStorageProvider,
+{
+    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
+        FunctionRecovery::new()
+    }
+
+    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
+        FunctionRecovery::new_with(config)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultLoadableAnalysers;
+
+impl<'a, P> LoadableAnalysers<'a, P> for DefaultLoadableAnalysers where P: ProjectStorageProvider {}
+
+impl<'a, P, T> LoadableAnalysers<'a, P> for Box<T>
+where
+    P: ProjectStorageProvider,
+    T: LoadableAnalysers<'a, P> + ?Sized,
+{
+    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
+        self.as_ref().function_recovery()
+    }
+
+    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
+        self.as_ref().function_recovery_with(config)
+    }
+}
+
+impl<'a, P, T> LoadableAnalysers<'a, P> for &T
+where
+    P: ProjectStorageProvider,
+    T: LoadableAnalysers<'a, P> + ?Sized,
+{
+    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
+        (*self).function_recovery()
+    }
+
+    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
+        (*self).function_recovery_with(config)
+    }
 }
 
 pub enum Loader<'a> {
@@ -732,6 +787,18 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.segment_range(),
             Self::Object(object) => object.segment_range(),
+        }
+    }
+
+    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    where
+        P: ProjectStorageProvider,
+    {
+        match self {
+            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<'a, P> + 'a>,
+            Self::Object(object) => {
+                Box::new(object.analysers()) as Box<dyn LoadableAnalysers<'a, P> + 'a>
+            }
         }
     }
 }
