@@ -357,6 +357,23 @@ where
     }
 }
 
+fn insert_function(
+    functions: &mut BTreeMap<Address, Confidence>,
+    address: Address,
+    confidence: Confidence,
+) -> bool {
+    use std::collections::btree_map::Entry;
+    let Entry::Vacant(entry) = functions
+        .entry(address)
+        .and_modify(|c| c.merge_max(confidence))
+    else {
+        return false;
+    };
+
+    entry.insert(confidence);
+    true
+}
+
 fn update_function(
     functions: &mut BTreeMap<Address, Confidence>,
     address: Address,
@@ -366,20 +383,9 @@ fn update_function(
     matches!(
         functions
             .entry(address)
-            .and_modify(|c| *c = confidence.max(*c)),
+            .and_modify(|c| c.merge_max(confidence)),
         Entry::Occupied(_)
     )
-}
-
-fn insert_function(
-    functions: &mut BTreeMap<Address, Confidence>,
-    address: Address,
-    confidence: Confidence,
-) {
-    functions
-        .entry(address)
-        .and_modify(|c| *c = confidence.max(*c))
-        .or_insert(confidence);
 }
 
 impl<'a, P> AnalysisPass<'a, P> for FunctionRecovery<'a, P>
@@ -485,7 +491,7 @@ where
                     tracing::debug!("failed to commit function at {address}: {e}");
 
                     new_functions.into_iter().for_each(|(function, address)| {
-                        insert_function(&mut functions, function, address)
+                        insert_function(&mut functions, function, address);
                     });
 
                     return Err(AnalysisError::pass_failed("function-recovery", e));
@@ -510,11 +516,9 @@ where
             }
 
             // flush pass functions
-            new_functions
-                .iter()
-                .for_each(|(&address, &confidence)| {
-                    insert_function(&mut functions, address, confidence)
-                });
+            new_functions.iter().for_each(|(&address, &confidence)| {
+                insert_function(&mut functions, address, confidence);
+            });
 
             // perform a restructuring pass over existing functions, which may split
             // or merge functions, check for overlaps and/or conflicts, etc.
