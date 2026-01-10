@@ -1,9 +1,29 @@
+use std::fmt::Display;
+
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[repr(transparent)]
 pub struct Confidence(OrderedFloat<f32>);
+
+impl Display for Confidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = self.0 .0;
+        let kind = if value == 1f32 {
+            "certain"
+        } else if value >= 0.8f32 {
+            "somewhat certain"
+        } else if value >= 0.6f32 {
+            "somewhat uncertain"
+        } else if value >= 0.4f32 {
+            "uncertain"
+        } else {
+            "very uncertain"
+        };
+        write!(f, "{kind} ~ {value:.2}")
+    }
+}
 
 impl Default for Confidence {
     fn default() -> Self {
@@ -101,5 +121,3 @@ impl<'de> Deserialize<'de> for Confidence {
         }
     }
 }
-
-

@@ -369,7 +369,6 @@ fn insert_function(
     else {
         return false;
     };
-
     entry.insert(confidence);
     true
 }
@@ -470,7 +469,9 @@ where
                     continue;
                 }
 
-                tracing::debug!("analysing function candidate at {candidate}");
+                tracing::debug!(
+                    "analysing function candidate at {candidate} (confidence: {confidence})"
+                );
 
                 let function = match self.builder.analyse(project, &mut translator, candidate) {
                     Ok(f) => f,
