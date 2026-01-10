@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::iter::repeat;
 use std::mem;
 use std::ops::RangeInclusive;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use crate::lifter::ContextSet;
 use crate::project::{Project, ProjectMut};
 use crate::storage::project::InMemoryProvider;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
+use crate::types::Confidence;
 
 use super::{
     FunctionBuilder, FunctionBuilderContext, FunctionRecoveryConfig, FunctionRecoveryError,
@@ -35,8 +37,8 @@ pub struct FunctionDiscoveryContext {
     candidates: VecDeque<AddressWithContext>,
     avoids: AddressRangeSet,
     failures: BTreeSet<Address>,
-    functions: BTreeSet<Address>,
-    new_functions: BTreeSet<Address>,
+    functions: BTreeMap<Address, Confidence>,
+    new_functions: BTreeMap<Address, Confidence>,
 }
 
 #[derive(Default)]
@@ -44,8 +46,8 @@ pub struct FunctionStructuringContext {
     config: FunctionRecoveryConfig,
     avoids: AddressRangeSet,
     failures: BTreeSet<Address>,
-    functions: BTreeSet<Address>,
-    new_functions: BTreeSet<Address>,
+    functions: BTreeMap<Address, Confidence>,
+    new_functions: BTreeMap<Address, Confidence>,
 }
 
 impl FunctionDiscoveryContext {
@@ -102,11 +104,11 @@ impl FunctionDiscoveryContext {
         self.failures.insert(address.into());
     }
 
-    pub fn functions(&self) -> &BTreeSet<Address> {
+    pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
         &self.functions
     }
 
-    pub fn new_functions(&self) -> &BTreeSet<Address> {
+    pub fn new_functions(&self) -> &BTreeMap<Address, Confidence> {
         &self.new_functions
     }
 
@@ -225,18 +227,22 @@ impl FunctionStructuringContext {
         self.failures.insert(address.into());
     }
 
-    pub fn functions(&self) -> &BTreeSet<Address> {
+    pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
         &self.functions
     }
 
-    pub fn new_functions(&self) -> &BTreeSet<Address> {
+    pub fn new_functions(&self) -> &BTreeMap<Address, Confidence> {
         &self.new_functions
     }
 
     pub fn add_function(&mut self, address: impl Into<Address>) {
+        self.add_function_with(address, Confidence::certain());
+    }
+
+    pub fn add_function_with(&mut self, address: impl Into<Address>, confidence: Confidence) {
         let address = address.into();
-        self.new_functions.insert(address);
-        self.functions.insert(address);
+        insert_function(&mut self.new_functions, address, confidence);
+        insert_function(&mut self.functions, address, confidence);
     }
 
     pub fn remove_function(&mut self, address: impl Into<Address>) {
@@ -351,6 +357,31 @@ where
     }
 }
 
+fn update_function(
+    functions: &mut BTreeMap<Address, Confidence>,
+    address: Address,
+    confidence: Confidence,
+) -> bool {
+    use std::collections::btree_map::Entry;
+    matches!(
+        functions
+            .entry(address)
+            .and_modify(|c| *c = confidence.max(*c)),
+        Entry::Occupied(_)
+    )
+}
+
+fn insert_function(
+    functions: &mut BTreeMap<Address, Confidence>,
+    address: Address,
+    confidence: Confidence,
+) {
+    functions
+        .entry(address)
+        .and_modify(|c| *c = confidence.max(*c))
+        .or_insert(confidence);
+}
+
 impl<'a, P> AnalysisPass<'a, P> for FunctionRecovery<'a, P>
 where
     P: ProjectStorageProvider,
@@ -396,8 +427,12 @@ where
         }
 
         let mut failures = BTreeSet::new();
-        let mut functions = project.functions().addresses().collect::<BTreeSet<_>>();
-        let mut new_functions = BTreeSet::new();
+        let mut functions = project
+            .functions()
+            .addresses()
+            .zip(repeat(Confidence::certain()))
+            .collect::<BTreeMap<_, _>>();
+        let mut new_functions = BTreeMap::new();
         let mut translator = Translator::new(project);
 
         tracing::debug!("existing functions: {}", functions.len());
@@ -405,6 +440,7 @@ where
         loop {
             while let Some(candidate) = self.candidates.pop_front() {
                 let address = candidate.address();
+                let confidence = Confidence::certain();
 
                 if !project.segments().contains_segment(address) {
                     tracing::trace!("skipping {address}: not mapped");
@@ -421,7 +457,9 @@ where
                     continue;
                 }
 
-                if functions.contains(&address) || new_functions.contains(&address) {
+                if update_function(&mut functions, address, confidence)
+                    || update_function(&mut new_functions, address, confidence)
+                {
                     tracing::trace!("skipping {address}: already analysed");
                     continue;
                 }
@@ -446,13 +484,14 @@ where
                 if let Err(e) = function.commit(ftable, cbtable) {
                     tracing::debug!("failed to commit function at {address}: {e}");
 
-                    // flush pass functions
-                    functions.extend(new_functions);
+                    new_functions.into_iter().for_each(|(function, address)| {
+                        insert_function(&mut functions, function, address)
+                    });
 
                     return Err(AnalysisError::pass_failed("function-recovery", e));
                 }
 
-                new_functions.insert(address);
+                new_functions.insert(address, confidence);
 
                 // avoids shouldn't make it into the candidate set
                 self.candidates.extend(
@@ -461,8 +500,9 @@ where
                         .iter()
                         .filter(|candidate| {
                             let start = candidate.address();
-                            !functions.contains(&start)
-                                && !new_functions.contains(&start)
+                            let confidence = Confidence::certain();
+                            !update_function(&mut functions, start, confidence)
+                                && !update_function(&mut functions, start, confidence)
                                 && !failures.contains(&start)
                         })
                         .cloned(),
@@ -470,7 +510,11 @@ where
             }
 
             // flush pass functions
-            functions.extend(new_functions.iter().copied());
+            new_functions
+                .iter()
+                .for_each(|(&address, &confidence)| {
+                    insert_function(&mut functions, address, confidence)
+                });
 
             // perform a restructuring pass over existing functions, which may split
             // or merge functions, check for overlaps and/or conflicts, etc.

@@ -1,8 +1,10 @@
 pub mod common;
+pub mod confidence;
 pub mod fspec;
 pub mod pattern;
 pub mod pspec;
 
+pub use confidence::Confidence;
 pub use fspec::{
     FunctionPatterns, FunctionProperties, FunctionSpec, FunctionSpecError, FunctionSpecs,
     FunctionStub,
