@@ -43,6 +43,36 @@ impl From<Confidence> for f32 {
     }
 }
 
+#[cfg(feature = "bincode")]
+impl bincode::Encode for Confidence {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.0.encode(encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<C> bincode::Decode<C> for Confidence {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let value = OrderedFloat(f32::decode(decoder)?);
+        Ok(Self(value))
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<'de, C> bincode::BorrowDecode<'de, C> for Confidence {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let value = OrderedFloat(f32::borrow_decode(decoder)?);
+        Ok(Self(value))
+    }
+}
+
 impl Confidence {
     pub fn new(value: f32) -> Self {
         Self(OrderedFloat(value.clamp(0f32, 1f32)))

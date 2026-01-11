@@ -5,8 +5,7 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::{
@@ -409,7 +408,7 @@ where
                     ContextSet::single(T_MODE, 0)
                 };
 
-                state.add_candidate_with_context(addr, context);
+                state.add_candidate(AddressWithContext::new(addr, context));
             } else {
                 state.add_candidate(addr);
             }

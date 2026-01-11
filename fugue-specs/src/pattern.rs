@@ -20,6 +20,8 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::Confidence;
+
 #[derive(Debug, Error)]
 pub enum PatternError {
     #[error("cannot parse pattern: {0:?}")]
@@ -321,20 +323,20 @@ impl Serialize for Pattern {
 }
 
 pub struct PatternMatchIter<'a>(
-    Box<dyn Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a>,
+    Box<dyn Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a>,
 );
 
 impl<'a> PatternMatchIter<'a> {
     pub(crate) fn new<I>(iter: I) -> Self
     where
-        I: Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a,
+        I: Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a,
     {
         Self(Box::new(iter))
     }
 }
 
 impl<'a> Iterator for PatternMatchIter<'a> {
-    type Item = (Range<usize>, &'a PatternContext, f32);
+    type Item = (Range<usize>, &'a PatternContext, Confidence);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
@@ -507,7 +509,7 @@ impl PatternGroup {
     pub fn matches<'a>(
         &'a self,
         bytes: &'a [u8],
-    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a {
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
         let bytes = bytes.as_ref();
 
         self.post_patterns.patterns.iter().flat_map(|pattern| {
@@ -550,7 +552,7 @@ pub struct PatternsWithContext {
     #[serde(default)]
     context: PatternContext,
     #[serde(default)]
-    confidence: f32,
+    confidence: Confidence,
 }
 
 impl<'de> Deserialize<'de> for PatternsWithContext {
@@ -567,7 +569,7 @@ impl<'de> Deserialize<'de> for PatternsWithContext {
                 #[serde(default)]
                 context: PatternContext,
                 #[serde(default)]
-                confidence: f32,
+                confidence: Confidence,
             },
         }
 
@@ -575,24 +577,17 @@ impl<'de> Deserialize<'de> for PatternsWithContext {
             PatternWithContexT::Pattern(pattern) => Self {
                 patterns: vec![pattern],
                 context: PatternContext::default(),
-                confidence: 1.0,
+                confidence: Confidence::default(),
             },
             PatternWithContexT::PatternWithContext {
                 patterns,
                 context,
                 confidence,
-            } => {
-                if confidence < 0.0 || confidence > 1.0 {
-                    return Err(serde::de::Error::custom(
-                        "confidence must be between 0.0 and 1.0",
-                    ));
-                }
-                Self {
-                    patterns,
-                    context,
-                    confidence,
-                }
-            }
+            } => Self {
+                patterns,
+                context,
+                confidence,
+            },
         };
 
         Ok(result)
@@ -603,7 +598,7 @@ impl PatternsWithContext {
     pub fn matches<'a>(
         &'a self,
         bytes: &'a [u8],
-    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, f32)> + 'a {
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
         let bytes = bytes.as_ref();
 
         self.patterns.iter().flat_map(|pattern| {

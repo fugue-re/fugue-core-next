@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::ir::Address;
+use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
 use crate::loader::LoadableSegment;
 use crate::project::Project;
@@ -149,7 +149,7 @@ where
         for gap in gaps.ranges() {
             Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
-                    for (range, ctx, _confidence) in pat.matches(&*bytes) {
+                    for (range, ctx, confidence) in pat.matches(&*bytes) {
                         let start = *gap.start() + range.start;
 
                         if arch.canonicalise_address(start).is_none() {
@@ -168,8 +168,7 @@ where
                             })
                             .collect::<ContextSet>();
 
-                        // NOTE: we should add confidence here based on pattern quality
-                        state.add_candidate_with_context(start, ctx);
+                        state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
                     }
                 }
             });

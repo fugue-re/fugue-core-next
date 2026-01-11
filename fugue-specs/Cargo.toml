@@ -7,7 +7,12 @@ license = "MIT"
 description = "A binary analysis framework written in Rust"
 homepage = "https://fugue.re"
 
+[features]
+bincode = ["dep:bincode"]
+default = []
+
 [dependencies]
+bincode = { version = "2", features = ["serde"], optional = true }
 bitflags = { version = "2", features = ["serde"] }
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }

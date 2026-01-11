@@ -10,14 +10,14 @@ use tracing::Level;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{Address, AddressRangeSet, AddressWithContext};
-use crate::lifter::ContextSet;
 use crate::project::{Project, ProjectMut};
 use crate::storage::project::InMemoryProvider;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 use crate::types::Confidence;
 
 use super::{
-    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryConfig, FunctionRecoveryError,
+    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
+    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
     PartialFunctionWithContext, Translator,
 };
 
@@ -29,6 +29,8 @@ where
     builder: FunctionBuilder<'a, P>,
     discovery_passes: AnalysisGroup<'a, P, FunctionDiscoveryContext>,
     structuring_passes: AnalysisGroup<'a, P, FunctionStructuringContext>,
+    commit_hook: Option<Box<dyn FunctionRecoveryCommitHook<'a, P> + 'a>>,
+    pending_functions: BTreeMap<Address, PartialFunction>,
 }
 
 #[derive(Default)]
@@ -48,6 +50,9 @@ pub struct FunctionStructuringContext {
     failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
+    pending_functions: BTreeMap<Address, PartialFunction>,
+    committed_functions: BTreeSet<Address>,
+    removed_functions: BTreeSet<Address>,
 }
 
 impl FunctionDiscoveryContext {
@@ -59,20 +64,11 @@ impl FunctionDiscoveryContext {
         &self.candidates
     }
 
-    pub fn add_candidate(&mut self, address: impl Into<Address>) {
-        self.add_candidate_with_context(address, ContextSet::new());
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
     }
 
-    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
-        self.candidates
-            .push_back(AddressWithContext::new(address, context));
-    }
-
-    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.add_candidates_with_context(addresses.into_iter().map(|addr| addr.into()));
-    }
-
-    pub fn add_candidates_with_context(
+    pub fn add_candidates(
         &mut self,
         candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
@@ -235,20 +231,72 @@ impl FunctionStructuringContext {
         &self.new_functions
     }
 
-    pub fn add_function(&mut self, address: impl Into<Address>) {
-        self.add_function_with(address, Confidence::certain());
+    pub fn pending_functions(&self) -> &BTreeMap<Address, PartialFunction> {
+        &self.pending_functions
     }
 
-    pub fn add_function_with(&mut self, address: impl Into<Address>, confidence: Confidence) {
+    pub fn add_function(
+        &mut self,
+        address: impl Into<Address>,
+        function: PartialFunction,
+        confidence: Confidence,
+    ) -> bool {
         let address = address.into();
-        insert_function(&mut self.new_functions, address, confidence);
-        insert_function(&mut self.functions, address, confidence);
+        let mut existing = false;
+
+        existing |= insert_function(&mut self.functions, address, confidence);
+        existing |= insert_function(&mut self.new_functions, address, confidence);
+
+        if !existing {
+            // in case we have previously marked this function as committed or for removal
+            self.committed_functions.remove(&address);
+            self.removed_functions.remove(&address);
+        }
+
+        self.pending_functions.insert(address.into(), function);
+
+        existing
+    }
+
+    pub fn modify_pending_function<F>(
+        &mut self,
+        address: impl Into<Address>,
+        f: F,
+    ) -> Result<(), FunctionRecoveryError>
+    where
+        F: FnOnce(&mut PartialFunction) -> Result<(), FunctionRecoveryError>,
+    {
+        let address = address.into();
+        let Some(function) = self.pending_functions.get_mut(&address) else {
+            return Ok(());
+        };
+        f(function)
     }
 
     pub fn remove_function(&mut self, address: impl Into<Address>) {
         let address = address.into();
-        self.functions.remove(&address);
-        self.new_functions.remove(&address);
+        let mut removed = false;
+
+        removed |= self.functions.remove(&address).is_some();
+        removed |= self.new_functions.remove(&address).is_some();
+
+        if !removed {
+            return;
+        }
+
+        if self.pending_functions.remove(&address).is_none() {
+            self.removed_functions.insert(address);
+        } else {
+            self.committed_functions.remove(&address);
+        }
+    }
+
+    pub fn commit_function(&mut self, address: impl Into<Address>) {
+        let address = address.into();
+
+        if self.pending_functions.contains_key(&address) {
+            self.committed_functions.insert(address);
+        }
     }
 }
 
@@ -266,6 +314,8 @@ where
             builder: FunctionBuilder::new(config),
             discovery_passes: AnalysisGroup::new(),
             structuring_passes: AnalysisGroup::new(),
+            commit_hook: None,
+            pending_functions: BTreeMap::new(),
         }
     }
 
@@ -273,24 +323,11 @@ where
         self.builder.config()
     }
 
-    pub fn add_candidate(&mut self, address: impl Into<Address>) {
-        self.add_candidate_with_context(address, ContextSet::new());
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
     }
 
-    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
-        self.candidates
-            .push_back(AddressWithContext::new(address, context));
-    }
-
-    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.add_candidates_with_context(
-            addresses
-                .into_iter()
-                .zip(std::iter::repeat(ContextSet::new())),
-        );
-    }
-
-    pub fn add_candidates_with_context(
+    pub fn add_candidates(
         &mut self,
         candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
@@ -354,6 +391,12 @@ where
         pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
     ) {
         self.builder.add_post_lifting_pass(name, pass);
+    }
+
+    // hooks
+
+    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook<'a, P> + 'a) {
+        self.commit_hook = Some(Box::new(hook));
     }
 }
 
@@ -431,14 +474,17 @@ where
             }
         }
 
+        // global state
         let mut failures = BTreeSet::new();
         let mut functions = project
             .functions()
             .addresses()
             .zip(repeat(Confidence::certain()))
             .collect::<BTreeMap<_, _>>();
-        let mut new_functions = BTreeMap::new();
         let mut translator = Translator::new(project);
+
+        // per pass state
+        let mut new_functions = BTreeMap::new();
 
         tracing::debug!("existing functions: {}", functions.len());
 
@@ -482,20 +528,37 @@ where
                     }
                 };
 
-                let ProjectMut {
-                    functions: ftable,
-                    blocks: cbtable,
-                    ..
-                } = project.fields_mut();
+                let commit_context = FunctionRecoveryCommitContext::new(function, confidence);
 
-                if let Err(e) = function.commit(ftable, cbtable) {
-                    tracing::debug!("failed to commit function at {address}: {e}");
+                if self
+                    .commit_hook
+                    .should_commit(project, &commit_context)
+                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
+                {
+                    tracing::debug!("committing function at {address}");
 
-                    new_functions.into_iter().for_each(|(function, address)| {
-                        insert_function(&mut functions, function, address);
-                    });
+                    let ProjectMut {
+                        functions: ftable,
+                        blocks: cbtable,
+                        ..
+                    } = project.fields_mut();
 
-                    return Err(AnalysisError::pass_failed("function-recovery", e));
+                    let function = commit_context.into_function();
+
+                    if let Err(e) = function.commit(ftable, cbtable) {
+                        tracing::debug!("failed to commit function at {address}: {e}");
+
+                        new_functions.into_iter().for_each(|(function, address)| {
+                            insert_function(&mut functions, function, address);
+                        });
+
+                        return Err(AnalysisError::pass_failed("function-recovery", e));
+                    }
+                } else {
+                    tracing::debug!("deferring commit of function at {address}");
+
+                    self.pending_functions
+                        .insert(address, commit_context.into_function());
                 }
 
                 new_functions.insert(address, confidence);
@@ -529,6 +592,9 @@ where
                 failures: mem::take(&mut failures),
                 functions: mem::take(&mut functions),
                 new_functions: mem::take(&mut new_functions),
+                pending_functions: mem::take(&mut self.pending_functions),
+                committed_functions: BTreeSet::new(),
+                removed_functions: BTreeSet::new(),
             };
 
             let result = self
@@ -540,6 +606,58 @@ where
                 // restore state
                 *self.builder.avoids_mut() = context.avoids;
                 return Err(e);
+            }
+
+            // remove any functions that were removed during restructuring
+            for f in context.removed_functions {
+                if context.pending_functions.remove(&f).is_some() {
+                    continue;
+                }
+
+                let ProjectMut {
+                    functions: ftable,
+                    blocks: cbtable,
+                    ..
+                } = project.fields_mut();
+
+                let Some(f) = ftable.get_by_address(f) else {
+                    continue;
+                };
+
+                for (_addr, bid) in f.blocks() {
+                    cbtable.remove_by_id(bid);
+                }
+
+                let fid = f.id();
+
+                drop(f);
+
+                ftable.remove_by_id(fid);
+            }
+
+            // commit any functions that were forced during restructuring
+            for f in context.committed_functions {
+                let function = match context.pending_functions.remove(&f) {
+                    Some(func) => func,
+                    None => continue,
+                };
+
+                tracing::debug!("committing pending function at {f}");
+
+                let ProjectMut {
+                    functions: ftable,
+                    blocks: cbtable,
+                    ..
+                } = project.fields_mut();
+
+                if let Err(e) = function.commit(ftable, cbtable) {
+                    tracing::debug!("failed to commit function at {f}: {e}");
+
+                    return Err(AnalysisError::pass_failed(
+                        "function-recovery",
+                        FunctionRecoveryError::from(e),
+                    ));
+                }
             }
 
             // perform a candidate discovery pass
@@ -567,6 +685,27 @@ where
 
             if self.candidates.is_empty() {
                 break;
+            }
+        }
+
+        if self.config().commit_pending_functions() {
+            let ProjectMut {
+                functions: ftable,
+                blocks: cbtable,
+                ..
+            } = project.fields_mut();
+
+            for (address, function) in mem::take(&mut self.pending_functions) {
+                tracing::debug!("committing pending function at {address}");
+
+                if let Err(e) = function.commit(ftable, cbtable) {
+                    tracing::debug!("failed to commit function at {address}: {e}");
+
+                    return Err(AnalysisError::pass_failed(
+                        "function-recovery",
+                        FunctionRecoveryError::from(e),
+                    ));
+                }
             }
         }
 

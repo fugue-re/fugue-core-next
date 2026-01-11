@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::il::pcode::Varnode;
 use crate::lifter::{ContextSet, Language};
+use crate::types::Confidence;
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
@@ -399,17 +400,25 @@ impl ToAddress for Varnode {
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
+    confidence: Confidence,
 }
 
 impl Display for AddressWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (context: {})", self.address, self.context)
+        write!(
+            f,
+            "{} (context: {}, confidence: {})",
+            self.address, self.context, self.confidence
+        )
     }
 }
 
-impl From<Address> for AddressWithContext {
-    fn from(address: Address) -> Self {
-        Self::new(address, ContextSet::default())
+impl<A> From<A> for AddressWithContext
+where
+    A: Into<Address>,
+{
+    fn from(address: A) -> Self {
+        Self::new(address.into(), ContextSet::default())
     }
 }
 
@@ -422,11 +431,29 @@ where
     }
 }
 
+impl<A> From<(A, ContextSet, Confidence)> for AddressWithContext
+where
+    A: Into<Address>,
+{
+    fn from(parts: (A, ContextSet, Confidence)) -> Self {
+        Self::new_with(parts.0.into(), parts.1, parts.2)
+    }
+}
+
 impl AddressWithContext {
     pub fn new(address: impl Into<Address>, context: ContextSet) -> Self {
+        Self::new_with(address.into(), context, Confidence::certain())
+    }
+
+    pub fn new_with(
+        address: impl Into<Address>,
+        context: ContextSet,
+        confidence: Confidence,
+    ) -> Self {
         Self {
             address: address.into(),
             context,
+            confidence,
         }
     }
 
@@ -438,12 +465,22 @@ impl AddressWithContext {
         &self.context
     }
 
+    pub fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+
     pub fn context_mut(&mut self) -> &mut ContextSet {
         &mut self.context
     }
 
     pub fn merge_context(&mut self, other: &ContextSet) {
         self.context.merge(other);
+    }
+
+    pub fn merge_max_confidence(&mut self, other: Confidence) {
+        if other > self.confidence {
+            self.confidence = other;
+        }
     }
 
     pub fn into_parts(self) -> (Address, ContextSet) {
@@ -456,11 +493,7 @@ pub struct AddressRangeSet(RangeSetBlaze<u64>);
 
 impl FromIterator<Address> for AddressRangeSet {
     fn from_iter<T: IntoIterator<Item = Address>>(iter: T) -> Self {
-        Self(
-            iter.into_iter()
-                .map(|addr| addr.offset())
-                .collect(),
-        )
+        Self(iter.into_iter().map(|addr| addr.offset()).collect())
     }
 }
 

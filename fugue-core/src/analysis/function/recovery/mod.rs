@@ -13,6 +13,9 @@ pub mod core;
 pub mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
 
+pub mod hooks;
+pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
+
 pub mod ir;
 pub use ir::{InsnEntry, PartialCodeBlock, PartialFunction};
 
@@ -29,6 +32,9 @@ pub enum FunctionRecoveryError {
     InitialisationPass(AnalysisError),
     #[error("post-lifting pass failed: {0}")]
     PostLiftingPass(AnalysisError),
+    // hook errors
+    #[error("commit hook failed: {0}")]
+    CommitHook(AnalysisError),
     // creation issues due to table invariants or storage
     #[error("failed to create block: {0}")]
     BlockCreation(anyhow::Error),
@@ -88,6 +94,9 @@ impl FunctionRecoveryError {
 // - For accessors, we use the option name directly (e.g., `max_function_blocks()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionRecoveryConfig {
+    // This flag controls whether to automatically commit remaining pending functions after
+    // all candidates have been processed and no further analysis is possible.
+    commit_pending_functions: bool,
     // This value controls the maximum number of basic blocks allowed in a single function.
     max_function_blocks: usize,
     // This value controls the maximum number of instructions allowed in a single basic block.
@@ -109,6 +118,7 @@ pub struct FunctionRecoveryConfig {
 impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
         FunctionRecoveryConfig {
+            commit_pending_functions: true,
             max_function_blocks: DEFAULT_MAX_FUNCTION_SIZE,
             max_block_insns: DEFAULT_MAX_BLOCK_SIZE,
             use_fine_grained_block_coverage: false,
@@ -120,12 +130,21 @@ impl Default for FunctionRecoveryConfig {
 }
 
 impl FunctionRecoveryConfig {
-    pub fn max_function_blocks(&self) -> usize {
-        self.max_function_blocks
+    pub fn commit_pending_functions(&self) -> bool {
+        self.commit_pending_functions
     }
 
-    pub fn max_block_insns(&self) -> usize {
-        self.max_block_insns
+    pub fn enable_commit_pending_functions(&mut self, enabled: bool) {
+        self.commit_pending_functions = enabled;
+    }
+
+    pub fn with_commit_pending_functions(mut self, enabled: bool) -> Self {
+        self.enable_commit_pending_functions(enabled);
+        self
+    }
+
+    pub fn max_function_blocks(&self) -> usize {
+        self.max_function_blocks
     }
 
     pub fn set_max_function_blocks(&mut self, max: usize) {
@@ -135,6 +154,10 @@ impl FunctionRecoveryConfig {
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
         self.set_max_function_blocks(max);
         self
+    }
+
+    pub fn max_block_insns(&self) -> usize {
+        self.max_block_insns
     }
 
     pub fn set_max_block_insns(&mut self, max: usize) {
