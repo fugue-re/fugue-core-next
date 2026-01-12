@@ -22,7 +22,7 @@ ordered-float = { version = "5", features = ["serde"] }
 nom = "8"
 regex = "1"
 serde = "1"
-serde_yaml = "0.9"
+serde-yaml = { version = "0.0.12", package = "serde-saphyr" }
 thiserror = "2"
 
 [lints]
