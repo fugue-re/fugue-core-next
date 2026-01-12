@@ -21,7 +21,7 @@ pub enum FunctionRecoveryPatternMatcherError {
     #[error("failed to read patterns from {0}: {1}")]
     Io(PathBuf, anyhow::Error),
     #[error("failed to parse patterns: {0}")]
-    Parse(#[from] serde_saphyr::Error),
+    Parse(#[from] serde_yaml::Error),
 }
 
 impl FunctionRecoveryPatternMatcherError {
@@ -48,11 +48,20 @@ impl FunctionRecoveryPatternMatcher {
         self.patterns.push(patterns);
     }
 
+    pub fn add_patterns_from_str(
+        &mut self,
+        s: &str,
+    ) -> Result<(), FunctionRecoveryPatternMatcherError> {
+        let pats = serde_yaml::from_str::<PatternsWithContext>(s)?;
+        self.patterns.push(pats);
+        Ok(())
+    }
+
     pub fn add_patterns_from_reader(
         &mut self,
         reader: impl Read,
     ) -> Result<(), FunctionRecoveryPatternMatcherError> {
-        let pats = serde_saphyr::from_reader::<_, PatternsWithContext>(reader)?;
+        let pats = serde_yaml::from_reader::<_, PatternsWithContext>(reader)?;
         self.patterns.push(pats);
         Ok(())
     }

@@ -240,7 +240,7 @@ mod test {
         tracing::subscriber::with_default(subscriber, || {
             let loader = Loader::from_file("tests/ls.elf")?;
             let mut project = InMemoryProject::new(&loader)?;
-            let mut cfr = loader.analysers().function_recovery();
+            let mut cfr = loader.analysers().function_recovery()?;
 
             cfr.add_candidate(0x4da0u64);
             cfr.add_candidate(0x6dd0u64);
@@ -275,7 +275,7 @@ mod test {
 
             let loader = Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?;
             let mut project = InMemoryProject::new(&loader)?;
-            let mut cfr = loader.analysers().function_recovery();
+            let mut cfr = loader.analysers().function_recovery()?;
 
             cfr.add_candidate(0x4EB14u64);
             cfr.analyse(&mut project)?;

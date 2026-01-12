@@ -13,6 +13,7 @@ use fugue_bytes::{BE, LE};
 
 use thiserror::Error;
 
+use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
@@ -628,12 +629,15 @@ pub trait LoadableAnalysers<'a, P>
 where
     P: ProjectStorageProvider,
 {
-    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
-        FunctionRecovery::new()
+    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+        self.function_recovery_with(FunctionRecoveryConfig::default())
     }
 
-    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
-        FunctionRecovery::new_with(config)
+    fn function_recovery_with(
+        &self,
+        config: FunctionRecoveryConfig,
+    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+        Ok(FunctionRecovery::new_with(config))
     }
 }
 
@@ -647,11 +651,14 @@ where
     P: ProjectStorageProvider,
     T: LoadableAnalysers<'a, P> + ?Sized,
 {
-    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
+    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
         self.as_ref().function_recovery()
     }
 
-    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
+    fn function_recovery_with(
+        &self,
+        config: FunctionRecoveryConfig,
+    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
         self.as_ref().function_recovery_with(config)
     }
 }
@@ -661,11 +668,14 @@ where
     P: ProjectStorageProvider,
     T: LoadableAnalysers<'a, P> + ?Sized,
 {
-    fn function_recovery(&self) -> FunctionRecovery<'a, P> {
+    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
         (*self).function_recovery()
     }
 
-    fn function_recovery_with(&self, config: FunctionRecoveryConfig) -> FunctionRecovery<'a, P> {
+    fn function_recovery_with(
+        &self,
+        config: FunctionRecoveryConfig,
+    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
         (*self).function_recovery_with(config)
     }
 }

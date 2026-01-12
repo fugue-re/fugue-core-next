@@ -22,6 +22,8 @@ pub enum AnalysisError {
     CyclicDependency(String, String),
     #[error("analysis pass not found: {0}")]
     PassNotFound(String),
+    #[error("analysis pass configuration failed: {0}")]
+    PassConfigurationFailed(String, anyhow::Error),
     #[error("analysis pass failed: {0}")]
     PassFailed(String, anyhow::Error),
 }
@@ -36,6 +38,13 @@ impl AnalysisError {
         E: std::error::Error + Send + Sync + 'static,
     {
         AnalysisError::PassFailed(name.into(), error.into())
+    }
+
+    pub fn pass_configuration_failed<E>(name: impl Into<String>, error: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        AnalysisError::PassConfigurationFailed(name.into(), error.into())
     }
 }
 

@@ -26,10 +26,15 @@ use crate::ir::{
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
 use crate::loader::{
-    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
+    LoadableSegment, LoaderError,
 };
+use crate::storage::ProjectStorageProvider;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
+
+mod analysers;
+pub use analysers::ElfAnalysers;
 
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
@@ -148,6 +153,10 @@ impl<'a> Elf<'a> {
     pub fn entry(&self) -> Option<Address> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
         (addr == 0).then_some(self.base + addr)
+    }
+
+    pub fn convention(&self) -> Option<&'a str> {
+        None
     }
 
     pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
@@ -1086,6 +1095,13 @@ impl Loadable for Elf<'_> {
         let start = *self.bounds.start();
         let end = *self.bounds.end();
         (start, end)
+    }
+
+    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    where
+        P: ProjectStorageProvider,
+    {
+        ElfAnalysers::new(self)
     }
 }
 
