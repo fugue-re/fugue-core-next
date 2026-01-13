@@ -2,14 +2,13 @@ use std::time::Instant;
 
 use fallible_iterator::FallibleIterator;
 
-use fugue_core::analysis::function::FunctionRecovery;
 use fugue_core::analysis::AnalysisPass;
 use fugue_core::attributes;
 use fugue_core::ir::traits::FunctionTable;
-use fugue_core::loader::{Loadable, LoadableFromFile};
+use fugue_core::loader::{Loadable, LoadableAnalysers, LoadableFromFile};
 use fugue_core::project::InMemoryProject;
 
-use fugue_core_idalib::{IDABinary, IDAFunctionBuilder, ATTRIBUTE_IDA_DATABASE_PATH};
+use fugue_core_idalib::{IDABinary, ATTRIBUTE_IDA_DATABASE_PATH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = tracing_subscriber::fmt()
@@ -51,12 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut project = InMemoryProject::new(&binary)?;
-        let mut analyser = FunctionRecovery::new();
-
-        analyser.add_builder_initialisation_pass(
-            "ida-function-builder",
-            IDAFunctionBuilder::new(binary.database()),
-        );
+        let mut analyser = binary.analysers().function_recovery()?;
 
         let t0 = Instant::now();
 

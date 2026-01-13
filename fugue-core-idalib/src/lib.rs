@@ -1,15 +1,20 @@
+use std::rc::Rc;
+
 use fallible_iterator::FallibleIterator;
 
+use fugue_core::analysis::core::FunctionRecoveryConfig;
+use fugue_core::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties
+    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties,
+    SymbolIndex, SymbolProperties,
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::{
-    Loadable, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+    Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
 };
 use fugue_core::project::Project;
 use fugue_core::storage::ProjectStorageProvider;
@@ -25,7 +30,7 @@ const FUNCTIONS_SELECTOR: usize = 0;
 const NAMES_SELECTOR: usize = 1;
 
 pub struct IDABinary {
-    database: IDB,
+    database: Rc<IDB>,
     architecture: Arch,
     symbols: IndexedSymbolTable,
     extern_segm: Option<ExternSegment>,
@@ -178,14 +183,6 @@ impl IDABinary {
     pub fn extern_segment(&self) -> Option<&ExternSegment> {
         self.extern_segm.as_ref()
     }
-
-    pub fn function_recovery_pass(&self) -> IDAFunctionRecovery {
-        IDAFunctionRecovery::new(&self.database, self.mark_thumb)
-    }
-
-    pub fn function_builder_pass(&self) -> IDAFunctionBuilder {
-        IDAFunctionBuilder::new(&self.database)
-    }
 }
 
 impl LoadableFromFile for IDABinary {
@@ -249,7 +246,7 @@ impl LoadableFromFile for IDABinary {
         );
 
         Ok(IDABinary {
-            database,
+            database: Rc::new(database),
             architecture,
             symbols,
             extern_segm,
@@ -361,33 +358,65 @@ impl Loadable for IDABinary {
     }
 }
 
-pub struct IDAFunctionRecovery<'a> {
-    database: &'a IDB,
+pub struct IDAAnalysers<'a> {
+    binary: &'a IDABinary,
+}
+
+impl<'a, P> LoadableAnalysers<'a, P> for IDAAnalysers<'a>
+where
+    P: ProjectStorageProvider,
+{
+    fn function_recovery_with(
+        &self,
+        config: FunctionRecoveryConfig,
+    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+        let mut recovery = FunctionRecovery::new_with(
+            config
+                .with_segment_function_hints(false)
+                .with_symbol_table_function_hints(false),
+        );
+
+        recovery.add_candidate_discovery_pass(
+            "ida-function-discovery",
+            IDAFunctionDiscovery::new(self.binary, self.binary.mark_thumb),
+        );
+
+        recovery.add_builder_initialisation_pass(
+            "ida-function-builder",
+            IDAFunctionBuilder::new(self.binary),
+        );
+
+        Ok(recovery)
+    }
+}
+
+pub struct IDAFunctionDiscovery {
+    database: Rc<IDB>,
     mark_thumb: bool,
 }
 
-impl<'a> IDAFunctionRecovery<'a> {
-    pub fn new(database: &'a IDB, mark_thumb: bool) -> Self {
-        IDAFunctionRecovery {
-            database,
+impl IDAFunctionDiscovery {
+    pub fn new(database: &IDABinary, mark_thumb: bool) -> Self {
+        Self {
+            database: database.database.clone(),
             mark_thumb,
         }
     }
 }
 
-impl<'a, P> AnalysisPass<'a, P, FunctionRecovery<'a>> for IDAFunctionRecovery<'a>
+impl<'a, P> AnalysisPass<'a, P, FunctionDiscoveryContext> for IDAFunctionDiscovery
 where
     P: ProjectStorageProvider,
 {
     fn analyse_with(
         &mut self,
         project: &mut Project<P>,
-        state: &mut FunctionRecovery,
+        state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
         let externs = segms
             .metadata()
-            .map_err(|e| AnalysisError::pass_failed("ida-function-recovery", e))?
+            .map_err(|e| AnalysisError::pass_failed("ida-function-discovery", e))?
             .find_map(|segm| {
                 segm.properties()
                     .contains(SegmentProperties::EXTERNAL)
@@ -395,8 +424,14 @@ where
             });
 
         let extern_bounds = externs.map(|segm| segm.address()..=segm.last_address());
+
         for (_, f) in self.database.functions() {
             let addr = Address::from(f.start_address());
+
+            if state.functions().contains_key(&addr) {
+                continue;
+            }
+
             if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
                 continue;
             }
@@ -413,25 +448,26 @@ where
                 state.add_candidate(addr);
             }
         }
+
         Ok(())
     }
 }
 
-pub struct IDAFunctionBuilder<'a> {
+pub struct IDAFunctionBuilder {
+    database: Rc<IDB>,
     last_insns: Vec<(u64, bool)>,
-    database: &'a IDB,
 }
 
-impl<'a> IDAFunctionBuilder<'a> {
-    pub fn new(database: &'a IDB) -> Self {
+impl IDAFunctionBuilder {
+    pub fn new(binary: &IDABinary) -> Self {
         IDAFunctionBuilder {
-            database,
+            database: binary.database.clone(),
             last_insns: Vec::new(),
         }
     }
 }
 
-impl<'a, P> AnalysisPass<'a, P, FunctionBuilderContext> for IDAFunctionBuilder<'a>
+impl<'a, P> AnalysisPass<'a, P, FunctionBuilderContext> for IDAFunctionBuilder
 where
     P: ProjectStorageProvider,
 {
