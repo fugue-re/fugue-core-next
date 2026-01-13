@@ -17,14 +17,14 @@ impl<'a> ElfAnalysers<'a> {
     }
 }
 
-impl<'a, P> LoadableAnalysers<'a, P> for ElfAnalysers<'a>
+impl<'a, P> LoadableAnalysers<P> for ElfAnalysers<'a>
 where
     P: ProjectStorageProvider,
 {
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    ) -> Result<FunctionRecovery<P>, AnalysisError> {
         let mut analyser = FunctionRecovery::new_with(config);
         let mut patttern_matcher = FunctionRecoveryPatternMatcher::new();
 

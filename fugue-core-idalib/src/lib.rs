@@ -362,14 +362,14 @@ pub struct IDAAnalysers<'a> {
     binary: &'a IDABinary,
 }
 
-impl<'a, P> LoadableAnalysers<'a, P> for IDAAnalysers<'a>
+impl<'a, P> LoadableAnalysers<P> for IDAAnalysers<'a>
 where
     P: ProjectStorageProvider,
 {
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    ) -> Result<FunctionRecovery<P>, AnalysisError> {
         let mut recovery = FunctionRecovery::new_with(
             config
                 .with_segment_function_hints(false)
@@ -404,7 +404,7 @@ impl IDAFunctionDiscovery {
     }
 }
 
-impl<'a, P> AnalysisPass<'a, P, FunctionDiscoveryContext> for IDAFunctionDiscovery
+impl<P> AnalysisPass<P, FunctionDiscoveryContext> for IDAFunctionDiscovery
 where
     P: ProjectStorageProvider,
 {
@@ -467,7 +467,7 @@ impl IDAFunctionBuilder {
     }
 }
 
-impl<'a, P> AnalysisPass<'a, P, FunctionBuilderContext> for IDAFunctionBuilder
+impl<P> AnalysisPass<P, FunctionBuilderContext> for IDAFunctionBuilder
 where
     P: ProjectStorageProvider,
 {

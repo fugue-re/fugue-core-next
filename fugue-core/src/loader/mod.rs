@@ -617,7 +617,7 @@ pub trait Loadable {
 
     fn segment_range(&self) -> (Address, Address);
 
-    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
         P: ProjectStorageProvider,
     {
@@ -625,18 +625,18 @@ pub trait Loadable {
     }
 }
 
-pub trait LoadableAnalysers<'a, P>
+pub trait LoadableAnalysers<P>
 where
     P: ProjectStorageProvider,
 {
-    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.function_recovery_with(FunctionRecoveryConfig::default())
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    ) -> Result<FunctionRecovery<P>, AnalysisError> {
         Ok(FunctionRecovery::new_with(config))
     }
 }
@@ -644,38 +644,38 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultLoadableAnalysers;
 
-impl<'a, P> LoadableAnalysers<'a, P> for DefaultLoadableAnalysers where P: ProjectStorageProvider {}
+impl<P> LoadableAnalysers<P> for DefaultLoadableAnalysers where P: ProjectStorageProvider {}
 
-impl<'a, P, T> LoadableAnalysers<'a, P> for Box<T>
+impl<P, T> LoadableAnalysers<P> for Box<T>
 where
     P: ProjectStorageProvider,
-    T: LoadableAnalysers<'a, P> + ?Sized,
+    T: LoadableAnalysers<P> + ?Sized,
 {
-    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.as_ref().function_recovery()
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    ) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.as_ref().function_recovery_with(config)
     }
 }
 
-impl<'a, P, T> LoadableAnalysers<'a, P> for &T
+impl<P, T> LoadableAnalysers<P> for &T
 where
     P: ProjectStorageProvider,
-    T: LoadableAnalysers<'a, P> + ?Sized,
+    T: LoadableAnalysers<P> + ?Sized,
 {
-    fn function_recovery(&self) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         (*self).function_recovery()
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<'a, P>, AnalysisError> {
+    ) -> Result<FunctionRecovery<P>, AnalysisError> {
         (*self).function_recovery_with(config)
     }
 }
@@ -800,14 +800,14 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
         P: ProjectStorageProvider,
     {
         match self {
-            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<'a, P> + 'a>,
+            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
             Self::Object(object) => {
-                Box::new(object.analysers()) as Box<dyn LoadableAnalysers<'a, P> + 'a>
+                Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>
             }
         }
     }

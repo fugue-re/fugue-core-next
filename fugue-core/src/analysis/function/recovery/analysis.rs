@@ -21,15 +21,15 @@ use super::{
     PartialFunctionWithContext, Translator,
 };
 
-pub struct FunctionRecovery<'a, P = InMemoryProvider>
+pub struct FunctionRecovery<P = InMemoryProvider>
 where
     P: ProjectStorageProvider,
 {
     candidates: VecDeque<AddressWithContext>,
-    builder: FunctionBuilder<'a, P>,
-    discovery_passes: AnalysisGroup<'a, P, FunctionDiscoveryContext>,
-    structuring_passes: AnalysisGroup<'a, P, FunctionStructuringContext>,
-    commit_hook: Option<Box<dyn FunctionRecoveryCommitHook<'a, P> + 'a>>,
+    builder: FunctionBuilder<P>,
+    discovery_passes: AnalysisGroup<P, FunctionDiscoveryContext>,
+    structuring_passes: AnalysisGroup<P, FunctionStructuringContext>,
+    commit_hook: Option<Box<dyn FunctionRecoveryCommitHook<P> + 'static>>,
     pending_functions: BTreeMap<Address, PartialFunction>,
 }
 
@@ -300,7 +300,7 @@ impl FunctionStructuringContext {
     }
 }
 
-impl<'a, P> FunctionRecovery<'a, P>
+impl<P> FunctionRecovery<P>
 where
     P: ProjectStorageProvider,
 {
@@ -340,38 +340,38 @@ where
     pub fn add_candidate_discovery_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, P, FunctionDiscoveryContext> + 'a,
+        pass: impl AnalysisPass<P, FunctionDiscoveryContext> + 'static,
     ) {
         self.discovery_passes.add_pass(name, pass);
     }
 
-    pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<'a, P, FunctionDiscoveryContext> {
+    pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<P, FunctionDiscoveryContext> {
         &self.discovery_passes
     }
 
     pub fn candidate_discovery_passes_mut(
         &mut self,
-    ) -> &mut AnalysisGroup<'a, P, FunctionDiscoveryContext> {
+    ) -> &mut AnalysisGroup<P, FunctionDiscoveryContext> {
         &mut self.discovery_passes
     }
 
     pub fn add_inter_function_structuring_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, P, FunctionStructuringContext> + 'a,
+        pass: impl AnalysisPass<P, FunctionStructuringContext> + 'static,
     ) {
         self.structuring_passes.add_pass(name, pass);
     }
 
     pub fn inter_function_structuring_passes(
         &self,
-    ) -> &AnalysisGroup<'a, P, FunctionStructuringContext> {
+    ) -> &AnalysisGroup<P, FunctionStructuringContext> {
         &self.structuring_passes
     }
 
     pub fn inter_function_structuring_passes_mut(
         &mut self,
-    ) -> &mut AnalysisGroup<'a, P, FunctionStructuringContext> {
+    ) -> &mut AnalysisGroup<P, FunctionStructuringContext> {
         &mut self.structuring_passes
     }
 
@@ -380,7 +380,7 @@ where
     pub fn add_builder_initialisation_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, P, FunctionBuilderContext> + 'a,
+        pass: impl AnalysisPass<P, FunctionBuilderContext> + 'static,
     ) {
         self.builder.add_initialisation_pass(name, pass);
     }
@@ -388,14 +388,14 @@ where
     pub fn add_builder_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<'a, P, PartialFunctionWithContext> + 'a,
+        pass: impl AnalysisPass<P, PartialFunctionWithContext> + 'static,
     ) {
         self.builder.add_post_lifting_pass(name, pass);
     }
 
     // hooks
 
-    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook<'a, P> + 'a) {
+    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook<P> + 'static) {
         self.commit_hook = Some(Box::new(hook));
     }
 }
@@ -430,7 +430,7 @@ fn update_function(
     )
 }
 
-impl<'a, P> AnalysisPass<'a, P> for FunctionRecovery<'a, P>
+impl<P> AnalysisPass<P> for FunctionRecovery<P>
 where
     P: ProjectStorageProvider,
 {

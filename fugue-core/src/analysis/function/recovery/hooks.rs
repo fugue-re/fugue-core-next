@@ -31,7 +31,7 @@ impl FunctionRecoveryCommitContext {
     }
 }
 
-pub trait FunctionRecoveryCommitHook<'a, P = InMemoryProvider>
+pub trait FunctionRecoveryCommitHook<P = InMemoryProvider>
 where
     P: ProjectStorageProvider,
 {
@@ -42,7 +42,7 @@ where
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
-impl<'a, P, F> FunctionRecoveryCommitHook<'a, P> for F
+impl<P, F> FunctionRecoveryCommitHook<P> for F
 where
     F: Fn(&mut Project<P>, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>,
     P: ProjectStorageProvider,
@@ -56,7 +56,7 @@ where
     }
 }
 
-impl<'a, P> FunctionRecoveryCommitHook<'a, P> for Box<dyn FunctionRecoveryCommitHook<'a, P> + 'a>
+impl<P> FunctionRecoveryCommitHook<P> for Box<dyn FunctionRecoveryCommitHook<P> + 'static>
 where
     P: ProjectStorageProvider,
 {
@@ -69,9 +69,9 @@ where
     }
 }
 
-impl<'a, P, T> FunctionRecoveryCommitHook<'a, P> for Option<T>
+impl<P, T> FunctionRecoveryCommitHook<P> for Option<T>
 where
-    T: FunctionRecoveryCommitHook<'a, P>,
+    T: FunctionRecoveryCommitHook<P>,
     P: ProjectStorageProvider,
 {
     fn should_commit(

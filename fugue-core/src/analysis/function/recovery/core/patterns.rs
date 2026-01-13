@@ -131,7 +131,7 @@ impl FunctionRecoveryPatternMatcher {
     }
 }
 
-impl<P> AnalysisPass<'_, P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
+impl<P> AnalysisPass<P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
 where
     P: ProjectStorageProvider,
 {

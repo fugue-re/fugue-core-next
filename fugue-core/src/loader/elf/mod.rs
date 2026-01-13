@@ -1097,7 +1097,7 @@ impl Loadable for Elf<'_> {
         (start, end)
     }
 
-    fn analysers<'a, P>(&'a self) -> impl LoadableAnalysers<'a, P> + 'a
+    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
         P: ProjectStorageProvider,
     {
