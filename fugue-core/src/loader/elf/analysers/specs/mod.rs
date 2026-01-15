@@ -2,7 +2,8 @@ use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::core::patterns::FunctionRecoveryPatternMatcher;
 use crate::arch::Arch;
 
-pub const X86_64_GCC: &'static str = ""; // include_str!("./x86_64_gcc.yml");
+pub const X86_GCC: &'static str = include_str!("./x86-gcc.yml");
+pub const X86_64_GCC: &'static str = include_str!("./x86-64-gcc.yml");
 
 pub(crate) fn configure_x86_64_analyser(
     _arch: &Arch,
@@ -22,10 +23,18 @@ pub(crate) fn configure_x86_64_analyser(
 
 pub(crate) fn configure_x86_analyser(
     _arch: &Arch,
-    _convention: &str,
-    _analyser: &mut FunctionRecoveryPatternMatcher,
+    convention: &str,
+    analyser: &mut FunctionRecoveryPatternMatcher,
 ) -> Result<(), AnalysisError> {
-    Ok(())
+    match convention {
+        "gcc" => {
+            analyser
+                .add_patterns_from_str(X86_GCC)
+                .map_err(|e| AnalysisError::pass_configuration_failed("function-recovery", e))?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn configure_analyser(
@@ -39,8 +48,8 @@ pub(crate) fn configure_analyser(
     let bits = language.address_bits();
 
     match (processor, is_be, bits) {
-        ("x86", false, 64) => configure_x86_64_analyser(arch, convention, analyser),
         ("x86", false, 32) => configure_x86_analyser(arch, convention, analyser),
+        ("x86", false, 64) => configure_x86_64_analyser(arch, convention, analyser),
         _ => Ok(()),
     }
 }

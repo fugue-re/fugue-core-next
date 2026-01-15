@@ -366,6 +366,14 @@ where
     pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<P, S>)> {
         self.iter_mut()
     }
+
+    pub fn len(&self) -> usize {
+        self.passes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.passes.is_empty()
+    }
 }
 
 impl<P, S> AnalysisPass<P, S> for AnalysisGroup<P, S>

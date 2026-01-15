@@ -586,6 +586,12 @@ where
 
             // perform a restructuring pass over existing functions, which may split
             // or merge functions, check for overlaps and/or conflicts, etc.
+
+            tracing::debug!(
+                "performing {} function restructuring pass(es)",
+                self.structuring_passes.len()
+            );
+
             let mut context = FunctionStructuringContext {
                 config: *self.builder.config(),
                 avoids: mem::take(self.builder.avoids_mut()),
@@ -661,6 +667,11 @@ where
             }
 
             // perform a candidate discovery pass
+            tracing::debug!(
+                "performing {} candidate discovery pass(es)",
+                self.discovery_passes.len()
+            );
+
             let mut context = FunctionDiscoveryContext {
                 config: context.config,
                 candidates: mem::take(&mut self.candidates),

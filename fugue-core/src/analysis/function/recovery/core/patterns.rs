@@ -147,6 +147,7 @@ where
             .map_err(|e| AnalysisError::pass_failed("function-recovery-pattern-matcher", e))?;
 
         if gaps.is_empty() {
+            tracing::debug!("no gaps to analyse");
             return Ok(());
         }
 
@@ -156,6 +157,7 @@ where
         let mut current_segm = None::<Cow<LoadableSegment>>;
 
         for gap in gaps.ranges() {
+            tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
             Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(&*bytes) {
@@ -176,6 +178,8 @@ where
                                 Some((bits, val))
                             })
                             .collect::<ContextSet>();
+
+                        tracing::debug!("adding candidate at {start} with context {ctx:?} (confidence: {confidence})");
 
                         state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
                     }
