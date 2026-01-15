@@ -8,8 +8,20 @@ use crate::ir::Address;
 use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, LoaderError};
 use crate::types::AttributeMap;
 
+pub mod bank;
+pub mod mapping;
 pub mod memory;
+pub mod overlay;
+pub mod provider;
+
+pub use bank::{SegmentBank, SegmentBankId};
+pub use mapping::{
+    SegmentMapping, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingRef,
+    SegmentMappingView,
+};
 pub use memory::InMemorySegmentStorage;
+pub use overlay::{OverlayChunk, OverlayTree};
+pub use provider::{SegmentStorageDescriptor, SegmentStorageProviderId};
 
 pub mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;
@@ -187,6 +199,28 @@ pub trait SegmentStorageProvider {
 
     // Returns an iterator over the metadata of all segments in the storage.
     fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError>;
+
+    fn size(&self) -> usize {
+        self.metadata()
+            .map(|iter| {
+                iter.map(|meta| usize::from(meta.address()) + meta.len())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+
+    fn resize(&mut self, _new_size: u64) -> Result<(), SegmentStorageError> {
+        Err(SegmentStorageError::backing_with("resize not supported"))
+    }
+
+    fn flush(&mut self) -> Result<(), SegmentStorageError> {
+        Ok(())
+    }
+
+    fn name(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub struct SegmentStorage {

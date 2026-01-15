@@ -1,0 +1,337 @@
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use bitflags::bitflags;
+
+use crate::ir::{Address, SegmentProperties};
+
+use crate::storage::segments::overlay::OverlayTree;
+use crate::storage::segments::provider::SegmentStorageProviderId;
+
+pub type SegmentMappingId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SegmentMappingKind {
+    #[default]
+    None,
+    Heap,
+    Stack,
+    Mmap,
+    Mmio,
+    Dma,
+    Jit,
+    Bss,
+    Shared,
+    Kernel,
+    Guard,
+    Null,
+    Gpu,
+    Tls,
+    Buffer,
+    Cow,
+    PageTable,
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct SegmentMappingFlags: u32 {
+        const NONE = 0;
+        const PAGED = 0x0001;
+        const PRIVATE = 0x0002;
+        const PERSISTENT = 0x0004;
+        const OVERLAY_ENABLED = 0x0008;
+        const COMPRESSED = 0x0010;
+        const ENCRYPTED = 0x0020;
+        const LARGE_PAGE = 0x0040;
+    }
+}
+
+static TIMESTAMP_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn next_timestamp() -> u64 {
+    TIMESTAMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug)]
+pub struct SegmentMapping {
+    id: SegmentMappingId,
+    start: Address,
+    size: usize,
+    delta: i64,
+    provider_id: SegmentStorageProviderId,
+    properties: SegmentProperties,
+    name: Option<String>,
+    kind: SegmentMappingKind,
+    flags: SegmentMappingFlags,
+    overlay: OverlayTree,
+    timestamp: u64,
+}
+
+impl SegmentMapping {
+    pub fn new(
+        id: SegmentMappingId,
+        start: impl Into<Address>,
+        size: usize,
+        delta: i64,
+        provider_id: SegmentStorageProviderId,
+        properties: SegmentProperties,
+        name: impl Into<Option<String>>,
+    ) -> Self {
+        Self {
+            id,
+            start: start.into(),
+            size,
+            delta,
+            provider_id,
+            properties,
+            name: name.into(),
+            kind: SegmentMappingKind::None,
+            flags: SegmentMappingFlags::NONE,
+            overlay: OverlayTree::new(),
+            timestamp: next_timestamp(),
+        }
+    }
+
+    pub fn id(&self) -> SegmentMappingId {
+        self.id
+    }
+
+    pub fn start(&self) -> Address {
+        self.start
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn end(&self) -> Address {
+        self.start + self.size
+    }
+
+    pub fn last(&self) -> Address {
+        self.start + self.size - 1usize
+    }
+
+    pub fn range(&self) -> Range<Address> {
+        self.start..self.end()
+    }
+
+    pub fn delta(&self) -> i64 {
+        self.delta
+    }
+
+    pub fn provider_id(&self) -> SegmentStorageProviderId {
+        self.provider_id
+    }
+
+    pub fn properties(&self) -> SegmentProperties {
+        self.properties
+    }
+
+    pub fn set_properties(&mut self, properties: SegmentProperties) {
+        self.properties = properties;
+        self.touch();
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn kind(&self) -> SegmentMappingKind {
+        self.kind
+    }
+
+    pub fn set_kind(&mut self, kind: SegmentMappingKind) {
+        self.kind = kind;
+        self.touch();
+    }
+
+    pub fn flags(&self) -> SegmentMappingFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: SegmentMappingFlags) {
+        self.flags = flags;
+        self.touch();
+    }
+
+    pub fn overlay(&self) -> &OverlayTree {
+        &self.overlay
+    }
+
+    pub fn overlay_mut(&mut self) -> &mut OverlayTree {
+        &mut self.overlay
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    fn touch(&mut self) {
+        self.timestamp = next_timestamp();
+    }
+
+    pub fn contains(&self, addr: impl Into<Address>) -> bool {
+        let addr = addr.into();
+        addr >= self.start && addr < self.end()
+    }
+
+    pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
+        let addr = addr.into();
+        let offset = addr.offset() as i64 - self.start.offset() as i64;
+        (offset + self.delta) as u64
+    }
+
+    pub fn to_address(&self, offset: u64) -> Address {
+        let rel = offset as i64 - self.delta;
+        Address::from((self.start.offset() as i64 + rel) as u64)
+    }
+
+    pub fn set_start(&mut self, start: impl Into<Address>) {
+        self.start = start.into();
+        self.touch();
+    }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.size = size;
+        self.touch();
+    }
+
+    pub fn make_ref(&self) -> SegmentMappingRef {
+        SegmentMappingRef {
+            mapping_id: self.id,
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentMappingRef {
+    mapping_id: SegmentMappingId,
+    timestamp: u64,
+}
+
+impl SegmentMappingRef {
+    pub fn new(mapping_id: SegmentMappingId, timestamp: u64) -> Self {
+        Self {
+            mapping_id,
+            timestamp,
+        }
+    }
+
+    pub fn mapping_id(&self) -> SegmentMappingId {
+        self.mapping_id
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    pub fn is_valid(&self, mapping: &SegmentMapping) -> bool {
+        self.mapping_id == mapping.id() && self.timestamp == mapping.timestamp()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentMappingView {
+    mapping_ref: SegmentMappingRef,
+    start: Address,
+    size: usize,
+}
+
+impl SegmentMappingView {
+    pub fn new(mapping_ref: SegmentMappingRef, start: impl Into<Address>, size: usize) -> Self {
+        Self {
+            mapping_ref,
+            start: start.into(),
+            size,
+        }
+    }
+
+    pub fn mapping_ref(&self) -> SegmentMappingRef {
+        self.mapping_ref
+    }
+
+    pub fn start(&self) -> Address {
+        self.start
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn end(&self) -> Address {
+        self.start + self.size
+    }
+
+    pub fn last(&self) -> Address {
+        self.start + self.size - 1usize
+    }
+
+    pub fn range(&self) -> Range<Address> {
+        self.start..self.end()
+    }
+
+    pub fn contains(&self, addr: impl Into<Address>) -> bool {
+        let addr = addr.into();
+        addr >= self.start && addr < self.end()
+    }
+
+    pub fn with_start(&self, new_start: impl Into<Address>) -> Option<Self> {
+        let new_start = new_start.into();
+        if new_start >= self.end() {
+            return None;
+        }
+        let new_size = usize::from(self.end() - new_start);
+        Some(Self::new(self.mapping_ref, new_start, new_size))
+    }
+
+    pub fn with_end(&self, new_end: impl Into<Address>) -> Option<Self> {
+        let new_end = new_end.into();
+        if new_end <= self.start {
+            return None;
+        }
+        let new_size = usize::from(new_end - self.start);
+        Some(Self::new(self.mapping_ref, self.start, new_size))
+    }
+
+    pub fn split_at(&self, addr: impl Into<Address>) -> (Option<Self>, Option<Self>) {
+        let addr = addr.into();
+
+        if addr <= self.start {
+            return (None, Some(self.clone()));
+        }
+
+        if addr >= self.end() {
+            return (Some(self.clone()), None);
+        }
+
+        let left_size = usize::from(addr - self.start);
+        let right_size = usize::from(self.end() - addr);
+
+        let left = Self::new(self.mapping_ref, self.start, left_size);
+        let right = Self::new(self.mapping_ref, addr, right_size);
+
+        (Some(left), Some(right))
+    }
+}
+
+impl PartialEq for SegmentMappingView {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start
+    }
+}
+
+impl Eq for SegmentMappingView {}
+
+impl PartialOrd for SegmentMappingView {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SegmentMappingView {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.start.cmp(&other.start)
+    }
+}
