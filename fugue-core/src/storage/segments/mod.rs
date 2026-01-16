@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
+use std::mem;
 use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
@@ -407,7 +408,7 @@ impl SegmentStorage {
         Ok(())
     }
 
-    pub fn set_mapping_metadata(
+    pub fn update_mapping_metadata(
         &mut self,
         id: SegmentMappingId,
         kind: SegmentMappingKind,
@@ -663,7 +664,7 @@ impl SegmentStorage {
                     .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
                 match bank.find_containing(current_addr) {
-                    Some(v) => v.clone(),
+                    Some(v) => v,
                     None => {
                         current_addr += 1usize;
                         remaining -= 1;
@@ -784,18 +785,18 @@ impl SegmentStorage {
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
             .mappings
-            .get(&mapping_id)
+            .get_mut(&mapping_id)
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
 
         let provider_id = mapping.provider_id();
-        let overlay_data: Vec<_> = mapping.overlay().iter().collect();
+        let overlay_data = mem::take(mapping.overlay_mut());
 
         let provider = self
             .providers
             .get_mut(&provider_id)
             .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
 
-        for (addr, chunk) in overlay_data {
+        for (addr, chunk) in overlay_data.iter() {
             let mapping = self.mappings.get(&mapping_id).unwrap();
             let phys_offset = mapping.to_offset(addr);
             provider
@@ -835,18 +836,6 @@ impl SegmentStorage {
         Some((mapping.provider_id(), offset))
     }
 
-    pub fn list_providers(&self) -> Vec<SegmentStorageProviderId> {
-        self.providers.keys().copied().collect()
-    }
-
-    pub fn list_mappings(&self) -> Vec<SegmentMappingId> {
-        self.mappings.keys().copied().collect()
-    }
-
-    pub fn list_banks(&self) -> Vec<SegmentBankId> {
-        self.banks.keys().copied().collect()
-    }
-
     pub fn contains_segment(&self, at: Address) -> bool {
         if let Some(bank) = self.banks.get(&self.current_bank) {
             bank.find_containing(at).is_some()
@@ -855,6 +844,8 @@ impl SegmentStorage {
         }
     }
 
+    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
+    // given address)
     pub fn find_segment_containing<'a>(
         &'a self,
         addr: Address,
@@ -884,6 +875,8 @@ impl SegmentStorage {
             .find_segment_containing(phys_addr.into())
     }
 
+    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
+    // given address)
     pub fn view_segment_bytes(
         &self,
         addr: Address,
@@ -902,6 +895,8 @@ impl SegmentStorage {
         Ok(Cow::Owned(bytes))
     }
 
+    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
+    // given address)
     pub fn view_segment_bytes_from<'a>(
         &'a self,
         addr: Address,
@@ -916,6 +911,7 @@ impl SegmentStorage {
         .ok_or(SegmentStorageError::InvalidSize)
     }
 
+    // TODO: this should be get segment views
     pub fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError> {
         let mut all_metadata = Vec::<Cow<'_, LoadableSegmentMetadata>>::new();
 

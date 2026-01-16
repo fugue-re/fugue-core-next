@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use bytes::Bytes;
 use smallvec::SmallVec;
@@ -51,7 +52,7 @@ impl OverlayTree {
         let addr = addr.into();
         let write_end = addr + data.len();
 
-        let overlapping: SmallVec<[Address; 4]> = self
+        let overlapping = self
             .chunks
             .range(..write_end)
             .filter_map(|(&start, chunk)| {
@@ -62,7 +63,7 @@ impl OverlayTree {
                     None
                 }
             })
-            .collect();
+            .collect::<SmallVec<[_; 4]>>();
 
         for start in overlapping {
             let chunk = self.chunks.remove(&start).unwrap();
@@ -92,7 +93,11 @@ impl OverlayTree {
         };
         let chunk_end = addr + chunk.len();
 
-        if let Some((&next_start, _)) = self.chunks.range((std::ops::Bound::Excluded(addr), std::ops::Bound::Unbounded)).next() {
+        if let Some((&next_start, _)) = self
+            .chunks
+            .range((Bound::Excluded(addr), Bound::Unbounded))
+            .next()
+        {
             if next_start == chunk_end {
                 let next_chunk = self.chunks.remove(&next_start).unwrap();
                 let current = self.chunks.get_mut(&addr).unwrap();
@@ -103,7 +108,7 @@ impl OverlayTree {
             }
         }
 
-        let prev_entry: Option<Address> = self
+        let prev_entry = self
             .chunks
             .range(..addr)
             .next_back()
