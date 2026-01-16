@@ -231,6 +231,9 @@ impl<'a> LiftingContextState<'a> {
         self.inputs.input.delay_slot_length()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn constructor(&self) -> &'static Constructor {
         self.inputs.input.constructor()
@@ -241,6 +244,14 @@ impl<'a> LiftingContextState<'a> {
         self.inputs.input.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn apply_commits<R: ConstructorResolver>(&mut self) {
         for commit in mem::take(&mut self.inputs.input.context.commits) {
@@ -270,7 +281,7 @@ impl<'a> LiftingContextState<'a> {
     pub fn nth_delay_slot<'b>(&'b mut self, n: usize) -> Option<LiftingContextState<'b>> {
         let (pinput, pinputs) = self.inputs.inputs.get_mut(n..)?.split_first_mut()?;
         let inputs =
-            ParserInputs::new_with(&self.inputs.bytes, pinput, pinputs, self.inputs.context);
+            ParserInputs::new_with(self.inputs.bytes, pinput, pinputs, self.inputs.context);
         let unique_offset = (inputs.input.address() & self.context.unique_mask) << 4;
 
         Some(LiftingContextState {
@@ -281,6 +292,9 @@ impl<'a> LiftingContextState<'a> {
         })
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
     pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
@@ -297,6 +311,9 @@ impl<'a> LiftingContextState<'a> {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
     pub unsafe fn emit<R: ConstructorResolver>(&mut self) -> Option<()> {
@@ -318,6 +335,9 @@ impl<'a> LiftingContextState<'a> {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
     pub unsafe fn emit_delay_slots<R: ConstructorResolver>(&mut self) -> Option<()> {
@@ -368,6 +388,9 @@ impl<'a> LiftingContextState<'a> {
         self.unique_offset = (address & self.context.unique_mask) << 4;
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_constructor(&self, index: usize) -> Option<&'static Constructor> {
@@ -387,6 +410,9 @@ impl<'a> LiftingContextState<'a> {
             .constructor
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_handle(&self, index: usize) -> &FixedHandle {
@@ -408,6 +434,9 @@ impl<'a> LiftingContextState<'a> {
             .unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_handle_mut(&mut self, index: usize) -> &mut FixedHandle {
@@ -429,6 +458,9 @@ impl<'a> LiftingContextState<'a> {
             .unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     #[doc(hidden)]
     pub unsafe fn push_input(&mut self, vnd: Varnode) {
@@ -652,7 +684,7 @@ impl<'a> Display for LanguageFormatter<'a, Varnode> {
             let value = self.value.offset() as i64;
             let size = self.value.size();
 
-            return if value >= -64 && value <= 64 {
+            return if (-64..=64).contains(&value) {
                 write!(f, "{value}:{size}")
             } else {
                 write!(f, "{value:#x}:{size}")
@@ -701,6 +733,9 @@ impl Inputs {
         self.0[index] = vnd;
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn set_input_unchecked(&mut self, index: usize, vnd: Varnode) {
         *self.0.get_unchecked_mut(index) = vnd;
@@ -722,6 +757,11 @@ impl Inputs {
             .iter()
             .position(|vnd| vnd.is_invalid())
             .unwrap_or(self.0.len())
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0[0].is_invalid()
     }
 }
 

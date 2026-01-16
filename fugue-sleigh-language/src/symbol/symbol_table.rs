@@ -17,7 +17,7 @@ pub struct SymbolTable {
 
 impl SymbolTable {
     pub fn global_scope(&self) -> Option<&SymbolScope> {
-        self.scopes.get(0)
+        self.scopes.first()
     }
 
     pub fn symbol(&self, id: usize) -> Option<&Symbol> {
@@ -89,7 +89,7 @@ impl SymbolTable {
 
             let builder = builders[id]
                 .as_mut()
-                .ok_or_else(|| DeserialiseError::Invariant("inconsistent symbol ID"))?;
+                .ok_or(DeserialiseError::Invariant("inconsistent symbol ID"))?;
 
             builder.kind = kind;
             builder.id = id;
@@ -139,7 +139,7 @@ impl SymbolTable {
         for _ in 0..scope_size {
             let input = children
                 .next()
-                .ok_or_else(|| DeserialiseError::Invariant("incorrect number of scopes"))?;
+                .ok_or(DeserialiseError::Invariant("incorrect number of scopes"))?;
 
             let id = input.attribute_int::<usize>("id")?;
             let parent = input.attribute_int::<usize>("parent")?;
@@ -152,7 +152,7 @@ impl SymbolTable {
         for _ in 0..symbol_size {
             let input = children
                 .next()
-                .ok_or_else(|| DeserialiseError::Invariant("incorrect number of scopes"))?;
+                .ok_or(DeserialiseError::Invariant("incorrect number of scopes"))?;
 
             let kind = match input.tag_name().name() {
                 "userop_head" => SymbolKind::UserOp,
@@ -176,11 +176,11 @@ impl SymbolTable {
             let scope = input.attribute_int("scope")?;
             let name = input
                 .attribute("name")
-                .ok_or_else(|| DeserialiseError::AttributeExpected("name"))?;
+                .ok_or(DeserialiseError::AttributeExpected("name"))?;
 
             let builder = builders[id]
                 .as_mut()
-                .ok_or_else(|| DeserialiseError::Invariant("inconsistent symbol ID"))?;
+                .ok_or(DeserialiseError::Invariant("inconsistent symbol ID"))?;
 
             builder.kind = kind;
             builder.id = id;

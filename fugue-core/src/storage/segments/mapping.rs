@@ -1,5 +1,6 @@
+use std::cmp::Ordering;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use bitflags::bitflags;
 
@@ -49,7 +50,7 @@ bitflags! {
 static TIMESTAMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_timestamp() -> u64 {
-    TIMESTAMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    TIMESTAMP_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 #[derive(Debug)]
@@ -60,7 +61,6 @@ pub struct SegmentMapping {
     delta: i64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
-    name: Option<String>,
     kind: SegmentMappingKind,
     flags: SegmentMappingFlags,
     overlay: OverlayTree,
@@ -75,7 +75,6 @@ impl SegmentMapping {
         delta: i64,
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
-        name: impl Into<Option<String>>,
     ) -> Self {
         Self {
             id,
@@ -84,7 +83,6 @@ impl SegmentMapping {
             delta,
             provider_id,
             properties,
-            name: name.into(),
             kind: SegmentMappingKind::None,
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
@@ -109,7 +107,7 @@ impl SegmentMapping {
     }
 
     pub fn last(&self) -> Address {
-        self.start + self.size - 1usize
+        self.end() - 1usize
     }
 
     pub fn range(&self) -> Range<Address> {
@@ -131,10 +129,6 @@ impl SegmentMapping {
     pub fn set_properties(&mut self, properties: SegmentProperties) {
         self.properties = properties;
         self.touch();
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
     }
 
     pub fn kind(&self) -> SegmentMappingKind {
@@ -178,13 +172,13 @@ impl SegmentMapping {
 
     pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
         let addr = addr.into();
-        let offset = addr.offset() as i64 - self.start.offset() as i64;
-        (offset + self.delta) as u64
+        let offset = (addr.offset() as i64).wrapping_sub(self.start.offset() as i64);
+        offset.wrapping_add(self.delta) as u64
     }
 
     pub fn to_address(&self, offset: u64) -> Address {
-        let rel = offset as i64 - self.delta;
-        Address::from((self.start.offset() as i64 + rel) as u64)
+        let rel = (offset as i64).wrapping_sub(self.delta);
+        Address::from((self.start.offset() as i64).wrapping_add(rel) as u64)
     }
 
     pub fn set_start(&mut self, start: impl Into<Address>) {
@@ -265,7 +259,7 @@ impl SegmentMappingView {
     }
 
     pub fn last(&self) -> Address {
-        self.start + self.size - 1usize
+        self.end() - 1usize
     }
 
     pub fn range(&self) -> Range<Address> {
@@ -325,13 +319,13 @@ impl PartialEq for SegmentMappingView {
 impl Eq for SegmentMappingView {}
 
 impl PartialOrd for SegmentMappingView {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for SegmentMappingView {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.start.cmp(&other.start)
     }
 }

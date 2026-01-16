@@ -35,38 +35,38 @@ pub const ATTRIB_WORDSIZE: AttributeId = AttributeId::new("wordsize", 26);
 pub const ATTRIB_STORAGE: AttributeId = AttributeId::new("storage", 149);
 pub const ATTRIB_STACKSPILL: AttributeId = AttributeId::new("stackspill", 150);
 
-pub const ELEM_UNKNOWN_NAME: &'static str = "XMLunknown";
+pub const ELEM_UNKNOWN_NAME: &str = "XMLunknown";
 pub const ELEM_UNKNOWN_ID: u32 = 287;
 pub const ELEM_UNKNOWN: ElementId = ElementId::new(ELEM_UNKNOWN_NAME, ELEM_UNKNOWN_ID);
-pub const ELEM_DATA_NAME: &'static str = "data";
+pub const ELEM_DATA_NAME: &str = "data";
 pub const ELEM_DATA_ID: u32 = 1;
 pub const ELEM_DATA: ElementId = ElementId::new(ELEM_DATA_NAME, ELEM_DATA_ID);
-pub const ELEM_INPUT_NAME: &'static str = "input";
+pub const ELEM_INPUT_NAME: &str = "input";
 pub const ELEM_INPUT_ID: u32 = 2;
 pub const ELEM_INPUT: ElementId = ElementId::new(ELEM_INPUT_NAME, ELEM_INPUT_ID);
-pub const ELEM_OFF_NAME: &'static str = "off";
+pub const ELEM_OFF_NAME: &str = "off";
 pub const ELEM_OFF_ID: u32 = 3;
 pub const ELEM_OFF: ElementId = ElementId::new(ELEM_OFF_NAME, ELEM_OFF_ID);
-pub const ELEM_OUTPUT_NAME: &'static str = "output";
+pub const ELEM_OUTPUT_NAME: &str = "output";
 pub const ELEM_OUTPUT_ID: u32 = 4;
 pub const ELEM_OUTPUT: ElementId = ElementId::new(ELEM_OUTPUT_NAME, ELEM_OUTPUT_ID);
-pub const ELEM_RETURNADDRESS_NAME: &'static str = "returnaddress";
+pub const ELEM_RETURNADDRESS_NAME: &str = "returnaddress";
 pub const ELEM_RETURNADDRESS_ID: u32 = 5;
 pub const ELEM_RETURNADDRESS: ElementId =
     ElementId::new(ELEM_RETURNADDRESS_NAME, ELEM_RETURNADDRESS_ID);
-pub const ELEM_SYMBOL_NAME: &'static str = "symbol";
+pub const ELEM_SYMBOL_NAME: &str = "symbol";
 pub const ELEM_SYMBOL_ID: u32 = 6;
 pub const ELEM_SYMBOL: ElementId = ElementId::new(ELEM_SYMBOL_NAME, ELEM_SYMBOL_ID);
-pub const ELEM_TARGET_NAME: &'static str = "target";
+pub const ELEM_TARGET_NAME: &str = "target";
 pub const ELEM_TARGET_ID: u32 = 7;
 pub const ELEM_TARGET: ElementId = ElementId::new(ELEM_TARGET_NAME, ELEM_TARGET_ID);
-pub const ELEM_VAL_NAME: &'static str = "val";
+pub const ELEM_VAL_NAME: &str = "val";
 pub const ELEM_VAL_ID: u32 = 8;
 pub const ELEM_VAL: ElementId = ElementId::new(ELEM_VAL_NAME, ELEM_VAL_ID);
-pub const ELEM_VALUE_NAME: &'static str = "value";
+pub const ELEM_VALUE_NAME: &str = "value";
 pub const ELEM_VALUE_ID: u32 = 9;
 pub const ELEM_VALUE: ElementId = ElementId::new(ELEM_VALUE_NAME, ELEM_VALUE_ID);
-pub const ELEM_VOID_NAME: &'static str = "void";
+pub const ELEM_VOID_NAME: &str = "void";
 pub const ELEM_VOID_ID: u32 = 10;
 pub const ELEM_VOID: ElementId = ElementId::new(ELEM_VOID_NAME, ELEM_VOID_ID);
 
@@ -388,6 +388,12 @@ impl Position {
     }
 }
 
+impl Default for PackedDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PackedDecoder {
     pub fn new() -> Self {
         Self {
@@ -411,7 +417,7 @@ impl PackedDecoder {
     }
 
     fn get_byte_plus_1(&self, pos: &Position) -> Result<u8, MarshalError> {
-        let mut next_pos = pos.clone();
+        let mut next_pos = *pos;
         if next_pos.byte_index + 1 < self.in_stream[next_pos.chunk_index].data.len() {
             next_pos.byte_index += 1;
         } else {
@@ -495,7 +501,7 @@ impl PackedDecoder {
     }
 
     fn find_matching_attribute(&mut self, attrib_id: &AttributeId) -> Result<(), MarshalError> {
-        self.cur_pos = self.start_pos.clone();
+        self.cur_pos = self.start_pos;
         loop {
             let header1 = self.get_byte(&self.cur_pos)?;
             if (header1 & packed_format::HEADER_MASK) != packed_format::ATTRIBUTE {
@@ -621,8 +627,8 @@ impl Decoder for PackedDecoder {
             id |= (self.get_next_byte_from_end()? & packed_format::RAWDATA_MASK) as u32;
         }
 
-        self.start_pos = self.end_pos.clone();
-        self.cur_pos = self.end_pos.clone();
+        self.start_pos = self.end_pos;
+        self.cur_pos = self.end_pos;
 
         let mut header1 = self.get_byte(&self.cur_pos)?;
         while (header1 & packed_format::HEADER_MASK) == packed_format::ATTRIBUTE {
@@ -630,8 +636,8 @@ impl Decoder for PackedDecoder {
             header1 = self.get_byte(&self.cur_pos)?;
         }
 
-        self.end_pos = self.cur_pos.clone();
-        self.cur_pos = self.start_pos.clone();
+        self.end_pos = self.cur_pos;
+        self.cur_pos = self.start_pos;
         self.attribute_read = true; // "Last attribute was read" is vacuously true
 
         Ok(id)
@@ -683,7 +689,7 @@ impl Decoder for PackedDecoder {
     }
 
     fn rewind_attributes(&mut self) -> Result<(), MarshalError> {
-        self.cur_pos = self.start_pos.clone();
+        self.cur_pos = self.start_pos;
         self.attribute_read = true;
         Ok(())
     }
@@ -731,7 +737,7 @@ impl Decoder for PackedDecoder {
     fn read_bool_with_id(&mut self, attrib_id: &AttributeId) -> Result<bool, MarshalError> {
         self.find_matching_attribute(attrib_id)?;
         let res = self.read_bool()?;
-        self.cur_pos = self.start_pos.clone();
+        self.cur_pos = self.start_pos;
         Ok(res)
     }
 
@@ -797,7 +803,7 @@ impl Decoder for PackedDecoder {
         expect: &str,
         expect_val: i64,
     ) -> Result<i64, MarshalError> {
-        let tmp_pos = self.cur_pos.clone();
+        let tmp_pos = self.cur_pos;
         let header1 = self.get_next_byte()?;
         if (header1 & packed_format::HEADEREXTEND_MASK) != 0 {
             self.get_next_byte()?;
@@ -829,7 +835,7 @@ impl Decoder for PackedDecoder {
     ) -> Result<i64, MarshalError> {
         self.find_matching_attribute(attrib_id)?;
         let res = self.read_signed_integer_expect_string(expect, expect_val)?;
-        self.cur_pos = self.start_pos.clone();
+        self.cur_pos = self.start_pos;
         Ok(res)
     }
 
@@ -975,7 +981,7 @@ impl Decoder for PackedDecoder {
     ) -> Result<AddressSpaceRef, MarshalError> {
         self.find_matching_attribute(attrib_id)?;
         let res = self.read_space()?;
-        self.cur_pos = self.start_pos.clone();
+        self.cur_pos = self.start_pos;
         Ok(res)
     }
 }

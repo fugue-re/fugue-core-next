@@ -68,11 +68,9 @@ impl Context {
                 shift: input.attribute_int("shift")?,
                 mask: input.attribute_int("mask")?,
                 pattern_value: input
-                    .children()
-                    .filter(xml::Node::is_element)
-                    .next()
+                    .children().find(xml::Node::is_element)
                     .map(PatternExpression::from_xml)
-                    .ok_or_else(|| {
+                    .ok_or({
                         DeserialiseError::Invariant("missing pattern for context_op")
                     })??,
             },
@@ -147,6 +145,9 @@ impl Constructor {
         self.template.as_ref()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn unchecked_template(&self) -> &ConstructTpl {
         if let Some(ref templ) = self.template {
             templ
@@ -159,6 +160,9 @@ impl Constructor {
         self.named_template.get(index).and_then(|v| v.as_ref())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn unchecked_named_template(&self, index: usize) -> &ConstructTpl {
         if let Some(ref named) = self.named_template.get_unchecked(index) {
             named
@@ -433,10 +437,8 @@ impl DecisionNode {
                     let id = input.attribute_int("id")?;
                     let pattern = DisjointPattern::from_xml(
                         input
-                            .children()
-                            .filter(xml::Node::is_element)
-                            .next()
-                            .ok_or_else(|| {
+                            .children().find(xml::Node::is_element)
+                            .ok_or({
                                 DeserialiseError::Invariant("no pattern for disjoint pattern")
                             })?,
                     )?;
@@ -521,13 +523,11 @@ impl DisjointPattern {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Combine {
                     context: ContextPattern::from_xml(
-                        children.next().ok_or_else(|| {
+                        children.next().ok_or({
                             DeserialiseError::Invariant("missing context pattern")
                         })?,
                     )?,
-                    instruction: InstructionPattern::from_xml(children.next().ok_or_else(
-                        || DeserialiseError::Invariant("missing instruction pattern"),
-                    )?)?,
+                    instruction: InstructionPattern::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing instruction pattern"))?)?,
                 }
             }
         })
@@ -563,10 +563,8 @@ impl InstructionPattern {
         Ok(Self {
             mask_value: PatternBlock::from_xml(
                 input
-                    .children()
-                    .filter(xml::Node::is_element)
-                    .next()
-                    .ok_or_else(|| DeserialiseError::Invariant("missing pattern block"))?,
+                    .children().find(xml::Node::is_element)
+                    .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
             )?,
         })
     }
@@ -601,10 +599,8 @@ impl ContextPattern {
         Ok(Self {
             mask_value: PatternBlock::from_xml(
                 input
-                    .children()
-                    .filter(xml::Node::is_element)
-                    .next()
-                    .ok_or_else(|| DeserialiseError::Invariant("missing pattern block"))?,
+                    .children().find(xml::Node::is_element)
+                    .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
             )?,
         })
     }
@@ -690,11 +686,11 @@ impl PatternBlock {
 
                 for i in 0..masks.len() - 1 {
                     tmp = masks[i] << (suboff * 8);
-                    tmp = tmp | (masks[i + 1] >> ((size_of::<u32>() - suboff) * 8));
+                    tmp |= masks[i + 1] >> ((size_of::<u32>() - suboff) * 8);
                     masks[i] = tmp;
 
                     tmp = values[i] << (suboff * 8);
-                    tmp = tmp | (values[i + 1] >> ((size_of::<u32>() - suboff) * 8));
+                    tmp |= values[i + 1] >> ((size_of::<u32>() - suboff) * 8);
                     values[i] = tmp;
                 }
 

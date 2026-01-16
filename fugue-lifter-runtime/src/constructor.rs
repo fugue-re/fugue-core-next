@@ -23,6 +23,9 @@ pub struct OperandFilter {
 }
 
 impl OperandFilter {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn validate<R: ConstructorResolver>(
         &self,
@@ -120,6 +123,9 @@ impl PartialEq for Constructor {
 impl Eq for Constructor {}
 
 impl Constructor {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn apply_context_actions<R: ConstructorResolver>(
         &'static self,
@@ -142,6 +148,9 @@ impl Constructor {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn resolve_operands<R: ConstructorResolver>(
         &'static self,
@@ -217,6 +226,9 @@ impl Constructor {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn resolve_handles<R: ConstructorResolver>(
         &'static self,
@@ -271,6 +283,9 @@ impl Constructor {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format_mnemonic<R: ConstructorResolver, W: fmt::Write>(
         &self,
         state: &mut LiftingContextState<'_>,
@@ -294,7 +309,7 @@ impl Constructor {
         let Some(pieces) = self.print_pieces.get(
             ..self
                 .first_whitespace
-                .unwrap_or_else(|| self.print_pieces.len()),
+                .unwrap_or(self.print_pieces.len()),
         ) else {
             return Ok(());
         };
@@ -324,6 +339,9 @@ impl Constructor {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format_body<R: ConstructorResolver, W: fmt::Write>(
         &self,
         state: &mut LiftingContextState<'_>,
@@ -380,6 +398,9 @@ impl Constructor {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
         &self,
         state: &mut LiftingContextState<'_>,

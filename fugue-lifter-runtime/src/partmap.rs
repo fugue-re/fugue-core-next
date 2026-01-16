@@ -67,7 +67,7 @@ where
     }
 
     pub fn bounds(&self, point: K) -> BoundKind<K, V> {
-        let lb = self.mapping.range(..=point).rev().next();
+        let lb = self.mapping.range(..=point).next_back();
         let ub = self
             .mapping
             .range(point..)
@@ -103,7 +103,7 @@ where
     }
 
     pub fn get(&self, point: K) -> Option<&V> {
-        self.mapping.range(..=point).rev().next().map(|(_, v)| v)
+        self.mapping.range(..=point).next_back().map(|(_, v)| v)
     }
 
     pub fn get_or_default(&self, point: K) -> &V {
@@ -140,12 +140,12 @@ where
         self.mapping.range_mut(range)
     }
 
-    pub fn split<'a>(&'a mut self, at: K) -> &'a V {
+    pub fn split(&mut self, at: K) -> &V {
         self.split_mut(at)
     }
 
-    pub fn split_mut<'a>(&'a mut self, at: K) -> &'a mut V {
-        let value = if let Some(point) = self.mapping.range(..=at).rev().next() {
+    pub fn split_mut(&mut self, at: K) -> &mut V {
+        let value = if let Some(point) = self.mapping.range(..=at).next_back() {
             if *point.0 == at {
                 None
             } else {

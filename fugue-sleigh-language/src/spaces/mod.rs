@@ -184,7 +184,7 @@ impl AddressSpaces {
 
         let default_name = input
             .attribute("defaultspace")
-            .ok_or_else(|| DeserialiseError::AttributeExpected("defaultspace"))?;
+            .ok_or(DeserialiseError::AttributeExpected("defaultspace"))?;
 
         for (index, child) in input
             .children()

@@ -64,7 +64,7 @@ impl LanguageVariant {
     }
 
     pub fn variant(&self) -> &'static str {
-        &self.variant
+        self.variant
     }
 
     pub fn context(&self) -> LiftingContextFactory {

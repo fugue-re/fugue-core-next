@@ -5,6 +5,7 @@ use num_traits::{AsPrimitive, ToPrimitive};
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::Hash;
 use std::ops::{
     Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Div, DivAssign,
     Mul, MulAssign, Neg, Not, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub, SubAssign,
@@ -15,7 +16,7 @@ use crate::error::{ParseError, TryFromBitVecError};
 
 pub const MAX_BITS: Option<u32> = Some(64);
 
-#[derive(Debug, Clone, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct BitVec(
     pub(crate) u64,
     pub(crate) u32, // [nbits|sign]
@@ -54,7 +55,7 @@ impl FromStr for BitVec {
         let val = if let Some(cstv) = cst.strip_prefix("0x") {
             u64::from_str_radix(cstv, 16)
         } else {
-            u64::from_str_radix(cst, 10)
+            cst.parse::<u64>()
         }
         .map_err(|_| ParseError::InvalidConst)?;
 
@@ -71,7 +72,7 @@ impl BitVec {
     }
 
     pub fn from_uint(v: u64, bits: u32) -> Self {
-        Self(v, Self::pack_meta(false, bits as u32)).mask()
+        Self(v, Self::pack_meta(false, bits)).mask()
     }
 
     pub(crate) fn from_uint_with(v: u64, mask: u64) -> Self {
@@ -142,23 +143,23 @@ impl BitVec {
     }
 
     pub fn count_zeros(&self) -> u32 {
-        self.0.count_zeros() - (64 - self.bits() as u32)
+        self.0.count_zeros() - (64 - self.bits())
     }
 
     pub fn leading_ones(&self) -> u32 {
-        (self.0 << (64 - self.bits() as u32)).leading_ones()
+        (self.0 << (64 - self.bits())).leading_ones()
     }
 
     pub fn leading_zeros(&self) -> u32 {
         if self.is_zero() {
-            self.bits() as u32
+            self.bits()
         } else {
-            (self.0 << (64 - self.bits() as u32)).leading_zeros()
+            (self.0 << (64 - self.bits())).leading_zeros()
         }
     }
 
     pub fn bits(&self) -> u32 {
-        (self.1 >> 1) as u32
+        self.1 >> 1
     }
 
     pub fn signed(self) -> Self {
@@ -207,10 +208,10 @@ impl BitVec {
 
     pub fn leading_one(&self) -> Option<u32> {
         let lzs = self.leading_zeros();
-        if lzs == self.bits() as u32 {
+        if lzs == self.bits() {
             None
         } else {
-            Some(self.bits() as u32 - (1 + lzs))
+            Some(self.bits() - (1 + lzs))
         }
     }
 
@@ -224,7 +225,7 @@ impl BitVec {
 
     pub fn bytes(&self) -> usize {
         let bits = self.bits() as usize;
-        bits / 8 + if bits % 8 == 0 { 0 } else { 1 }
+        bits / 8 + if bits.is_multiple_of(8) { 0 } else { 1 }
     }
 
     pub fn from_be_bytes(buf: &[u8]) -> Self {
@@ -282,7 +283,7 @@ impl BitVec {
 
     pub fn to_be_bytes(&self, buf: &mut [u8]) {
         let bits = self.bits() as usize;
-        let size = bits / 8 + if bits % 8 == 0 { 0 } else { 1 };
+        let size = bits / 8 + if bits.is_multiple_of(8) { 0 } else { 1 };
         if buf.len() != size {
             panic!("invalid buf size {}; expected {}", buf.len(), size);
         }
@@ -298,7 +299,7 @@ impl BitVec {
 
     pub fn to_le_bytes(&self, buf: &mut [u8]) {
         let bits = self.bits() as usize;
-        let size = bits / 8 + if bits % 8 == 0 { 0 } else { 1 };
+        let size = bits / 8 + if bits.is_multiple_of(8) { 0 } else { 1 };
         if buf.len() != size {
             panic!("invalid buf size {}; expected {}", buf.len(), size);
         }
@@ -506,7 +507,7 @@ impl BitVec {
     }
 
     pub fn max_value_with(bits: u32, signed: bool) -> Self {
-        let mask = Self::mask_value(bits as u32);
+        let mask = Self::mask_value(bits);
         if signed {
             Self::from_uint_with(mask.checked_shr(1).unwrap_or(0), mask).signed()
         } else {
@@ -526,7 +527,7 @@ impl BitVec {
     }
 
     pub fn min_value_with(bits: u32, signed: bool) -> Self {
-        let mask = Self::mask_value(bits as u32);
+        let mask = Self::mask_value(bits);
         if signed {
             Self::from_uint_with(!mask.checked_shr(1).unwrap_or(0) & mask, mask)
         } else {
@@ -566,8 +567,8 @@ impl BitVec {
     pub fn cast(self, size: u32) -> Self {
         if self.is_signed() {
             if size > self.bits() && self.msb() {
-                let mask = Self::mask_value(size as u32);
-                let extm = u64::from(self.mask_bits() ^ mask);
+                let mask = Self::mask_value(size);
+                let extm = self.mask_bits() ^ mask;
                 Self::from_uint_with(self.0 | extm, mask)
             } else {
                 Self::from_uint(self.0, size)
@@ -581,8 +582,8 @@ impl BitVec {
     pub fn cast_assign(&mut self, size: u32) {
         if self.is_signed() {
             if size > self.bits() && self.msb() {
-                let mask = Self::mask_value(size as u32);
-                let extm = u64::from(self.mask_bits() ^ mask);
+                let mask = Self::mask_value(size);
+                let extm = self.mask_bits() ^ mask;
                 self.0 |= extm;
                 self.1 = Self::pack_meta(true, size as _);
                 self.mask_assign();
@@ -601,13 +602,22 @@ impl PartialEq<Self> for BitVec {
         self.bits() == other.bits() && self.0 == other.0
     }
 }
+
 impl Eq for BitVec {}
+
+impl Hash for BitVec {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.bits().hash(state);
+        self.0.hash(state);
+    }
+}
 
 impl PartialOrd for BitVec {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
+
 impl Ord for BitVec {
     fn cmp(&self, other: &Self) -> Ordering {
         if self.bits() != other.bits() {
@@ -659,7 +669,7 @@ impl Neg for BitVec {
     }
 }
 
-impl<'a> Neg for &'a BitVec {
+impl Neg for &BitVec {
     type Output = BitVec;
 
     fn neg(self) -> Self::Output {
@@ -685,7 +695,7 @@ impl Not for BitVec {
     }
 }
 
-impl<'a> Not for &'a BitVec {
+impl Not for &BitVec {
     type Output = BitVec;
 
     fn not(self) -> Self::Output {
@@ -715,7 +725,7 @@ impl Add for BitVec {
     }
 }
 
-impl<'a> Add for &'a BitVec {
+impl Add for &BitVec {
     type Output = BitVec;
 
     fn add(self, rhs: Self) -> Self::Output {
@@ -782,7 +792,7 @@ impl Div for BitVec {
     }
 }
 
-impl<'a> Div for &'a BitVec {
+impl Div for &BitVec {
     type Output = BitVec;
 
     fn div(self, rhs: Self) -> Self::Output {
@@ -798,10 +808,10 @@ impl<'a> Div for &'a BitVec {
         let size = self.mask_bits();
 
         match (lneg, rneg) {
-            (false, false) => BitVec::from_uint_with(u64::from(&self.0 / &rhs.0), size),
-            (true, false) => -BitVec::from_uint_with(u64::from(&(-self).0 / &rhs.0), size),
-            (false, true) => -BitVec::from_uint_with(u64::from(&self.0 / &(-rhs).0), size),
-            (true, true) => BitVec::from_uint_with(u64::from(&(-self).0 / &(-rhs).0), size),
+            (false, false) => BitVec::from_uint_with(self.0 / rhs.0, size),
+            (true, false) => -BitVec::from_uint_with((-self).0 / rhs.0, size),
+            (false, true) => -BitVec::from_uint_with(self.0 / (-rhs).0, size),
+            (true, true) => BitVec::from_uint_with((-self).0 / (-rhs).0, size),
         }
     }
 }
@@ -900,10 +910,10 @@ impl BitVec {
         let size = self.mask_bits();
 
         match (lneg, rneg) {
-            (false, false) => BitVec::from_uint_with(u64::from(&self.0 / &rhs.0), size),
-            (true, false) => -BitVec::from_uint_with(u64::from(&(-self).0 / &rhs.0), size),
-            (false, true) => -BitVec::from_uint_with(u64::from(&self.0 / &(-rhs).0), size),
-            (true, true) => BitVec::from_uint_with(u64::from(&(-self).0 / &(-rhs).0), size),
+            (false, false) => BitVec::from_uint_with(self.0 / rhs.0, size),
+            (true, false) => -BitVec::from_uint_with((-self).0 / rhs.0, size),
+            (false, true) => -BitVec::from_uint_with(self.0 / (-rhs).0, size),
+            (true, true) => BitVec::from_uint_with((-self).0 / (-rhs).0, size),
         }
     }
 
@@ -961,7 +971,7 @@ impl Mul for BitVec {
     }
 }
 
-impl<'a> Mul for &'a BitVec {
+impl Mul for &BitVec {
     type Output = BitVec;
 
     fn mul(self, rhs: Self) -> Self::Output {
@@ -1021,7 +1031,7 @@ impl Rem for BitVec {
     }
 }
 
-impl<'a> Rem for &'a BitVec {
+impl Rem for &BitVec {
     type Output = BitVec;
 
     fn rem(self, rhs: Self) -> Self::Output {
@@ -1037,9 +1047,9 @@ impl<'a> Rem for &'a BitVec {
         let size = self.mask_bits();
 
         match (lneg, rneg) {
-            (false, false) => BitVec::from_uint_with(u64::from(&self.0 % &rhs.0), size),
-            (true, false) => -BitVec::from_uint_with((-self).0 % &rhs.0, size),
-            (false, true) => BitVec::from_uint_with(&self.0 % (-rhs).0, size),
+            (false, false) => BitVec::from_uint_with(self.0 % rhs.0, size),
+            (true, false) => -BitVec::from_uint_with((-self).0 % rhs.0, size),
+            (false, true) => BitVec::from_uint_with(self.0 % (-rhs).0, size),
             (true, true) => -BitVec::from_uint_with((-self).0 % (-rhs).0, size),
         }
     }
@@ -1200,7 +1210,7 @@ impl Sub for BitVec {
     }
 }
 
-impl<'a> Sub for &'a BitVec {
+impl Sub for &BitVec {
     type Output = BitVec;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -1258,7 +1268,7 @@ impl BitAnd for BitVec {
     }
 }
 
-impl<'a> BitAnd for &'a BitVec {
+impl BitAnd for &BitVec {
     type Output = BitVec;
 
     fn bitand(self, rhs: Self) -> Self::Output {
@@ -1269,7 +1279,7 @@ impl<'a> BitAnd for &'a BitVec {
                 rhs.bits()
             )
         }
-        BitVec::from_uint_with(self.0 & &rhs.0, self.mask_bits())
+        BitVec::from_uint_with(self.0 & rhs.0, self.mask_bits())
     }
 }
 
@@ -1316,7 +1326,7 @@ impl BitOr for BitVec {
     }
 }
 
-impl<'a> BitOr for &'a BitVec {
+impl BitOr for &BitVec {
     type Output = BitVec;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -1374,7 +1384,7 @@ impl BitXor for BitVec {
     }
 }
 
-impl<'a> BitXor for &'a BitVec {
+impl BitXor for &BitVec {
     type Output = BitVec;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
@@ -1425,7 +1435,7 @@ impl Shl<u32> for BitVec {
     }
 }
 
-impl<'a> Shl<u32> for &'a BitVec {
+impl Shl<u32> for &BitVec {
     type Output = BitVec;
 
     fn shl(self, rhs: u32) -> Self::Output {
@@ -1453,17 +1463,15 @@ impl Shl for BitVec {
         }
         if rhs.0 >= self.bits() as u64 {
             Self::zero(self.bits())
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            Self::from_uint_with(self.0.checked_shl(rhs).unwrap_or(0), self.mask_bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                Self::from_uint_with(self.0.checked_shl(rhs).unwrap_or(0), self.mask_bits())
-            } else {
-                Self::zero(self.bits())
-            }
+            Self::zero(self.bits())
         }
     }
 }
 
-impl<'a> Shl for &'a BitVec {
+impl Shl for &BitVec {
     type Output = BitVec;
 
     fn shl(self, rhs: Self) -> Self::Output {
@@ -1476,12 +1484,10 @@ impl<'a> Shl for &'a BitVec {
         }
         if rhs.0 >= self.bits() as u64 {
             BitVec::zero(self.bits())
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            BitVec::from_uint_with(self.0.checked_shl(rhs).unwrap_or(0), self.mask_bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                BitVec::from_uint_with(self.0.checked_shl(rhs).unwrap_or(0), self.mask_bits())
-            } else {
-                BitVec::zero(self.bits())
-            }
+            BitVec::zero(self.bits())
         }
     }
 }
@@ -1497,12 +1503,10 @@ impl ShlAssign for BitVec {
         }
         if rhs.0 >= self.bits() as u64 {
             self.0 = 0;
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            self.shl_assign(rhs);
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                self.shl_assign(rhs);
-            } else {
-                self.0 = 0;
-            }
+            self.0 = 0;
         }
     }
 }
@@ -1518,12 +1522,10 @@ impl ShlAssign<&'_ BitVec> for BitVec {
         }
         if rhs.0 >= self.bits() as u64 {
             self.0 = 0;
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            self.shl_assign(rhs);
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                self.shl_assign(rhs);
-            } else {
-                self.0 = 0;
-            }
+            self.0 = 0;
         }
     }
 }
@@ -1533,7 +1535,7 @@ impl Shr<u32> for BitVec {
 
     fn shr(self, rhs: u32) -> Self::Output {
         let size = self.bits();
-        if rhs as u32 >= size {
+        if rhs >= size {
             if self.is_signed() {
                 -Self::one(size)
             } else {
@@ -1543,7 +1545,7 @@ impl Shr<u32> for BitVec {
             // perform ASR
             let mask = self.mask_bits()
                 ^ 1u64
-                    .checked_shl((size - rhs as u32) as u32)
+                    .checked_shl(size - rhs)
                     .unwrap_or(0)
                     .wrapping_sub(1);
             Self::from_uint_with(
@@ -1556,12 +1558,12 @@ impl Shr<u32> for BitVec {
     }
 }
 
-impl<'a> Shr<u32> for &'a BitVec {
+impl Shr<u32> for &BitVec {
     type Output = BitVec;
 
     fn shr(self, rhs: u32) -> Self::Output {
         let size = self.bits();
-        if rhs as u32 >= size {
+        if rhs >= size {
             if self.is_signed() {
                 -BitVec::one(size)
             } else {
@@ -1571,7 +1573,7 @@ impl<'a> Shr<u32> for &'a BitVec {
             // perform ASR
             let mask = self.mask_bits()
                 ^ 1u64
-                    .checked_shl((size - rhs as u32) as u32)
+                    .checked_shl(size - rhs)
                     .unwrap_or(0)
                     .wrapping_sub(1);
             BitVec::from_uint_with(
@@ -1587,7 +1589,7 @@ impl<'a> Shr<u32> for &'a BitVec {
 impl ShrAssign<u32> for BitVec {
     fn shr_assign(&mut self, rhs: u32) {
         let size = self.bits();
-        if rhs as u32 >= size {
+        if rhs >= size {
             if self.is_signed() {
                 self.0 = !0;
                 self.mask_assign();
@@ -1598,7 +1600,7 @@ impl ShrAssign<u32> for BitVec {
             // perform ASR
             let mask = self.mask_bits()
                 ^ 1u64
-                    .checked_shl((size - rhs as u32) as u32)
+                    .checked_shl(size - rhs)
                     .unwrap_or(0)
                     .wrapping_sub(1);
             self.0 = self.0.checked_shr(rhs).unwrap_or(0) | mask;
@@ -1632,7 +1634,7 @@ impl Shr for BitVec {
             if let Some(rhs) = rhs.0.to_u32() {
                 let mask = self.mask_bits()
                     ^ 1u64
-                        .checked_shl((self.bits() - rhs as u32) as u32)
+                        .checked_shl(self.bits() - rhs)
                         .unwrap_or(0)
                         .wrapping_sub(1);
                 Self::from_uint_with(
@@ -1642,17 +1644,15 @@ impl Shr for BitVec {
             } else {
                 -Self::one(self.bits())
             }
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            Self::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                Self::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
-            } else {
-                Self::zero(self.bits())
-            }
+            Self::zero(self.bits())
         }
     }
 }
 
-impl<'a> Shr for &'a BitVec {
+impl Shr for &BitVec {
     type Output = BitVec;
 
     fn shr(self, rhs: Self) -> Self::Output {
@@ -1674,7 +1674,7 @@ impl<'a> Shr for &'a BitVec {
             if let Some(rhs) = rhs.0.to_u32() {
                 let mask = self.mask_bits()
                     ^ 1u64
-                        .checked_shl((self.bits() - rhs as u32) as u32)
+                        .checked_shl(self.bits() - rhs)
                         .unwrap_or(0)
                         .wrapping_sub(1);
                 BitVec::from_uint_with(
@@ -1684,12 +1684,10 @@ impl<'a> Shr for &'a BitVec {
             } else {
                 -BitVec::one(self.bits())
             }
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            BitVec::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                BitVec::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
-            } else {
-                BitVec::zero(self.bits())
-            }
+            BitVec::zero(self.bits())
         }
     }
 }
@@ -1748,7 +1746,7 @@ impl BitVec {
             if let Some(rhs) = rhs.0.to_u32() {
                 let mask = self.mask_bits()
                     ^ 1u64
-                        .checked_shl((self.bits() - rhs as u32) as u32)
+                        .checked_shl(self.bits() - rhs)
                         .unwrap_or(0)
                         .wrapping_sub(1);
                 BitVec::from_uint_with(
@@ -1758,12 +1756,10 @@ impl BitVec {
             } else {
                 -BitVec::one(self.bits())
             }
+        } else if let Some(rhs) = rhs.0.to_u32() {
+            BitVec::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
         } else {
-            if let Some(rhs) = rhs.0.to_u32() {
-                BitVec::from_uint_with(self.0.checked_shr(rhs).unwrap_or(0), self.mask_bits())
-            } else {
-                BitVec::zero(self.bits())
-            }
+            BitVec::zero(self.bits())
         }
     }
 

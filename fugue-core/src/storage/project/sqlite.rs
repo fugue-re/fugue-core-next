@@ -31,7 +31,7 @@ impl StorageProvider for SqliteProvider<TRANSIENT> {
             loadable, attributes,
         )?);
         let segments =
-            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?);
+            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?)?;
 
         Ok(StorageContainer::from_parts(entities, segments))
     }

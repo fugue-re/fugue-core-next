@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::ops::{Deref, DerefMut};
 
@@ -104,7 +105,7 @@ impl AddressSpaceDef {
     ) -> Self {
         let properties = properties
             .map(|v| v & AddressSpaceProperty::HasPhysical)
-            .unwrap_or(AddressSpaceProperty::default());
+            .unwrap_or_default();
 
         let highest = calculate_mask(address_size) * (word_size as u64) + (word_size as u64 - 1);
 
@@ -128,7 +129,7 @@ impl AddressSpaceDef {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub enum AddressSpace {
     Constant(AddressSpaceDef),
     Unique(AddressSpaceDef),
@@ -141,6 +142,12 @@ impl PartialEq for AddressSpace {
     }
 }
 impl Eq for AddressSpace {}
+
+impl Hash for AddressSpace {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.index().hash(state);
+    }
+}
 
 impl Deref for AddressSpace {
     type Target = AddressSpaceDef;
@@ -275,19 +282,11 @@ impl AddressSpaceId {
 
 impl AddressSpace {
     pub fn is_constant(&self) -> bool {
-        if let Self::Constant(..) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Constant(..))
     }
 
     pub fn is_unique(&self) -> bool {
-        if let Self::Unique(..) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::Unique(..))
     }
 
     pub fn is_register(&self) -> bool {

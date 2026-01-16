@@ -22,6 +22,9 @@ pub struct ContextPreAction {
 }
 
 impl ContextPreAction {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn apply<R: ConstructorResolver>(
         &self,
@@ -53,6 +56,9 @@ impl ContextPostAction {
         input.input().context.context[self.num] & self.mask
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn apply<R: ConstructorResolver>(
         &self,

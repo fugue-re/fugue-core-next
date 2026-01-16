@@ -17,7 +17,7 @@ use crate::{core_bigint, core_u64};
 
 pub const MAX_BITS: Option<u32> = core_bigint::MAX_BITS;
 
-#[derive(Debug, Clone, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum BitVec {
     N(core_u64::BitVec),
     U(core_bigint::BitVec),
@@ -337,7 +337,7 @@ impl BitVec {
 
     pub fn bytes(&self) -> usize {
         let bits = self.bits() as usize;
-        bits / 8 + if bits % 8 == 0 { 0 } else { 1 }
+        bits / 8 + if bits.is_multiple_of(8) { 0 } else { 1 }
     }
 
     pub fn from_be_bytes(buf: &[u8]) -> Self {
@@ -530,12 +530,10 @@ impl BitVec {
                     } else {
                         v.unsigned().cast(size)
                     })
+                } else if signed {
+                    Self::U(bv.signed().cast(size).signed())
                 } else {
-                    if signed {
-                        Self::U(bv.signed().cast(size).signed())
-                    } else {
-                        Self::U(bv.unsigned().cast(size))
-                    }
+                    Self::U(bv.unsigned().cast(size))
                 }
             }
         }
@@ -579,24 +577,15 @@ impl BitVec {
                         v.unsigned_cast_assign(size);
                     }
                     *self = Self::N(v);
+                } else if signed {
+                    bv.signed_cast_assign(size);
                 } else {
-                    if signed {
-                        bv.signed_cast_assign(size);
-                    } else {
-                        bv.unsigned_cast_assign(size);
-                    }
+                    bv.unsigned_cast_assign(size);
                 }
             }
         }
     }
 }
-
-impl PartialEq<Self> for BitVec {
-    fn eq(&self, other: &Self) -> bool {
-        self.bits() == other.bits() && fold_map2!(self, other, |slf, other| slf.eq(other))
-    }
-}
-impl Eq for BitVec {}
 
 impl PartialOrd for BitVec {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -629,7 +618,7 @@ impl BitVec {
     }
 }
 
-impl<'a> Neg for &'a BitVec {
+impl Neg for &BitVec {
     type Output = BitVec;
 
     fn neg(self) -> Self::Output {
@@ -645,7 +634,7 @@ impl Not for BitVec {
     }
 }
 
-impl<'a> Not for &'a BitVec {
+impl Not for &BitVec {
     type Output = BitVec;
 
     fn not(self) -> Self::Output {
@@ -667,7 +656,7 @@ impl Add for BitVec {
     }
 }
 
-impl<'a> Add for &'a BitVec {
+impl Add for &BitVec {
     type Output = BitVec;
 
     fn add(self, rhs: Self) -> Self::Output {
@@ -695,7 +684,7 @@ impl Div for BitVec {
     }
 }
 
-impl<'a> Div for &'a BitVec {
+impl Div for &BitVec {
     type Output = BitVec;
 
     fn div(self, rhs: Self) -> Self::Output {
@@ -733,7 +722,7 @@ impl Mul for BitVec {
     }
 }
 
-impl<'a> Mul for &'a BitVec {
+impl Mul for &BitVec {
     type Output = BitVec;
 
     fn mul(self, rhs: Self) -> Self::Output {
@@ -761,7 +750,7 @@ impl Rem for BitVec {
     }
 }
 
-impl<'a> Rem for &'a BitVec {
+impl Rem for &BitVec {
     type Output = BitVec;
 
     fn rem(self, rhs: Self) -> Self::Output {
@@ -799,7 +788,7 @@ impl Sub for BitVec {
     }
 }
 
-impl<'a> Sub for &'a BitVec {
+impl Sub for &BitVec {
     type Output = BitVec;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -827,7 +816,7 @@ impl BitAnd for BitVec {
     }
 }
 
-impl<'a> BitAnd for &'a BitVec {
+impl BitAnd for &BitVec {
     type Output = BitVec;
 
     fn bitand(self, rhs: Self) -> Self::Output {
@@ -855,7 +844,7 @@ impl BitOr for BitVec {
     }
 }
 
-impl<'a> BitOr for &'a BitVec {
+impl BitOr for &BitVec {
     type Output = BitVec;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -883,7 +872,7 @@ impl BitXor for BitVec {
     }
 }
 
-impl<'a> BitXor for &'a BitVec {
+impl BitXor for &BitVec {
     type Output = BitVec;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
@@ -911,7 +900,7 @@ impl Shl<u32> for BitVec {
     }
 }
 
-impl<'a> Shl<u32> for &'a BitVec {
+impl Shl<u32> for &BitVec {
     type Output = BitVec;
 
     fn shl(self, rhs: u32) -> Self::Output {
@@ -933,7 +922,7 @@ impl Shl for BitVec {
     }
 }
 
-impl<'a> Shl for &'a BitVec {
+impl Shl for &BitVec {
     type Output = BitVec;
 
     fn shl(self, rhs: Self) -> Self::Output {
@@ -961,7 +950,7 @@ impl Shr<u32> for BitVec {
     }
 }
 
-impl<'a> Shr<u32> for &'a BitVec {
+impl Shr<u32> for &BitVec {
     type Output = BitVec;
 
     fn shr(self, rhs: u32) -> Self::Output {
@@ -983,7 +972,7 @@ impl Shr for BitVec {
     }
 }
 
-impl<'a> Shr for &'a BitVec {
+impl Shr for &BitVec {
     type Output = BitVec;
 
     fn shr(self, rhs: Self) -> Self::Output {

@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use iset::IntervalMap;
 use smallvec::SmallVec;
 
@@ -11,16 +9,14 @@ pub type SegmentBankId = u32;
 #[derive(Debug)]
 pub struct SegmentBank {
     id: SegmentBankId,
-    name: Option<String>,
     submaps: IntervalMap<Address, SegmentMappingView>,
     priority_list: Vec<SegmentMappingRef>,
 }
 
 impl SegmentBank {
-    pub fn new(id: SegmentBankId, name: impl Into<Option<String>>) -> Self {
+    pub fn new(id: SegmentBankId) -> Self {
         Self {
             id,
-            name: name.into(),
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
         }
@@ -30,20 +26,21 @@ impl SegmentBank {
         self.id
     }
 
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    pub fn add_mapping_top(&mut self, mapping_ref: SegmentMappingRef, addr: impl Into<Address>, size: usize) {
+    pub fn add_mapping_top(
+        &mut self,
+        mapping_ref: SegmentMappingRef,
+        addr: impl Into<Address>,
+        size: usize,
+    ) {
         let start = addr.into();
         let end = start + size;
         let last = end - 1usize;
 
-        let overlapping: SmallVec<[_; 8]> = self
+        let overlapping = self
             .submaps
             .iter(start..end)
             .map(|(iv, view)| (iv.clone(), view.clone()))
-            .collect();
+            .collect::<SmallVec<[_; 8]>>();
 
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
@@ -64,22 +61,28 @@ impl SegmentBank {
         let new_view = SegmentMappingView::new(mapping_ref, start, size);
         self.submaps.insert(start..end, new_view);
 
-        self.priority_list.retain(|r| r.mapping_id() != mapping_ref.mapping_id());
+        self.priority_list
+            .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
         self.priority_list.push(mapping_ref);
     }
 
-    pub fn add_mapping_bottom(&mut self, mapping_ref: SegmentMappingRef, addr: impl Into<Address>, size: usize) {
+    pub fn add_mapping_bottom(
+        &mut self,
+        mapping_ref: SegmentMappingRef,
+        addr: impl Into<Address>,
+        size: usize,
+    ) {
         let start = addr.into();
         let end = start + size;
 
-        let mut gaps: SmallVec<[Range<Address>; 8]> = SmallVec::new();
+        let mut gaps = SmallVec::<[_; 8]>::new();
         let mut current = start;
 
-        let overlapping: SmallVec<[_; 8]> = self
+        let overlapping = self
             .submaps
             .iter(start..end)
             .map(|(iv, _)| iv.clone())
-            .collect();
+            .collect::<SmallVec<[_; 8]>>();
 
         for iv in overlapping {
             if iv.start > current {
@@ -101,7 +104,8 @@ impl SegmentBank {
             self.submaps.insert(gap, view);
         }
 
-        self.priority_list.retain(|r| r.mapping_id() != mapping_ref.mapping_id());
+        self.priority_list
+            .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
         self.priority_list.insert(0, mapping_ref);
     }
 
@@ -110,20 +114,31 @@ impl SegmentBank {
         self.submaps.values(addr..(addr + 1usize)).next()
     }
 
-    pub fn find_containing_mut(&mut self, addr: impl Into<Address>) -> Option<&mut SegmentMappingView> {
+    pub fn find_containing_mut(
+        &mut self,
+        addr: impl Into<Address>,
+    ) -> Option<&mut SegmentMappingView> {
         let addr = addr.into();
         self.submaps.values_mut(addr..(addr + 1usize)).next()
     }
 
     pub fn prioritise(&mut self, mapping_id: SegmentMappingId) {
-        if let Some(pos) = self.priority_list.iter().position(|r| r.mapping_id() == mapping_id) {
+        if let Some(pos) = self
+            .priority_list
+            .iter()
+            .position(|r| r.mapping_id() == mapping_id)
+        {
             let mapping_ref = self.priority_list.remove(pos);
             self.priority_list.push(mapping_ref);
         }
     }
 
     pub fn deprioritise(&mut self, mapping_id: SegmentMappingId) {
-        if let Some(pos) = self.priority_list.iter().position(|r| r.mapping_id() == mapping_id) {
+        if let Some(pos) = self
+            .priority_list
+            .iter()
+            .position(|r| r.mapping_id() == mapping_id)
+        {
             let mapping_ref = self.priority_list.remove(pos);
             self.priority_list.insert(0, mapping_ref);
         }
@@ -163,7 +178,7 @@ impl SegmentBank {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
 
     fn make_ref(id: u32) -> SegmentMappingRef {
@@ -172,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_add_mapping_top() {
-        let mut bank = SegmentBank::new(0, None::<String>);
+        let mut bank = SegmentBank::new(0);
 
         bank.add_mapping_top(make_ref(1), 0x1000u64, 0x1001);
         bank.add_mapping_top(make_ref(2), 0x1500u64, 0x301);
@@ -189,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_add_mapping_bottom() {
-        let mut bank = SegmentBank::new(0, None::<String>);
+        let mut bank = SegmentBank::new(0);
 
         bank.add_mapping_top(make_ref(1), 0x1000u64, 0x501);
         bank.add_mapping_bottom(make_ref(2), 0x1000u64, 0x1001);
@@ -203,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_remove_mapping() {
-        let mut bank = SegmentBank::new(0, None::<String>);
+        let mut bank = SegmentBank::new(0);
 
         bank.add_mapping_top(make_ref(1), 0x1000u64, 0x1001);
         bank.add_mapping_top(make_ref(2), 0x3000u64, 0x1001);

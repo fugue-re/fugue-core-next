@@ -8,7 +8,6 @@ pub struct SegmentStorageDescriptor {
     id: SegmentStorageProviderId,
     provider: Box<dyn SegmentStorageProvider>,
     permissions: SegmentProperties,
-    name: Option<String>,
 }
 
 impl SegmentStorageDescriptor {
@@ -16,13 +15,11 @@ impl SegmentStorageDescriptor {
         id: SegmentStorageProviderId,
         provider: impl SegmentStorageProvider + 'static,
         permissions: SegmentProperties,
-        name: impl Into<Option<String>>,
     ) -> Self {
         Self {
             id,
             provider: Box::new(provider),
             permissions,
-            name: name.into(),
         }
     }
 
@@ -30,13 +27,11 @@ impl SegmentStorageDescriptor {
         id: SegmentStorageProviderId,
         provider: Box<dyn SegmentStorageProvider>,
         permissions: SegmentProperties,
-        name: impl Into<Option<String>>,
     ) -> Self {
         Self {
             id,
             provider,
             permissions,
-            name: name.into(),
         }
     }
 
@@ -50,10 +45,6 @@ impl SegmentStorageDescriptor {
 
     pub fn set_permissions(&mut self, permissions: SegmentProperties) {
         self.permissions = permissions;
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
     }
 
     pub fn provider(&self) -> &dyn SegmentStorageProvider {
@@ -82,7 +73,6 @@ impl std::fmt::Debug for SegmentStorageDescriptor {
         f.debug_struct("SegmentStorageDescriptor")
             .field("id", &self.id)
             .field("permissions", &self.permissions)
-            .field("name", &self.name)
             .finish()
     }
 }

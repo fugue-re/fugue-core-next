@@ -56,6 +56,9 @@ pub enum Symbol {
 }
 
 impl Symbol {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
         &self,
         state: &mut LiftingContextState<'_>,
@@ -116,6 +119,9 @@ impl Symbol {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn resolve_handle<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,

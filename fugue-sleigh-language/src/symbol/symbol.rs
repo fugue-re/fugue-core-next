@@ -278,9 +278,9 @@ impl Default for SymbolBuilder {
 }
 
 impl SymbolBuilder {
-    pub fn build_from_decoder<'a, D: Decoder>(
+    pub fn build_from_decoder<D: Decoder>(
         self,
-        spaces: &'a AddressSpaces,
+        spaces: &AddressSpaces,
         input: &mut D,
         symbol_id: u32,
     ) -> Result<Symbol, DeserialiseError> {
@@ -342,14 +342,14 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < value_table.len() as i64
-                    && !value_table.iter().any(|v| *v == 0xbadbeef);
+                    && max < value_table.len() as i64
+                    && !value_table.contains(&0xbadbeef);
 
                 Symbol::ValueMap {
                     id: self.id,
@@ -385,13 +385,13 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < name_table.len() as i64
+                    && max < name_table.len() as i64
                     && !name_table.iter().any(|v| v == "\t");
 
                 Symbol::Name {
@@ -415,7 +415,7 @@ impl SymbolBuilder {
 
                 let space = spaces
                     .get(space_id as usize)
-                    .ok_or_else(|| DeserialiseError::Invariant("varnode space not defined"))?;
+                    .ok_or(DeserialiseError::Invariant("varnode space not defined"))?;
 
                 let offset = input.read_unsigned_integer_with_id(&ATTRIB_OFF)?;
                 let size = input.read_signed_integer_with_id(&ATTRIB_SIZE)? as usize;
@@ -476,13 +476,13 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < varnode_table.len() as i64
+                    && max < varnode_table.len() as i64
                     && !varnode_table.iter().any(Option::is_none);
 
                 Symbol::VarnodeList {
@@ -617,7 +617,7 @@ impl SymbolBuilder {
                     scope: self.scope,
                     name: self.name,
                     constructors,
-                    decision_tree: decision_root.ok_or_else(|| {
+                    decision_tree: decision_root.ok_or({
                         DeserialiseError::Invariant("missing decision tree for subtable")
                     })?,
                 }
@@ -630,9 +630,9 @@ impl SymbolBuilder {
         })
     }
 
-    pub fn build_from_xml<'a>(
+    pub fn build_from_xml(
         self,
-        spaces: &'a AddressSpaces,
+        spaces: &AddressSpaces,
         input: xml::Node,
     ) -> Result<Symbol, DeserialiseError> {
         Ok(match self.kind {
@@ -669,10 +669,8 @@ impl SymbolBuilder {
                 }
                 let pattern_value = PatternExpression::from_xml(
                     input
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .next()
-                        .ok_or_else(|| {
+                        .children().find(xml::Node::is_element)
+                        .ok_or({
                             DeserialiseError::Invariant("missing pattern expression for value")
                         })?,
                 )?;
@@ -692,7 +690,7 @@ impl SymbolBuilder {
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or_else(|| {
+                    PatternExpression::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing pattern expression for name")
                     })?)?;
 
@@ -702,14 +700,14 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < value_table.len() as i64
-                    && !value_table.iter().any(|v| *v == 0xbadbeef);
+                    && max < value_table.len() as i64
+                    && !value_table.contains(&0xbadbeef);
 
                 Symbol::ValueMap {
                     id: self.id,
@@ -728,7 +726,7 @@ impl SymbolBuilder {
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or_else(|| {
+                    PatternExpression::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing pattern expression for value")
                     })?)?;
 
@@ -744,13 +742,13 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < name_table.len() as i64
+                    && max < name_table.len() as i64
                     && !name_table.iter().any(|v| v == "\t");
 
                 Symbol::Name {
@@ -771,11 +769,11 @@ impl SymbolBuilder {
 
                 let space_name = input
                     .attribute("space")
-                    .ok_or_else(|| DeserialiseError::AttributeExpected("space"))?;
+                    .ok_or(DeserialiseError::AttributeExpected("space"))?;
 
                 let space = spaces
                     .space_by_name(space_name)
-                    .ok_or_else(|| DeserialiseError::Invariant("varnode space not defined"))?;
+                    .ok_or(DeserialiseError::Invariant("varnode space not defined"))?;
 
                 let offset = input.attribute_int_or("offset", "off")?;
                 let size = input.attribute_int("size")?;
@@ -798,10 +796,8 @@ impl SymbolBuilder {
 
                 let pattern_value = PatternExpression::from_xml(
                     input
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .next()
-                        .ok_or_else(|| {
+                        .children().find(xml::Node::is_element)
+                        .ok_or({
                             DeserialiseError::Invariant("missing pattern expression for context")
                         })?,
                 )?;
@@ -830,7 +826,7 @@ impl SymbolBuilder {
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or_else(|| {
+                    PatternExpression::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing pattern expression for varnodelist")
                     })?)?;
 
@@ -846,13 +842,13 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or_else(|| DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
-                    && (max as i64) < varnode_table.len() as i64
+                    && max < varnode_table.len() as i64
                     && !varnode_table.iter().any(Option::is_none);
 
                 Symbol::VarnodeList {
@@ -897,7 +893,7 @@ impl SymbolBuilder {
 
                 let mut children = input.children().filter(xml::Node::is_element);
                 let local_expr =
-                    PatternExpression::from_xml(children.next().ok_or_else(|| {
+                    PatternExpression::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing local expression for operand")
                     })?)?;
 
@@ -1020,7 +1016,7 @@ impl SymbolBuilder {
                     scope: self.scope,
                     name: self.name,
                     constructors,
-                    decision_tree: decision_root.ok_or_else(|| {
+                    decision_tree: decision_root.ok_or({
                         DeserialiseError::Invariant("missing decision tree for subtable")
                     })?,
                 }

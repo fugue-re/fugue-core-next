@@ -747,7 +747,7 @@ where
 
         let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
 
-        while let Some(range) = covered.next() {
+        if let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
 
             let rvsize = (*range.end() - *range.start() + 1) as usize;

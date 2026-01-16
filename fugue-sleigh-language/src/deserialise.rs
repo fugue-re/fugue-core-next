@@ -156,7 +156,7 @@ impl XmlExt for xml::Node<'_, '_> {
     fn attribute_endian(&self, name: &'static str) -> Result<Endian, DeserialiseError> {
         let n = self
             .attribute(name)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name))?;
+            .ok_or(DeserialiseError::AttributeExpected(name))?;
         match n {
             "big" | "BIG" | "be" | "BE" => Ok(Endian::Big),
             "little" | "LITTLE" | "le" | "LE" => Ok(Endian::Little),
@@ -167,7 +167,7 @@ impl XmlExt for xml::Node<'_, '_> {
     fn attribute_string(&self, name: &'static str) -> Result<String, DeserialiseError> {
         self.attribute(name)
             .map(String::from)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name))
+            .ok_or(DeserialiseError::AttributeExpected(name))
     }
 
     fn attribute_string_or(
@@ -178,7 +178,7 @@ impl XmlExt for xml::Node<'_, '_> {
         self.attribute(name1)
             .or_else(|| self.attribute(name2))
             .map(String::from)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name1))
+            .ok_or(DeserialiseError::AttributeExpected(name1))
     }
 
     fn attribute_string_opt(&self, name: &'static str, default: &str) -> String {
@@ -193,7 +193,7 @@ impl XmlExt for xml::Node<'_, '_> {
     ) -> Result<(T, T), DeserialiseError> {
         let s = self
             .attribute(name)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name))?;
+            .ok_or(DeserialiseError::AttributeExpected(name))?;
 
         let b = s.as_bytes();
         if let Some(pos) = b.iter().position(|v| *v == b':') {
@@ -212,7 +212,7 @@ impl XmlExt for xml::Node<'_, '_> {
     fn attribute_int<T: FromStrRadix>(&self, name: &'static str) -> Result<T, DeserialiseError> {
         let s = self
             .attribute(name)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name))?;
+            .ok_or(DeserialiseError::AttributeExpected(name))?;
         parse_int_radix(s)
     }
 
@@ -224,7 +224,7 @@ impl XmlExt for xml::Node<'_, '_> {
         let s = self
             .attribute(name1)
             .or_else(|| self.attribute(name2))
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name1))?;
+            .ok_or(DeserialiseError::AttributeExpected(name1))?;
         parse_int_radix(s)
     }
 
@@ -242,7 +242,7 @@ impl XmlExt for xml::Node<'_, '_> {
 
     fn attribute_bool(&self, name: &'static str) -> Result<bool, DeserialiseError> {
         self.attribute(name)
-            .ok_or_else(|| DeserialiseError::AttributeExpected(name))?
+            .ok_or(DeserialiseError::AttributeExpected(name))?
             .parse::<bool>()
             .map_err(DeserialiseError::ParseBool)
     }

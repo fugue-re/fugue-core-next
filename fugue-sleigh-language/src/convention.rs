@@ -30,29 +30,29 @@ impl PrototypeOperand {
     ) -> Result<Self, DeserialiseError> {
         match spec {
             compiler::PrototypeOperand::Register(ref name) => {
-                let (name, offset, size) = registers.get_by_name(&**name).ok_or_else(|| {
+                let (name, offset, size) = registers.get_by_name(&**name).ok_or({
                     DeserialiseError::Invariant("register for prototype operand invalid")
                 })?;
                 Ok(Self::Register {
-                    name: name.clone(),
+                    name: *name,
                     varnode: VarnodeData::new(registers.register_space(), offset, size),
                 })
             }
             compiler::PrototypeOperand::RegisterJoin(ref first_name, ref second_name) => {
                 let (first_name, foffset, fsize) =
-                    registers.get_by_name(&**first_name).ok_or_else(|| {
+                    registers.get_by_name(&**first_name).ok_or({
                         DeserialiseError::Invariant("register for prototype operand invalid")
                     })?;
 
                 let (second_name, soffset, ssize) =
-                    registers.get_by_name(&**second_name).ok_or_else(|| {
+                    registers.get_by_name(&**second_name).ok_or({
                         DeserialiseError::Invariant("register for prototype operand invalid")
                     })?;
 
                 Ok(Self::RegisterJoin {
-                    first_name: first_name.clone(),
+                    first_name: *first_name,
                     first_varnode: VarnodeData::new(registers.register_space(), foffset, fsize),
-                    second_name: second_name.clone(),
+                    second_name: *second_name,
                     second_varnode: VarnodeData::new(registers.register_space(), soffset, ssize),
                 })
             }
@@ -206,11 +206,11 @@ impl ReturnAddress {
     ) -> Result<Self, DeserialiseError> {
         match spec {
             compiler::ReturnAddress::Register(ref name) => {
-                let (name, offset, size) = registers.get_by_name(&**name).ok_or_else(|| {
+                let (name, offset, size) = registers.get_by_name(&**name).ok_or({
                     DeserialiseError::Invariant("register for return address invalid")
                 })?;
                 Ok(Self::Register {
-                    name: name.clone(),
+                    name: *name,
                     varnode: VarnodeData::new(registers.register_space(), offset, size),
                 })
             }
@@ -235,15 +235,15 @@ impl StackPointer {
         registers: &RegisterNames,
         spaces: &AddressSpaces,
     ) -> Result<Self, DeserialiseError> {
-        let space = spaces.space_by_name(&spec.space).ok_or_else(|| {
+        let space = spaces.space_by_name(&spec.space).ok_or({
             DeserialiseError::Invariant("stack pointer space for convention invalid")
         })?;
         let (name, offset, size) = registers
             .get_by_name(&*spec.register)
-            .ok_or_else(|| DeserialiseError::Invariant("named stack pointer invalid"))?;
+            .ok_or(DeserialiseError::Invariant("named stack pointer invalid"))?;
 
         Ok(Self {
-            name: name.clone(),
+            name: *name,
             varnode: VarnodeData::new(registers.register_space(), offset, size),
             space,
         })

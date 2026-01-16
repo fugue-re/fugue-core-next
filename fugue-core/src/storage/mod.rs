@@ -262,7 +262,7 @@ impl StorageProvider for TransientStorageProvider {
         let entities =
             EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable, attributes)?);
         let segments =
-            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?);
+            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?)?;
 
         Ok(StorageContainer::from_parts(entities, segments))
     }
@@ -291,7 +291,7 @@ impl StorageProvider for PersistentEntityStorageProvider {
         )?);
         let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
             loadable, attributes,
-        )?);
+        )?)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
@@ -315,7 +315,7 @@ where
         let unpacked = path.with_extension("fdb");
 
         let entities = EntityStorage::new(T::from_storage(&unpacked, attributes)?);
-        let segments = SegmentStorage::new(U::from_storage(&unpacked, attributes)?);
+        let segments = SegmentStorage::new(U::from_storage(&unpacked, attributes)?)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
@@ -328,7 +328,7 @@ where
             .with_header(FugueStorageHeader::STANDALONE);
 
         let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
-        let segments = SegmentStorage::new(U::from_loadable(loadable, attributes)?);
+        let segments = SegmentStorage::new(U::from_loadable(loadable, attributes)?)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
