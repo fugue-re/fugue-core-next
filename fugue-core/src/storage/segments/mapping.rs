@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::ops::{Range, RangeInclusive};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use bitflags::bitflags;
 
@@ -47,12 +46,6 @@ bitflags! {
     }
 }
 
-static TIMESTAMP_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn next_timestamp() -> u64 {
-    TIMESTAMP_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
-}
-
 #[derive(Debug)]
 pub struct SegmentMapping {
     id: SegmentMappingId,
@@ -64,7 +57,7 @@ pub struct SegmentMapping {
     kind: SegmentMappingKind,
     flags: SegmentMappingFlags,
     overlay: OverlayTree,
-    timestamp: u64,
+    version: u64,
 }
 
 impl SegmentMapping {
@@ -86,7 +79,7 @@ impl SegmentMapping {
             kind: SegmentMappingKind::None,
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
-            timestamp: next_timestamp(),
+            version: 0,
         }
     }
 
@@ -157,12 +150,12 @@ impl SegmentMapping {
         &mut self.overlay
     }
 
-    pub fn timestamp(&self) -> u64 {
-        self.timestamp
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     fn touch(&mut self) {
-        self.timestamp = next_timestamp();
+        self.version += 1;
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
@@ -194,7 +187,7 @@ impl SegmentMapping {
     pub fn make_ref(&self) -> SegmentMappingRef {
         SegmentMappingRef {
             mapping_id: self.id,
-            timestamp: self.timestamp,
+            version: self.version,
         }
     }
 }
@@ -202,14 +195,14 @@ impl SegmentMapping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentMappingRef {
     mapping_id: SegmentMappingId,
-    timestamp: u64,
+    version: u64,
 }
 
 impl SegmentMappingRef {
-    pub fn new(mapping_id: SegmentMappingId, timestamp: u64) -> Self {
+    pub fn new(mapping_id: SegmentMappingId, version: u64) -> Self {
         Self {
             mapping_id,
-            timestamp,
+            version,
         }
     }
 
@@ -217,12 +210,12 @@ impl SegmentMappingRef {
         self.mapping_id
     }
 
-    pub fn timestamp(&self) -> u64 {
-        self.timestamp
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn is_valid(&self, mapping: &SegmentMapping) -> bool {
-        self.mapping_id == mapping.id() && self.timestamp == mapping.timestamp()
+        self.mapping_id == mapping.id() && self.version == mapping.version()
     }
 }
 

@@ -14,7 +14,7 @@ pub struct SegmentMappingView<'a> {
     provider: &'a SegmentStorageDescriptor,
     submap: SegmentSubMapping,
     segment: Cow<'a, LoadableSegment<'a>>,
-    mapping_timestamp: u64,
+    mapping_version: u64,
 }
 
 impl<'a> SegmentMappingView<'a> {
@@ -31,7 +31,7 @@ impl<'a> SegmentMappingView<'a> {
             provider,
             submap,
             segment,
-            mapping_timestamp: mapping.timestamp(),
+            mapping_version: mapping.version(),
         }
     }
 
@@ -60,7 +60,7 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.mapping.timestamp() == self.mapping_timestamp
+        self.mapping.version() == self.mapping_version
     }
 
     pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<&[u8]> {
