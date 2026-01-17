@@ -236,7 +236,10 @@ impl PartialFunction {
             .ok_or_else(|| FunctionRecoveryError::InvalidBlockId(id))?;
 
         let start = block.address();
-        let bytes = segments.view_segment_bytes_from(start)?;
+        let segment = segments.view_at(start)?;
+        let bytes = segment
+            .bytes_from(start)
+            .expect("block start must be in segment");
 
         for insn_id in block.insns().iter().copied() {
             let insn = &mut self.insns[insn_id];
@@ -262,15 +265,15 @@ impl PartialFunction {
         segments: &SegmentStorage,
         translator: &mut Translator,
     ) -> Result<(), FunctionRecoveryError> {
-        let mut segment = segments.find_segment_containing(self.entry)?;
+        let mut segment = segments.view_at(self.entry)?;
 
         for block in self.blocks.iter_mut() {
-            if !segment.contains_address(block.address()) {
-                segment = segments.find_segment_containing(block.address())?;
+            if !segment.contains(block.address()) {
+                segment = segments.view_at(block.address())?;
             }
 
             let bytes = segment
-                .view_bytes_from_address(block.address())
+                .bytes_from(block.address())
                 .expect("block start must be in segment");
 
             for insn_id in block.insns().iter().copied() {

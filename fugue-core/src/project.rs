@@ -484,7 +484,7 @@ mod test {
             let mut bytes = [0u8; 32];
             project
                 .segments()
-                .read_bytes(0x4000u32.into(), &mut bytes)?;
+                .read_bytes(0x4000u32, &mut bytes)?;
 
             assert_eq!(
                 &bytes,

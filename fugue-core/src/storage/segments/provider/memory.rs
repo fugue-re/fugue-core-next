@@ -4,10 +4,10 @@ use fallible_iterator::FallibleIterator;
 
 use crate::ir::Address;
 use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata};
-use crate::storage::segments::SegmentStorageMetadataIter;
+use crate::storage::segments::{SegmentStorageError, SegmentStorageMetadataIter};
 use crate::types::AttributeMap;
 
-use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable};
+use super::{SegmentStorageProvider, SegmentStorageProviderFromLoadable};
 
 pub struct InMemorySegmentStorage {
     segments: Vec<LoadableSegment<'static>>,

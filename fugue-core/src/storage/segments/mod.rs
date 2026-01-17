@@ -1,36 +1,34 @@
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
 use std::mem;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{Address, SegmentProperties};
-use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, LoaderError};
-use crate::types::AttributeMap;
+use crate::loader::LoaderError;
 
 pub mod bank;
 pub mod mapping;
-pub mod memory;
 pub mod overlay;
 pub mod provider;
+pub mod view;
 
-pub use bank::{SegmentBank, SegmentBankId};
-pub use mapping::{
-    SegmentMapping, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingRef,
-    SegmentMappingView,
+use bank::{SegmentBank, SegmentBankId};
+use mapping::{SegmentMapping, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind};
+use view::SegmentMappingView;
+
+pub use provider::{
+    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
+    SegmentStorageMetadataIter, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
+    SegmentStorageProviderFromStorage, SegmentStorageProviderId,
 };
-pub use memory::InMemorySegmentStorage;
-pub use overlay::{OverlayChunk, OverlayTree};
-pub use provider::{SegmentStorageDescriptor, SegmentStorageProviderId};
-
-pub mod memmap;
-pub use memmap::MemoryMappedSegmentStorage;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
+
+const DEFAULT_BANK_ID: SegmentBankId = 0;
 
 #[derive(Debug, Error)]
 pub enum SegmentStorageError {
@@ -68,195 +66,39 @@ impl SegmentStorageError {
     }
 }
 
-pub trait SegmentStorageProviderFromLoadable: SegmentStorageProvider + 'static {
-    // Creates a new storage provider from the given loadable object.
-    fn from_loadable(
-        loader: &impl Loadable,
-        attributes: &mut AttributeMap,
-    ) -> Result<Self, SegmentStorageError>
-    where
-        Self: Sized;
-}
-
-pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable {
-    fn from_storage(
-        path: impl AsRef<Path>,
-        attributes: &mut AttributeMap,
-    ) -> Result<Self, SegmentStorageError>
-    where
-        Self: Sized;
-}
-
-pub struct SegmentStorageMetadataIter<'a> {
-    iter: Box<dyn Iterator<Item = Cow<'a, LoadableSegmentMetadata>> + 'a>,
-}
-
-impl SegmentStorageMetadataIter<'_> {
-    pub fn new<'a>(
-        iter: impl Iterator<Item = Cow<'a, LoadableSegmentMetadata>> + 'a,
-    ) -> SegmentStorageMetadataIter<'a> {
-        SegmentStorageMetadataIter {
-            iter: Box::new(iter),
-        }
-    }
-}
-
-impl<'a> Iterator for SegmentStorageMetadataIter<'a> {
-    type Item = Cow<'a, LoadableSegmentMetadata>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-
-pub trait SegmentStorageProvider {
-    // Reads the given bytes from the storage at the specified address; returns the number of bytes
-    // read.
-    fn read_bytes(&self, addr: Address, bytes: &mut [u8]) -> Result<usize, SegmentStorageError>;
-
-    // Reads the given bytes from the storage at the specified address; fails if not all bytes can
-    // be read, e.g., due to gaps or lack of segment coverage.
-    fn read_bytes_exact(&self, addr: Address, bytes: &mut [u8]) -> Result<(), SegmentStorageError> {
-        if self.read_bytes(addr, bytes)? != bytes.len() {
-            return Err(SegmentStorageError::InvalidAddressRange);
-        }
-        Ok(())
-    }
-
-    // Writes the given bytes to the storage at the specified address; returns the number of bytes
-    // written.
-    fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<usize, SegmentStorageError>;
-
-    // Writes the given bytes to the storage at the specified address; fails if not all bytes can
-    // be written, e.g., due to gaps or lack of segment coverage.
-    fn write_bytes_exact(
-        &mut self,
-        addr: Address,
-        bytes: &[u8],
-    ) -> Result<(), SegmentStorageError> {
-        if self.write_bytes(addr, bytes)? != bytes.len() {
-            return Err(SegmentStorageError::InvalidAddressRange);
-        }
-        Ok(())
-    }
-
-    // Returns true if the storage has a segment that contains the given address.
-    fn contains_segment(&self, at: Address) -> bool;
-
-    // Returns the segment that contains the given address, if any.
-    fn find_segment_containing(
-        &self,
-        addr: Address,
-    ) -> Result<Cow<LoadableSegment<'_>>, SegmentStorageError>;
-
-    // Returns a view of length `size` over the bytes of the segment containing the given address.
-    fn view_segment_bytes(
-        &self,
-        addr: Address,
-        size: usize,
-    ) -> Result<Cow<[u8]>, SegmentStorageError> {
-        let addr = addr.into();
-        let segm = self.find_segment_containing(addr)?;
-
-        let offset = usize::from(addr - segm.address());
-        let bytes = match segm {
-            Cow::Borrowed(segm) => Cow::Borrowed(
-                segm.view_bytes_at(offset, size)
-                    .ok_or(SegmentStorageError::InvalidSize)?,
-            ),
-            Cow::Owned(segm) => Cow::Owned(
-                segm.view_bytes_at(offset, size)
-                    .ok_or(SegmentStorageError::InvalidSize)?
-                    .to_owned(),
-            ),
-        };
-
-        Ok(bytes)
-    }
-
-    // Returns a view over the bytes of the segment containing the given address, starting from the
-    // given address.
-    fn view_segment_bytes_from(&self, addr: Address) -> Result<Cow<[u8]>, SegmentStorageError> {
-        let addr = addr.into();
-        let segm = self.find_segment_containing(addr)?;
-
-        let offset = usize::from(addr - segm.address());
-        let bytes = match segm {
-            Cow::Borrowed(segm) => Cow::Borrowed(
-                segm.view_bytes_from(offset)
-                    .ok_or(SegmentStorageError::InvalidSize)?,
-            ),
-            Cow::Owned(segm) => Cow::Owned(
-                segm.view_bytes_from(offset)
-                    .ok_or(SegmentStorageError::InvalidSize)?
-                    .to_owned(),
-            ),
-        };
-
-        Ok(bytes)
-    }
-
-    // Returns an iterator over the metadata of all segments in the storage.
-    fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError>;
-
-    fn size(&self) -> usize {
-        self.metadata()
-            .map(|iter| {
-                iter.map(|meta| usize::from(meta.address()) + meta.len())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0)
-    }
-
-    // Resizes the backing storage to the given new size.
-    fn resize(&mut self, _new_size: u64) -> Result<(), SegmentStorageError> {
-        Err(SegmentStorageError::backing_with("resize not supported"))
-    }
-
-    // Flushes any pending changes to the backing storage.
-    fn flush(&mut self) -> Result<(), SegmentStorageError> {
-        Ok(())
-    }
-}
-
 pub struct SegmentStorage {
     providers: BTreeMap<SegmentStorageProviderId, SegmentStorageDescriptor>,
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
     banks: BTreeMap<SegmentBankId, SegmentBank>,
-
     current_bank: SegmentBankId,
     overlay_enabled: bool,
     fill_byte: u8,
-
     next_provider_id: u32,
     next_mapping_id: u32,
     next_bank_id: u32,
+}
 
-    default_bank_id: SegmentBankId,
+impl Default for SegmentStorage {
+    fn default() -> Self {
+        Self::empty()
+    }
 }
 
 impl SegmentStorage {
     pub fn empty() -> Self {
-        let default_bank_id = 0;
         let mut banks = BTreeMap::new();
-        banks.insert(default_bank_id, SegmentBank::new(default_bank_id));
+        banks.insert(DEFAULT_BANK_ID, SegmentBank::new(DEFAULT_BANK_ID));
 
         Self {
             providers: BTreeMap::new(),
             mappings: BTreeMap::new(),
             banks,
-            current_bank: default_bank_id,
+            current_bank: DEFAULT_BANK_ID,
             overlay_enabled: false,
             fill_byte: 0,
             next_provider_id: 0,
             next_mapping_id: 0,
             next_bank_id: 1,
-            default_bank_id,
         }
     }
 
@@ -274,14 +116,13 @@ impl SegmentStorage {
             .unwrap_or_default();
 
         let provider_id = storage.open_provider(backing, SegmentProperties::PERM_ALL);
-        let default_bank_id = storage.default_bank_id;
 
         for (addr, size, props) in segments {
             // For identity mapping (virtual == physical), delta should equal the base address
             // so that to_offset() returns: (virt - virt_start) + delta = (virt - start) + start = virt
             let delta = addr.offset() as i64;
             let mapping_id = storage.create_mapping(provider_id, addr, size, delta, props)?;
-            storage.add_mapping_to_bank_top(default_bank_id, mapping_id)?;
+            storage.add_mapping_to_bank_top(DEFAULT_BANK_ID, mapping_id)?;
         }
 
         Ok(storage)
@@ -376,7 +217,7 @@ impl SegmentStorage {
             let was_present = bank.priority_list().iter().any(|r| r.mapping_id() == id);
             if was_present {
                 bank.remove_mapping(id);
-                bank.add_mapping_top(mapping_ref, new_start, old_size);
+                bank.add_mapping_top(mapping_ref, new_start, old_size, mapping.properties());
             }
         }
 
@@ -401,7 +242,7 @@ impl SegmentStorage {
             let was_present = bank.priority_list().iter().any(|r| r.mapping_id() == id);
             if was_present {
                 bank.remove_mapping(id);
-                bank.add_mapping_top(mapping_ref, start, new_size);
+                bank.add_mapping_top(mapping_ref, start, new_size, mapping.properties());
             }
         }
 
@@ -444,8 +285,10 @@ impl SegmentStorage {
         self.current_bank
     }
 
-    pub fn default_bank_id(&self) -> SegmentBankId {
-        self.default_bank_id
+    pub fn current_bank(&self) -> &SegmentBank {
+        self.banks
+            .get(&self.current_bank)
+            .expect("current bank should exist")
     }
 
     pub fn add_mapping_to_bank_top(
@@ -467,7 +310,7 @@ impl SegmentStorage {
             .get_mut(&bank_id)
             .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
-        bank.add_mapping_top(mapping_ref, start, size);
+        bank.add_mapping_top(mapping_ref, start, size, mapping.properties());
 
         Ok(())
     }
@@ -491,7 +334,7 @@ impl SegmentStorage {
             .get_mut(&bank_id)
             .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
-        bank.add_mapping_bottom(mapping_ref, start, size);
+        bank.add_mapping_bottom(mapping_ref, start, size, mapping.properties());
 
         Ok(())
     }
@@ -507,7 +350,8 @@ impl SegmentStorage {
             .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
         bank.prioritise(mapping_id);
-        Ok(())
+
+        self.rebuild_submaps_for_mapping(bank_id, mapping_id)
     }
 
     pub fn deprioritise_mapping(
@@ -521,12 +365,51 @@ impl SegmentStorage {
             .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
         bank.deprioritise(mapping_id);
+
+        self.rebuild_submaps_for_mapping(bank_id, mapping_id)
+    }
+
+    fn rebuild_submaps_for_mapping(
+        &mut self,
+        bank_id: SegmentBankId,
+        mapping_id: SegmentMappingId,
+    ) -> Result<(), SegmentStorageError> {
+        let mapping = self
+            .mappings
+            .get(&mapping_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+
+        let range_start = mapping.start();
+        let range_end = mapping.end();
+
+        let bank = self
+            .banks
+            .get(&bank_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+
+        let overlapping = bank
+            .priority_list()
+            .iter()
+            .filter_map(|mref| {
+                self.mappings.get(&mref.mapping_id()).and_then(|m| {
+                    if m.end() > range_start && m.start() < range_end {
+                        Some((*mref, m.start(), m.size(), m.properties()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect::<SmallVec<[_; 8]>>();
+
+        let bank = self.banks.get_mut(&bank_id).unwrap();
+        bank.rebuild_range(range_start, range_end, overlapping);
+
         Ok(())
     }
 
     pub fn read_bytes(
         &self,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
         self.read_bytes_from_bank(self.current_bank, addr, bytes)
@@ -535,7 +418,7 @@ impl SegmentStorage {
     pub fn read_bytes_from_bank(
         &self,
         bank_id: SegmentBankId,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
         if bytes.is_empty() {
@@ -549,6 +432,7 @@ impl SegmentStorage {
             .get(&bank_id)
             .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
 
+        let addr = addr.into();
         let mut current_addr = addr;
         let mut remaining = bytes.len();
         let mut total_read = 0;
@@ -635,7 +519,7 @@ impl SegmentStorage {
 
     pub fn write_bytes(
         &mut self,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
         self.write_bytes_to_bank(self.current_bank, addr, bytes)
@@ -644,14 +528,14 @@ impl SegmentStorage {
     pub fn write_bytes_to_bank(
         &mut self,
         bank_id: SegmentBankId,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
         if bytes.is_empty() {
             return Ok(0);
         }
 
-        let mut current_addr = addr;
+        let mut current_addr = addr.into();
         let mut remaining = bytes.len();
         let mut total_written = 0;
         let mut write_offset = 0;
@@ -751,7 +635,7 @@ impl SegmentStorage {
 
     pub fn read_bytes_exact(
         &self,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<(), SegmentStorageError> {
         if self.read_bytes(addr, bytes)? != bytes.len() {
@@ -828,7 +712,11 @@ impl SegmentStorage {
         self.fill_byte
     }
 
-    pub fn resolve_to_offset(&self, addr: Address) -> Option<(SegmentStorageProviderId, u64)> {
+    pub fn resolve_to_offset(
+        &self,
+        addr: impl Into<Address>,
+    ) -> Option<(SegmentStorageProviderId, u64)> {
+        let addr = addr.into();
         let bank = self.banks.get(&self.current_bank)?;
         let view = bank.find_containing(addr)?;
         let mapping = self.mappings.get(&view.mapping_ref().mapping_id())?;
@@ -844,24 +732,33 @@ impl SegmentStorage {
         }
     }
 
-    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
-    // given address)
-    pub fn find_segment_containing<'a>(
-        &'a self,
-        addr: Address,
-    ) -> Result<Cow<'a, LoadableSegment<'a>>, SegmentStorageError> {
+    pub fn view_at(
+        &self,
+        addr: impl Into<Address>,
+    ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
+        self.view_of_bank_at(self.current_bank, addr)
+    }
+
+    pub fn view_of_bank_at(
+        &self,
+        bank_id: SegmentBankId,
+        addr: impl Into<Address>,
+    ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
+        let addr = addr.into();
+
         let bank = self
             .banks
-            .get(&self.current_bank)
+            .get(&bank_id)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let view = bank
+        let mapping_view = bank
             .find_containing(addr)
-            .ok_or(SegmentStorageError::InvalidAddress)?;
+            .ok_or(SegmentStorageError::InvalidAddress)?
+            .clone();
 
         let mapping = self
             .mappings
-            .get(&view.mapping_ref().mapping_id())
+            .get(&mapping_view.mapping_ref().mapping_id())
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
         let provider = self
@@ -870,65 +767,53 @@ impl SegmentStorage {
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
         let phys_addr = mapping.to_offset(addr);
-        provider
+        let segment = provider
             .provider()
-            .find_segment_containing(phys_addr.into())
+            .find_segment_containing(phys_addr.into())?;
+
+        Ok(SegmentMappingView::new(
+            self,
+            mapping,
+            provider,
+            mapping_view,
+            segment,
+        ))
     }
 
-    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
-    // given address)
-    pub fn view_segment_bytes(
+    pub fn iter_views(
         &self,
-        addr: Address,
-        size: usize,
-    ) -> Result<Cow<[u8]>, SegmentStorageError> {
-        let segm = self.find_segment_containing(addr)?;
-
-        let offset = usize::from(addr - segm.address());
-        let bytes = match &segm {
-            Cow::Borrowed(s) => s.view_bytes_at(offset, size),
-            Cow::Owned(s) => s.view_bytes_at(offset, size),
-        }
-        .ok_or(SegmentStorageError::InvalidSize)?
-        .to_owned();
-
-        Ok(Cow::Owned(bytes))
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        self.iter_views_of_bank(self.current_bank)
     }
 
-    // TODO: this should be get segment view (i.e., the largest contiguous view of a segment at the
-    // given address)
-    pub fn view_segment_bytes_from<'a>(
-        &'a self,
-        addr: Address,
-    ) -> Result<Cow<'a, [u8]>, SegmentStorageError> {
-        let segm = self.find_segment_containing(addr)?;
+    pub fn iter_views_of_bank(
+        &self,
+        bank_id: SegmentBankId,
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        let bank = self
+            .banks
+            .get(&bank_id)
+            .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let offset = usize::from(addr - segm.address());
-        match segm {
-            Cow::Borrowed(s) => s.view_bytes_from(offset).map(Cow::Borrowed),
-            Cow::Owned(s) => s.view_bytes_from(offset).map(|b| Cow::Owned(b.to_owned())),
-        }
-        .ok_or(SegmentStorageError::InvalidSize)
-    }
+        let views = bank.iter().cloned().map(|submap| {
+            let mapping_ref = submap.mapping_ref();
+            let mapping = self
+                .mappings
+                .get(&mapping_ref.mapping_id())
+                .expect("mapping should exist");
+            let provider = self
+                .providers
+                .get(&mapping.provider_id())
+                .expect("provider should exist");
+            let phys_addr = mapping.to_offset(submap.start());
+            let segment = provider
+                .provider()
+                .find_segment_containing(phys_addr.into())
+                .expect("segment should exist");
 
-    // TODO: this should be get segment views
-    pub fn metadata(&self) -> Result<SegmentStorageMetadataIter<'_>, SegmentStorageError> {
-        let mut all_metadata = Vec::<Cow<'_, LoadableSegmentMetadata>>::new();
+            SegmentMappingView::new(self, mapping, provider, submap, segment)
+        });
 
-        for provider in self.providers.values() {
-            if let Ok(iter) = provider.provider().metadata() {
-                for meta in iter {
-                    all_metadata.push(meta);
-                }
-            }
-        }
-
-        Ok(SegmentStorageMetadataIter::new(all_metadata.into_iter()))
-    }
-}
-
-impl Default for SegmentStorage {
-    fn default() -> Self {
-        Self::empty()
+        Ok(views)
     }
 }

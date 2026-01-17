@@ -11,14 +11,13 @@ use thiserror::Error;
 
 use crate::ir::Address;
 use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, Loader};
-use crate::storage::segments::SegmentStorageMetadataIter;
+use crate::storage::segments::{SegmentStorageError, SegmentStorageMetadataIter};
 use crate::storage::{self, PERSISTENT, StoragePersistence};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 use super::{
-    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
-    SegmentStorageProviderFromStorage,
+    SegmentStorageProvider, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,
 };
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";

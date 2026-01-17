@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use bitflags::bitflags;
@@ -227,18 +227,25 @@ impl SegmentMappingRef {
 }
 
 #[derive(Debug, Clone)]
-pub struct SegmentMappingView {
+pub struct SegmentSubMapping {
     mapping_ref: SegmentMappingRef,
     start: Address,
     size: usize,
+    properties: SegmentProperties,
 }
 
-impl SegmentMappingView {
-    pub fn new(mapping_ref: SegmentMappingRef, start: impl Into<Address>, size: usize) -> Self {
+impl SegmentSubMapping {
+    pub fn new(
+        mapping_ref: SegmentMappingRef,
+        start: impl Into<Address>,
+        size: usize,
+        properties: SegmentProperties,
+    ) -> Self {
         Self {
             mapping_ref,
             start: start.into(),
             size,
+            properties,
         }
     }
 
@@ -266,6 +273,14 @@ impl SegmentMappingView {
         self.start..self.end()
     }
 
+    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+        self.start..=self.last()
+    }
+
+    pub fn properties(&self) -> SegmentProperties {
+        self.properties
+    }
+
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
         let addr = addr.into();
         addr >= self.start && addr < self.end()
@@ -277,7 +292,12 @@ impl SegmentMappingView {
             return None;
         }
         let new_size = usize::from(self.end() - new_start);
-        Some(Self::new(self.mapping_ref, new_start, new_size))
+        Some(Self::new(
+            self.mapping_ref,
+            new_start,
+            new_size,
+            self.properties,
+        ))
     }
 
     pub fn with_end(&self, new_end: impl Into<Address>) -> Option<Self> {
@@ -286,7 +306,12 @@ impl SegmentMappingView {
             return None;
         }
         let new_size = usize::from(new_end - self.start);
-        Some(Self::new(self.mapping_ref, self.start, new_size))
+        Some(Self::new(
+            self.mapping_ref,
+            self.start,
+            new_size,
+            self.properties,
+        ))
     }
 
     pub fn split_at(&self, addr: impl Into<Address>) -> (Option<Self>, Option<Self>) {
@@ -303,28 +328,28 @@ impl SegmentMappingView {
         let left_size = usize::from(addr - self.start);
         let right_size = usize::from(self.end() - addr);
 
-        let left = Self::new(self.mapping_ref, self.start, left_size);
-        let right = Self::new(self.mapping_ref, addr, right_size);
+        let left = Self::new(self.mapping_ref, self.start, left_size, self.properties);
+        let right = Self::new(self.mapping_ref, addr, right_size, self.properties);
 
         (Some(left), Some(right))
     }
 }
 
-impl PartialEq for SegmentMappingView {
+impl PartialEq for SegmentSubMapping {
     fn eq(&self, other: &Self) -> bool {
         self.start == other.start
     }
 }
 
-impl Eq for SegmentMappingView {}
+impl Eq for SegmentSubMapping {}
 
-impl PartialOrd for SegmentMappingView {
+impl PartialOrd for SegmentSubMapping {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for SegmentMappingView {
+impl Ord for SegmentSubMapping {
     fn cmp(&self, other: &Self) -> Ordering {
         self.start.cmp(&other.start)
     }

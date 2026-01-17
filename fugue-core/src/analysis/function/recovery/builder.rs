@@ -78,9 +78,7 @@ where
         &self.initialisation_passes
     }
 
-    pub fn initialisation_passes_mut(
-        &mut self,
-    ) -> &mut AnalysisGroup<P, FunctionBuilderContext> {
+    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<P, FunctionBuilderContext> {
         &mut self.initialisation_passes
     }
 
@@ -88,9 +86,7 @@ where
         &self.post_lifting_passes
     }
 
-    pub fn post_lifting_passes_mut(
-        &mut self,
-    ) -> &mut AnalysisGroup<P, PartialFunctionWithContext> {
+    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<P, PartialFunctionWithContext> {
         &mut self.post_lifting_passes
     }
 
@@ -258,8 +254,8 @@ impl FunctionBuilderContext {
         // address read from.
 
         // We assume that most (all?) of a function's blocks will be in the same segment.
-        let mut segment = segments
-            .find_segment_containing(self.entry())
+        let mut view = segments
+            .view_at(self.entry())
             .expect("function entry is valid");
 
         // This is the stage where we build blocks by collecting instructions and marking them.
@@ -276,10 +272,13 @@ impl FunctionBuilderContext {
                 continue 'outer;
             };
 
-            if !segment.contains_address(block) {
-                if let Ok(nsegment) = segments.find_segment_containing(block) {
-                    tracing::debug!("switching segment for {block} to segment {nsegment}");
-                    segment = nsegment;
+            if !view.contains(block) {
+                if let Ok(nview) = segments.view_at(block) {
+                    tracing::debug!(
+                        "switching segment for {block} to segment {}",
+                        nview.segment()
+                    );
+                    view = nview;
                 } else {
                     tracing::trace!("skipping {block}: not mapped in any segment");
                     continue 'outer;
@@ -325,7 +324,7 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                let Some(bytes) = segment.view_bytes_from_address(address) else {
+                let Some(bytes) = view.bytes_from(address) else {
                     // NOTE: we should not reach this point if we're following a local flow, since
                     // we check segment membership when adding local targets.
                     tracing::trace!("skipping {address}: not mapped in segment");
@@ -362,7 +361,7 @@ impl FunctionBuilderContext {
                                     continue;
                                 };
 
-                                if kind.is_local() && segment.contains_address(addr) {
+                                if kind.is_local() && view.contains(addr) {
                                     let Some(target) =
                                         FlowTarget::from_insn_target(insn, target, addr)
                                     else {
@@ -481,10 +480,8 @@ impl FunctionBuilderContext {
         if config.use_segment_mapping_hints() {
             // NOTE: this expect is safe because the entry address must be valid to reach this
             // point under normal usage.
-            let segm = project
-                .segments()
-                .find_segment_containing(self.entry)
-                .expect("valid entry");
+            let view = project.segments().view_at(self.entry).expect("valid entry");
+            let segm = view.segment();
 
             if let Some(hint) = segm.mapping_hints().get(&self.entry) {
                 if hint.is_data() {
