@@ -4,12 +4,14 @@ use std::ops::{Range, RangeInclusive};
 
 use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
+use uuid::Uuid;
 
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
+use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
 pub type SegmentMappingId = u32;
 
@@ -434,5 +436,206 @@ impl PartialOrd for SegmentSubMapping {
 impl Ord for SegmentSubMapping {
     fn cmp(&self, other: &Self) -> Ordering {
         self.start.cmp(&other.start)
+    }
+}
+
+#[derive(Debug)]
+pub struct SegmentMappingBuilder {
+    start: Address,
+    size: usize,
+    offset: u64,
+    provider_id: SegmentStorageProviderId,
+    properties: SegmentProperties,
+    kind: SegmentMappingKind,
+    flags: SegmentMappingFlags,
+    name: String,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
+}
+
+impl SegmentMappingBuilder {
+    pub fn new(
+        start: impl Into<Address>,
+        size: usize,
+        offset: u64,
+        provider_id: SegmentStorageProviderId,
+    ) -> Self {
+        Self {
+            start: start.into(),
+            size,
+            offset,
+            provider_id,
+            properties: SegmentProperties::default(),
+            kind: SegmentMappingKind::default(),
+            flags: SegmentMappingFlags::default(),
+            name: Uuid::now_v7().to_string(),
+            mapping_hints: BTreeMap::new(),
+            function_hints: BTreeSet::new(),
+        }
+    }
+
+    pub fn start(&self) -> Address {
+        self.start
+    }
+
+    pub fn set_start(&mut self, start: impl Into<Address>) {
+        self.start = start.into();
+    }
+
+    pub fn with_start(mut self, start: impl Into<Address>) -> Self {
+        self.set_start(start);
+        self
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn set_size(&mut self, size: usize) {
+        self.size = size;
+    }
+
+    pub fn with_size(mut self, size: usize) -> Self {
+        self.set_size(size);
+        self
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn set_offset(&mut self, offset: u64) {
+        self.offset = offset;
+    }
+
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.set_offset(offset);
+        self
+    }
+
+    pub fn provider_id(&self) -> SegmentStorageProviderId {
+        self.provider_id
+    }
+
+    pub fn set_provider_id(&mut self, provider_id: SegmentStorageProviderId) {
+        self.provider_id = provider_id;
+    }
+
+    pub fn with_provider_id(mut self, provider_id: SegmentStorageProviderId) -> Self {
+        self.set_provider_id(provider_id);
+        self
+    }
+
+    pub fn properties(&self) -> SegmentProperties {
+        self.properties
+    }
+
+    pub fn set_properties(&mut self, properties: impl Into<SegmentProperties>) {
+        self.properties = properties.into();
+    }
+
+    pub fn with_properties(mut self, properties: impl Into<SegmentProperties>) -> Self {
+        self.set_properties(properties);
+        self
+    }
+
+    pub fn kind(&self) -> SegmentMappingKind {
+        self.kind
+    }
+
+    pub fn set_kind(&mut self, kind: impl Into<SegmentMappingKind>) {
+        self.kind = kind.into();
+    }
+
+    pub fn with_kind(mut self, kind: impl Into<SegmentMappingKind>) -> Self {
+        self.set_kind(kind);
+        self
+    }
+
+    pub fn flags(&self) -> SegmentMappingFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: impl Into<SegmentMappingFlags>) {
+        self.flags = flags.into();
+    }
+
+    pub fn with_flags(mut self, flags: impl Into<SegmentMappingFlags>) -> Self {
+        self.set_flags(flags);
+        self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.set_name(name);
+        self
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn set_mapping_hints(&mut self, mapping_hints: impl Into<BTreeMap<Address, ContextHint>>) {
+        self.mapping_hints = mapping_hints.into();
+    }
+
+    pub fn extend_mapping_hints(
+        &mut self,
+        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+    ) {
+        self.mapping_hints.extend(mapping_hints);
+    }
+
+    pub fn add_mapping_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
+        self.mapping_hints.insert(address.into(), hint);
+    }
+
+    pub fn with_mapping_hints(
+        mut self,
+        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+    ) -> Self {
+        self.extend_mapping_hints(mapping_hints);
+        self
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
+    }
+
+    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<Address>>) {
+        self.function_hints = function_hints.into();
+    }
+
+    pub fn extend_function_hints(
+        &mut self,
+        function_hints: impl IntoIterator<Item = Address>,
+    ) {
+        self.function_hints.extend(function_hints);
+    }
+
+    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
+        self.function_hints.insert(address.into());
+    }
+
+    pub fn with_function_hints(
+        mut self,
+        function_hints: impl IntoIterator<Item = Address>,
+    ) -> Self {
+        self.extend_function_hints(function_hints);
+        self
+    }
+
+    pub fn build(
+        self,
+        storage: &mut SegmentStorage,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        storage.create_mapping_from_builder(self)
     }
 }

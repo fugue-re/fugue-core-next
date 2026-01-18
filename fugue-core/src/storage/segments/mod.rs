@@ -22,7 +22,10 @@ pub mod provider;
 pub mod view;
 
 use bank::{SegmentBank, SegmentBankId};
-use mapping::{SegmentMapping, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind};
+use mapping::{
+    SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
+    SegmentMappingKind,
+};
 use view::SegmentMappingView;
 
 pub use provider::{
@@ -299,10 +302,10 @@ impl SegmentStorage {
             .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
         let mut reader = BufReader::new(file);
 
-        let segments =
-            bincode::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
-                |e| SegmentStorageError::backing_with(format!("failed to decode metadata: {e}")),
-            )?;
+        let segments = bincode::decode_from_std_read(&mut reader, bincode::config::standard())
+            .map_err(|e| {
+                SegmentStorageError::backing_with(format!("failed to decode metadata: {e}"))
+            })?;
 
         Ok(segments)
     }
@@ -393,6 +396,36 @@ impl SegmentStorage {
             mapping_hints,
             function_hints,
         );
+        self.mappings.insert(id, mapping);
+
+        Ok(id)
+    }
+
+    pub fn create_mapping_from_builder(
+        &mut self,
+        builder: SegmentMappingBuilder,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        if !self.providers.contains_key(&builder.provider_id()) {
+            return Err(SegmentStorageError::backing_with("provider not found"));
+        }
+
+        let id = self.next_mapping_id;
+        self.next_mapping_id += 1;
+
+        let mut mapping = SegmentMapping::new_with_metadata(
+            id,
+            builder.start(),
+            builder.size(),
+            builder.offset(),
+            builder.provider_id(),
+            builder.properties(),
+            builder.name(),
+            builder.mapping_hints().clone(),
+            builder.function_hints().clone(),
+        );
+        mapping.set_kind(builder.kind());
+        mapping.set_flags(builder.flags());
+
         self.mappings.insert(id, mapping);
 
         Ok(id)
