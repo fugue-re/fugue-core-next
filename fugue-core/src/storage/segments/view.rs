@@ -1,7 +1,8 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{Address, SegmentProperties};
-use crate::loader::LoadableSegment;
+use crate::lifter::ContextHint;
 
 use super::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
 use super::provider::SegmentStorageDescriptor;
@@ -13,7 +14,6 @@ pub struct SegmentMappingView<'a> {
     mapping: &'a SegmentMapping,
     provider: &'a SegmentStorageDescriptor,
     submap: SegmentSubMapping,
-    segment: Cow<'a, LoadableSegment<'a>>,
     mapping_version: u64,
 }
 
@@ -23,14 +23,12 @@ impl<'a> SegmentMappingView<'a> {
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
         submap: SegmentSubMapping,
-        segment: Cow<'a, LoadableSegment<'a>>,
     ) -> Self {
         Self {
             storage,
             mapping,
             provider,
             submap,
-            segment,
             mapping_version: mapping.version(),
         }
     }
@@ -63,20 +61,34 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.version() == self.mapping_version
     }
 
-    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<&[u8]> {
-        let addr = addr.into();
-        if !self.submap.contains(addr) {
-            return None;
-        }
-        self.segment.view_bytes_from_address(addr)
+    pub fn name(&self) -> &str {
+        self.mapping.name()
     }
 
-    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<&[u8]> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        self.mapping.mapping_hints()
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        self.mapping.function_hints()
+    }
+
+    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<Cow<'a, [u8]>> {
         let addr = addr.into();
         if !self.submap.contains(addr) {
             return None;
         }
-        self.segment.view_bytes_at_address(addr, size)
+        let phys_offset = self.mapping.to_offset(addr);
+        self.provider.provider().view_bytes_from(phys_offset).ok()
+    }
+
+    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<Cow<'a, [u8]>> {
+        let addr = addr.into();
+        if !self.submap.contains(addr) {
+            return None;
+        }
+        let phys_offset = self.mapping.to_offset(addr);
+        self.provider.provider().view_bytes(phys_offset, size).ok()
     }
 
     pub fn read_bytes(
@@ -98,19 +110,13 @@ impl<'a> SegmentMappingView<'a> {
         let buf_slice = &mut buf[..read_size];
 
         let phys_offset = self.mapping.to_offset(addr);
-        self.provider
-            .provider()
-            .read_bytes(phys_offset.into(), buf_slice)?;
+        self.provider.provider().read_bytes(phys_offset, buf_slice)?;
 
         if self.storage.is_overlay_enabled() {
             self.mapping.overlay().read(addr, buf_slice);
         }
 
         Ok(read_size)
-    }
-
-    pub fn segment(&self) -> &LoadableSegment<'a> {
-        &self.segment
     }
 
     pub fn mapping_ref(&self) -> SegmentMappingRef {

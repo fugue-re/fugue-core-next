@@ -2,9 +2,7 @@ use std::path::Path;
 
 use crate::loader::Loadable;
 use crate::storage::entities::{EntityStorageProviderFromLoadable, SqliteEntityStorage};
-use crate::storage::segments::{
-    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageProviderFromLoadable,
-};
+use crate::storage::segments::{InMemorySegmentStorage, MemoryMappedSegmentStorage};
 use crate::storage::{
     EntityStorage, PERSISTENT, PersistentStorageProvider, SegmentStorage, StorageContainer,
     StoragePersistence, StorageProvider, StorageProviderError, TRANSIENT,
@@ -30,8 +28,7 @@ impl StorageProvider for SqliteProvider<TRANSIENT> {
         let entities = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::from_loadable(
             loadable, attributes,
         )?);
-        let segments =
-            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?)?;
+        let segments = SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments))
     }

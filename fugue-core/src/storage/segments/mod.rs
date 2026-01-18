@@ -1,13 +1,19 @@
-use std::collections::BTreeMap;
-use std::io;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter};
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use bincode::{Decode, Encode};
+use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{Address, SegmentProperties};
-use crate::loader::LoaderError;
+use crate::lifter::ContextHint;
+use crate::loader::{Loadable, LoaderError};
+use crate::types::AttributeMap;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 pub mod bank;
 pub mod mapping;
@@ -21,14 +27,18 @@ use view::SegmentMappingView;
 
 pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
-    SegmentStorageMetadataIter, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
-    SegmentStorageProviderFromStorage, SegmentStorageProviderId,
+    SegmentStorageProvider, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,
+    SegmentStorageProviderId,
 };
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
 const DEFAULT_BANK_ID: SegmentBankId = 0;
+const DEFAULT_FILL_BYTE: u8 = 0;
+const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = 0;
+
+const SEGMENT_MAPPINGS_FILE: &str = "segment.mappings.bin";
 
 #[derive(Debug, Error)]
 pub enum SegmentStorageError {
@@ -66,6 +76,19 @@ impl SegmentStorageError {
     }
 }
 
+#[derive(Encode, Decode)]
+struct SegmentStorageMetadata {
+    name: String,
+    virtual_start: u64,
+    physical_offset: u64,
+    size: usize,
+    properties: SegmentProperties,
+    kind: SegmentMappingKind,
+    flags: SegmentMappingFlags,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
+}
+
 pub struct SegmentStorage {
     providers: BTreeMap<SegmentStorageProviderId, SegmentStorageDescriptor>,
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
@@ -95,37 +118,193 @@ impl SegmentStorage {
             banks,
             current_bank: DEFAULT_BANK_ID,
             overlay_enabled: false,
-            fill_byte: 0,
-            next_provider_id: 0,
+            fill_byte: DEFAULT_FILL_BYTE,
+            next_provider_id: DEFAULT_PROVIDER_ID,
             next_mapping_id: 0,
             next_bank_id: 1,
         }
     }
 
-    pub fn new(
-        backing: impl SegmentStorageProvider + 'static,
+    pub fn from_loadable<S: SegmentStorageProviderFromLoadable>(
+        loader: &impl Loadable,
+        attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+            let meta_path = project_path.join(SEGMENT_MAPPINGS_FILE);
+
+            if meta_path.exists() {
+                tracing::trace!(
+                    "segment mappings already exist at {}; loading from storage",
+                    meta_path.display()
+                );
+                return Self::from_loadable_with_existing::<S>(loader, attributes);
+            }
+        }
+
+        let mut provider = S::from_loadable(loader, attributes)?;
+
         let mut storage = Self::empty();
+        let (base_addr, _) = loader.segment_range();
 
-        let segments = backing
-            .metadata()
-            .map(|iter| {
-                iter.map(|meta| (meta.address(), meta.len(), meta.properties()))
-                    .collect::<SmallVec<[_; 8]>>()
-            })
-            .unwrap_or_default();
+        let mut siter = loader.segments();
+        while let Some(segm) = siter.next()? {
+            let physical_offset = (segm.address().offset() - base_addr.offset()) as u64;
 
-        let provider_id = storage.open_provider(backing, SegmentProperties::PERM_ALL);
+            tracing::trace!(
+                "loading segment {} ({}-{}) at offset {physical_offset:#x}",
+                segm.name(),
+                segm.address(),
+                segm.next_address()
+            );
 
-        for (addr, size, props) in segments {
-            // For identity mapping (virtual == physical), delta should equal the base address
-            // so that to_offset() returns: (virt - virt_start) + delta = (virt - start) + start = virt
-            let delta = addr.offset() as i64;
-            let mapping_id = storage.create_mapping(provider_id, addr, size, delta, props)?;
+            provider.write_bytes_exact(physical_offset, segm.bytes())?;
+        }
+
+        let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
+
+        let mut siter = loader.segments();
+        while let Some(segm) = siter.next()? {
+            let physical_offset = (segm.address().offset() - base_addr.offset()) as u64;
+
+            let mapping_id = storage.create_mapping_with_metadata(
+                provider_id,
+                segm.address(),
+                segm.len(),
+                physical_offset,
+                segm.properties(),
+                segm.name().to_owned(),
+                segm.mapping_hints().clone(),
+                segm.function_hints().clone(),
+            )?;
+            storage.add_mapping_to_bank_top(DEFAULT_BANK_ID, mapping_id)?;
+        }
+
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+            storage.persist_metadata(&project_path)?;
+        }
+
+        Ok(storage)
+    }
+
+    fn from_loadable_with_existing<S: SegmentStorageProviderFromLoadable>(
+        loader: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, SegmentStorageError> {
+        let project_path = attributes
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .ok_or_else(|| SegmentStorageError::backing_with("no project path"))?;
+
+        let segments = Self::load_metadata(&project_path)?;
+        let provider = S::from_loadable(loader, attributes)?;
+
+        let mut storage = Self::empty();
+        let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
+
+        for seg in segments {
+            let mapping_id = storage.create_mapping_with_metadata(
+                provider_id,
+                Address::from(seg.virtual_start),
+                seg.size,
+                seg.physical_offset,
+                seg.properties,
+                seg.name,
+                seg.mapping_hints,
+                seg.function_hints,
+            )?;
+
+            storage.update_mapping_metadata(mapping_id, seg.kind, seg.flags)?;
+
             storage.add_mapping_to_bank_top(DEFAULT_BANK_ID, mapping_id)?;
         }
 
         Ok(storage)
+    }
+
+    pub fn from_storage<S: SegmentStorageProviderFromStorage>(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, SegmentStorageError> {
+        let path = path.as_ref();
+
+        let segments = Self::load_metadata(path)?;
+
+        let provider = S::from_storage(path, attributes)?;
+
+        let mut storage = Self::empty();
+        let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
+
+        for seg in segments {
+            let mapping_id = storage.create_mapping_with_metadata(
+                provider_id,
+                Address::from(seg.virtual_start),
+                seg.size,
+                seg.physical_offset,
+                seg.properties,
+                seg.name,
+                seg.mapping_hints,
+                seg.function_hints,
+            )?;
+
+            storage.update_mapping_metadata(mapping_id, seg.kind, seg.flags)?;
+
+            storage.add_mapping_to_bank_top(DEFAULT_BANK_ID, mapping_id)?;
+        }
+
+        Ok(storage)
+    }
+
+    fn persist_metadata(&self, path: impl AsRef<Path>) -> Result<(), SegmentStorageError> {
+        let meta_path = path.as_ref().join(SEGMENT_MAPPINGS_FILE);
+
+        tracing::trace!("persisting segment mappings to {}", meta_path.display());
+
+        let segments = self
+            .mappings
+            .values()
+            .filter_map(|m| {
+                (m.provider_id() == DEFAULT_PROVIDER_ID).then(|| SegmentStorageMetadata {
+                    name: m.name().to_owned(),
+                    virtual_start: m.start().offset(),
+                    physical_offset: m.offset(),
+                    size: m.size(),
+                    properties: m.properties(),
+                    kind: m.kind(),
+                    flags: m.flags(),
+                    mapping_hints: m.mapping_hints().clone(),
+                    function_hints: m.function_hints().clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let file = File::create(&meta_path)
+            .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
+        let mut writer = BufWriter::new(file);
+
+        bincode::encode_into_std_write(&segments, &mut writer, bincode::config::standard())
+            .map_err(|e| {
+                SegmentStorageError::backing_with(format!("failed to encode metadata: {e}"))
+            })?;
+
+        Ok(())
+    }
+
+    fn load_metadata(
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<SegmentStorageMetadata>, SegmentStorageError> {
+        let meta_path = path.as_ref().join(SEGMENT_MAPPINGS_FILE);
+
+        tracing::trace!("loading segment mappings from {}", meta_path.display());
+
+        let file = File::open(&meta_path)
+            .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
+        let mut reader = BufReader::new(file);
+
+        let segments =
+            bincode::decode_from_std_read(&mut reader, bincode::config::standard()).map_err(
+                |e| SegmentStorageError::backing_with(format!("failed to decode metadata: {e}")),
+            )?;
+
+        Ok(segments)
     }
 
     pub fn open_provider(
@@ -169,7 +348,7 @@ impl SegmentStorage {
         provider_id: SegmentStorageProviderId,
         start: impl Into<Address>,
         size: usize,
-        delta: i64,
+        offset: u64,
         properties: SegmentProperties,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
         if !self.providers.contains_key(&provider_id) {
@@ -179,7 +358,41 @@ impl SegmentStorage {
         let id = self.next_mapping_id;
         self.next_mapping_id += 1;
 
-        let mapping = SegmentMapping::new(id, start, size, delta, provider_id, properties);
+        let mapping = SegmentMapping::new(id, start, size, offset, provider_id, properties);
+        self.mappings.insert(id, mapping);
+
+        Ok(id)
+    }
+
+    pub fn create_mapping_with_metadata(
+        &mut self,
+        provider_id: SegmentStorageProviderId,
+        start: impl Into<Address>,
+        size: usize,
+        offset: u64,
+        properties: SegmentProperties,
+        name: impl Into<String>,
+        mapping_hints: std::collections::BTreeMap<Address, crate::lifter::ContextHint>,
+        function_hints: std::collections::BTreeSet<Address>,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        if !self.providers.contains_key(&provider_id) {
+            return Err(SegmentStorageError::backing_with("provider not found"));
+        }
+
+        let id = self.next_mapping_id;
+        self.next_mapping_id += 1;
+
+        let mapping = SegmentMapping::new_with_metadata(
+            id,
+            start,
+            size,
+            offset,
+            provider_id,
+            properties,
+            name,
+            mapping_hints,
+            function_hints,
+        );
         self.mappings.insert(id, mapping);
 
         Ok(id)
@@ -487,9 +700,7 @@ impl SegmentStorage {
             let buf_offset = usize::from(current_addr - addr);
             let buf_slice = &mut bytes[buf_offset..buf_offset + read_size];
 
-            provider
-                .provider()
-                .read_bytes(phys_offset.into(), buf_slice)?;
+            provider.provider().read_bytes(phys_offset, buf_slice)?;
 
             if self.overlay_enabled {
                 mapping.overlay().read(current_addr, buf_slice);
@@ -514,7 +725,7 @@ impl SegmentStorage {
             .get(&provider_id)
             .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
 
-        provider.provider().read_bytes(offset.into(), bytes)
+        provider.provider().read_bytes(offset, bytes)
     }
 
     pub fn write_bytes(
@@ -607,7 +818,7 @@ impl SegmentStorage {
 
                 provider
                     .provider_mut()
-                    .write_bytes(phys_offset.into(), write_data)?;
+                    .write_bytes(phys_offset, write_data)?;
             }
 
             total_written += write_size;
@@ -630,7 +841,7 @@ impl SegmentStorage {
             .get_mut(&provider_id)
             .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
 
-        provider.provider_mut().write_bytes(offset.into(), bytes)
+        provider.provider_mut().write_bytes(offset, bytes)
     }
 
     pub fn read_bytes_exact(
@@ -685,7 +896,7 @@ impl SegmentStorage {
             let phys_offset = mapping.to_offset(addr);
             provider
                 .provider_mut()
-                .write_bytes(phys_offset.into(), chunk.data())?;
+                .write_bytes(phys_offset, chunk.data())?;
         }
 
         Ok(())
@@ -754,7 +965,7 @@ impl SegmentStorage {
         let mapping_view = bank
             .find_containing(addr)
             .ok_or(SegmentStorageError::InvalidAddress)?
-            .clone();
+            .to_owned();
 
         let mapping = self
             .mappings
@@ -766,17 +977,11 @@ impl SegmentStorage {
             .get(&mapping.provider_id())
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let phys_addr = mapping.to_offset(addr);
-        let segment = provider
-            .provider()
-            .find_segment_containing(phys_addr.into())?;
-
         Ok(SegmentMappingView::new(
             self,
             mapping,
             provider,
             mapping_view,
-            segment,
         ))
     }
 
@@ -805,13 +1010,8 @@ impl SegmentStorage {
                 .providers
                 .get(&mapping.provider_id())
                 .expect("provider should exist");
-            let phys_addr = mapping.to_offset(submap.start());
-            let segment = provider
-                .provider()
-                .find_segment_containing(phys_addr.into())
-                .expect("segment should exist");
 
-            SegmentMappingView::new(self, mapping, provider, submap, segment)
+            SegmentMappingView::new(self, mapping, provider, submap)
         });
 
         Ok(views)

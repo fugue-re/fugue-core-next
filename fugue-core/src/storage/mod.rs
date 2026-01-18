@@ -33,9 +33,7 @@ pub use segments::{
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentStorage,
     SegmentStorageError, SegmentStorageProvider,
 };
-use segments::{
-    InMemorySegmentStorage, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,
-};
+use segments::{InMemorySegmentStorage, SegmentStorageProviderFromStorage};
 
 // The magic bytes used to identify a Fugue project file.
 //
@@ -262,7 +260,7 @@ impl StorageProvider for TransientStorageProvider {
         let entities =
             EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable, attributes)?);
         let segments =
-            SegmentStorage::new(InMemorySegmentStorage::from_loadable(loadable, attributes)?)?;
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments))
     }
@@ -289,16 +287,17 @@ impl StorageProvider for PersistentEntityStorageProvider {
         let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
             loadable, attributes,
         )?);
-        let segments = SegmentStorage::new(DefaultTransientSegmentStorage::from_loadable(
-            loadable, attributes,
-        )?)?;
+        let segments =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
 }
 
 // This provider uses the default persistent storage provider for both segments and entities.
-pub struct PersistentStorageProvider<T, U>(std::marker::PhantomData<(T, U)>);
+pub struct PersistentStorageProvider<T, U = DefaultPersistentSegmentStorage>(
+    std::marker::PhantomData<(T, U)>,
+);
 
 impl<T, U> StorageProvider for PersistentStorageProvider<T, U>
 where
@@ -315,7 +314,7 @@ where
         let unpacked = path.with_extension("fdb");
 
         let entities = EntityStorage::new(T::from_storage(&unpacked, attributes)?);
-        let segments = SegmentStorage::new(U::from_storage(&unpacked, attributes)?)?;
+        let segments = SegmentStorage::from_storage::<U>(&unpacked, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }
@@ -328,7 +327,7 @@ where
             .with_header(FugueStorageHeader::STANDALONE);
 
         let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
-        let segments = SegmentStorage::new(U::from_loadable(loadable, attributes)?)?;
+        let segments = SegmentStorage::from_loadable::<U>(loadable, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }

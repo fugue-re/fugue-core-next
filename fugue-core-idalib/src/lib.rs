@@ -414,16 +414,14 @@ where
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
-        let externs = segms
-            .metadata()
+        let extern_bounds = segms
+            .iter_views()
             .map_err(|e| AnalysisError::pass_failed("ida-function-discovery", e))?
-            .find_map(|segm| {
-                segm.properties()
+            .find_map(|view| {
+                view.properties()
                     .contains(SegmentProperties::EXTERNAL)
-                    .then_some(segm)
+                    .then(|| view.start()..=view.last())
             });
-
-        let extern_bounds = externs.map(|segm| segm.address()..=segm.last_address());
 
         for (_, f) in self.database.functions() {
             let addr = Address::from(f.start_address());

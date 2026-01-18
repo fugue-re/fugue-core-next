@@ -1,17 +1,13 @@
 use std::borrow::Cow;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader};
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 
-use bincode::{Decode, Encode};
-use fallible_iterator::FallibleIterator;
-use hex_display::HexDisplayExt;
 use memmap2::MmapMut;
 use thiserror::Error;
 
-use crate::ir::Address;
-use crate::loader::{Loadable, LoadableSegment, LoadableSegmentMetadata, Loader};
-use crate::storage::segments::{SegmentStorageError, SegmentStorageMetadataIter};
+use crate::loader::Loadable;
+use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -21,11 +17,9 @@ use super::{
 };
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
-const PROJECT_MEMORY_MAPPING_META: &str = "segment.meta.bin";
 
 pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
     backing: MmapMut,
-    segments: Vec<LoadableSegmentMetadata>,
     project: PathBuf,
 }
 
@@ -35,12 +29,8 @@ pub enum MemoryMappedSegmentStorageError {
     CreateProject(std::io::Error),
     #[error("failed to create project memory mapping: {0}")]
     CreateProjectMapping(std::io::Error),
-    #[error("failed to create project memory mapping metadata: {0}")]
-    CreateProjectMetadata(std::io::Error),
     #[error("invalid address")]
     InvalidAddress,
-    #[error("invalid segment metadata (no physical offset)")]
-    InvalidMetadata,
     #[error("invalid size")]
     InvalidSize,
     #[error("no project path specified")]
@@ -70,16 +60,6 @@ impl MemoryMappedSegmentStorageError {
         ))
     }
 
-    pub fn create_project_metadata<E>(e: E) -> Self
-    where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
-        MemoryMappedSegmentStorageError::CreateProjectMetadata(io::Error::new(
-            io::ErrorKind::Other,
-            e.into(),
-        ))
-    }
-
     pub fn no_project_data(path: impl Into<PathBuf>) -> Self {
         MemoryMappedSegmentStorageError::NoProjectData(path.into())
     }
@@ -89,9 +69,9 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
     fn from(e: MemoryMappedSegmentStorageError) -> Self {
         match e {
             MemoryMappedSegmentStorageError::CreateProject(_)
-            | MemoryMappedSegmentStorageError::CreateProjectMapping(_)
-            | MemoryMappedSegmentStorageError::CreateProjectMetadata(_)
-            | MemoryMappedSegmentStorageError::InvalidMetadata => SegmentStorageError::backing(e),
+            | MemoryMappedSegmentStorageError::CreateProjectMapping(_) => {
+                SegmentStorageError::backing(e)
+            }
             MemoryMappedSegmentStorageError::InvalidAddress => SegmentStorageError::InvalidAddress,
             MemoryMappedSegmentStorageError::InvalidSize => SegmentStorageError::InvalidSize,
             MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::InvalidAddress,
@@ -102,255 +82,95 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
     }
 }
 
-#[derive(Encode, Decode)]
-pub struct MemoryMappedSegmentStorageMetadata {
-    digest: [u8; 32],                       // Digest provided by the loader metadata
-    segments: Vec<LoadableSegmentMetadata>, // Segment metadataa sorted by address
-}
-
-impl MemoryMappedSegmentStorageMetadata {
-    pub fn expected_size(&self) -> usize {
-        self.segments
-            .iter()
-            .map(|segm| segm.physical_offset().expect("physical offset available") + segm.len())
-            .max()
-            .unwrap_or(0)
-    }
-}
-
 impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTENCE> {
-    fn from_existing(
-        project: impl AsRef<Path>,
-        meta: impl AsRef<Path>,
-        segments: impl AsRef<Path>,
-        loader: Option<&impl Loadable>,
+    /// Create new flat storage with given size.
+    pub fn with_size(
+        project_path: impl AsRef<Path>,
+        size: u64,
     ) -> Result<Self, SegmentStorageError> {
-        let project = project.as_ref();
-        let meta = meta.as_ref();
-        let segments = segments.as_ref();
+        let project = project_path.as_ref();
 
-        tracing::trace!(
-            "loading (existing) memory-mapped storage for project {}",
-            project.display(),
-        );
-
-        tracing::trace!(
-            "loading memory-mapped storage metadata from {}",
-            meta.display()
-        );
-
-        let mut meta_file = BufReader::new(
-            File::open(&meta).map_err(MemoryMappedSegmentStorageError::CreateProjectMetadata)?,
-        );
-
-        let metadata = bincode::decode_from_std_read::<MemoryMappedSegmentStorageMetadata, _, _>(
-            &mut meta_file,
-            bincode::config::standard(),
-        )
-        .map_err(MemoryMappedSegmentStorageError::create_project_metadata)?;
-
-        tracing::trace!(
-            "loading memory-mapped storage backing from {}",
-            segments.display()
-        );
-
-        if let Some(loader) = loader
-            && metadata.digest != loader.metadata().digest()
-        {
-            tracing::error!(
-                "memory-mapped storage loader digest mismatch: expected {}, got {}",
-                metadata.digest.hex(),
-                loader.metadata().digest().hex(),
-            );
-            return Err(
-                MemoryMappedSegmentStorageError::create_project("corrupted storage").into(),
-            );
-        }
-
-        let backing_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(&segments)
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
-
-        let backing = unsafe { MmapMut::map_mut(&backing_file) }
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
-
-        // perform a quick sanity check on the backing size
-        let backing_size = backing.len();
-        let expected_size = metadata.expected_size();
-
-        if backing_size != expected_size {
-            tracing::error!(
-                "memory-mapped storage backing size mismatch: expected {expected_size} bytes, got {backing_size} bytes",
-            );
-            return Err(
-                MemoryMappedSegmentStorageError::create_project("corrupted storage").into(),
-            );
-        }
-
-        Ok(Self {
-            backing,
-            segments: metadata.segments,
-            project: project.to_owned(),
-        })
-    }
-
-    fn from_loadable_aux(
-        project: impl AsRef<Path>,
-        loader: &impl Loadable,
-    ) -> Result<Self, SegmentStorageError> {
         // Ensure the project directory exists
-        let project = project.as_ref();
-        fs::create_dir_all(&project).map_err(MemoryMappedSegmentStorageError::CreateProject)?;
+        fs::create_dir_all(project).map_err(MemoryMappedSegmentStorageError::CreateProject)?;
 
-        let path = project.join(PROJECT_MEMORY_MAPPING_DATA);
+        let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
         tracing::trace!(
-            "creating memory-mapped storage for project {} at {}",
-            project.display(),
-            path.display(),
+            "creating memory-mapped storage at {} with size {} bytes",
+            data_path.display(),
+            size,
         );
 
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)
+            .truncate(true)
+            .open(&data_path)
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
 
-        let (start, end) = loader.segment_range();
-        let size = usize::from(end - start) + 1usize;
-
-        tracing::trace!("memory-mapped storage size is {size} bytes");
-
-        file.set_len(size as _)
+        file.set_len(size)
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
 
-        let mut siter = loader.segments();
-
-        let mut backing = unsafe { MmapMut::map_mut(&file) }
+        let backing = unsafe { MmapMut::map_mut(&file) }
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
-
-        let mut segments = Vec::new();
-
-        while let Some(segm) = siter.next()? {
-            let offset = usize::from(segm.address() - start);
-
-            tracing::trace!(
-                "loading segment {} ({}-{}) into memory-mapped storage at offset {offset:#x}",
-                segm.name(),
-                segm.address(),
-                segm.next_address()
-            );
-
-            segments.push(LoadableSegmentMetadata::new(&segm, offset));
-
-            backing[offset..offset + segm.len()].copy_from_slice(segm.bytes());
-        }
-
-        segments.sort_by(|a, b| a.address().cmp(&b.address()));
-
-        let segments = if PERSISTENCE == storage::PERSISTENT {
-            let meta = project.join(PROJECT_MEMORY_MAPPING_META);
-
-            tracing::trace!(
-                "writing memory-mapped storage metadata to {}",
-                meta.display()
-            );
-
-            let mut file = File::create(&meta)
-                .map_err(MemoryMappedSegmentStorageError::CreateProjectMetadata)?;
-
-            let metadata = MemoryMappedSegmentStorageMetadata {
-                digest: loader.metadata().digest(),
-                segments,
-            };
-
-            bincode::encode_into_std_write(&metadata, &mut file, bincode::config::standard())
-                .map_err(MemoryMappedSegmentStorageError::create_project_metadata)?;
-
-            metadata.segments
-        } else {
-            tracing::trace!("not writing memory-mapped storage metadata (non-persistent)");
-            segments
-        };
 
         Ok(Self {
             backing,
-            segments,
             project: project.to_owned(),
         })
     }
 
-    fn position(&self, addr: Address) -> Option<usize> {
-        self.segments
-            .binary_search_by(|segm| {
-                if addr < segm.address() {
-                    std::cmp::Ordering::Greater
-                } else if addr > segm.last_address() {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-    }
+    pub fn open_existing(project_path: impl AsRef<Path>) -> Result<Self, SegmentStorageError> {
+        let project = project_path.as_ref();
+        let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-    fn overlapping(
-        &self,
-        addr: Address,
-        size: usize,
-    ) -> Option<impl Iterator<Item = &LoadableSegmentMetadata>> {
-        let last_addr = addr + size;
-
-        if last_addr < addr {
-            return None;
+        if !data_path.exists() {
+            tracing::error!(
+                "memory-mapped storage data file does not exist at {}",
+                data_path.display()
+            );
+            return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());
         }
 
-        let first = self.position(addr)?;
-        let last = self
-            .position(last_addr)
-            .unwrap_or_else(|| self.segments.len() - 1);
+        tracing::trace!(
+            "opening existing memory-mapped storage at {}",
+            data_path.display()
+        );
 
-        let view = &self.segments[first..last + 1];
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .open(&data_path)
+            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
 
-        for i in 0..view.len() - 1usize {
-            if view[i].next_address() != view[i + 1].address() {
-                return Some(view[..=i].iter());
-            }
-        }
+        let backing = unsafe { MmapMut::map_mut(&file) }
+            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
 
-        Some(view.iter())
+        Ok(Self {
+            backing,
+            project: project.to_owned(),
+        })
     }
 }
 
 impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
     fn drop(&mut self) {
         if PERSISTENCE == storage::PERSISTENT {
-            tracing::trace!("skipping memory-mapped storage clean-up; persistence is enabled",);
+            tracing::trace!("skipping memory-mapped storage clean-up; persistence is enabled");
             return;
         }
 
-        let meta = self.project.join(PROJECT_MEMORY_MAPPING_META);
-        if meta.exists()
-            && let Err(e) = fs::remove_file(&meta)
-        {
-            tracing::error!(
-                "failed to clean-up memory-mapped storage metadata at {}: {e}",
-                meta.display()
-            );
-        }
+        let data_path = self.project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let segments = self.project.join(PROJECT_MEMORY_MAPPING_DATA);
-        if segments.exists()
-            && let Err(e) = fs::remove_file(&segments)
-        {
-            tracing::error!(
-                "failed to clean-up memory-mapped storage backing at {}: {e}",
-                segments.display()
-            );
+        if data_path.exists() {
+            if let Err(e) = fs::remove_file(&data_path) {
+                tracing::error!(
+                    "failed to clean-up memory-mapped storage backing at {}: {e}",
+                    data_path.display()
+                );
+            }
         }
     }
 }
@@ -360,27 +180,7 @@ impl SegmentStorageProviderFromStorage for MemoryMappedSegmentStorage<{ PERSISTE
         path: impl AsRef<Path>,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let project = path.as_ref();
-        let meta = project.join(PROJECT_MEMORY_MAPPING_META);
-        let segments = project.join(PROJECT_MEMORY_MAPPING_DATA);
-
-        if !meta.exists() || !segments.exists() {
-            tracing::error!(
-                "memory-mapped storage for project {} does not exist at {}; cannot load",
-                project.display(),
-                segments.display()
-            );
-            return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());
-        }
-
-        tracing::trace!(
-            "loading memory-mapped storage for project {} from {}",
-            project.display(),
-            segments.display()
-        );
-
-        Self::from_existing(&project, &meta, &segments, None::<&Loader>)
-            .map_err(SegmentStorageError::from)
+        Self::open_existing(path)
     }
 }
 
@@ -395,180 +195,89 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .ok_or(MemoryMappedSegmentStorageError::NoProjectPath)?;
 
-        let meta = project.join(PROJECT_MEMORY_MAPPING_META);
-        let segments = project.join(PROJECT_MEMORY_MAPPING_DATA);
+        let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let result = if meta.exists() && segments.exists() {
-            tracing::trace!(
-                "memory-mapped storage for project {} already exists at {}; reusing",
-                project.display(),
-                segments.display()
-            );
+        let (start, end) = loader.segment_range();
+        let size = (end.offset() - start.offset() + 1) as u64;
 
-            Self::from_existing(&project, &meta, &segments, Some(loader))
-        } else {
-            tracing::trace!(
-                "memory-mapped storage for project {} does not exist at {}; creating",
-                project.display(),
-                segments.display()
-            );
+        if data_path.exists() {
+            let existing = Self::open_existing(project)?;
 
-            Self::from_loadable_aux(&project, loader)
-        };
-
-        if result.is_err() {
-            tracing::error!("failed to create memory-mapped storage; cleaning-up");
-            if PERSISTENCE == storage::PERSISTENT {
-                // NOTE: metadata is only created if persistence is enabled
-                fs::remove_file(&meta).ok();
+            if existing.size() != size {
+                return Err(SegmentStorageError::backing_with(format!(
+                    "existing memory-mapped storage size ({}) does not match expected segment size ({})",
+                    existing.size(),
+                    size,
+                )));
             }
-            fs::remove_file(&segments).ok();
+
+            return Ok(existing);
         }
 
-        result
+        Self::with_size(project, size)
     }
 }
 
 impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
-    fn read_bytes(&self, addr: Address, bytes: &mut [u8]) -> Result<usize, SegmentStorageError> {
-        let mut size = bytes.len();
-        let mut offset = 0;
+    fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError> {
+        let offset = offset as usize;
+        let available = self.backing.len().saturating_sub(offset);
+        let read_size = bytes.len().min(available);
 
-        tracing::trace!("reading {size} bytes from address {addr}");
-
-        if bytes.is_empty() {
-            return Ok(offset);
-        }
-
-        let segms = self
-            .overlapping(addr, size)
-            .ok_or(SegmentStorageError::InvalidAddress)?;
-
-        for segm in segms {
-            let read_addr = addr + offset;
-
-            let segm_addr = segm.address();
-            let segm_last_addr = segm.last_address();
-
-            let read_offset = segm
-                .physical_offset()
-                .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?
-                + usize::from(read_addr - segm_addr);
-            let read_size = size.min(usize::from(segm_last_addr - read_addr) + 1);
-
-            let segm_bytes = self
-                .backing
-                .get(read_offset..read_offset + read_size)
-                .ok_or(SegmentStorageError::InvalidAddress)?;
-
-            bytes[offset..offset + read_size].copy_from_slice(segm_bytes);
-
-            size -= read_size;
-            offset += read_size;
-
-            if size == 0 {
-                break;
-            }
-        }
-
-        Ok(offset)
-    }
-
-    fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<usize, SegmentStorageError> {
-        let mut size = bytes.len();
-        let mut offset = 0;
-
-        tracing::trace!("writing {size} bytes to address {addr}");
-
-        if bytes.is_empty() {
-            return Ok(offset);
-        }
-
-        let last_addr = addr + size;
-
-        if last_addr < addr {
+        if read_size == 0 && !bytes.is_empty() {
             return Err(SegmentStorageError::InvalidAddress);
         }
 
-        let first = self
-            .position(addr)
-            .ok_or(SegmentStorageError::InvalidAddress)?;
-        let last = self
-            .position(last_addr)
-            .ok_or(SegmentStorageError::InvalidAddress)?;
+        bytes[..read_size].copy_from_slice(&self.backing[offset..offset + read_size]);
+        Ok(read_size)
+    }
 
-        let segms = &self.segments[first..last + 1];
+    fn write_bytes(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, SegmentStorageError> {
+        let offset = offset as usize;
+        let available = self.backing.len().saturating_sub(offset);
+        let write_size = bytes.len().min(available);
 
-        for i in 0..segms.len() - 1usize {
-            if segms[i].next_address() != segms[i + 1].address() {
-                return Err(SegmentStorageError::InvalidAddress);
-            }
+        if write_size == 0 && !bytes.is_empty() {
+            return Err(SegmentStorageError::InvalidAddress);
         }
 
-        for segm in segms.iter() {
-            let write_addr = addr + offset;
+        self.backing[offset..offset + write_size].copy_from_slice(&bytes[..write_size]);
+        Ok(write_size)
+    }
 
-            let segm_addr = segm.address();
-            let segm_last_addr = segm.last_address();
-
-            let write_offset = segm
-                .physical_offset()
-                .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?
-                + usize::from(write_addr - segm_addr);
-            let write_size = size.min(usize::from(segm_last_addr - write_addr) + 1);
-
-            let segm_bytes = self
-                .backing
-                .get_mut(write_offset..write_offset + write_size)
-                .ok_or(SegmentStorageError::InvalidAddress)?;
-
-            segm_bytes.copy_from_slice(&bytes[offset..offset + write_size]);
-
-            size -= write_size;
-            offset += write_size;
-
-            if size == 0 {
-                break;
-            }
+    fn view_bytes(&self, offset: u64, n: usize) -> Result<Cow<'_, [u8]>, SegmentStorageError> {
+        let offset = offset as usize;
+        if offset >= self.backing.len() {
+            return Err(SegmentStorageError::InvalidAddress);
         }
 
-        Ok(offset)
+        let end = (offset + n).min(self.backing.len());
+        if end - offset < n {
+            return Err(SegmentStorageError::InvalidSize);
+        }
+
+        Ok(Cow::Borrowed(&self.backing[offset..end]))
     }
 
-    fn contains_segment(&self, addr: Address) -> bool {
-        self.position(addr).is_some()
+    fn view_bytes_from(&self, offset: u64) -> Result<Cow<'_, [u8]>, SegmentStorageError> {
+        let offset = offset as usize;
+        if offset >= self.backing.len() {
+            return Err(SegmentStorageError::InvalidAddress);
+        }
+
+        Ok(Cow::Borrowed(&self.backing[offset..]))
     }
 
-    fn find_segment_containing(
-        &self,
-        addr: Address,
-    ) -> Result<Cow<LoadableSegment<'_>>, SegmentStorageError> {
-        self.position(addr)
-            .map(|pos| -> Result<_, SegmentStorageError> {
-                let segm = &self.segments[pos];
-                let bytes = Cow::Borrowed(
-                    &self.backing[segm
-                        .physical_range()
-                        .ok_or(MemoryMappedSegmentStorageError::InvalidMetadata)?],
-                );
-                Ok(Cow::Owned(LoadableSegment::from_parts(
-                    segm.name(),
-                    segm.address(),
-                    segm.properties(),
-                    bytes,
-                    Cow::Borrowed(segm.mapping_hints()),
-                    Cow::Borrowed(segm.function_hints()),
-                )))
-            })
-            .transpose()?
-            .ok_or(SegmentStorageError::InvalidAddress)
+    fn size(&self) -> u64 {
+        self.backing.len() as u64
     }
 
-    fn metadata(&self) -> Result<SegmentStorageMetadataIter, SegmentStorageError> {
-        Ok(SegmentStorageMetadataIter::new(
-            self.segments.iter().map(Cow::Borrowed),
-        ))
+    fn flush(&mut self) -> Result<(), SegmentStorageError> {
+        self.backing
+            .flush()
+            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+        Ok(())
     }
 }

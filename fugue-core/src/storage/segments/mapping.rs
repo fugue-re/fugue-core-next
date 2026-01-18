@@ -1,16 +1,19 @@
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Range, RangeInclusive};
 
+use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 
 use crate::ir::{Address, SegmentProperties};
+use crate::lifter::ContextHint;
 
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 
 pub type SegmentMappingId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, bincode::Encode, bincode::Decode)]
 pub enum SegmentMappingKind {
     #[default]
     None,
@@ -46,18 +49,48 @@ bitflags! {
     }
 }
 
+impl Encode for SegmentMappingFlags {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.bits().encode(encoder)
+    }
+}
+
+impl<C> Decode<C> for SegmentMappingFlags {
+    fn decode<D: bincode::de::Decoder>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::decode(decoder)?;
+        Ok(SegmentMappingFlags::from_bits_truncate(bits))
+    }
+}
+
+impl<'de, C> BorrowDecode<'de, C> for SegmentMappingFlags {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let bits = u32::borrow_decode(decoder)?;
+        Ok(SegmentMappingFlags::from_bits_truncate(bits))
+    }
+}
+
 #[derive(Debug)]
 pub struct SegmentMapping {
     id: SegmentMappingId,
     start: Address,
     size: usize,
-    delta: i64,
+    offset: u64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
     flags: SegmentMappingFlags,
     overlay: OverlayTree,
     version: u64,
+    name: String,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
 }
 
 impl SegmentMapping {
@@ -65,7 +98,7 @@ impl SegmentMapping {
         id: SegmentMappingId,
         start: impl Into<Address>,
         size: usize,
-        delta: i64,
+        offset: u64,
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
     ) -> Self {
@@ -73,13 +106,44 @@ impl SegmentMapping {
             id,
             start: start.into(),
             size,
-            delta,
+            offset,
             provider_id,
             properties,
             kind: SegmentMappingKind::None,
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
             version: 0,
+            name: String::new(),
+            mapping_hints: BTreeMap::new(),
+            function_hints: BTreeSet::new(),
+        }
+    }
+
+    pub fn new_with_metadata(
+        id: SegmentMappingId,
+        start: impl Into<Address>,
+        size: usize,
+        offset: u64,
+        provider_id: SegmentStorageProviderId,
+        properties: SegmentProperties,
+        name: impl Into<String>,
+        mapping_hints: BTreeMap<Address, ContextHint>,
+        function_hints: BTreeSet<Address>,
+    ) -> Self {
+        Self {
+            id,
+            start: start.into(),
+            size,
+            offset,
+            provider_id,
+            properties,
+            kind: SegmentMappingKind::None,
+            flags: SegmentMappingFlags::NONE,
+            overlay: OverlayTree::new(),
+            version: 0,
+            name: name.into(),
+            mapping_hints,
+            function_hints,
         }
     }
 
@@ -107,8 +171,8 @@ impl SegmentMapping {
         self.start..self.end()
     }
 
-    pub fn delta(&self) -> i64 {
-        self.delta
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 
     pub fn provider_id(&self) -> SegmentStorageProviderId {
@@ -165,13 +229,13 @@ impl SegmentMapping {
 
     pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
         let addr = addr.into();
-        let offset = (addr.offset() as i64).wrapping_sub(self.start.offset() as i64);
-        offset.wrapping_add(self.delta) as u64
+        let relative = addr.offset() - self.start.offset();
+        self.offset + relative
     }
 
-    pub fn to_address(&self, offset: u64) -> Address {
-        let rel = (offset as i64).wrapping_sub(self.delta);
-        Address::from((self.start.offset() as i64).wrapping_add(rel) as u64)
+    pub fn to_address(&self, phys_offset: u64) -> Address {
+        let relative = phys_offset - self.offset;
+        Address::from(self.start.offset() + relative)
     }
 
     pub fn set_start(&mut self, start: impl Into<Address>) {
@@ -182,6 +246,31 @@ impl SegmentMapping {
     pub fn set_size(&mut self, size: usize) {
         self.size = size;
         self.touch();
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+        self.touch();
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
+        &mut self.mapping_hints
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
+        &self.function_hints
+    }
+
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
+        &mut self.function_hints
     }
 
     pub fn make_ref(&self) -> SegmentMappingRef {

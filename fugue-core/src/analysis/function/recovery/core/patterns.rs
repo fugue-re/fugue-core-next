@@ -125,7 +125,7 @@ impl FunctionRecoveryPatternMatcher {
                 break;
             };
 
-            f(range, bytes);
+            f(range, &bytes);
         }
     }
 }

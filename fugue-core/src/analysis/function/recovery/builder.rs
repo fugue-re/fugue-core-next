@@ -276,7 +276,7 @@ impl FunctionBuilderContext {
                 if let Ok(nview) = segments.view_at(block) {
                     tracing::debug!(
                         "switching segment for {block} to segment {}",
-                        nview.segment()
+                        nview.name()
                     );
                     view = nview;
                 } else {
@@ -481,9 +481,8 @@ impl FunctionBuilderContext {
             // NOTE: this expect is safe because the entry address must be valid to reach this
             // point under normal usage.
             let view = project.segments().view_at(self.entry).expect("valid entry");
-            let segm = view.segment();
 
-            if let Some(hint) = segm.mapping_hints().get(&self.entry) {
+            if let Some(hint) = view.mapping_hints().get(&self.entry) {
                 if hint.is_data() {
                     tracing::debug!(
                         "entry {candidate} is marked as data in segment mapping hints; skipping"
