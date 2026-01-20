@@ -22,10 +22,12 @@ digest = "0.10"
 downcast-rs = "2"
 fallible-iterator = "0.3"
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
+fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
 fugue-lifter = { version = "0.3", path = "../fugue-lifter", features = ["bincode"] }
 fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["bincode"] }
 hex-display = "0.3"
 indexmap = "2.12"
+inventory = "0.3"
 iset = "0.3"
 itertools = "0.14"
 libmdbx = { version = "0.6", optional = true }

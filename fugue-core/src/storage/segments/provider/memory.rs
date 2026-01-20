@@ -1,11 +1,14 @@
 use std::borrow::Cow;
 
-use crate::loader::Loadable;
+use crate::SegmentStorageProvider as DeriveSegmentStorageProvider;
+use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
 
-use super::{SegmentStorageProvider, SegmentStorageProviderFromLoadable};
+use super::{SegmentStorageProvider, SegmentStorageProviderFromSegmentRange};
 
+#[derive(DeriveSegmentStorageProvider)]
+#[provider(tag = "in-memory")]
 pub struct InMemorySegmentStorage {
     backing: Vec<u8>,
 }
@@ -22,12 +25,12 @@ impl InMemorySegmentStorage {
     }
 }
 
-impl SegmentStorageProviderFromLoadable for InMemorySegmentStorage {
-    fn from_loadable(
-        loader: &impl Loadable,
+impl SegmentStorageProviderFromSegmentRange for InMemorySegmentStorage {
+    fn from_segment_range(
+        start: Address,
+        end: Address,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let (start, end) = loader.segment_range();
         let total_size = usize::from(end - start) + 1usize;
 
         tracing::trace!("creating in-memory storage with size {total_size} bytes");

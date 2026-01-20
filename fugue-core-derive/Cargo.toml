@@ -1,0 +1,16 @@
+[package]
+name = "fugue-core-derive"
+version = "0.3.0"
+authors = ["Sam Thomas <st@xv.ax>"]
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing"] }
+
+[lints]
+workspace = true

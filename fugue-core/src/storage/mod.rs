@@ -314,7 +314,7 @@ where
         let unpacked = path.with_extension("fdb");
 
         let entities = EntityStorage::new(T::from_storage(&unpacked, attributes)?);
-        let segments = SegmentStorage::from_storage::<U>(&unpacked, attributes)?;
+        let segments = SegmentStorage::from_storage(&unpacked, attributes)?;
 
         Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
     }

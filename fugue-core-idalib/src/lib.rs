@@ -14,7 +14,8 @@ use fugue_core::ir::{
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::{
-    Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+    Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment,
+    LoadableSegmentBounds, LoaderError,
 };
 use fugue_core::project::Project;
 use fugue_core::storage::ProjectStorageProvider;
@@ -278,16 +279,16 @@ impl Loadable for IDABinary {
         Some(&self.symbols)
     }
 
-    fn segment_range(&self) -> (Address, Address) {
+    fn segment_bounds(&self) -> LoadableSegmentBounds {
         let mut start = Address::MAX;
         let mut end = Address::zero();
 
         for (_, segm) in self.database.segments() {
             start = start.min(segm.start_address().into());
-            end = end.max(segm.end_address().wrapping_sub(1).into());
+            end = end.max(segm.end_address().into());
         }
 
-        (start, end)
+        LoadableSegmentBounds::new(start..end)
     }
 
     fn segments<'a>(

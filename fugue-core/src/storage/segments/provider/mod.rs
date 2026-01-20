@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::path::Path;
 
-use crate::ir::SegmentProperties;
+use crate::ir::{Address, SegmentProperties};
 use crate::loader::Loadable;
 use crate::types::AttributeMap;
 
@@ -20,6 +20,7 @@ pub struct SegmentStorageDescriptor {
     id: SegmentStorageProviderId,
     provider: Box<dyn SegmentStorageProvider>,
     permissions: SegmentProperties,
+    stable_tag: Option<String>,
 }
 
 impl Debug for SegmentStorageDescriptor {
@@ -27,6 +28,7 @@ impl Debug for SegmentStorageDescriptor {
         f.debug_struct("SegmentStorageDescriptor")
             .field("id", &self.id)
             .field("permissions", &self.permissions)
+            .field("stable_tag", &self.stable_tag)
             .finish()
     }
 }
@@ -41,6 +43,21 @@ impl SegmentStorageDescriptor {
             id,
             provider: Box::new(provider),
             permissions,
+            stable_tag: None,
+        }
+    }
+
+    pub fn with_tag(
+        id: SegmentStorageProviderId,
+        provider: impl SegmentStorageProvider + 'static,
+        permissions: SegmentProperties,
+        stable_tag: Option<&str>,
+    ) -> Self {
+        Self {
+            id,
+            provider: Box::new(provider),
+            permissions,
+            stable_tag: stable_tag.map(String::from),
         }
     }
 
@@ -53,6 +70,21 @@ impl SegmentStorageDescriptor {
             id,
             provider,
             permissions,
+            stable_tag: None,
+        }
+    }
+
+    pub fn from_boxed_with_tag(
+        id: SegmentStorageProviderId,
+        provider: Box<dyn SegmentStorageProvider>,
+        permissions: SegmentProperties,
+        stable_tag: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            provider,
+            permissions,
+            stable_tag,
         }
     }
 
@@ -66,6 +98,14 @@ impl SegmentStorageDescriptor {
 
     pub fn set_permissions(&mut self, permissions: SegmentProperties) {
         self.permissions = permissions;
+    }
+
+    pub fn stable_tag(&self) -> Option<&str> {
+        self.stable_tag.as_deref()
+    }
+
+    pub fn set_stable_tag(&mut self, tag: Option<String>) {
+        self.stable_tag = tag;
     }
 
     pub fn provider(&self) -> &dyn SegmentStorageProvider {
@@ -89,14 +129,33 @@ impl SegmentStorageDescriptor {
     }
 }
 
-pub trait SegmentStorageProviderFromLoadable: SegmentStorageProvider + 'static {
-    fn from_loadable(
-        loader: &impl Loadable,
+pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'static {
+    fn from_segment_range(
+        start: Address,
+        end: Address,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
         Self: Sized;
 }
+
+pub trait SegmentStorageProviderFromLoadable: SegmentStorageProviderFromSegmentRange {
+    const STABLE_TAG: Option<&'static str> = None;
+
+    fn from_loadable(
+        loader: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, SegmentStorageError>
+    where
+        Self: Sized,
+    {
+        let bounds = loader.segment_bounds();
+        let range = bounds.first();
+        Self::from_segment_range(range.start, range.end, attributes)
+    }
+}
+
+impl<T: SegmentStorageProviderFromSegmentRange> SegmentStorageProviderFromLoadable for T {}
 
 pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable {
     fn from_storage(

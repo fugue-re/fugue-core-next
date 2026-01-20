@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use memmap2::MmapMut;
 use thiserror::Error;
 
-use crate::loader::Loadable;
+use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
-use crate::storage::{self, PERSISTENT, StoragePersistence};
+use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 use super::{
-    SegmentStorageProvider, SegmentStorageProviderFromLoadable, SegmentStorageProviderFromStorage,
+    SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
+    SegmentStorageProviderFromStorage,
 };
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
@@ -184,11 +185,12 @@ impl SegmentStorageProviderFromStorage for MemoryMappedSegmentStorage<{ PERSISTE
     }
 }
 
-impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
+impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRange
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
-    fn from_loadable(
-        loader: &impl Loadable,
+    fn from_segment_range(
+        start: Address,
+        end: Address,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let project = attributes
@@ -197,7 +199,6 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromLoadable
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let (start, end) = loader.segment_range();
         let size = (end.offset() - start.offset() + 1) as u64;
 
         if data_path.exists() {
@@ -279,5 +280,34 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
             .flush()
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
         Ok(())
+    }
+}
+
+// Manual registration for the persistent memory-mapped storage variant
+inventory::submit! {
+    crate::storage::segments::registry::ProviderEntry {
+        type_id: std::any::TypeId::of::<MemoryMappedSegmentStorage<{ PERSISTENT }>>(),
+        stable_tag: "memory-mapped-persistent",
+        from_segment_range: Some(|start: Address, end: Address, attributes: &mut AttributeMap| {
+            let provider = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_segment_range(start, end, attributes)?;
+            Ok(Box::new(provider))
+        }),
+        from_storage: Some(|path: &Path, attributes: &mut AttributeMap| {
+            let provider = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_storage(path, attributes)?;
+            Ok(Box::new(provider))
+        }),
+    }
+}
+
+// Manual registration for the transient memory-mapped storage variant
+inventory::submit! {
+    crate::storage::segments::registry::ProviderEntry {
+        type_id: std::any::TypeId::of::<MemoryMappedSegmentStorage<{ TRANSIENT }>>(),
+        stable_tag: "memory-mapped-transient",
+        from_segment_range: Some(|start: Address, end: Address, attributes: &mut AttributeMap| {
+            let provider = MemoryMappedSegmentStorage::<{ TRANSIENT }>::from_segment_range(start, end, attributes)?;
+            Ok(Box::new(provider))
+        }),
+        from_storage: None, // Transient storage doesn't support from_storage
     }
 }

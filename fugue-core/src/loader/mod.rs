@@ -7,6 +7,7 @@ use std::path::Path;
 use bincode::{Decode, Encode};
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
+use smallvec::{SmallVec, smallvec};
 
 use fugue_bytes::traits::ByteCast;
 use fugue_bytes::{BE, LE};
@@ -20,6 +21,7 @@ use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::ProjectStorageProvider;
+use crate::storage::segments::bank::SegmentBankId;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -196,6 +198,7 @@ pub struct LoadableSegment<'a> {
     bytes: Cow<'a, [u8]>,          // Bytes of the segment
     mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
     function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
+    bank_index: SegmentBankId,                  // Bank index this segment belongs to
 }
 
 impl Display for LoadableSegment<'_> {
@@ -266,6 +269,7 @@ impl<'a> LoadableSegment<'a> {
             bytes: bytes.into(),
             mapping_hints: mapping_hints.into(),
             function_hints: function_hints.into(),
+            bank_index: Default::default(),
         }
     }
 
@@ -488,7 +492,17 @@ impl<'a> LoadableSegment<'a> {
             bytes: self.bytes.into_owned().into(),
             mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
+            bank_index: self.bank_index,
         }
+    }
+
+    pub fn bank_index(&self) -> u32 {
+        self.bank_index
+    }
+
+    pub fn with_bank_index(mut self, bank_index: u32) -> Self {
+        self.bank_index = bank_index;
+        self
     }
 }
 
@@ -566,6 +580,48 @@ impl LoadableSegmentMetadata {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LoadableSegmentBounds {
+    banks: SmallVec<[Range<Address>; 4]>,
+}
+
+impl LoadableSegmentBounds {
+    pub fn new(range: Range<Address>) -> Self {
+        Self {
+            banks: smallvec![range],
+        }
+    }
+
+    pub fn with_bank(mut self, range: Range<Address>) -> Self {
+        self.banks.push(range);
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.banks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    pub fn first(&self) -> &Range<Address> {
+        &self.banks[0]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &Range<Address>)> + '_ {
+        self.banks.iter().enumerate()
+    }
+}
+
+impl std::ops::Index<usize> for LoadableSegmentBounds {
+    type Output = Range<Address>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.banks[index]
+    }
+}
+
 pub trait LoadableFromBytes<'a>: Loadable {
     fn from_bytes(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError>
     where
@@ -615,7 +671,7 @@ pub trait Loadable {
         &'a self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a;
 
-    fn segment_range(&self) -> (Address, Address);
+    fn segment_bounds(&self) -> LoadableSegmentBounds;
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
@@ -793,10 +849,10 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn segment_range(&self) -> (Address, Address) {
+    fn segment_bounds(&self) -> LoadableSegmentBounds {
         match self {
-            Self::Elf(elf) => elf.segment_range(),
-            Self::Object(object) => object.segment_range(),
+            Self::Elf(elf) => elf.segment_bounds(),
+            Self::Object(object) => object.segment_bounds(),
         }
     }
 
@@ -806,9 +862,7 @@ impl Loadable for Loader<'_> {
     {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
-            Self::Object(object) => {
-                Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>
-            }
+            Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>,
         }
     }
 }
@@ -838,9 +892,10 @@ mod tests {
         assert_eq!(loaded.attributes().get_attr::<u32>("test2"), Some(2));
         assert_eq!(loaded.attributes().get_attr::<u64>("test3"), Some(3));
 
-        let (start, end) = loaded.segment_range();
+        let bounds = loaded.segment_bounds();
+        let range = bounds.first();
 
-        println!("segment range: {start:#x} - {end:#x}");
+        println!("segment range: {:#x} - {:#x}", range.start, range.end);
 
         Ok(())
     }
