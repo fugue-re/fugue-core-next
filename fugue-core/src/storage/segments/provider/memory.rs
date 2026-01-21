@@ -1,14 +1,13 @@
 use std::borrow::Cow;
 
-use crate::SegmentStorageProvider as DeriveSegmentStorageProvider;
 use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
 
 use super::{SegmentStorageProvider, SegmentStorageProviderFromSegmentRange};
 
-#[derive(DeriveSegmentStorageProvider)]
-#[provider(tag = "in-memory")]
+#[derive(crate::SegmentStorageProvider)]
+#[provider(tag = "in-memory", persistent = false)]
 pub struct InMemorySegmentStorage {
     backing: Vec<u8>,
 }

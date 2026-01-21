@@ -19,7 +19,6 @@ pub mod bank;
 pub mod mapping;
 pub mod overlay;
 pub mod provider;
-pub mod registry;
 pub mod view;
 
 use bank::{SegmentBank, SegmentBankId};
@@ -27,6 +26,7 @@ use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind,
 };
+use provider::SegmentStorageProviderRegistry;
 use view::SegmentMappingView;
 
 pub use provider::{
@@ -35,8 +35,6 @@ pub use provider::{
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
-
-pub use registry::{ProviderEntry, ProviderRegistry, registry};
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
@@ -281,8 +279,12 @@ impl SegmentStorage {
                 storage.create_bank()
             };
 
-            let provider =
-                registry::registry().from_segment_range(tag, range.start, range.end, attributes)?;
+            let provider = SegmentStorageProviderRegistry::get().from_segment_range(
+                tag,
+                range.start,
+                range.end,
+                attributes,
+            )?;
 
             let provider_id = storage.open_provider_boxed_with_tag(
                 provider,
@@ -361,8 +363,11 @@ impl SegmentStorage {
             BTreeMap::new();
 
         for prov_meta in &metadata.providers {
-            let provider =
-                registry::registry().from_storage(&prov_meta.stable_tag, path, attributes)?;
+            let provider = SegmentStorageProviderRegistry::get().from_storage(
+                &prov_meta.stable_tag,
+                path,
+                attributes,
+            )?;
             let new_id = storage.open_provider_boxed_with_tag(
                 provider,
                 prov_meta.permissions,

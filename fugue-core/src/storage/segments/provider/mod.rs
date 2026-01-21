@@ -14,6 +14,9 @@ pub use memmap::MemoryMappedSegmentStorage;
 pub mod memory;
 pub use memory::InMemorySegmentStorage;
 
+pub mod registry;
+pub use registry::*;
+
 pub type SegmentStorageProviderId = u32;
 
 pub struct SegmentStorageDescriptor {

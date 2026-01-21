@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use memmap2::MmapMut;
 use thiserror::Error;
 
+use fugue_core_derive::SegmentStorageProvider;
+
 use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
@@ -19,6 +21,16 @@ use super::{
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
 
+#[derive(SegmentStorageProvider)]
+#[provider(
+    concrete = MemoryMappedSegmentStorage<{ PERSISTENT }>,
+    tag = "memory-mapped-persistent",
+)]
+#[provider(
+    concrete = MemoryMappedSegmentStorage<{ TRANSIENT }>,
+    tag = "memory-mapped-transient",
+    persistent = false,
+)]
 pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
     backing: MmapMut,
     project: PathBuf,
@@ -280,34 +292,5 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
             .flush()
             .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
         Ok(())
-    }
-}
-
-// Manual registration for the persistent memory-mapped storage variant
-inventory::submit! {
-    crate::storage::segments::registry::ProviderEntry {
-        type_id: std::any::TypeId::of::<MemoryMappedSegmentStorage<{ PERSISTENT }>>(),
-        stable_tag: "memory-mapped-persistent",
-        from_segment_range: Some(|start: Address, end: Address, attributes: &mut AttributeMap| {
-            let provider = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_segment_range(start, end, attributes)?;
-            Ok(Box::new(provider))
-        }),
-        from_storage: Some(|path: &Path, attributes: &mut AttributeMap| {
-            let provider = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_storage(path, attributes)?;
-            Ok(Box::new(provider))
-        }),
-    }
-}
-
-// Manual registration for the transient memory-mapped storage variant
-inventory::submit! {
-    crate::storage::segments::registry::ProviderEntry {
-        type_id: std::any::TypeId::of::<MemoryMappedSegmentStorage<{ TRANSIENT }>>(),
-        stable_tag: "memory-mapped-transient",
-        from_segment_range: Some(|start: Address, end: Address, attributes: &mut AttributeMap| {
-            let provider = MemoryMappedSegmentStorage::<{ TRANSIENT }>::from_segment_range(start, end, attributes)?;
-            Ok(Box::new(provider))
-        }),
-        from_storage: None, // Transient storage doesn't support from_storage
     }
 }

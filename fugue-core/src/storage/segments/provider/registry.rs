@@ -9,46 +9,66 @@ use crate::types::AttributeMap;
 
 use super::{SegmentStorageError, SegmentStorageProvider};
 
-// Re-export traits from provider module for derive macro access
-pub use super::provider::{
-    SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
-};
+static REGISTRY: OnceLock<SegmentStorageProviderRegistry> = OnceLock::new();
 
-/// Factory function for creating a provider from a segment range.
-pub type FromSegmentRangeFn = fn(
+type FromSegmentRangeFn = fn(
     start: Address,
     end: Address,
     attributes: &mut AttributeMap,
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
-/// Factory function for creating a provider from storage path.
-pub type FromStorageFn = fn(
+type FromStorageFn = fn(
     path: &Path,
     attributes: &mut AttributeMap,
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
-/// Registry entry for a provider type.
-pub struct ProviderEntry {
+pub struct SegmentStorageProviderEntry {
     pub type_id: TypeId,
     pub stable_tag: &'static str,
     pub from_segment_range: Option<FromSegmentRangeFn>,
     pub from_storage: Option<FromStorageFn>,
 }
 
-inventory::collect!(ProviderEntry);
+impl SegmentStorageProviderEntry {
+    pub const fn new<T: 'static>(
+        stable_tag: &'static str,
+        from_segment_range: FromSegmentRangeFn,
+        from_storage: FromStorageFn,
+    ) -> Self {
+        Self::new_with::<T>(
+            stable_tag,
+            Some(from_segment_range),
+            Some(from_storage),
+        )
+    }
 
-/// Global registry of provider types built from inventory.
-pub struct ProviderRegistry {
-    by_type_id: FxHashMap<TypeId, &'static ProviderEntry>,
-    by_tag: FxHashMap<&'static str, &'static ProviderEntry>,
+    pub const fn new_with<T: 'static>(
+        stable_tag: &'static str,
+        from_segment_range: Option<FromSegmentRangeFn>,
+        from_storage: Option<FromStorageFn>,
+    ) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            stable_tag,
+            from_segment_range,
+            from_storage,
+        }
+    }
 }
 
-impl ProviderRegistry {
+inventory::collect!(SegmentStorageProviderEntry);
+
+pub struct SegmentStorageProviderRegistry {
+    by_type_id: FxHashMap<TypeId, &'static SegmentStorageProviderEntry>,
+    by_tag: FxHashMap<&'static str, &'static SegmentStorageProviderEntry>,
+}
+
+impl SegmentStorageProviderRegistry {
     fn new() -> Self {
         let mut by_type_id = FxHashMap::default();
         let mut by_tag = FxHashMap::default();
 
-        for entry in inventory::iter::<ProviderEntry> {
+        for entry in inventory::iter::<SegmentStorageProviderEntry> {
             by_type_id.insert(entry.type_id, entry);
             by_tag.insert(entry.stable_tag, entry);
         }
@@ -56,17 +76,18 @@ impl ProviderRegistry {
         Self { by_type_id, by_tag }
     }
 
-    /// Get a provider entry by its TypeId.
-    pub fn get_by_type_id(&self, id: TypeId) -> Option<&ProviderEntry> {
+    pub fn get() -> &'static Self {
+        REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
+    }
+
+    pub fn get_by_type_id(&self, id: TypeId) -> Option<&SegmentStorageProviderEntry> {
         self.by_type_id.get(&id).copied()
     }
 
-    /// Get a provider entry by its stable tag.
-    pub fn get_by_tag(&self, tag: &str) -> Option<&ProviderEntry> {
+    pub fn get_by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {
         self.by_tag.get(tag).copied()
     }
 
-    /// Create a provider from a segment range using the specified tag.
     pub fn from_segment_range(
         &self,
         tag: &str,
@@ -87,7 +108,6 @@ impl ProviderRegistry {
         factory(start, end, attributes)
     }
 
-    /// Create a provider from storage using the specified tag.
     pub fn from_storage(
         &self,
         tag: &str,
@@ -107,30 +127,19 @@ impl ProviderRegistry {
         factory(path, attributes)
     }
 
-    /// Iterate over all registered provider tags.
     pub fn tags(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.by_tag.keys().copied()
     }
 
-    /// Check if a tag is registered.
     pub fn has_tag(&self, tag: &str) -> bool {
         self.by_tag.contains_key(tag)
     }
 
-    /// Get the number of registered providers.
     pub fn len(&self) -> usize {
         self.by_tag.len()
     }
 
-    /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.by_tag.is_empty()
     }
-}
-
-static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
-
-/// Get the global provider registry.
-pub fn registry() -> &'static ProviderRegistry {
-    REGISTRY.get_or_init(ProviderRegistry::new)
 }
