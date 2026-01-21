@@ -36,7 +36,7 @@ pub use provider::{
     SegmentStorageProviderId,
 };
 
-pub use registry::{registry, ProviderEntry, ProviderRegistry};
+pub use registry::{ProviderEntry, ProviderRegistry, registry};
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
@@ -125,9 +125,9 @@ pub struct SegmentStorage {
     current_bank: SegmentBankId,
     overlay_enabled: bool,
     fill_byte: u8,
-    next_provider_id: u32,
-    next_mapping_id: u32,
-    next_bank_id: u32,
+    next_provider_id: SegmentStorageProviderId,
+    next_mapping_id: SegmentMappingId,
+    next_bank_id: SegmentBankId,
 }
 
 impl Default for SegmentStorage {
@@ -182,8 +182,7 @@ impl SegmentStorage {
                 storage.create_bank()
             };
 
-            let provider =
-                S::from_segment_range(range.start, range.end, attributes)?;
+            let provider = S::from_segment_range(range.start, range.end, attributes)?;
 
             let provider_id = storage.open_provider_with_tag(
                 provider,
@@ -191,7 +190,10 @@ impl SegmentStorage {
                 S::STABLE_TAG,
             );
 
-            bank_providers.insert(bank_idx as u32, (bank_id, provider_id));
+            bank_providers.insert(
+                SegmentBankId::try_from(bank_idx).expect("bank index is convertable to a bank id"),
+                (bank_id, provider_id),
+            );
         }
 
         let mut siter = loader.segments();
@@ -202,7 +204,7 @@ impl SegmentStorage {
                 .unwrap_or((DEFAULT_BANK_ID, DEFAULT_PROVIDER_ID));
 
             let range = &bounds[segm.bank_index() as usize];
-            let physical_offset = (segm.address().offset() - range.start.offset()) as u64;
+            let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
 
             tracing::trace!(
                 "loading segment {} ({}-{}) at offset {physical_offset:#x} in bank {bank_id}",
@@ -241,7 +243,10 @@ impl SegmentStorage {
         let meta_path = path.join(SEGMENT_STORAGE_FILE);
 
         if !meta_path.exists() {
-            return Err(SegmentStorageError::project_data(path, io::ErrorKind::NotFound));
+            return Err(SegmentStorageError::project_data(
+                path,
+                io::ErrorKind::NotFound,
+            ));
         }
 
         Self::from_storage_internal(path, attributes)
@@ -276,7 +281,8 @@ impl SegmentStorage {
                 storage.create_bank()
             };
 
-            let provider = registry::registry().from_segment_range(tag, range.start, range.end, attributes)?;
+            let provider =
+                registry::registry().from_segment_range(tag, range.start, range.end, attributes)?;
 
             let provider_id = storage.open_provider_boxed_with_tag(
                 provider,
@@ -335,7 +341,10 @@ impl SegmentStorage {
         let meta_path = path.join(SEGMENT_STORAGE_FILE);
 
         if !meta_path.exists() {
-            return Err(SegmentStorageError::project_data(path, io::ErrorKind::NotFound));
+            return Err(SegmentStorageError::project_data(
+                path,
+                io::ErrorKind::NotFound,
+            ));
         }
 
         Self::from_storage_internal(path, attributes)
@@ -352,7 +361,8 @@ impl SegmentStorage {
             BTreeMap::new();
 
         for prov_meta in &metadata.providers {
-            let provider = registry::registry().from_storage(&prov_meta.stable_tag, path, attributes)?;
+            let provider =
+                registry::registry().from_storage(&prov_meta.stable_tag, path, attributes)?;
             let new_id = storage.open_provider_boxed_with_tag(
                 provider,
                 prov_meta.permissions,
@@ -426,7 +436,7 @@ impl SegmentStorage {
         let mappings = self
             .mappings
             .values()
-            .filter_map(|m| {
+            .map(|m| {
                 let bank_id = self
                     .banks
                     .iter()
@@ -434,7 +444,7 @@ impl SegmentStorage {
                     .map(|(id, _)| *id)
                     .unwrap_or(DEFAULT_BANK_ID);
 
-                Some(MappingMetadata {
+                MappingMetadata {
                     name: m.name().to_owned(),
                     virtual_start: m.start().offset(),
                     physical_offset: m.offset(),
@@ -446,7 +456,7 @@ impl SegmentStorage {
                     function_hints: m.function_hints().clone(),
                     bank_id,
                     provider_id: m.provider_id(),
-                })
+                }
             })
             .collect::<Vec<_>>();
 
@@ -539,7 +549,8 @@ impl SegmentStorage {
         let id = self.next_provider_id;
         self.next_provider_id += 1;
 
-        let descriptor = SegmentStorageDescriptor::from_boxed_with_tag(id, provider, permissions, tag);
+        let descriptor =
+            SegmentStorageDescriptor::from_boxed_with_tag(id, provider, permissions, tag);
         self.providers.insert(id, descriptor);
 
         id
