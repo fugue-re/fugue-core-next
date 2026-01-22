@@ -78,6 +78,14 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
                 #from_storage_fn,
             )
         }
+
+        impl ::fugue_core::storage::segments::provider::StableSegmentStorageProvider for #ty {
+            const STABLE_TAG: &'static str = #tag;
+
+            fn stable_tag(&self) -> &'static str {
+                Self::STABLE_TAG
+            }
+        }
     }
 }
 

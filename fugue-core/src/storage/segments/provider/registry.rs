@@ -54,6 +54,10 @@ impl SegmentStorageProviderEntry {
             from_storage,
         }
     }
+
+    pub fn is_persistable(&self) -> bool {
+        self.from_storage.is_some()
+    }
 }
 
 inventory::collect!(SegmentStorageProviderEntry);
