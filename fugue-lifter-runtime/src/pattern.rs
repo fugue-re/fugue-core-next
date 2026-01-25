@@ -75,6 +75,9 @@ impl PatternExpression {
         &R::PATTERN_EXPRESSIONS[self.range()]
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
         &self,
         state: &mut LiftingContextState<'_>,
@@ -88,6 +91,9 @@ impl PatternExpression {
         }
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn resolve<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,

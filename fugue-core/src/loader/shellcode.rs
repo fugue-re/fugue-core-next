@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::loader::util::parse_language;
-use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoaderError};
+use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError};
 use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -138,8 +138,8 @@ impl Loadable for Shellcode<'_> {
         })
     }
 
-    fn segment_range(&self) -> (Address, Address) {
-        (self.address, self.address + self.bytes.len() - 1usize)
+    fn segment_bounds(&self) -> LoadableSegmentBounds {
+        LoadableSegmentBounds::new(self.address..self.address + self.bytes.len())
     }
 
     fn attributes(&self) -> &AttributeMap {

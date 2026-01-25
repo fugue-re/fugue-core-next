@@ -95,13 +95,13 @@ impl Order for BE {
         let trimmed = &source[..source.len() - amount];
         match trimmed.len().cmp(&destination.len()) {
             Ordering::Less => {
-                destination.copy_from_slice(&trimmed);
+                destination.copy_from_slice(trimmed);
                 for i in destination[trimmed.len()..].iter_mut() {
                     *i = 0;
                 }
             }
             Ordering::Equal => {
-                destination.copy_from_slice(&trimmed);
+                destination.copy_from_slice(trimmed);
             }
             Ordering::Greater => {
                 destination.copy_from_slice(&trimmed[trimmed.len() - destination.len()..])
@@ -159,7 +159,7 @@ impl Order for LE {
         let trimmed = &source[amount..];
         match trimmed.len().cmp(&destination.len()) {
             Ordering::Less => {
-                destination[..trimmed.len()].copy_from_slice(&trimmed);
+                destination[..trimmed.len()].copy_from_slice(trimmed);
                 for i in destination[trimmed.len()..].iter_mut() {
                     *i = 0;
                 }

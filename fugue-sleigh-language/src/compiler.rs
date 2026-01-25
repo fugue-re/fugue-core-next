@@ -165,7 +165,7 @@ impl ReturnAddress {
 
         let node = children
             .next()
-            .ok_or_else(|| DeserialiseError::Invariant("no children for returnaddress"))?;
+            .ok_or(DeserialiseError::Invariant("no children for returnaddress"))?;
 
         match node.tag_name().name() {
             "register" => Ok(Self::Register(node.attribute_string("name")?)),
@@ -241,7 +241,7 @@ impl PrototypeEntry {
             .map(Some)
             .unwrap_or_default();
 
-        let node = input.children().filter(xml::Node::is_element).next();
+        let node = input.children().find(xml::Node::is_element);
         if node.is_none() {
             return Err(DeserialiseError::Invariant(
                 "compiler specification prototype entry does not define an operand",
@@ -397,7 +397,7 @@ impl CompilerSpec {
                     return_address = Some(ReturnAddress::from_xml(child)?);
                 }
                 "default_proto" => {
-                    let proto = child.children().filter(xml::Node::is_element).next();
+                    let proto = child.children().find(xml::Node::is_element);
                     if proto.is_none() {
                         return Err(DeserialiseError::Invariant(
                                 "compiler specification does not define prototype for default prototype"

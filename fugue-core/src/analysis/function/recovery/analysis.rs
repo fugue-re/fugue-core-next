@@ -183,7 +183,8 @@ impl FunctionDiscoveryContext {
         let covered = self.covered(ftable, cbtable);
 
         let avail = segments
-            .metadata()?
+            .current_bank()
+            .iter()
             .filter_map(|segm| {
                 (segm.properties().is_executable() && !segm.properties().is_external())
                     .then(|| segm.range_inclusive())
@@ -464,13 +465,15 @@ where
         }
 
         if self.config().use_segment_function_hints() {
-            for segm in project.segments().metadata().map_err(|e| {
-                AnalysisError::pass_failed("function-recovery", FunctionRecoveryError::from(e))
-            })? {
+            for _segm in project.segments().current_bank().iter() {
+                // FIXME: function hints should be a view over the hints of a given
+                // mapping within a given bank, not the segment as a whole.
+                /*
                 for addr in segm.function_hints().iter() {
                     tracing::debug!(source = "segment", "function hint: {addr}");
                     self.add_candidate(*addr);
                 }
+                */
             }
         }
 

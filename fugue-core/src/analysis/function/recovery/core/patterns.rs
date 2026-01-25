@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::ops::RangeInclusive;
@@ -12,8 +11,8 @@ use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
-use crate::loader::LoadableSegment;
 use crate::project::Project;
+use crate::storage::segments::view::SegmentMappingView;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 #[derive(Debug, Error)]
@@ -79,7 +78,7 @@ impl FunctionRecoveryPatternMatcher {
 
     fn for_each_segment<'a>(
         segments: &'a SegmentStorage,
-        segm: &mut Option<Cow<'a, LoadableSegment<'a>>>,
+        segm: &mut Option<SegmentMappingView<'a>>,
         gap: RangeInclusive<Address>,
         mut f: impl FnMut(RangeInclusive<Address>, &[u8]),
     ) {
@@ -87,8 +86,8 @@ impl FunctionRecoveryPatternMatcher {
         let gap_end = *gap.end();
 
         let mut current_start = *gap.start();
-        let calculate_end = |segm: &LoadableSegment| -> Address {
-            let segm_end = segm.last_address();
+        let calculate_end = |segm: &SegmentMappingView| -> Address {
+            let segm_end = segm.last();
             if segm_end <= gap_end {
                 segm_end
             } else {
@@ -98,7 +97,7 @@ impl FunctionRecoveryPatternMatcher {
 
         while current_start <= gap_end {
             let (range, segm) = if let Some(segm) = current_segment.as_ref()
-                && segm.contains_address(current_start)
+                && segm.contains(current_start)
             {
                 let match_end = calculate_end(&*segm);
                 let range = current_start..=match_end;
@@ -107,7 +106,7 @@ impl FunctionRecoveryPatternMatcher {
 
                 (range, segm)
             } else {
-                let Ok(segment) = segments.find_segment_containing(current_start) else {
+                let Ok(segment) = segments.view_at(current_start) else {
                     break;
                 };
 
@@ -122,11 +121,11 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.view_bytes_at_address(*range.start(), size) else {
+            let Some(bytes) = segm.bytes_at(*range.start(), size) else {
                 break;
             };
 
-            f(range, bytes);
+            f(range, &bytes);
         }
     }
 }
@@ -154,7 +153,7 @@ where
         let arch = project.arch();
         let language = project.language();
 
-        let mut current_segm = None::<Cow<LoadableSegment>>;
+        let mut current_segm = None::<SegmentMappingView<'_>>;
 
         for gap in gaps.ranges() {
             tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());

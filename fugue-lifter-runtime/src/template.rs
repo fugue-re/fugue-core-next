@@ -93,6 +93,9 @@ pub(crate) fn construct_tpl<R: ConstructorResolver>(idx: u16) -> &'static Constr
 }
 
 impl ConstructTpl {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn build<R: ConstructorResolver>(
         &self,
@@ -112,6 +115,9 @@ impl ConstructTpl {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn build_result<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,
@@ -148,6 +154,9 @@ fn const_tpl<R: ConstructorResolver>(idx: u16) -> &'static ConstTpl {
 }
 
 impl ConstTpl {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn update_offset<R: ConstructorResolver>(
         &self,
@@ -174,7 +183,9 @@ impl ConstTpl {
         Some(())
     }
 
-    // fix space
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn space_via<R: ConstructorResolver>(
         &self,
@@ -195,7 +206,9 @@ impl ConstTpl {
         }
     }
 
-    // fix space
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn space<R: ConstructorResolver>(&self, input: &mut LiftingContextState<'_>) -> u8 {
         match self {
@@ -209,6 +222,9 @@ impl ConstTpl {
         }
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn value<R: ConstructorResolver>(
         &self,
@@ -261,12 +277,10 @@ impl ConstTpl {
                                 handle.temporary_offset
                             };
                             val.checked_shr(value_shift).unwrap_or(0)
+                        } else if handle.offset_space == INVALID_HANDLE {
+                            handle.offset_offset + value_short
                         } else {
-                            if handle.offset_space == INVALID_HANDLE {
-                                handle.offset_offset + value_short
-                            } else {
-                                handle.temporary_offset + value_short
-                            }
+                            handle.temporary_offset + value_short
                         }
                     }
                 }
@@ -308,6 +322,9 @@ fn op_tpl<R: ConstructorResolver>(idx: u16) -> &'static OpTpl {
 }
 
 impl OpTpl {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn build<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState,
@@ -338,6 +355,9 @@ impl OpTpl {
         }
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn append_build_action<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState,
@@ -355,6 +375,9 @@ impl OpTpl {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn delay_slot_action<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState,
@@ -362,6 +385,9 @@ impl OpTpl {
         input.emit_delay_slots::<R>()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn dump_action<R: ConstructorResolver>(
         &self,
         state: &mut LiftingContextState,
@@ -388,6 +414,9 @@ impl OpTpl {
         output.build_output::<R>(state, op)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     unsafe fn build_op<R: ConstructorResolver>(
         &self,
@@ -490,6 +519,9 @@ pub(crate) fn handle_tpl<R: ConstructorResolver>(idx: u16) -> &'static HandleTpl
 }
 
 impl HandleTpl {
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn build<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState,
@@ -559,6 +591,9 @@ fn varnode_tpl_offset<R: ConstructorResolver>(idx: u16) -> &'static ConstTpl {
     R::VARNODE_TEMPLATES[idx as usize].offset::<R>()
 }
 
+/// # Safety
+///
+/// Called from generated code which ensures validity of arguments and state.
 #[inline(always)]
 unsafe fn varnode_tpl_offset_value<R: ConstructorResolver>(
     idx: u16,
@@ -582,6 +617,9 @@ impl VarnodeTpl {
         handle.offset_space != INVALID_HANDLE
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn location<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,
@@ -602,6 +640,9 @@ impl VarnodeTpl {
         })
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn pointer<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,
@@ -624,6 +665,9 @@ impl VarnodeTpl {
         ))
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn build_input<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,
@@ -644,6 +688,9 @@ impl VarnodeTpl {
         Some(())
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn build_output<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,

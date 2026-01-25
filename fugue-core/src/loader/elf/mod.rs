@@ -27,7 +27,7 @@ use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
 use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
-    LoadableSegment, LoaderError,
+    LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
 use crate::storage::ProjectStorageProvider;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
@@ -642,6 +642,7 @@ where
             bytes: Cow::Owned(bytes),
             mapping_hints: Cow::Owned(BTreeMap::new()),
             function_hints: Cow::Owned(function_hints),
+            bank_index: Default::default(),
         };
 
         Ok(Some(lsegm))
@@ -747,7 +748,7 @@ where
 
         let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
 
-        while let Some(range) = covered.next() {
+        if let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
 
             let rvsize = (*range.end() - *range.start() + 1) as usize;
@@ -1091,10 +1092,10 @@ impl Loadable for Elf<'_> {
         )
     }
 
-    fn segment_range(&self) -> (Address, Address) {
+    fn segment_bounds(&self) -> LoadableSegmentBounds {
         let start = *self.bounds.start();
-        let end = *self.bounds.end();
-        (start, end)
+        let end = *self.bounds.end() + 1usize;
+        LoadableSegmentBounds::new(start..end)
     }
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>

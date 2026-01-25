@@ -9,7 +9,8 @@ use crate::arch::{self, Arch};
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::{
-    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment, LoaderError,
+    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
+    LoadableSegmentBounds, LoaderError,
 };
 use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
@@ -201,7 +202,7 @@ impl Loadable for Object<'_> {
         }))
     }
 
-    fn segment_range(&self) -> (Address, Address) {
+    fn segment_bounds(&self) -> LoadableSegmentBounds {
         let mut start = None::<Address>;
         let mut end = None::<Address>;
 
@@ -211,12 +212,12 @@ impl Loadable for Object<'_> {
             }
 
             let nstart = Address::from(segm.address());
-            let nend = nstart + segm.size() - 1usize;
+            let nend = nstart + segm.size();
 
             start = Some(start.map_or(nstart, |start| start.min(nstart)));
             end = Some(end.map_or(nend, |end| end.max(nend)));
         }
 
-        (start.unwrap_or_default(), end.unwrap_or_default())
+        LoadableSegmentBounds::new(start.unwrap_or_default()..end.unwrap_or_default())
     }
 }

@@ -190,10 +190,10 @@ impl PatternExpression {
             "plus_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Plus(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -201,10 +201,10 @@ impl PatternExpression {
             "sub_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Sub(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -212,10 +212,10 @@ impl PatternExpression {
             "mult_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Mult(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -223,10 +223,10 @@ impl PatternExpression {
             "lshift_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::LeftShift(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -234,10 +234,10 @@ impl PatternExpression {
             "rshift_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::RightShift(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -245,10 +245,10 @@ impl PatternExpression {
             "and_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::And(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -256,10 +256,10 @@ impl PatternExpression {
             "or_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Or(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -267,10 +267,10 @@ impl PatternExpression {
             "xor_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Xor(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
@@ -278,25 +278,21 @@ impl PatternExpression {
             "div_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Div(
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing lhs of binary expression")
                     })?)?),
-                    Box::new(Self::from_xml(children.next().ok_or_else(|| {
+                    Box::new(Self::from_xml(children.next().ok_or({
                         DeserialiseError::Invariant("missing rhs of binary expression")
                     })?)?),
                 )
             }
             "minus_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
-                Self::Minus(Box::new(Self::from_xml(children.next().ok_or_else(
-                    || DeserialiseError::Invariant("missing operand of unary expression"),
-                )?)?))
+                Self::Minus(Box::new(Self::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing operand of unary expression"))?)?))
             }
             "not_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
-                Self::Not(Box::new(Self::from_xml(children.next().ok_or_else(
-                    || DeserialiseError::Invariant("missing operand of unary expression"),
-                )?)?))
+                Self::Not(Box::new(Self::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing operand of unary expression"))?)?))
             }
             name => return Err(DeserialiseError::TagUnexpected(name.to_owned())),
         })

@@ -4,9 +4,7 @@ use crate::ir::block::table::IndexedCodeBlockTable;
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{IndexedFunctionTable, IndexedSymbolTable};
 use crate::storage::entities::EntityStorageProviderFromStorage;
-use crate::storage::segments::{
-    SegmentStorageProviderFromStorage,
-};
+use crate::storage::segments::SegmentStorageProviderFromStorage;
 use crate::storage::{
     EntityStorage, EntityStorageError, PersistentStorageProvider, StorageProvider,
     TransientStorageProvider,

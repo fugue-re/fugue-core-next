@@ -142,7 +142,7 @@ impl<'a> ParserInputs<'a> {
 
     pub fn initialise(&mut self, address: u64, bytes: &'a [u8]) {
         self.bytes = bytes;
-        self.input.initialise(address, self.bytes, &self.context);
+        self.input.initialise(address, self.bytes, self.context);
     }
 
     pub fn next_input<'b>(&'b mut self) -> Option<ParserInputs<'b>> {
@@ -167,7 +167,7 @@ impl<'a> ParserInputs<'a> {
         let offset = self.input.len();
 
         let naddress = address + offset as u64;
-        let ninput = self.inputs.get(0)?;
+        let ninput = self.inputs.first()?;
 
         if ninput.address() == naddress {
             Some(ninput.next_address())
@@ -256,11 +256,17 @@ impl ParserInput {
         self.point == INVALID_HANDLE
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn operand(&self) -> usize {
         *self.breadcrumb.get_unchecked(self.depth as usize) as _
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn constructor(&self) -> &'static Constructor {
         self.context
@@ -288,6 +294,9 @@ impl ParserInput {
             .expect("context is correct size");
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn instruction_bytes(&self, start: usize, size: usize) -> Option<u32> {
         let offset = self
@@ -298,6 +307,9 @@ impl ParserInput {
         self.instruction_bytes_with(start, size, offset as _)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn instruction_bytes_with(
         &self,
@@ -320,6 +332,9 @@ impl ParserInput {
         Some(result)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn instruction_bits(&self, start: usize, size: usize) -> Option<u32> {
         let offset = self
@@ -330,6 +345,9 @@ impl ParserInput {
         self.instruction_bits_with(start, size, offset as _)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn instruction_bits_with(
         &self,
@@ -340,7 +358,7 @@ impl ParserInput {
         let bit_offset = start % 8;
         let byte_offset = offset + (start / 8);
         let total_bits = bit_offset + size;
-        let bytes_needed = (total_bits + 7) / 8;
+        let bytes_needed = total_bits.div_ceil(8);
 
         if byte_offset >= self.context.buffer.len() {
             return None;
@@ -373,7 +391,7 @@ impl ParserInput {
         result <<= bytes_off as u32 * 8;
         result = result.checked_shr(unused as u32 * 8).unwrap_or(0);
 
-        let remaining = (bytes_off + size) as i32 - (8 * size_of::<u32>()) as i32;
+        let remaining = (bytes_off + size) as i32 - u32::BITS as i32;
         if remaining <= 0 {
             return result;
         }
@@ -390,23 +408,23 @@ impl ParserInput {
 
     #[inline(always)]
     pub fn context_bits(&self, start: usize, size: usize) -> u32 {
-        let start_off = start / (8 * size_of::<u32>());
-        let bits_off = start % (8 * size_of::<u32>());
+        let start_off = start / u32::BITS as usize;
+        let bits_off = start % u32::BITS as usize;
 
-        let unused = 8 * size_of::<u32>() - size;
+        let unused = u32::BITS as usize - size;
         let mut result = self.context.context[start_off];
 
         result <<= bits_off as u32;
         result = result.checked_shr(unused as u32).unwrap_or(0);
 
-        let remaining = (bits_off + size) as i32 - (8 * size_of::<u32>()) as i32;
+        let remaining = (bits_off + size) as i32 - u32::BITS as i32;
         if remaining <= 0 {
             return result;
         }
 
         if start_off + 1 < self.context.context.len() {
             let mut nresult = self.context.context[start_off + 1];
-            let unused = 8 * size_of::<u32>() - remaining as usize;
+            let unused = u32::BITS as usize - remaining as usize;
             nresult = nresult.checked_shr(unused as u32).unwrap_or(0);
             result |= nresult;
         }
@@ -414,6 +432,9 @@ impl ParserInput {
         result
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn calculate_length(&mut self, length: usize, operands: usize) {
         let state = self.context.constructors.get_unchecked(self.point as usize);
@@ -436,6 +457,9 @@ impl ParserInput {
             .length = (max_length - offset) as u8;
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn offset(&self) -> usize {
         self.context
@@ -444,6 +468,9 @@ impl ParserInput {
             .offset as _
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn set_offset(&mut self, offset: usize) {
         self.context
@@ -452,6 +479,9 @@ impl ParserInput {
             .offset = offset as _;
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn offset_for_operand(&mut self, index: usize) -> usize {
         let opid = self
@@ -460,10 +490,13 @@ impl ParserInput {
             .get_unchecked_mut(self.point as usize)
             .operands as usize
             + index;
-        let op = self.context.constructors.get_unchecked(opid as usize);
+        let op = self.context.constructors.get_unchecked(opid);
         op.offset as usize + op.length as usize
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn set_constructor(&mut self, ctor: &'static Constructor) {
         self.context
@@ -472,12 +505,18 @@ impl ParserInput {
             .constructor = Some(ctor);
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn set_context_word(&mut self, num: usize, value: u32, mask: u32) {
         *self.context.context.get_unchecked_mut(num) =
             (*self.context.context.get_unchecked(num) & !mask) | (mask & value);
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn set_current_length(&mut self, length: usize) {
         self.context
@@ -496,6 +535,9 @@ impl ParserInput {
         self.context.delay_slot_length as _
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn allocate_operands(&mut self, operands: usize) -> Option<usize> {
         let nalloc = self.context.alloc as usize + operands;
@@ -539,6 +581,9 @@ impl ParserInput {
         Some(id as _)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn push_operand(&mut self, operand: usize) {
         *self.breadcrumb.get_unchecked_mut(self.depth as usize) = operand as u8 + 1;
@@ -552,6 +597,9 @@ impl ParserInput {
         *self.breadcrumb.get_unchecked_mut(self.depth as usize) = 0;
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn pop_operand(&mut self) {
         self.point = self
@@ -574,6 +622,9 @@ impl ParserInput {
             .as_ref()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn parent_handle_mut(&mut self) -> Option<&mut FixedHandle> {
         self.context
@@ -583,6 +634,9 @@ impl ParserInput {
             .as_mut()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn set_parent_handle(&mut self, handle: FixedHandle) {
         self.context
@@ -591,6 +645,9 @@ impl ParserInput {
             .handle = Some(handle);
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn operand_constructor(&self, index: usize) -> &Constructor {
         let opnds = self
@@ -603,6 +660,9 @@ impl ParserInput {
             .unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn operand_handle(&self, index: usize) -> &FixedHandle {
         let opnds = self
@@ -618,6 +678,9 @@ impl ParserInput {
             .unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn unchecked_operand(&self, index: usize) -> &ConstructorNode {
         let opnds = self
@@ -628,12 +691,18 @@ impl ParserInput {
         self.context.constructors.get_unchecked(opnds + index)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn unchecked_operand_via(&self, point: usize, index: usize) -> &ConstructorNode {
         let opnds = self.context.constructors.get_unchecked(point).operands as usize;
         self.context.constructors.get_unchecked(opnds + index)
     }
 
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
     pub unsafe fn unchecked_operand_handle(&self, index: usize) -> FixedHandle {
         let opnds = self
@@ -651,5 +720,10 @@ impl ParserInput {
     #[inline]
     pub fn len(&self) -> usize {
         self.context.constructors[0].length as _
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
