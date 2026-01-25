@@ -13,7 +13,6 @@ use thiserror::Error;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{Loadable, LoaderError};
-use crate::storage::segments::provider::StableSegmentStorageProvider;
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
@@ -32,8 +31,8 @@ use provider::SegmentStorageProviderRegistry;
 use view::SegmentMappingView;
 
 pub use provider::{
-    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
-    SegmentStorageProvider, SegmentStorageProviderFromLoadable,
+    InMemorySegmentStorage, MemoryMappedSegmentStorage, PersistableSegmentStorageProvider,
+    SegmentStorageDescriptor, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
@@ -159,7 +158,7 @@ impl SegmentStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
-        S: SegmentStorageProviderFromLoadable + StableSegmentStorageProvider + 'static,
+        S: SegmentStorageProviderFromLoadable + PersistableSegmentStorageProvider + 'static,
     {
         if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
             let meta_path = project_path.join(SEGMENT_STORAGE_FILE);
@@ -437,7 +436,7 @@ impl SegmentStorage {
         permissions: SegmentProperties,
     ) -> SegmentStorageProviderId
     where
-        S: StableSegmentStorageProvider + 'static,
+        S: PersistableSegmentStorageProvider + 'static,
     {
         let id = self.next_provider_id;
         self.next_provider_id += 1;

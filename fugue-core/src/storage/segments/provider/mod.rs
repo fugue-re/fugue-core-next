@@ -39,7 +39,7 @@ impl Debug for SegmentStorageDescriptor {
 impl SegmentStorageDescriptor {
     pub fn new(
         id: SegmentStorageProviderId,
-        provider: impl StableSegmentStorageProvider + 'static,
+        provider: impl PersistableSegmentStorageProvider + 'static,
         permissions: SegmentProperties,
     ) -> Self {
         Self {
@@ -128,7 +128,7 @@ pub trait SegmentStorageProviderFromLoadable: SegmentStorageProviderFromSegmentR
 impl<T: SegmentStorageProviderFromSegmentRange> SegmentStorageProviderFromLoadable for T {}
 
 pub trait SegmentStorageProviderFromStorage:
-    SegmentStorageProviderFromLoadable + StableSegmentStorageProvider
+    SegmentStorageProviderFromLoadable + PersistableSegmentStorageProvider
 {
     fn from_storage(
         path: impl AsRef<Path>,
@@ -138,7 +138,7 @@ pub trait SegmentStorageProviderFromStorage:
         Self: Sized;
 }
 
-pub trait StableSegmentStorageProvider: SegmentStorageProvider {
+pub trait PersistableSegmentStorageProvider: SegmentStorageProvider {
     const STABLE_TAG: &'static str;
 
     fn stable_tag(&self) -> &'static str;
