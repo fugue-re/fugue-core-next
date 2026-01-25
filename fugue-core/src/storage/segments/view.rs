@@ -13,7 +13,7 @@ pub struct SegmentMappingView<'a> {
     storage: &'a SegmentStorage,
     mapping: &'a SegmentMapping,
     provider: &'a SegmentStorageDescriptor,
-    submap: SegmentSubMapping,
+    submap: &'a SegmentSubMapping,
     mapping_version: u64,
 }
 
@@ -22,7 +22,7 @@ impl<'a> SegmentMappingView<'a> {
         storage: &'a SegmentStorage,
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
-        submap: SegmentSubMapping,
+        submap: &'a SegmentSubMapping,
     ) -> Self {
         Self {
             storage,

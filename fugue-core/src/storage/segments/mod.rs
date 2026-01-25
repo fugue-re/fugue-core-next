@@ -1137,8 +1137,7 @@ impl SegmentStorage {
 
         let mapping_view = bank
             .find_containing(addr)
-            .ok_or(SegmentStorageError::InvalidAddress)?
-            .to_owned();
+            .ok_or(SegmentStorageError::InvalidAddress)?;
 
         let mapping = self
             .mappings
@@ -1173,7 +1172,7 @@ impl SegmentStorage {
             .get(&bank_id)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let views = bank.iter().cloned().map(|submap| {
+        let views = bank.iter().map(|submap| {
             let mapping_ref = submap.mapping_ref();
             let mapping = self
                 .mappings
