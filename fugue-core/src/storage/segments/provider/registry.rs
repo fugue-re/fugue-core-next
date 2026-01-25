@@ -23,10 +23,10 @@ type FromStorageFn = fn(
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
 pub struct SegmentStorageProviderEntry {
-    pub type_id: TypeId,
-    pub stable_tag: &'static str,
-    pub from_segment_range: Option<FromSegmentRangeFn>,
-    pub from_storage: Option<FromStorageFn>,
+    type_id: TypeId,
+    stable_tag: &'static str,
+    from_segment_range: FromSegmentRangeFn,
+    from_storage: Option<FromStorageFn>,
 }
 
 impl SegmentStorageProviderEntry {
@@ -37,14 +37,14 @@ impl SegmentStorageProviderEntry {
     ) -> Self {
         Self::new_with::<T>(
             stable_tag,
-            Some(from_segment_range),
+            from_segment_range,
             Some(from_storage),
         )
     }
 
     pub const fn new_with<T: 'static>(
         stable_tag: &'static str,
-        from_segment_range: Option<FromSegmentRangeFn>,
+        from_segment_range: FromSegmentRangeFn,
         from_storage: Option<FromStorageFn>,
     ) -> Self {
         Self {
@@ -103,13 +103,7 @@ impl SegmentStorageProviderRegistry {
             SegmentStorageError::backing_with(format!("unknown provider tag: {tag}"))
         })?;
 
-        let factory = entry.from_segment_range.ok_or_else(|| {
-            SegmentStorageError::backing_with(format!(
-                "provider '{tag}' does not support from_segment_range"
-            ))
-        })?;
-
-        factory(start, end, attributes)
+        (entry.from_segment_range)(start, end, attributes)
     }
 
     pub fn from_storage(
