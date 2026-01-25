@@ -127,6 +127,7 @@ impl ProcessorSpec {
         })
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str<S: AsRef<str>>(input: S) -> Result<Self, DeserialiseError> {
         let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::Xml)?;
 

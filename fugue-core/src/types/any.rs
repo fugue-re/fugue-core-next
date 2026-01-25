@@ -30,26 +30,8 @@ impl Any {
     //
     // Now `a.as_ref()` and `a.take()` return references to a dead String.
     pub(crate) unsafe fn new<T>(t: T) -> Self {
-        let value: Value;
-        let drop: unsafe fn(&mut Value);
         let type_id = typeid::of::<T>();
-
-        if is_small::<T>() {
-            let mut inline = [MaybeUninit::uninit(); 2];
-            unsafe { ptr::write(inline.as_mut_ptr().cast::<T>(), t) };
-            value = Value { inline };
-            unsafe fn inline_drop<T>(value: &mut Value) {
-                unsafe { ptr::drop_in_place(value.inline.as_mut_ptr().cast::<T>()) }
-            }
-            drop = inline_drop::<T>;
-        } else {
-            let ptr = Box::into_raw(Box::new(t)).cast::<()>();
-            value = Value { ptr };
-            unsafe fn ptr_drop<T>(value: &mut Value) {
-                mem::drop(unsafe { Box::from_raw(value.ptr.cast::<T>()) });
-            }
-            drop = ptr_drop::<T>;
-        }
+        let (value, drop) = Self::make_value_and_drop::<T>(t);
 
         Any {
             value,
@@ -58,10 +40,27 @@ impl Any {
         }
     }
 
+    fn make_value_and_drop<T>(t: T) -> (Value, unsafe fn(&mut Value)) {
+        if is_small::<T>() {
+            let mut inline = [MaybeUninit::uninit(); 2];
+            unsafe { ptr::write(inline.as_mut_ptr().cast::<T>(), t) };
+            unsafe fn inline_drop<T>(value: &mut Value) {
+                unsafe { ptr::drop_in_place(value.inline.as_mut_ptr().cast::<T>()) }
+            }
+            (Value { inline }, inline_drop::<T>)
+        } else {
+            let ptr = Box::into_raw(Box::new(t)).cast::<()>();
+            unsafe fn ptr_drop<T>(value: &mut Value) {
+                mem::drop(unsafe { Box::from_raw(value.ptr.cast::<T>()) });
+            }
+            (Value { ptr }, ptr_drop::<T>)
+        }
+    }
+
     // This is unsafe -- caller is responsible that T is the correct type.
     pub(crate) unsafe fn take<T>(mut self) -> T {
         if self.type_id != typeid::of::<T>() {
-            self.invalid_cast_to::<T>();
+            self.invalid_cast_to();
         }
 
         if is_small::<T>() {
@@ -77,7 +76,7 @@ impl Any {
         }
     }
 
-    fn invalid_cast_to<T>(&self) -> ! {
+    fn invalid_cast_to(&self) -> ! {
         panic!("invalid cast");
     }
 }

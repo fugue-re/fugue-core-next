@@ -81,8 +81,8 @@ impl<'a> Shellcode<'a> {
         attributes.set_attr(ATTRIBUTE_ENTRY_POINT, address);
 
         Ok(Self {
-            address: address.into(),
-            bytes: bytes.into(),
+            address,
+            bytes,
             arch,
             metadata,
             attributes,

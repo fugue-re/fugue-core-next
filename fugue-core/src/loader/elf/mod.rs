@@ -310,7 +310,7 @@ impl ElfSymbolData {
 
             let mut properties = kind;
 
-            if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
+            if is_import && (!is_object || st_type == STT_NOTYPE) {
                 properties |= SymbolProperties::EXTERN;
             } else if is_export {
                 properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
@@ -365,7 +365,7 @@ impl ElfSymbolData {
                 SymbolProperties::NONE
             };
 
-            if (is_import && !is_object) || (is_object && is_import && st_type == STT_NOTYPE) {
+            if is_import && (!is_object || st_type == STT_NOTYPE) {
                 Some((index, sym, kind | SymbolProperties::EXTERN))
             } else if is_export {
                 Some((
@@ -382,10 +382,11 @@ impl ElfSymbolData {
                 None
             }
         }) {
-            let addr = kind
-                .is_extern()
-                .then(|| extern_segm.add_extern())
-                .unwrap_or(sym.address().into()); // FIXME: this needs to be mapped, see above.
+            let addr = if kind.is_extern() {
+                extern_segm.add_extern()
+            } else {
+                sym.address().into()
+            }; // FIXME: this needs to be mapped, see above.
             let sym = sym.name().ok();
 
             symbols.insert(
@@ -485,7 +486,7 @@ pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<
         name: sect
             .name()
             .ok()
-            .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Borrowed(name)),
+            .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
         address,
         properties: elf_section_properties(sect),
         bytes,
@@ -526,17 +527,13 @@ pub fn elf_segment<'a>(segm: &impl ObjectSegment<'a>) -> Option<LoadableSegment<
 pub fn elf_sections<'a>(
     elf: &'a impl Object<'a>,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    elf.sections()
-        .into_iter()
-        .filter_map(|sect| elf_section(&sect))
+    elf.sections().filter_map(|sect| elf_section(&sect))
 }
 
 pub fn elf_segments<'a>(
     elf: &'a impl Object<'a>,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    elf.segments()
-        .into_iter()
-        .filter_map(|segm| elf_segment(&segm))
+    elf.segments().filter_map(|segm| elf_segment(&segm))
 }
 
 pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
@@ -598,7 +595,7 @@ where
         let Some(externs) = self.extern_segm.take().filter(|e| !e.is_empty()) else {
             return Ok(None);
         };
-        let extern_size = externs.size() as usize;
+        let extern_size = externs.size();
         let extern_padding = externs.aligned_template_size() - externs.template().len();
 
         let address = externs.address();
@@ -651,7 +648,7 @@ where
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
 
-        while let Some(sect) = self.sects.next() {
+        for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
                 continue;
             };
@@ -716,7 +713,7 @@ where
                 name: sect
                     .name()
                     .ok()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Borrowed(name)),
+                    .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
@@ -809,7 +806,7 @@ where
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
 
-        while let Some(sect) = self.sects.next() {
+        for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
                 continue;
             };
@@ -856,7 +853,7 @@ where
                 name: sect
                     .name()
                     .ok()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Borrowed(name)),
+                    .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
                 address,
                 properties: elf_section_properties(&sect),
                 bytes,
@@ -884,7 +881,7 @@ where
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
 
-        while let Some(segm) = self.segms.next() {
+        for segm in self.segms.by_ref() {
             let size = segm.size();
 
             if segm.size() == 0 {

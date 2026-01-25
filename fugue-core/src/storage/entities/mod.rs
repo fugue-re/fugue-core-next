@@ -244,7 +244,7 @@ impl<'a> EntityTransactionalWriter<'a> {
 
         let encoded = BytesOrSlice::from(encoded);
 
-        self.inner.insert(&*key, encoded)
+        self.inner.insert(&key, encoded)
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {

@@ -60,6 +60,16 @@ where
     passes: IndexMap<String, Box<dyn AnalysisPass<P, S> + 'static>>,
 }
 
+impl<P, S> Default for AnalysisManager<P, S>
+where
+    P: ProjectStorageProvider,
+    S: 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<P, S> AnalysisManager<P, S>
 where
     P: ProjectStorageProvider,
@@ -161,7 +171,7 @@ where
         if let Some(pass) = self.passes.get_mut(pass_name) {
             pass.analyse_with(project, state)
         } else {
-            Err(AnalysisError::PassNotFound(pass_name.to_string()))
+            Err(AnalysisError::PassNotFound(pass_name.to_owned()))
         }
     }
 }
@@ -264,6 +274,16 @@ where
         let mut group = AnalysisGroup::new();
         group.add_passes("pass", iter);
         group
+    }
+}
+
+impl<P, S> Default for AnalysisGroup<P, S>
+where
+    P: ProjectStorageProvider,
+    S: 'static,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -438,8 +458,8 @@ where
         self.pass.as_mut().downcast_mut::<T>()
     }
 
-    pub fn condition(&self) -> &Box<dyn AnalysisCondition<P, S> + 'static> {
-        &self.condition
+    pub fn condition(&self) -> &(dyn AnalysisCondition<P, S> + 'static) {
+        &*self.condition
     }
 
     pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<P, S> + 'static> {
@@ -517,8 +537,8 @@ where
         self.pass.as_mut().downcast_mut::<T>()
     }
 
-    pub fn condition(&self) -> &Box<dyn AnalysisCondition<P, S> + 'static> {
-        &self.condition
+    pub fn condition(&self) -> &(dyn AnalysisCondition<P, S> + 'static) {
+        &*self.condition
     }
 
     pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<P, S> + 'static> {

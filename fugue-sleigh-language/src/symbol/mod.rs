@@ -1,4 +1,5 @@
 pub mod sub_table;
+#[allow(clippy::module_inception)]
 pub mod symbol;
 pub mod symbol_scope;
 pub mod symbol_table;

@@ -77,6 +77,7 @@ impl<'a> PartialEq for BytesOrSlice<'a> {
 
 impl<'a> Eq for BytesOrSlice<'a> {}
 
+#[allow(clippy::non_canonical_partial_ord_impl)]
 impl<'a> PartialOrd for BytesOrSlice<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.as_slice().partial_cmp(other.as_slice())

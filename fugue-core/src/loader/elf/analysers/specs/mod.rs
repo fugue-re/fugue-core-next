@@ -2,7 +2,7 @@ use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::core::patterns::FunctionRecoveryPatternMatcher;
 use crate::arch::Arch;
 
-pub const X86_64_GCC: &'static str = ""; // include_str!("./x86_64_gcc.yml");
+pub const X86_64_GCC: &str = ""; // include_str!("./x86_64_gcc.yml");
 
 pub(crate) fn configure_x86_64_analyser(
     _arch: &Arch,

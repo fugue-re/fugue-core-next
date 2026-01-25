@@ -169,6 +169,10 @@ impl CodeBlock {
         self.len as _
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn range(&self) -> Range<Address> {
         self.address()..self.next_address()
     }

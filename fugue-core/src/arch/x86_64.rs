@@ -79,6 +79,7 @@ impl ArchT for X86_64 {
 }
 
 impl X86_64 {
+    #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
     }
@@ -89,6 +90,7 @@ struct X86_64Disassembler {
 }
 
 impl X86_64Disassembler {
+    #[allow(clippy::new_ret_no_self)]
     fn new() -> Disassembler {
         Disassembler::new(Self {
             decoder: InstDecoder::default(),

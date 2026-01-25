@@ -318,6 +318,10 @@ impl Insn {
         self.length as _
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
     pub fn iter_targets<'a>(
         &'a self,
     ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
@@ -517,9 +521,9 @@ impl InsnTarget {
 
         let nlocation = |i: u16| -> Location {
             if i >= op_count {
-                Location::new(naddress.clone(), i - op_count)
+                Location::new(naddress, i - op_count)
             } else {
-                Location::new(address.clone(), i)
+                Location::new(address, i)
             }
         };
 

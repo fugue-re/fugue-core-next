@@ -185,10 +185,8 @@ impl FunctionDiscoveryContext {
         let avail = segments
             .current_bank()
             .iter()
-            .filter_map(|segm| {
-                (segm.properties().is_executable() && !segm.properties().is_external())
-                    .then(|| segm.range_inclusive())
-            })
+            .filter(|segm| segm.properties().is_executable() && !segm.properties().is_external())
+            .map(|segm| segm.range_inclusive())
             .collect::<AddressRangeSet>();
 
         Ok(avail.difference(&covered))
@@ -254,7 +252,7 @@ impl FunctionStructuringContext {
             self.removed_functions.remove(&address);
         }
 
-        self.pending_functions.insert(address.into(), function);
+        self.pending_functions.insert(address, function);
 
         existing
     }
@@ -298,6 +296,15 @@ impl FunctionStructuringContext {
         if self.pending_functions.contains_key(&address) {
             self.committed_functions.insert(address);
         }
+    }
+}
+
+impl<P> Default for FunctionRecovery<P>
+where
+    P: ProjectStorageProvider,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -656,10 +663,7 @@ where
                 if let Err(e) = function.commit(ftable, cbtable) {
                     tracing::debug!("failed to commit function at {f}: {e}");
 
-                    return Err(AnalysisError::pass_failed(
-                        "function-recovery",
-                        FunctionRecoveryError::from(e),
-                    ));
+                    return Err(AnalysisError::pass_failed("function-recovery", e));
                 }
             }
 
@@ -684,7 +688,7 @@ where
             failures = context.failures;
             functions = context.functions;
 
-            let _ = result?;
+            result?;
 
             if self.candidates.is_empty() {
                 break;
@@ -704,10 +708,7 @@ where
                 if let Err(e) = function.commit(ftable, cbtable) {
                     tracing::debug!("failed to commit function at {address}: {e}");
 
-                    return Err(AnalysisError::pass_failed(
-                        "function-recovery",
-                        FunctionRecoveryError::from(e),
-                    ));
+                    return Err(AnalysisError::pass_failed("function-recovery", e));
                 }
             }
         }

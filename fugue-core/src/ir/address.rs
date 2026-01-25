@@ -10,7 +10,7 @@ use crate::lifter::{ContextSet, Language};
 use crate::types::Confidence;
 
 #[derive(
-    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
+    Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
 )]
 #[repr(transparent)]
 pub struct Address(u64);
@@ -48,12 +48,6 @@ impl AsRef<Address> for Address {
 impl AsRef<u64> for Address {
     fn as_ref(&self) -> &u64 {
         &self.0
-    }
-}
-
-impl Default for Address {
-    fn default() -> Self {
-        Self(0)
     }
 }
 

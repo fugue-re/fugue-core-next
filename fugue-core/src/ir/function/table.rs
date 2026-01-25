@@ -113,7 +113,7 @@ impl FunctionTableT for IndexedFunctionTable {
 
         if reuse {
             self.free_ids.pop();
-            self.functions[id.index() as usize] = nf;
+            self.functions[id.index()] = nf;
         } else {
             self.functions.push(nf);
         }
@@ -143,7 +143,7 @@ impl FunctionTableT for IndexedFunctionTable {
             return false;
         };
 
-        let _ = mem::take(&mut self.functions[id.index() as usize]);
+        let _ = mem::take(&mut self.functions[id.index()]);
         self.free_ids.push(id);
 
         true
@@ -159,13 +159,13 @@ impl FunctionTableT for IndexedFunctionTable {
 
     fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
         self.functions
-            .get(id.index() as usize)
+            .get(id.index())
             .filter(|f| f.id().is_valid())
     }
 
     fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
         self.functions
-            .get_mut(id.index() as usize)
+            .get_mut(id.index())
             .filter(|f| f.id().is_valid())
     }
 

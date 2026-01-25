@@ -99,7 +99,7 @@ impl FunctionRecoveryPatternMatcher {
             let (range, segm) = if let Some(segm) = current_segment.as_ref()
                 && segm.contains(current_start)
             {
-                let match_end = calculate_end(&*segm);
+                let match_end = calculate_end(segm);
                 let range = current_start..=match_end;
 
                 current_start = match_end + 1usize;
@@ -157,7 +157,7 @@ where
         for gap in gaps.ranges() {
             Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
-                    for (range, ctx, confidence) in pat.matches(&*bytes) {
+                    for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = *gap.start() + range.start;
 
                         if arch.canonicalise_address(start).is_none() {

@@ -78,7 +78,7 @@ where
             attr.parse::<A>()
                 .map_err(|_| Error::custom("cannot parse attribute"))?
         } else {
-            return Err(Error::custom(format!("expected attribute")))?;
+            return Err(Error::custom("expected attribute"))?;
         };
 
         let val = map.next_value::<V>()?;
@@ -152,19 +152,14 @@ where
     AttrWithVal(AttrWithVal<A, V>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GroupKind {
+    #[default]
     All,
     Any,
     NotAll,
     NotAny,
-}
-
-impl Default for GroupKind {
-    fn default() -> Self {
-        GroupKind::All
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

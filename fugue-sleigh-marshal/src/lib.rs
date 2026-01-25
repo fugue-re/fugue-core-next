@@ -487,7 +487,7 @@ impl PackedDecoder {
     }
 
     fn read_integer(&mut self, len: usize) -> Result<u64, MarshalError> {
-        let mut res: u64 = 0;
+        let mut res = 0u64;
         for _ in 0..len {
             res <<= packed_format::RAWDATA_BITSPERBYTE;
             let byte = self.get_next_byte()?;

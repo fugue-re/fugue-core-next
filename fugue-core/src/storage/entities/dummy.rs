@@ -25,7 +25,7 @@ pub struct DummyEntityStorage;
 
 impl DummyEntityStorage {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 

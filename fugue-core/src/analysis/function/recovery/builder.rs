@@ -317,9 +317,7 @@ impl FunctionBuilderContext {
                         // for this we mark instructions that appear in multiple blocks as starts
                         // so they're considered cut points when performing block structuring.
                         entry.get_mut().mark_maybe_taken();
-                        self.contexts
-                            .entry(address)
-                            .or_insert_with(ContextSet::default);
+                        self.contexts.entry(address).or_default();
                         continue 'outer;
                     }
                 };

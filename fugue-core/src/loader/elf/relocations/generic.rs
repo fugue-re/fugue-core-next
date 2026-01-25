@@ -5,7 +5,7 @@ use crate::loader::LoadableSegment;
 
 use super::ElfSegmentRelocator;
 
-impl<'data, 'file, 'segments, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
+impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
@@ -65,7 +65,6 @@ where
             }
             _ => {
                 tracing::warn!("unsupported relocation kind {reloc_type:?}");
-                return;
             }
         }
     }

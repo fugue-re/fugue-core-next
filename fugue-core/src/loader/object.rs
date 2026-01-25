@@ -169,7 +169,7 @@ impl Loadable for Object<'_> {
         // NOTE: we need to apply relocations
         // NOTE: we need to make a mapping of externs
 
-        fallible_iterator::convert(view.segments().into_iter().filter_map(|segm| {
+        fallible_iterator::convert(view.segments().filter_map(|segm| {
             if segm.size() == 0 {
                 return None;
             }

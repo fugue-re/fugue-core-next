@@ -148,7 +148,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_function_blocks(&mut self, max: usize) {
-        self.max_function_blocks = max.min(DEFAULT_MAX_FUNCTION_SIZE).max(1);
+        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_SIZE);
     }
 
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
@@ -161,7 +161,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_block_insns(&mut self, max: usize) {
-        self.max_block_insns = max.min(DEFAULT_MAX_BLOCK_SIZE).max(1);
+        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_SIZE);
     }
 
     pub fn with_max_block_insns(mut self, max: usize) -> Self {
