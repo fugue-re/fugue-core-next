@@ -8,8 +8,6 @@ use crate::storage::SegmentStorageError;
 pub mod analysis;
 pub use analysis::FunctionRecovery;
 
-pub mod core;
-
 pub mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
 
@@ -18,6 +16,9 @@ pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
 pub mod ir;
 pub use ir::{InsnEntry, PartialCodeBlock, PartialFunction};
+
+pub mod patterns;
+pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
 pub mod translator;
 pub use translator::Translator;

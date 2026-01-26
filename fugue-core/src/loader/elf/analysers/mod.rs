@@ -1,5 +1,5 @@
 use crate::analysis::AnalysisError;
-use crate::analysis::function::recovery::core::patterns::FunctionRecoveryPatternMatcher;
+use crate::analysis::function::recovery::FunctionRecoveryPatternMatcher;
 use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
 use crate::storage::ProjectStorageProvider;
