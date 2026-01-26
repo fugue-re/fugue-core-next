@@ -234,7 +234,7 @@ impl SqliteEntityStorage<PERSISTENT> {
         let manager = SqliteConnectionManager::file(&db_path);
         let pool = Pool::builder()
             .max_size(DEFAULT_POOL_SIZE)
-            .connection_customizer(Box::new(SqliteConnectionCustomiser::default()))
+            .connection_customizer(Box::new(SqliteConnectionCustomiser))
             .build(manager)
             .map_err(SqliteEntityStorageError::Pool)?;
 
@@ -529,6 +529,7 @@ struct SqliteEntityKeyBytesIterator<'a> {
 }
 
 impl<'a> SqliteEntityKeyBytesIterator<'a> {
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         pool: &'_ Pool<SqliteConnectionManager>,
         prefix: EntityKeyPrefix,
@@ -589,6 +590,7 @@ struct SqliteEntityBytesIterator<'a> {
 }
 
 impl<'a> SqliteEntityBytesIterator<'a> {
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         pool: &Pool<SqliteConnectionManager>,
         prefix: EntityKeyPrefix,
@@ -641,6 +643,7 @@ struct SqliteEntityBytesAsIterator<'a, T> {
 }
 
 impl<'a, T: 'a> SqliteEntityBytesAsIterator<'a, T> {
+    #[allow(clippy::new_ret_no_self)]
     fn new<F>(
         pool: &Pool<SqliteConnectionManager>,
         prefix: EntityKeyPrefix,
@@ -698,6 +701,7 @@ struct SqliteEntityBytesBulkInserter<'a, const P: StoragePersistence> {
 }
 
 impl<'a, const P: StoragePersistence> SqliteEntityBytesBulkInserter<'a, P> {
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         storage: &'a SqliteEntityStorage<P>,
     ) -> Result<EntityBytesBulkInserter<'a>, EntityStorageError> {
@@ -733,10 +737,8 @@ impl<'a, const P: StoragePersistence> SqliteEntityBytesBulkInserter<'a, P> {
 
 impl<const P: StoragePersistence> Drop for SqliteEntityBytesBulkInserter<'_, P> {
     fn drop(&mut self) {
-        if self.in_transaction {
-            if let Err(e) = self.conn.execute_batch("COMMIT") {
-                tracing::warn!("failed to flush batch to storage: {e}");
-            }
+        if self.in_transaction && let Err(e) = self.conn.execute_batch("COMMIT") {
+            tracing::warn!("failed to flush batch to storage: {e}");
         }
     }
 }
@@ -782,6 +784,7 @@ struct SqliteEntityReader<'a, const P: StoragePersistence> {
 }
 
 impl<'a, const P: StoragePersistence> SqliteEntityReader<'a, P> {
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         storage: &'a SqliteEntityStorage<P>,
     ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
@@ -844,6 +847,7 @@ struct SqliteEntityWriter<'a, const P: StoragePersistence> {
 }
 
 impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         storage: &'a SqliteEntityStorage<P>,
     ) -> Result<EntityBytesTransactionalWriter<'a>, EntityStorageError> {
@@ -860,10 +864,8 @@ impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
 
 impl<const P: StoragePersistence> Drop for SqliteEntityWriter<'_, P> {
     fn drop(&mut self) {
-        if !self.committed {
-            if let Err(e) = self.conn.execute_batch("ROLLBACK") {
-                tracing::warn!("failed to rollback transaction: {e}");
-            }
+        if !self.committed && let Err(e) = self.conn.execute_batch("ROLLBACK") {
+            tracing::warn!("failed to rollback transaction: {e}");
         }
     }
 }

@@ -138,14 +138,11 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             return Err(IndexedCodeBlockTableError::AddressMismatch);
         }
 
-        self.bounds
-            .entry(nblk.range())
-            .or_insert_with(IdSet::new)
-            .insert(id);
+        self.bounds.entry(nblk.range()).or_default().insert(id);
 
         if reuse {
             self.free_ids.pop();
-            self.blocks[id.index() as usize] = nblk;
+            self.blocks[id.index()] = nblk;
         } else {
             self.blocks.push(nblk);
         }

@@ -174,8 +174,8 @@ impl SegmentStorage {
 
         let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
-        let mut bank_providers: BTreeMap<u32, (SegmentBankId, SegmentStorageProviderId)> =
-            BTreeMap::new();
+        let mut bank_providers =
+            BTreeMap::<u32, (SegmentBankId, SegmentStorageProviderId)>::new();
 
         for (bank_idx, range) in bounds.iter() {
             let bank_id = if bank_idx == 0 {
@@ -328,22 +328,22 @@ impl SegmentStorage {
         let providers = self
             .providers
             .values()
-            .filter_map(|p| {
+            .filter(|p| {
                 SegmentStorageProviderRegistry::get()
-                    .get_by_tag(p.stable_tag())?
-                    .is_persistable()
-                    .then(|| {
-                        tracing::debug!(
-                            "persisting segment storage provider `{}` with tag `{}`",
-                            p.id(),
-                            p.stable_tag(),
-                        );
-                        ProviderMetadata {
-                            id: p.id(),
-                            stable_tag: p.stable_tag().to_owned(),
-                            permissions: p.permissions(),
-                        }
-                    })
+                    .get_by_tag(p.stable_tag())
+                    .is_some_and(|reg| reg.is_persistable())
+            })
+            .map(|p| {
+                tracing::debug!(
+                    "persisting segment storage provider `{}` with tag `{}`",
+                    p.id(),
+                    p.stable_tag(),
+                );
+                ProviderMetadata {
+                    id: p.id(),
+                    stable_tag: p.stable_tag().to_owned(),
+                    permissions: p.permissions(),
+                }
             })
             .collect::<Vec<_>>();
 

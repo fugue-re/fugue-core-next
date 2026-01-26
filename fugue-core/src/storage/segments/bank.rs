@@ -61,16 +61,10 @@ impl SegmentBank {
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
 
-            if view.start() < start {
-                if let Some(left) = view.with_end(start) {
-                    self.submaps.insert(left.range(), left);
-                }
-            }
-
-            if view.last() > last {
-                if let Some(right) = view.with_start(end) {
-                    self.submaps.insert(right.range(), right);
-                }
+            if view.start() < start && let Some(left) = view.with_end(start) {
+                self.submaps.insert(left.range(), left);
+            } else if view.last() > last && let Some(right) = view.with_start(end) {
+                self.submaps.insert(right.range(), right);
             }
         }
 
@@ -179,10 +173,8 @@ impl SegmentBank {
                 if let Some(left) = view.with_end(range_start) {
                     self.submaps.insert(left.range(), left);
                 }
-            }
-
-            // preserve the portion after the rebuild range
-            if view.last() > range_last {
+            } else if view.last() > range_last {
+                // preserve the portion after the rebuild range
                 if let Some(right) = view.with_start(range_end) {
                     self.submaps.insert(right.range(), right);
                 }

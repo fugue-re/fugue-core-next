@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use bitflags::bitflags;
 
@@ -61,11 +62,8 @@ impl From<FunctionProperties> for Vec<FunctionProperty> {
     fn from(value: FunctionProperties) -> Self {
         let mut props = Vec::new();
         for prop in value.iter() {
-            match prop {
-                FunctionProperties::NON_RETURNING => {
-                    props.push(FunctionProperty::NonReturning);
-                }
-                _ => (),
+            if prop == FunctionProperties::NON_RETURNING {
+                props.push(FunctionProperty::NonReturning);
             }
         }
         props
@@ -150,7 +148,7 @@ impl<'de> Deserialize<'de> for FunctionStub {
     {
         let source = String::deserialize(deserializer)?;
         let ast =
-            CodeBlock::parse(&source).map_err(|e| <D::Error as serde::de::Error>::custom(e))?;
+            CodeBlock::parse(&source).map_err(<D::Error as serde::de::Error>::custom)?;
 
         Ok(Self { source, ast })
     }
@@ -174,7 +172,8 @@ impl FunctionStub {
         &self.source
     }
 
-    pub fn to_pcode<'ir>(
+    #[allow(clippy::result_large_err)]
+    pub fn to_pcode(
         &self,
         language: &'static Language,
     ) -> Result<Vec<PCodeOp>, IRBuilderError> {
@@ -289,9 +288,17 @@ pub enum FunctionSpecError {
     ReadFile(PathBuf, io::Error),
 }
 
+impl FromStr for FunctionSpecs {
+    type Err = FunctionSpecError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_yaml::from_str(s).map_err(FunctionSpecError::Parse)
+    }
+}
+
 impl FunctionSpecs {
-    pub fn from_str(input: impl AsRef<str>) -> Result<Self, FunctionSpecError> {
-        serde_yaml::from_str(input.as_ref()).map_err(FunctionSpecError::Parse)
+    pub fn parse(input: impl AsRef<str>) -> Result<Self, FunctionSpecError> {
+        input.as_ref().parse()
     }
 
     pub fn from_reader(reader: impl Read) -> Result<Self, FunctionSpecError> {

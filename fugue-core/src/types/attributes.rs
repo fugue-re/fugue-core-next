@@ -52,13 +52,13 @@ impl Encode for AttributeValue<&'_ serde_json::Value> {
             Value::Number(num) => {
                 if num.is_i64() {
                     AttributeKind::Signed.encode(encoder)?;
-                    i64::from(num.as_i64().unwrap()).encode(encoder)?
+                    num.as_i64().unwrap().encode(encoder)?
                 } else if num.is_u64() {
                     AttributeKind::Unsigned.encode(encoder)?;
-                    u64::from(num.as_u64().unwrap()).encode(encoder)?
+                    num.as_u64().unwrap().encode(encoder)?
                 } else {
                     AttributeKind::Float.encode(encoder)?;
-                    f64::from(num.as_f64().unwrap()).encode(encoder)?
+                    num.as_f64().unwrap().encode(encoder)?
                 }
             }
             Value::String(s) => {

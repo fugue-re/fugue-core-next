@@ -102,6 +102,7 @@ impl ArchT for Arm {
 }
 
 impl Arm {
+    #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
         Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchT>)
@@ -113,6 +114,7 @@ struct ArmDisassembler {
 }
 
 impl ArmDisassembler {
+    #[allow(clippy::new_ret_no_self)]
     fn new(thumb: bool) -> Disassembler {
         Disassembler::new(Self {
             decoder: if thumb {

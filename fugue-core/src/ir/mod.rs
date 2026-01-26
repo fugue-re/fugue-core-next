@@ -69,10 +69,7 @@ impl<T> UpperHex for Id<T> {
 
 impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
-        Id {
-            id: self.id,
-            _marker: std::marker::PhantomData,
-        }
+        *self
     }
 }
 

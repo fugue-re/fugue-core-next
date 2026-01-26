@@ -375,11 +375,12 @@ impl<'a> LoadableSegment<'a> {
     ) -> Option<()> {
         let is_le = self.properties.is_little_endian();
         let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
-        Some(if is_le {
-            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range)
+        if is_le {
+            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range);
         } else {
-            f(T::from_bytes::<BE>(range)).into_bytes::<BE>(range)
-        })
+            f(T::from_bytes::<BE>(range)).into_bytes::<BE>(range);
+        }
+        Some(())
     }
 
     /// Writes the value at the given offset, if the offset is valid.
@@ -387,11 +388,12 @@ impl<'a> LoadableSegment<'a> {
         let is_le = self.properties.is_little_endian();
         let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
 
-        Some(if is_le {
-            value.into_bytes::<LE>(range)
+        if is_le {
+            value.into_bytes::<LE>(range);
         } else {
-            value.into_bytes::<BE>(range)
-        })
+            value.into_bytes::<BE>(range);
+        }
+        Some(())
     }
 
     /// Returns a view of the segment's bytes from the given offset, if the offset and count
@@ -578,6 +580,10 @@ impl LoadableSegmentMetadata {
     pub fn len(&self) -> usize {
         self.size
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -677,7 +683,7 @@ pub trait Loadable {
     where
         P: ProjectStorageProvider,
     {
-        DefaultLoadableAnalysers::default()
+        DefaultLoadableAnalysers
     }
 }
 

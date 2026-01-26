@@ -289,7 +289,7 @@ where
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError> {
-        Self::try_from_file_with::<Loader>(path, attributes).map_err(ProjectError::from)
+        Self::try_from_file_with::<Loader>(path, attributes)
     }
 
     pub fn try_from_file_with<L>(

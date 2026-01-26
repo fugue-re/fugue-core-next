@@ -309,7 +309,7 @@ impl<'de> Deserialize<'de> for Pattern {
         D: Deserializer<'de>,
     {
         let s = Cow::<str>::deserialize(deserializer)?;
-        Self::from_str(&*s).map_err(<D::Error as serde::de::Error>::custom)
+        Self::from_str(&s).map_err(<D::Error as serde::de::Error>::custom)
     }
 }
 
@@ -510,8 +510,6 @@ impl PatternGroup {
         &'a self,
         bytes: &'a [u8],
     ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
-        let bytes = bytes.as_ref();
-
         self.post_patterns.patterns.iter().flat_map(|pattern| {
             pattern
                 .normalised_matcher()
@@ -599,8 +597,6 @@ impl PatternsWithContext {
         &'a self,
         bytes: &'a [u8],
     ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
-        let bytes = bytes.as_ref();
-
         self.patterns.iter().flat_map(|pattern| {
             pattern
                 .normalised_matcher()
@@ -618,7 +614,7 @@ impl PatternsWithContext {
 
 #[derive(Clone, Deserialize, Serialize)]
 struct PatternContextItem<'a> {
-    name: Cow<'a, String>,
+    name: Cow<'a, str>,
     value: u32,
 }
 

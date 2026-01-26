@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -43,9 +44,17 @@ struct PatternSpecsT<'a> {
     patterns: PatternOrGroupSeq<'a>,
 }
 
+impl FromStr for PatternSpecs {
+    type Err = PatternSpecError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_yaml::from_str(s).map_err(PatternSpecError::Parse)
+    }
+}
+
 impl PatternSpecs {
-    pub fn from_str(input: impl AsRef<str>) -> Result<Self, PatternSpecError> {
-        serde_yaml::from_str(input.as_ref()).map_err(PatternSpecError::Parse)
+    pub fn parse(input: impl AsRef<str>) -> Result<Self, PatternSpecError> {
+        input.as_ref().parse()
     }
 
     pub fn from_reader(reader: impl Read) -> Result<Self, PatternSpecError> {

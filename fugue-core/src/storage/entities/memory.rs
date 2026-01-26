@@ -26,11 +26,17 @@ pub struct InMemoryEntityStorage {
     data: DashMap<EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
 }
 
-impl InMemoryEntityStorage {
-    pub fn new() -> Self {
+impl Default for InMemoryEntityStorage {
+    fn default() -> Self {
         Self {
             data: DashMap::new(),
         }
+    }
+}
+
+impl InMemoryEntityStorage {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn extract_key_parts(key: &[u8]) -> Option<(EntityKeyPrefix, &[u8])> {
@@ -95,7 +101,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        let mut map = self.data.entry(prefix).or_insert_with(SkipMap::new);
+        let mut map = self.data.entry(prefix).or_default();
         map.insert(Bytes::copy_from_slice(key), value.into_bytes());
 
         Ok(())
@@ -292,7 +298,7 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
         let entry = self.batches.entry(prefix).or_default();
 
         if entry.len() >= BATCH_SIZE {
-            let mut dentry = self.inner.data.entry(prefix).or_insert_with(SkipMap::new);
+            let mut dentry = self.inner.data.entry(prefix).or_default();
             dentry.extend(
                 mem::take(entry)
                     .into_iter()
@@ -309,7 +315,7 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
         for (prefix, batch) in self.batches {
-            let mut map = self.inner.data.entry(prefix).or_insert_with(SkipMap::new);
+            let mut map = self.inner.data.entry(prefix).or_default();
             map.extend(
                 batch
                     .into_iter()

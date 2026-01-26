@@ -57,20 +57,14 @@ impl MemoryMappedSegmentStorageError {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        MemoryMappedSegmentStorageError::CreateProject(io::Error::new(
-            io::ErrorKind::Other,
-            e.into(),
-        ))
+        MemoryMappedSegmentStorageError::CreateProject(io::Error::other(e.into()))
     }
 
     pub fn create_project_mapping<E>(e: E) -> Self
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        MemoryMappedSegmentStorageError::CreateProjectMapping(io::Error::new(
-            io::ErrorKind::Other,
-            e.into(),
-        ))
+        MemoryMappedSegmentStorageError::CreateProjectMapping(io::Error::other(e.into()))
     }
 
     pub fn no_project_data(path: impl Into<PathBuf>) -> Self {
@@ -177,13 +171,11 @@ impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
 
         let data_path = self.project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        if data_path.exists() {
-            if let Err(e) = fs::remove_file(&data_path) {
-                tracing::error!(
-                    "failed to clean-up memory-mapped storage backing at {}: {e}",
-                    data_path.display()
-                );
-            }
+        if data_path.exists() && let Err(e) = fs::remove_file(&data_path) {
+            tracing::error!(
+                "failed to clean-up memory-mapped storage backing at {}: {e}",
+                data_path.display()
+            );
         }
     }
 }
@@ -211,7 +203,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let size = (end.offset() - start.offset() + 1) as u64;
+        let size = end.offset() - start.offset() + 1;
 
         if data_path.exists() {
             let existing = Self::open_existing(project)?;

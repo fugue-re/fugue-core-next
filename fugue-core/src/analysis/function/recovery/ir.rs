@@ -76,6 +76,10 @@ impl PartialCodeBlock {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn insns(&self) -> &[usize] {
         &self.insns
     }

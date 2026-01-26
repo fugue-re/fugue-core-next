@@ -409,12 +409,10 @@ impl<C> Decode<C> for IndexedSymbolTable {
 
         let names_len = usize::decode(decoder)?;
         let names = (0..names_len)
-            .into_iter()
             .map(|_| {
                 let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
                 let ids_len = usize::decode(decoder)?;
                 let ids = (0..ids_len)
-                    .into_iter()
                     .map(|_| Id::<Symbol>::decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((sym, ids))
@@ -423,12 +421,10 @@ impl<C> Decode<C> for IndexedSymbolTable {
 
         let addresses_len = usize::decode(decoder)?;
         let addresses = (0..addresses_len)
-            .into_iter()
             .map(|_| {
                 let addr = Address::decode(decoder)?;
                 let ids_len = usize::decode(decoder)?;
                 let ids = (0..ids_len)
-                    .into_iter()
                     .map(|_| Id::<Symbol>::decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((addr, ids))
@@ -458,12 +454,10 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedSymbolTable {
 
         let names_len = usize::borrow_decode(decoder)?;
         let names = (0..names_len)
-            .into_iter()
             .map(|_| {
                 let Compat(sym) = Compat::<Symbol>::borrow_decode(decoder)?;
                 let ids_len = usize::borrow_decode(decoder)?;
                 let ids = (0..ids_len)
-                    .into_iter()
                     .map(|_| Id::<Symbol>::borrow_decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((sym, ids))
@@ -472,12 +466,10 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedSymbolTable {
 
         let addresses_len = usize::borrow_decode(decoder)?;
         let addresses = (0..addresses_len)
-            .into_iter()
             .map(|_| {
                 let addr = Address::borrow_decode(decoder)?;
                 let ids_len = usize::borrow_decode(decoder)?;
                 let ids = (0..ids_len)
-                    .into_iter()
                     .map(|_| Id::<Symbol>::borrow_decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((addr, ids))
@@ -875,12 +867,14 @@ impl IndexedSymbolTable {
 
     // Iterator over all symbol entries in insertion order.
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
-        self.symbols.iter().enumerate().filter_map(|(i, entry)| {
-            entry.is_valid().then(|| {
+        self.symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_valid())
+            .map(|(i, entry)| {
                 let id = Id::from_index(i);
                 (id, entry)
             })
-        })
     }
 
     // Iterator over all symbol entries for a given selector.

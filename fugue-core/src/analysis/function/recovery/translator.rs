@@ -34,7 +34,7 @@ impl Translator {
             .disassembler
             .disassemble(address, bytes, self.lifter.context_mut())?;
 
-        if !insn.needs_lifting() && insn.len() != 0 {
+        if !insn.needs_lifting() && !insn.is_empty() {
             return Ok(insn);
         }
 

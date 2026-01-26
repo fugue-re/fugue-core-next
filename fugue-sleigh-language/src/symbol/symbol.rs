@@ -734,7 +734,7 @@ impl SymbolBuilder {
                     .map(|v| {
                         let mut s = v.attribute_string_opt("name", "\t");
                         if s == "_" {
-                            s = "\t".to_string()
+                            s = "\t".to_owned()
                         };
                         s
                     })

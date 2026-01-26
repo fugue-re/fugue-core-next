@@ -97,15 +97,14 @@ impl OverlayTree {
             .chunks
             .range((Bound::Excluded(addr), Bound::Unbounded))
             .next()
+            && next_start == chunk_end
         {
-            if next_start == chunk_end {
-                let next_chunk = self.chunks.remove(&next_start).unwrap();
-                let current = self.chunks.get_mut(&addr).unwrap();
-                let mut merged = Vec::with_capacity(current.data.len() + next_chunk.data.len());
-                merged.extend_from_slice(&current.data);
-                merged.extend_from_slice(&next_chunk.data);
-                current.data = Bytes::from(merged);
-            }
+            let next_chunk = self.chunks.remove(&next_start).unwrap();
+            let current = self.chunks.get_mut(&addr).unwrap();
+            let mut merged = Vec::with_capacity(current.data.len() + next_chunk.data.len());
+            merged.extend_from_slice(&current.data);
+            merged.extend_from_slice(&next_chunk.data);
+            current.data = Bytes::from(merged);
         }
 
         let prev_entry = self

@@ -106,7 +106,7 @@ impl StorageProviderError {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        Self::CreateProject(io::Error::new(io::ErrorKind::Other, e))
+        Self::CreateProject(io::Error::other(e))
     }
 
     pub fn cleanup_project_invalid_data<E>(e: E) -> Self
@@ -120,7 +120,7 @@ impl StorageProviderError {
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        Self::CleanupProject(io::Error::new(io::ErrorKind::Other, e))
+        Self::CleanupProject(io::Error::other(e))
     }
 
     pub fn requires_loadable(&self) -> bool {
@@ -399,9 +399,11 @@ impl CompressedPersistentStorage {
             })?;
 
             // if not less than 4 GiB, use large file options
-            let options = (size > u32::MAX as u64)
-                .then(|| options.large_file(true))
-                .unwrap_or(options);
+            let options = if size > u32::MAX as u64 {
+                options.large_file(true)
+            } else {
+                options
+            };
 
             zip.start_file_from_path(relative_path, options)
                 .map_err(StorageProviderError::cleanup_project)?;
@@ -421,11 +423,9 @@ impl CompressedPersistentStorage {
 impl StorageCleanupHandler for CompressedPersistentStorage {
     fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
         let result = self.cleanup_storage_aux();
-        if result.is_err()
-            && let path = self.path.with_extension("fdbz")
-            && path.exists()
-        {
-            if let Err(e) = fs::remove_file(&path) {
+        if result.is_err() {
+            let path = self.path.with_extension("fdbz");
+            if path.exists() && let Err(e) = fs::remove_file(&path) {
                 tracing::error!(
                     "failed to remove packed project file `{}`: {e}",
                     path.display()
