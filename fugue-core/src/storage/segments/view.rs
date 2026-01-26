@@ -3,14 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
-
-use super::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
-use super::provider::SegmentStorageDescriptor;
-use super::{SegmentStorage, SegmentStorageError};
+use crate::storage::segments::SegmentStorageError;
+use crate::storage::segments::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
+use crate::storage::segments::provider::SegmentStorageDescriptor;
 
 #[derive(Clone)]
 pub struct SegmentMappingView<'a> {
-    storage: &'a SegmentStorage,
     mapping: &'a SegmentMapping,
     provider: &'a SegmentStorageDescriptor,
     submap: &'a SegmentSubMapping,
@@ -19,13 +17,11 @@ pub struct SegmentMappingView<'a> {
 
 impl<'a> SegmentMappingView<'a> {
     pub(super) fn new(
-        storage: &'a SegmentStorage,
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
         submap: &'a SegmentSubMapping,
     ) -> Self {
         Self {
-            storage,
             mapping,
             provider,
             submap,
@@ -110,11 +106,9 @@ impl<'a> SegmentMappingView<'a> {
         let buf_slice = &mut buf[..read_size];
 
         let phys_offset = self.mapping.to_offset(addr);
-        self.provider.provider().read_bytes(phys_offset, buf_slice)?;
-
-        if self.storage.is_overlay_enabled() {
-            self.mapping.overlay().read(addr, buf_slice);
-        }
+        self.provider
+            .provider()
+            .read_bytes(phys_offset, buf_slice)?;
 
         Ok(read_size)
     }

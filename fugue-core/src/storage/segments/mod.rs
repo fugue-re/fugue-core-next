@@ -122,7 +122,6 @@ pub struct SegmentStorage {
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
     banks: BTreeMap<SegmentBankId, SegmentBank>,
     current_bank: SegmentBankId,
-    overlay_enabled: bool,
     fill_byte: u8,
     next_provider_id: SegmentStorageProviderId,
     next_mapping_id: SegmentMappingId,
@@ -145,7 +144,6 @@ impl SegmentStorage {
             mappings: BTreeMap::new(),
             banks,
             current_bank: DEFAULT_BANK_ID,
-            overlay_enabled: false,
             fill_byte: DEFAULT_FILL_BYTE,
             next_provider_id: DEFAULT_PROVIDER_ID,
             next_mapping_id: 0,
@@ -174,8 +172,7 @@ impl SegmentStorage {
 
         let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
-        let mut bank_providers =
-            BTreeMap::<u32, (SegmentBankId, SegmentStorageProviderId)>::new();
+        let mut bank_providers = BTreeMap::<u32, (SegmentBankId, SegmentStorageProviderId)>::new();
 
         for (bank_idx, range) in bounds.iter() {
             let bank_id = if bank_idx == 0 {
@@ -874,10 +871,6 @@ impl SegmentStorage {
 
             provider.provider().read_bytes(phys_offset, buf_slice)?;
 
-            if self.overlay_enabled {
-                mapping.overlay().read(current_addr, buf_slice);
-            }
-
             total_read += read_size;
             current_addr += read_size;
             remaining -= read_size;
@@ -970,28 +963,22 @@ impl SegmentStorage {
                 continue;
             }
 
-            if self.overlay_enabled {
-                mapping
-                    .overlay_mut()
-                    .write(current_addr, write_data.to_vec());
-            } else {
-                let phys_offset = mapping.to_offset(current_addr);
-                let provider_id = mapping.provider_id();
+            let phys_offset = mapping.to_offset(current_addr);
+            let provider_id = mapping.provider_id();
 
-                let provider = match self.providers.get_mut(&provider_id) {
-                    Some(p) => p,
-                    None => {
-                        current_addr += write_size;
-                        remaining -= write_size;
-                        write_offset += write_size;
-                        continue;
-                    }
-                };
+            let provider = match self.providers.get_mut(&provider_id) {
+                Some(p) => p,
+                None => {
+                    current_addr += write_size;
+                    remaining -= write_size;
+                    write_offset += write_size;
+                    continue;
+                }
+            };
 
-                provider
-                    .provider_mut()
-                    .write_bytes(phys_offset, write_data)?;
-            }
+            provider
+                .provider_mut()
+                .write_bytes(phys_offset, write_data)?;
 
             total_written += write_size;
             current_addr += write_size;
@@ -1035,55 +1022,6 @@ impl SegmentStorage {
         if self.write_bytes(addr, bytes)? != bytes.len() {
             return Err(SegmentStorageError::InvalidAddressRange);
         }
-        Ok(())
-    }
-
-    pub fn enable_overlay(&mut self, enabled: bool) {
-        self.overlay_enabled = enabled;
-    }
-
-    pub fn is_overlay_enabled(&self) -> bool {
-        self.overlay_enabled
-    }
-
-    pub fn commit_overlay(
-        &mut self,
-        mapping_id: SegmentMappingId,
-    ) -> Result<(), SegmentStorageError> {
-        let mapping = self
-            .mappings
-            .get_mut(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
-
-        let provider_id = mapping.provider_id();
-        let overlay_data = mem::take(mapping.overlay_mut());
-
-        let provider = self
-            .providers
-            .get_mut(&provider_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
-
-        for (addr, chunk) in overlay_data.iter() {
-            let mapping = self.mappings.get(&mapping_id).unwrap();
-            let phys_offset = mapping.to_offset(addr);
-            provider
-                .provider_mut()
-                .write_bytes(phys_offset, chunk.data())?;
-        }
-
-        Ok(())
-    }
-
-    pub fn clear_overlay(
-        &mut self,
-        mapping_id: SegmentMappingId,
-    ) -> Result<(), SegmentStorageError> {
-        let mapping = self
-            .mappings
-            .get_mut(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
-
-        mapping.overlay_mut().clear();
         Ok(())
     }
 
@@ -1148,12 +1086,7 @@ impl SegmentStorage {
             .get(&mapping.provider_id())
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        Ok(SegmentMappingView::new(
-            self,
-            mapping,
-            provider,
-            mapping_view,
-        ))
+        Ok(SegmentMappingView::new(mapping, provider, mapping_view))
     }
 
     pub fn iter_views(
@@ -1182,7 +1115,7 @@ impl SegmentStorage {
                 .get(&mapping.provider_id())
                 .expect("provider should exist");
 
-            SegmentMappingView::new(self, mapping, provider, submap)
+            SegmentMappingView::new(mapping, provider, submap)
         });
 
         Ok(views)

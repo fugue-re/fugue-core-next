@@ -2,9 +2,10 @@ use std::borrow::Cow;
 
 use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
+use crate::storage::segments::provider::{
+    SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
+};
 use crate::types::AttributeMap;
-
-use super::{SegmentStorageProvider, SegmentStorageProviderFromSegmentRange};
 
 #[derive(crate::SegmentStorageProvider)]
 #[provider(tag = "in-memory", persistent = false)]
