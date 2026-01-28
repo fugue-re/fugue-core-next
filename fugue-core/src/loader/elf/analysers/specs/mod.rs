@@ -1,5 +1,5 @@
 use crate::analysis::AnalysisError;
-use crate::analysis::function::recovery::core::patterns::FunctionRecoveryPatternMatcher;
+use crate::analysis::function::recovery::FunctionRecoveryPatternMatcher;
 use crate::arch::Arch;
 
 pub const X86_GCC: &'static str = include_str!("./x86-gcc.yml");

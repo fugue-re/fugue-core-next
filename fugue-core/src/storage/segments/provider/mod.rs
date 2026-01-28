@@ -4,9 +4,8 @@ use std::path::Path;
 
 use crate::ir::{Address, SegmentProperties};
 use crate::loader::Loadable;
+use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
-
-use super::SegmentStorageError;
 
 pub mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;

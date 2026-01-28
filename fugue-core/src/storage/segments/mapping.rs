@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
-
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
@@ -613,10 +612,7 @@ impl SegmentMappingBuilder {
         self.function_hints = function_hints.into();
     }
 
-    pub fn extend_function_hints(
-        &mut self,
-        function_hints: impl IntoIterator<Item = Address>,
-    ) {
+    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = Address>) {
         self.function_hints.extend(function_hints);
     }
 
