@@ -35,7 +35,7 @@ impl<'a, 'b> SymbolAdaptor<'a, 'b> {
         let limit = u16::try_from(limit).expect("limit fits in u16");
 
         quote! {
-            fugue_lifter_runtime::constructor::OperandFilter {
+            fugue_lifter_runtime::operand::OperandFilter {
                 pattern: #pvalue,
                 indices: &[#(#indices),*],
                 limit: #limit,

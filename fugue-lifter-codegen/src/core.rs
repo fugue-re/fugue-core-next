@@ -1078,7 +1078,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 #(#dtrees,)*
             ];
 
-            static OPERAND_FILTERS: &[fugue_lifter_runtime::constructor::OperandFilter] = &[
+            static OPERAND_FILTERS: &[fugue_lifter_runtime::operand::OperandFilter] = &[
                 #(#operand_filters,)*
             ];
 
@@ -1114,12 +1114,13 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
             impl fugue_lifter_runtime::ConstructorResolver for Instruction {
                 const ADDRESS_SIZE: usize = ADDRESS_SIZE;
+                const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
                 const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
                 const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
 
                 const CONSTRUCTORS: &'static [fugue_lifter_runtime::Constructor] = CONSTRUCTORS;
                 const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DECISION_TREES;
-                const OPERAND_FILTERS: &'static [fugue_lifter_runtime::constructor::OperandFilter] = OPERAND_FILTERS;
+                const OPERAND_FILTERS: &'static [fugue_lifter_runtime::operand::OperandFilter] = OPERAND_FILTERS;
                 const PATTERN_EXPRESSIONS: &'static [fugue_lifter_runtime::pattern::PatternOp] = PATTERN_EXPRESSIONS;
                 const SYMBOLS: &'static [fugue_lifter_runtime::symbol::Symbol] = SYMBOLS;
 
@@ -1220,6 +1221,37 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     if apply_commits {
                         state.apply_commits::<Instruction>();
                     }
+
+                    Some(length)
+                }
+            }
+
+            pub fn resolve_operands(
+                address: u64,
+                bytes: &[u8],
+                context: &mut fugue_lifter_runtime::LiftingContext,
+                operands: &mut fugue_lifter_runtime::Operands,
+            ) -> Option<usize> {
+                unsafe {
+                    let mut nop_issued = Vec::with_capacity(0);
+                    let mut state = context.state_for(address, bytes, &mut nop_issued)?;
+
+                    let ctor = resolve_instruction(&mut state)?;
+
+                    let buffer_limit = bytes.len();
+                    let length = state.len();
+
+                    if length == 0 || length > buffer_limit {
+                        return None;
+                    }
+
+                    ctor.resolve_handles::<Instruction>(&mut state)?;
+
+                    state.inputs.input.base_state();
+
+                    state.apply_commits::<Instruction>();
+
+                    state.operands::<Instruction>(operands)?;
 
                     Some(length)
                 }

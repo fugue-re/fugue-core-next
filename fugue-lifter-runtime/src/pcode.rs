@@ -9,6 +9,7 @@ use crate::constructor::{Constructor, ConstructorResolver};
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageFormatter};
+use crate::operand::Operands;
 use crate::template::construct_tpl;
 
 pub const MAX_LABELS: usize = 256;
@@ -290,6 +291,23 @@ impl<'a> LiftingContextState<'a> {
             unique_offset,
             issued: self.issued,
         })
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn operands<R: ConstructorResolver>(
+        &mut self,
+        operands: &mut Operands,
+    ) -> Option<()> {
+        self.inputs.base_state();
+
+        let ctor = &self.inputs.input.constructor();
+        ctor.operands::<R>(self, operands)?;
+
+        Some(())
     }
 
     /// # Safety

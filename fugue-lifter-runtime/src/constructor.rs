@@ -2,60 +2,17 @@ use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::pattern::{PatternExpression, PatternOp};
+use crate::operand::{Operand, OperandFilter, OperandHandleResolver, OperandResolver, Operands};
+use crate::pattern::PatternOp;
 use crate::pcode::LiftingContextState;
 use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
 use crate::template::{handle_tpl, ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 
 // pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
-
-pub enum OperandResolver {
-    None,
-    Constructor(u16),
-    Filter(u16),
-}
-
-pub struct OperandFilter {
-    pub pattern: PatternExpression,
-    pub indices: &'static [u16],
-    pub limit: u16,
-}
-
-impl OperandFilter {
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    #[inline]
-    pub unsafe fn validate<R: ConstructorResolver>(
-        &self,
-        input: &mut LiftingContextState,
-    ) -> Option<()> {
-        let index = u16::try_from(self.pattern.resolve::<R>(input)?).ok()?;
-        if index >= self.limit || self.indices.contains(&index) {
-            None
-        } else {
-            Some(())
-        }
-    }
-}
-
-pub enum OperandHandleResolver {
-    None,
-    Symbol(u16),
-    Expression(PatternExpression),
-}
-
-pub struct Operand {
-    pub resolver: OperandResolver,
-    pub handle_resolver: OperandHandleResolver,
-    pub offset_base: Option<usize>,
-    pub offset_rela: usize,
-    pub minimum_length: usize,
-}
-
 pub trait ConstructorResolver {
     const ADDRESS_SIZE: usize;
+    const CONSTANT_SPACE: u8;
     const DEFAULT_SPACE: u8;
     const UNIQUE_SPACE: u8;
 
@@ -90,7 +47,7 @@ pub struct Constructor {
     pub context_pre_actions: &'static [ContextPreAction],
     pub context_post_actions: &'static [ContextPostAction],
     pub operands: &'static [Operand],
-    pub result: Option<u16>, // HandleTpl
+    pub result: Option<u16>,       // HandleTpl
     pub build_action: Option<u16>, // ConstructTpl
     pub print_pieces: &'static [PrintPiece],
     pub first_whitespace: Option<usize>,
@@ -306,11 +263,10 @@ impl Constructor {
             }
         }
 
-        let Some(pieces) = self.print_pieces.get(
-            ..self
-                .first_whitespace
-                .unwrap_or(self.print_pieces.len()),
-        ) else {
+        let Some(pieces) = self
+            .print_pieces
+            .get(..self.first_whitespace.unwrap_or(self.print_pieces.len()))
+        else {
             return Ok(());
         };
 
@@ -429,5 +385,85 @@ impl Constructor {
             }
         }
         Ok(())
+    }
+
+    pub(crate) unsafe fn operands<R: ConstructorResolver>(
+        &self,
+        state: &mut LiftingContextState<'_>,
+        operands: &mut Operands,
+    ) -> Option<()> {
+        if let Some(index) = self.flow_through_index {
+            if matches!(
+                &self.operands[index].handle_resolver,
+                OperandHandleResolver::None
+            ) {
+                state.input().push_operand(index);
+                state.input().constructor().operands::<R>(state, operands)?;
+                state.input().pop_operand();
+                return Some(());
+            }
+        }
+
+        let Some(pieces) = self
+            .first_whitespace
+            .and_then(|start| self.print_pieces.get(start + 1..))
+        else {
+            return Some(());
+        };
+
+        for p in pieces {
+            if let PrintPiece::Operand(index) = p {
+                match &self.operands[*index as usize].handle_resolver {
+                    OperandHandleResolver::None => {
+                        let mut inner = Operands::new();
+                        state.input().push_operand(*index as usize);
+                        state
+                            .input()
+                            .constructor()
+                            .operands_inner::<R>(state, &mut inner)?;
+                        state.input().pop_operand();
+                        operands.append(inner);
+                    }
+                    OperandHandleResolver::Symbol(symbol) => {
+                        R::SYMBOLS[*symbol as usize].operands::<R>(state, operands);
+                    }
+                    OperandHandleResolver::Expression(expr) => {
+                        expr.operands::<R>(state, operands);
+                    }
+                }
+            }
+        }
+
+        Some(())
+    }
+
+    pub(crate) unsafe fn operands_inner<R: ConstructorResolver>(
+        &self,
+        state: &mut LiftingContextState<'_>,
+        operands: &mut Operands,
+    ) -> Option<()> {
+        for p in self.print_pieces {
+            if let PrintPiece::Operand(index) = p {
+                state.input().push_operand(*index as usize);
+                match &self.operands[*index as usize].handle_resolver {
+                    OperandHandleResolver::None => {
+                        let mut inner = Operands::new();
+                        state
+                            .input()
+                            .constructor()
+                            .operands_inner::<R>(state, &mut inner)?;
+                        operands.append(inner);
+                    }
+                    OperandHandleResolver::Symbol(symbol) => {
+                        R::SYMBOLS[*symbol as usize].operands::<R>(state, operands);
+                    }
+                    OperandHandleResolver::Expression(expr) => {
+                        expr.operands::<R>(state, operands);
+                    }
+                }
+                state.input().pop_operand();
+            }
+        }
+        Some(())
     }
 }
