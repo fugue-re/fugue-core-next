@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::context::ContextBitRange;
 use crate::lifter::LiftingContextFactory;
+use crate::operand::Operands;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::wrap_offset;
 
@@ -189,6 +190,7 @@ pub trait LanguageImpl {
     const USER_OP_BY_ID: fn(u16) -> Option<&'static str>;
 
     const RESOLVE: fn(u64, &[u8], &mut LiftingContext, bool) -> Option<usize>;
+    const OPERANDS: fn(u64, &[u8], &mut LiftingContext, &mut Operands) -> Option<usize>;
     const DISASSEMBLE: fn(u64, &[u8], &mut LiftingContext, &mut String) -> Option<usize>;
     const LIFT: fn(u64, &[u8], &mut LiftingContext, &mut Vec<PCodeOp>) -> Option<usize>;
 }
@@ -230,6 +232,7 @@ pub struct Language {
     user_op_by_id: fn(u16) -> Option<&'static str>,
 
     resolve: fn(u64, &[u8], &mut LiftingContext, bool) -> Option<usize>,
+    operands: fn(u64, &[u8], &mut LiftingContext, &mut Operands) -> Option<usize>,
     disassemble: fn(u64, &[u8], &mut LiftingContext, &mut String) -> Option<usize>,
     lift: fn(u64, &[u8], &mut LiftingContext, &mut Vec<PCodeOp>) -> Option<usize>,
 }
@@ -332,6 +335,7 @@ impl Language {
             user_op_by_id: L::USER_OP_BY_ID,
 
             resolve: L::RESOLVE,
+            operands: L::OPERANDS,
             disassemble: L::DISASSEMBLE,
             lift: L::LIFT,
         }
@@ -479,6 +483,16 @@ impl Language {
         apply_commits: bool,
     ) -> Option<usize> {
         (self.resolve)(address, bytes.as_ref(), context, apply_commits)
+    }
+
+    pub fn operands(
+        &self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        context: &mut LiftingContext,
+        operands: &mut Operands,
+    ) -> Option<usize> {
+        (self.operands)(address, bytes.as_ref(), context, operands)
     }
 
     pub fn disassemble(

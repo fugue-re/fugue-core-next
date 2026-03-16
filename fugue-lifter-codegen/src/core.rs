@@ -1226,11 +1226,12 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 }
             }
 
+            #[inline]
             pub fn resolve_operands(
                 address: u64,
                 bytes: &[u8],
                 context: &mut fugue_lifter_runtime::LiftingContext,
-                operands: &mut fugue_lifter_runtime::Operands,
+                operands: &mut fugue_lifter_runtime::operand::Operands,
             ) -> Option<usize> {
                 unsafe {
                     let mut nop_issued = Vec::with_capacity(0);
@@ -1439,6 +1440,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const USER_OP_BY_ID: fn(u16) -> Option<&'static str> = user_op::user_op_by_id;
 
                 const RESOLVE: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, bool) -> Option<usize> = resolve;
+                const OPERANDS: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut fugue_lifter_runtime::operand::Operands) -> Option<usize> = resolve_operands;
                 const DISASSEMBLE: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut String) -> Option<usize> = disassemble_to_string;
                 const LIFT: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut Vec<fugue_lifter_runtime::pcode::PCodeOp>) -> Option<usize> = lift;
             }
