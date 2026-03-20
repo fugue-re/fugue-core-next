@@ -21,7 +21,7 @@ use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::ProjectStorageProvider;
-use crate::storage::segments::bank::SegmentBankId;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -198,7 +198,7 @@ pub struct LoadableSegment<'a> {
     bytes: Cow<'a, [u8]>,          // Bytes of the segment
     mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
     function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
-    bank_index: SegmentBankId,                  // Bank index this segment belongs to
+    space_index: AddressSpaceId,                // Address space (by index) this segment belongs to
 }
 
 impl Display for LoadableSegment<'_> {
@@ -269,7 +269,7 @@ impl<'a> LoadableSegment<'a> {
             bytes: bytes.into(),
             mapping_hints: mapping_hints.into(),
             function_hints: function_hints.into(),
-            bank_index: Default::default(),
+            space_index: Default::default(),
         }
     }
 
@@ -494,16 +494,16 @@ impl<'a> LoadableSegment<'a> {
             bytes: self.bytes.into_owned().into(),
             mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
-            bank_index: self.bank_index,
+            space_index: self.space_index,
         }
     }
 
-    pub fn bank_index(&self) -> u32 {
-        self.bank_index
+    pub fn space_index(&self) -> u32 {
+        self.space_index
     }
 
-    pub fn with_bank_index(mut self, bank_index: u32) -> Self {
-        self.bank_index = bank_index;
+    pub fn with_space_index(mut self, space_index: u32) -> Self {
+        self.space_index = space_index;
         self
     }
 }

@@ -118,7 +118,7 @@ impl SegmentStorageProviderRegistry {
 
         let factory = entry.from_storage.ok_or_else(|| {
             SegmentStorageError::backing_with(format!(
-                "provider '{tag}' does not support from_storage"
+                "provider `{tag}` does not support from_storage"
             ))
         })?;
 
