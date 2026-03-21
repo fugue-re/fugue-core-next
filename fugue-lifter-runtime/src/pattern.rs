@@ -200,7 +200,7 @@ impl PatternExpression {
 
                     update_range(
                         &mut range,
-                        field_range(input, *byte_start, *bit_start, *bit_end, tsize),
+                        field_range(input, *byte_start, *bit_start, *bit_end, size as _),
                     );
 
                     stack.push(if *sign_bit {

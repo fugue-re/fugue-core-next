@@ -6,6 +6,7 @@ use crate::operand::{OperandValue, Operands};
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
+#[derive(Debug)]
 pub enum Symbol {
     Epsilon,
     Value {
@@ -106,6 +107,18 @@ impl Symbol {
                     }
                 }
             }
+            Self::ValueMapFilled {
+                pattern_value,
+                value_table,
+            } => {
+                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let value = *value_table.get(index as usize).expect("resolved");
+                if value < 0 {
+                    write!(writer, "-{:#x}", -(value as i128))?;
+                } else {
+                    write!(writer, "{:#x}", value)?;
+                }
+            }
             Self::Start { .. } => {
                 write!(writer, "{:#x}", state.address())?;
             }
@@ -115,7 +128,7 @@ impl Symbol {
             Self::Next2 { .. } => {
                 write!(writer, "{:#x}", state.next2_address().expect("resolved"))?;
             }
-            _ => unreachable!("this state should not be reachable"),
+            what => unreachable!("this state should not be reachable: {what:?}"),
         }
         Ok(())
     }
@@ -176,6 +189,16 @@ impl Symbol {
                     operands.push_with(value, range);
                 }
             }
+            Self::ValueMapFilled {
+                pattern_value,
+                value_table,
+            } => {
+                let (index, range) = pattern_value
+                    .resolve_with_range::<R>(state)
+                    .expect("resolved");
+                let value = *value_table.get(index as usize).expect("resolved");
+                operands.push_with(value, range);
+            }
             Self::Start { .. } => {
                 operands.push(state.address());
             }
@@ -185,7 +208,7 @@ impl Symbol {
             Self::Next2 { .. } => {
                 operands.push(state.next2_address().expect("resolved"));
             }
-            _ => unreachable!("this state should not be reachable"),
+            what => unreachable!("this state should not be reachable: {what:?}"),
         }
     }
 
