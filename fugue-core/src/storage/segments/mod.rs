@@ -16,18 +16,18 @@ use crate::loader::{Loadable, LoaderError};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
-pub mod bank;
 pub mod mapping;
 pub mod overlay;
 pub mod provider;
+pub mod space;
 pub mod view;
 
-use bank::{SegmentBank, SegmentBankId};
 use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind,
 };
 use provider::SegmentStorageProviderRegistry;
+use space::{AddressSpace, AddressSpaceId};
 use view::SegmentMappingView;
 
 pub use provider::{
@@ -40,7 +40,7 @@ pub use provider::{
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
-const DEFAULT_BANK_ID: SegmentBankId = 0;
+const DEFAULT_SPACE_ID: AddressSpaceId = 0;
 const DEFAULT_FILL_BYTE: u8 = 0;
 const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = 0;
 
@@ -90,8 +90,8 @@ struct ProviderMetadata {
 }
 
 #[derive(Encode, Decode)]
-struct BankMetadata {
-    id: SegmentBankId,
+struct AddressSpaceMetadata {
+    id: AddressSpaceId,
     mapping_ids: Vec<SegmentMappingId>,
 }
 
@@ -106,26 +106,26 @@ struct MappingMetadata {
     flags: SegmentMappingFlags,
     mapping_hints: BTreeMap<Address, ContextHint>,
     function_hints: BTreeSet<Address>,
-    bank_id: SegmentBankId,
+    space_id: AddressSpaceId,
     provider_id: SegmentStorageProviderId,
 }
 
 #[derive(Encode, Decode)]
 struct SegmentStorageMetadata {
     providers: Vec<ProviderMetadata>,
-    banks: Vec<BankMetadata>,
+    spaces: Vec<AddressSpaceMetadata>,
     mappings: Vec<MappingMetadata>,
 }
 
 pub struct SegmentStorage {
     providers: BTreeMap<SegmentStorageProviderId, SegmentStorageDescriptor>,
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
-    banks: BTreeMap<SegmentBankId, SegmentBank>,
-    current_bank: SegmentBankId,
+    spaces: BTreeMap<AddressSpaceId, AddressSpace>,
+    current_space: AddressSpaceId,
     fill_byte: u8,
     next_provider_id: SegmentStorageProviderId,
     next_mapping_id: SegmentMappingId,
-    next_bank_id: SegmentBankId,
+    next_space_id: AddressSpaceId,
 }
 
 impl Default for SegmentStorage {
@@ -136,18 +136,18 @@ impl Default for SegmentStorage {
 
 impl SegmentStorage {
     pub fn empty() -> Self {
-        let mut banks = BTreeMap::new();
-        banks.insert(DEFAULT_BANK_ID, SegmentBank::new(DEFAULT_BANK_ID));
+        let mut spaces = BTreeMap::new();
+        spaces.insert(DEFAULT_SPACE_ID, AddressSpace::new(DEFAULT_SPACE_ID));
 
         Self {
             providers: BTreeMap::new(),
             mappings: BTreeMap::new(),
-            banks,
-            current_bank: DEFAULT_BANK_ID,
+            spaces,
+            current_space: DEFAULT_SPACE_ID,
             fill_byte: DEFAULT_FILL_BYTE,
             next_provider_id: DEFAULT_PROVIDER_ID,
             next_mapping_id: 0,
-            next_bank_id: 1,
+            next_space_id: 1,
         }
     }
 
@@ -172,38 +172,40 @@ impl SegmentStorage {
 
         let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
-        let mut bank_providers = BTreeMap::<u32, (SegmentBankId, SegmentStorageProviderId)>::new();
+        let mut space_providers =
+            BTreeMap::<u32, (AddressSpaceId, SegmentStorageProviderId)>::new();
 
-        for (bank_idx, range) in bounds.iter() {
-            let bank_id = if bank_idx == 0 {
-                DEFAULT_BANK_ID
+        for (space_idx, range) in bounds.iter() {
+            let space_id = if space_idx == 0 {
+                DEFAULT_SPACE_ID
             } else {
-                storage.create_bank()
+                storage.create_space()
             };
 
             let provider = S::from_segment_range(range.start, range.end, attributes)?;
 
             let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
 
-            bank_providers.insert(
-                SegmentBankId::try_from(bank_idx).expect("bank index is convertable to a bank id"),
-                (bank_id, provider_id),
+            space_providers.insert(
+                AddressSpaceId::try_from(space_idx)
+                    .expect("space index is convertable to a space id"),
+                (space_id, provider_id),
             );
         }
 
         let mut siter = loader.segments();
 
         while let Some(segm) = siter.next()? {
-            let (bank_id, provider_id) = bank_providers
-                .get(&segm.bank_index())
+            let (space_id, provider_id) = space_providers
+                .get(&segm.space_index())
                 .copied()
-                .unwrap_or((DEFAULT_BANK_ID, DEFAULT_PROVIDER_ID));
+                .unwrap_or((DEFAULT_SPACE_ID, DEFAULT_PROVIDER_ID));
 
-            let range = &bounds[segm.bank_index() as usize];
+            let range = &bounds[segm.space_index() as usize];
             let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
 
             tracing::debug!(
-                "loading segment {} ({}-{}) at offset {physical_offset:#x} in bank {bank_id}",
+                "loading segment {} ({}-{}) at offset {physical_offset:#x} in space {space_id}",
                 segm.name(),
                 segm.address(),
                 segm.next_address()
@@ -221,7 +223,7 @@ impl SegmentStorage {
                 segm.mapping_hints().clone(),
                 segm.function_hints().clone(),
             )?;
-            storage.add_mapping_to_bank_top(bank_id, mapping_id)?;
+            storage.add_mapping_to_space_top(space_id, mapping_id)?;
         }
 
         if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
@@ -278,13 +280,13 @@ impl SegmentStorage {
             provider_map.insert(prov_meta.id, new_id);
         }
 
-        let mut bank_map = BTreeMap::new();
-        bank_map.insert(DEFAULT_BANK_ID, DEFAULT_BANK_ID);
+        let mut space_map = BTreeMap::new();
+        space_map.insert(DEFAULT_SPACE_ID, DEFAULT_SPACE_ID);
 
-        for bank_meta in &metadata.banks {
-            if bank_meta.id != DEFAULT_BANK_ID {
-                let new_id = storage.create_bank();
-                bank_map.insert(bank_meta.id, new_id);
+        for space_meta in &metadata.spaces {
+            if space_meta.id != DEFAULT_SPACE_ID {
+                let new_id = storage.create_space();
+                space_map.insert(space_meta.id, new_id);
             }
         }
 
@@ -295,9 +297,9 @@ impl SegmentStorage {
                     mapping_meta.provider_id
                 ))
             })?;
-            let bank_id = *bank_map
-                .get(&mapping_meta.bank_id)
-                .ok_or_else(|| SegmentStorageError::backing_with("unknown bank in metadata"))?;
+            let space_id = *space_map
+                .get(&mapping_meta.space_id)
+                .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
 
             let mapping_id = storage.create_mapping_with_metadata(
                 provider_id,
@@ -311,7 +313,7 @@ impl SegmentStorage {
             )?;
 
             storage.update_mapping_metadata(mapping_id, mapping_meta.kind, mapping_meta.flags)?;
-            storage.add_mapping_to_bank_top(bank_id, mapping_id)?;
+            storage.add_mapping_to_space_top(space_id, mapping_id)?;
         }
 
         Ok(storage)
@@ -344,10 +346,10 @@ impl SegmentStorage {
             })
             .collect::<Vec<_>>();
 
-        let banks = self
-            .banks
+        let spaces = self
+            .spaces
             .values()
-            .map(|b| BankMetadata {
+            .map(|b| AddressSpaceMetadata {
                 id: b.id(),
                 mapping_ids: b.priority_list().iter().map(|r| r.mapping_id()).collect(),
             })
@@ -357,12 +359,12 @@ impl SegmentStorage {
             .mappings
             .values()
             .map(|m| {
-                let bank_id = self
-                    .banks
+                let space_id = self
+                    .spaces
                     .iter()
                     .find(|(_, b)| b.priority_list().iter().any(|r| r.mapping_id() == m.id()))
                     .map(|(id, _)| *id)
-                    .unwrap_or(DEFAULT_BANK_ID);
+                    .unwrap_or(DEFAULT_SPACE_ID);
 
                 MappingMetadata {
                     name: m.name().to_owned(),
@@ -374,7 +376,7 @@ impl SegmentStorage {
                     flags: m.flags(),
                     mapping_hints: m.mapping_hints().clone(),
                     function_hints: m.function_hints().clone(),
-                    bank_id,
+                    space_id,
                     provider_id: m.provider_id(),
                 }
             })
@@ -382,7 +384,7 @@ impl SegmentStorage {
 
         let metadata = SegmentStorageMetadata {
             providers,
-            banks,
+            spaces,
             mappings,
         };
 
@@ -418,9 +420,9 @@ impl SegmentStorage {
         })?;
 
         tracing::debug!(
-            "loaded segment storage metadata; {} providers, {} banks, {} mappings",
+            "loaded segment storage metadata; {} providers, {} spaces, {} mappings",
             metadata.providers.len(),
-            metadata.banks.len(),
+            metadata.spaces.len(),
             metadata.mappings.len(),
         );
 
@@ -568,8 +570,8 @@ impl SegmentStorage {
     }
 
     pub fn remove_mapping(&mut self, id: SegmentMappingId) -> Result<(), SegmentStorageError> {
-        for bank in self.banks.values_mut() {
-            bank.remove_mapping(id);
+        for space in self.spaces.values_mut() {
+            space.remove_mapping(id);
         }
 
         self.mappings
@@ -595,11 +597,11 @@ impl SegmentStorage {
         mapping.set_start(new_start);
         let mapping_ref = mapping.make_ref();
 
-        for bank in self.banks.values_mut() {
-            let was_present = bank.priority_list().iter().any(|r| r.mapping_id() == id);
+        for space in self.spaces.values_mut() {
+            let was_present = space.priority_list().iter().any(|r| r.mapping_id() == id);
             if was_present {
-                bank.remove_mapping(id);
-                bank.add_mapping_top(mapping_ref, new_start, old_size, mapping.properties());
+                space.remove_mapping(id);
+                space.add_mapping_top(mapping_ref, new_start, old_size, mapping.properties());
             }
         }
 
@@ -620,11 +622,11 @@ impl SegmentStorage {
         mapping.set_size(new_size);
         let mapping_ref = mapping.make_ref();
 
-        for bank in self.banks.values_mut() {
-            let was_present = bank.priority_list().iter().any(|r| r.mapping_id() == id);
+        for space in self.spaces.values_mut() {
+            let was_present = space.priority_list().iter().any(|r| r.mapping_id() == id);
             if was_present {
-                bank.remove_mapping(id);
-                bank.add_mapping_top(mapping_ref, start, new_size, mapping.properties());
+                space.remove_mapping(id);
+                space.add_mapping_top(mapping_ref, start, new_size, mapping.properties());
             }
         }
 
@@ -648,34 +650,34 @@ impl SegmentStorage {
         Ok(())
     }
 
-    pub fn create_bank(&mut self) -> SegmentBankId {
-        let id = self.next_bank_id;
-        self.next_bank_id += 1;
-        self.banks.insert(id, SegmentBank::new(id));
+    pub fn create_space(&mut self) -> AddressSpaceId {
+        let id = self.next_space_id;
+        self.next_space_id += 1;
+        self.spaces.insert(id, AddressSpace::new(id));
         id
     }
 
-    pub fn use_bank(&mut self, id: SegmentBankId) -> Result<(), SegmentStorageError> {
-        if !self.banks.contains_key(&id) {
-            return Err(SegmentStorageError::backing_with("bank not found"));
+    pub fn use_space(&mut self, id: AddressSpaceId) -> Result<(), SegmentStorageError> {
+        if !self.spaces.contains_key(&id) {
+            return Err(SegmentStorageError::backing_with("space not found"));
         }
-        self.current_bank = id;
+        self.current_space = id;
         Ok(())
     }
 
-    pub fn current_bank_id(&self) -> SegmentBankId {
-        self.current_bank
+    pub fn current_space_id(&self) -> AddressSpaceId {
+        self.current_space
     }
 
-    pub fn current_bank(&self) -> &SegmentBank {
-        self.banks
-            .get(&self.current_bank)
-            .expect("current bank should exist")
+    pub fn current_space(&self) -> &AddressSpace {
+        self.spaces
+            .get(&self.current_space)
+            .expect("current space should exist")
     }
 
-    pub fn add_mapping_to_bank_top(
+    pub fn add_mapping_to_space_top(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
@@ -687,19 +689,19 @@ impl SegmentStorage {
         let start = mapping.start();
         let size = mapping.size();
 
-        let bank = self
-            .banks
-            .get_mut(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get_mut(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        bank.add_mapping_top(mapping_ref, start, size, mapping.properties());
+        space.add_mapping_top(mapping_ref, start, size, mapping.properties());
 
         Ok(())
     }
 
-    pub fn add_mapping_to_bank_bottom(
+    pub fn add_mapping_to_space_bottom(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
@@ -711,49 +713,49 @@ impl SegmentStorage {
         let start = mapping.start();
         let size = mapping.size();
 
-        let bank = self
-            .banks
-            .get_mut(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get_mut(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        bank.add_mapping_bottom(mapping_ref, start, size, mapping.properties());
+        space.add_mapping_bottom(mapping_ref, start, size, mapping.properties());
 
         Ok(())
     }
 
     pub fn prioritise_mapping(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
-        let bank = self
-            .banks
-            .get_mut(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get_mut(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        bank.prioritise(mapping_id);
+        space.prioritise(mapping_id);
 
-        self.rebuild_submaps_for_mapping(bank_id, mapping_id)
+        self.rebuild_submaps_for_mapping(space_id, mapping_id)
     }
 
     pub fn deprioritise_mapping(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
-        let bank = self
-            .banks
-            .get_mut(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get_mut(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        bank.deprioritise(mapping_id);
+        space.deprioritise(mapping_id);
 
-        self.rebuild_submaps_for_mapping(bank_id, mapping_id)
+        self.rebuild_submaps_for_mapping(space_id, mapping_id)
     }
 
     fn rebuild_submaps_for_mapping(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
@@ -764,12 +766,12 @@ impl SegmentStorage {
         let range_start = mapping.start();
         let range_end = mapping.end();
 
-        let bank = self
-            .banks
-            .get(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        let overlapping = bank
+        let overlapping = space
             .priority_list()
             .iter()
             .filter_map(|mref| {
@@ -783,8 +785,8 @@ impl SegmentStorage {
             })
             .collect::<SmallVec<[_; 8]>>();
 
-        let bank = self.banks.get_mut(&bank_id).unwrap();
-        bank.rebuild_range(range_start, range_end, overlapping);
+        let space = self.spaces.get_mut(&space_id).unwrap();
+        space.rebuild_range(range_start, range_end, overlapping);
 
         Ok(())
     }
@@ -794,12 +796,12 @@ impl SegmentStorage {
         addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
-        self.read_bytes_from_bank(self.current_bank, addr, bytes)
+        self.read_bytes_from_space(self.current_space, addr, bytes)
     }
 
-    pub fn read_bytes_from_bank(
+    pub fn read_bytes_from_space(
         &self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
@@ -809,10 +811,10 @@ impl SegmentStorage {
 
         bytes.fill(self.fill_byte);
 
-        let bank = self
-            .banks
-            .get(&bank_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+        let space = self
+            .spaces
+            .get(&space_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
         let addr = addr.into();
         let mut current_addr = addr;
@@ -820,7 +822,7 @@ impl SegmentStorage {
         let mut total_read = 0;
 
         while remaining > 0 {
-            let view = match bank.find_containing(current_addr) {
+            let view = match space.find_containing(current_addr) {
                 Some(v) => v,
                 None => {
                     current_addr += 1usize;
@@ -898,12 +900,12 @@ impl SegmentStorage {
         addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
-        self.write_bytes_to_bank(self.current_bank, addr, bytes)
+        self.write_bytes_to_space(self.current_space, addr, bytes)
     }
 
-    pub fn write_bytes_to_bank(
+    pub fn write_bytes_to_space(
         &mut self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
@@ -918,12 +920,12 @@ impl SegmentStorage {
 
         while remaining > 0 {
             let view = {
-                let bank = self
-                    .banks
-                    .get(&bank_id)
-                    .ok_or_else(|| SegmentStorageError::backing_with("bank not found"))?;
+                let space = self
+                    .spaces
+                    .get(&space_id)
+                    .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-                match bank.find_containing(current_addr) {
+                match space.find_containing(current_addr) {
                     Some(v) => v,
                     None => {
                         current_addr += 1usize;
@@ -1038,16 +1040,16 @@ impl SegmentStorage {
         addr: impl Into<Address>,
     ) -> Option<(SegmentStorageProviderId, u64)> {
         let addr = addr.into();
-        let bank = self.banks.get(&self.current_bank)?;
-        let view = bank.find_containing(addr)?;
+        let space = self.spaces.get(&self.current_space)?;
+        let view = space.find_containing(addr)?;
         let mapping = self.mappings.get(&view.mapping_ref().mapping_id())?;
         let offset = mapping.to_offset(addr);
         Some((mapping.provider_id(), offset))
     }
 
     pub fn contains_segment(&self, at: Address) -> bool {
-        if let Some(bank) = self.banks.get(&self.current_bank) {
-            bank.find_containing(at).is_some()
+        if let Some(space) = self.spaces.get(&self.current_space) {
+            space.find_containing(at).is_some()
         } else {
             false
         }
@@ -1057,22 +1059,22 @@ impl SegmentStorage {
         &self,
         addr: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
-        self.view_of_bank_at(self.current_bank, addr)
+        self.view_of_space_at(self.current_space, addr)
     }
 
-    pub fn view_of_bank_at(
+    pub fn view_of_space_at(
         &self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
         addr: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
         let addr = addr.into();
 
-        let bank = self
-            .banks
-            .get(&bank_id)
+        let space = self
+            .spaces
+            .get(&space_id)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let mapping_view = bank
+        let mapping_view = space
             .find_containing(addr)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
@@ -1092,19 +1094,19 @@ impl SegmentStorage {
     pub fn iter_views(
         &self,
     ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
-        self.iter_views_of_bank(self.current_bank)
+        self.iter_views_of_space(self.current_space)
     }
 
-    pub fn iter_views_of_bank(
+    pub fn iter_views_of_space(
         &self,
-        bank_id: SegmentBankId,
+        space_id: AddressSpaceId,
     ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
-        let bank = self
-            .banks
-            .get(&bank_id)
+        let space = self
+            .spaces
+            .get(&space_id)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let views = bank.iter().map(|submap| {
+        let views = space.iter().map(|submap| {
             let mapping_ref = submap.mapping_ref();
             let mapping = self
                 .mappings

@@ -5,6 +5,7 @@ pub mod context;
 pub mod input;
 pub mod language;
 pub mod lifter;
+pub mod operand;
 pub mod partmap;
 pub mod pattern;
 pub mod pcode;
@@ -12,13 +13,12 @@ pub mod resolve;
 pub mod symbol;
 pub mod template;
 
-pub use constructor::{
-    Constructor, ConstructorResolver, Operand, OperandHandleResolver, OperandResolver,
-};
+pub use constructor::{Constructor, ConstructorResolver};
 pub use context::ContextDatabase;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId, LanguageVariant};
 pub use lifter::Lifter;
+pub use operand::{Operand, OperandData, OperandHandleResolver, OperandResolver, Operands};
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,
 };

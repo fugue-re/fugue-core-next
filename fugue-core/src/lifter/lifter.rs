@@ -1,8 +1,11 @@
 use std::fmt::{Debug, Display};
+use std::str::FromStr;
 
 use fugue_lifter::runtime::context::ContextBitRange;
 use fugue_lifter::runtime::language::Language;
+use fugue_lifter::runtime::operand::Operands;
 use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
+use fugue_lifter::{LifterBuilder, LifterBuilderError};
 
 use thiserror::Error;
 
@@ -11,6 +14,8 @@ use crate::ir::{Address, Insn};
 
 #[derive(Debug, Error)]
 pub enum LifterError {
+    #[error(transparent)]
+    Builder(#[from] LifterBuilderError),
     #[error("invalid instruction at {0}")]
     InvalidInstruction(Address),
     #[error(transparent)]
@@ -151,6 +156,23 @@ impl Lifter {
         self.0.resolve(address.into(), bytes, apply_commits)
     }
 
+    pub fn operands(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Option<Operands> {
+        let address = address.into();
+        let mut operands = Operands::new();
+        self.0.operands(address.into(), bytes, &mut operands)?;
+        Some(operands)
+    }
+
+    pub fn operands_into(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        operands: &mut Operands,
+    ) -> Option<usize> {
+        let address = address.into();
+        self.0.operands(address.into(), bytes, operands)
+    }
+
     pub fn disassemble(
         &mut self,
         address: impl Into<Address>,
@@ -187,5 +209,71 @@ impl Lifter {
         };
 
         Ok(length)
+    }
+}
+
+impl FromStr for Lifter {
+    type Err = LifterBuilderError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        LifterBuilder::build_str(s).map(Self)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_basic_operands() {
+        let mut lifter = "x86:LE:64".parse::<Lifter>().unwrap();
+        let bytes = [0x48, 0x89, 0xd8]; // mov rax, rbx
+
+        let operands = lifter.operands(0x1000, &bytes).unwrap();
+        assert_eq!(operands.len(), 2);
+
+        let op0 = operands.get(0).unwrap();
+        assert_eq!(op0.range().cloned(), Some(21..24));
+
+        let op1 = operands.get(1).unwrap();
+        assert_eq!(op1.range().cloned(), Some(18..21));
+    }
+
+    #[test]
+    fn test_grouped_operands() {
+        let mut lifter = "x86:LE:64".parse::<Lifter>().unwrap();
+
+        // mov rax, [0x1000]
+        let bytes = [0x48, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00];
+
+        let operands = lifter.operands(0x1000, &bytes).unwrap();
+        assert_eq!(operands.len(), 2);
+
+        let op0 = operands.get(0).unwrap();
+        assert_eq!(op0.range().cloned(), Some(18..21));
+
+        let op1 = operands.get(1).unwrap();
+        assert_eq!(op1.range().cloned(), Some(32..64));
+
+        // mov rax, [ecx*4 + 0x10]
+        let bytes = [0x67, 0x48, 0x8b, 0x04, 0x8d, 0x10, 0x00, 0x00, 0x00];
+
+        let operands = lifter.operands(0x1000, &bytes).unwrap();
+        assert_eq!(operands.len(), 2);
+
+        let op0 = operands.get(0).unwrap();
+        assert_eq!(op0.symbol(), Some("RAX"));
+
+        let op1 = operands.get(1).unwrap();
+        assert!(op1.group().is_some());
+
+        let op1_0 = op1.group().unwrap().get(0).unwrap();
+        assert_eq!(op1_0.symbol(), Some("ECX"));
+
+        let op1_1 = op1.group().unwrap().get(1).unwrap();
+        assert_eq!(op1_1.value(), Some(4));
+
+        let op1_2 = op1.group().unwrap().get(2).unwrap();
+        assert_eq!(op1_2.value(), Some(0x10));
     }
 }

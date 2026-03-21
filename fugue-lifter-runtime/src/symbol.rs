@@ -2,9 +2,11 @@ use std::fmt;
 
 use crate::constructor::ConstructorResolver;
 use crate::input::FixedHandle;
+use crate::operand::{OperandValue, Operands};
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
+#[derive(Debug)]
 pub enum Symbol {
     Epsilon,
     Value {
@@ -105,6 +107,18 @@ impl Symbol {
                     }
                 }
             }
+            Self::ValueMapFilled {
+                pattern_value,
+                value_table,
+            } => {
+                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let value = *value_table.get(index as usize).expect("resolved");
+                if value < 0 {
+                    write!(writer, "-{:#x}", -(value as i128))?;
+                } else {
+                    write!(writer, "{:#x}", value)?;
+                }
+            }
             Self::Start { .. } => {
                 write!(writer, "{:#x}", state.address())?;
             }
@@ -114,9 +128,88 @@ impl Symbol {
             Self::Next2 { .. } => {
                 write!(writer, "{:#x}", state.next2_address().expect("resolved"))?;
             }
-            _ => unreachable!("this state should not be reachable"),
+            what => unreachable!("this state should not be reachable: {what:?}"),
         }
         Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    pub unsafe fn operands<R: ConstructorResolver>(
+        &self,
+        state: &mut LiftingContextState<'_>,
+        operands: &mut Operands,
+    ) {
+        match self {
+            Self::Varnode {
+                name,
+                space,
+                offset,
+                ..
+            } => {
+                operands.push(OperandValue::from_varnode::<R>(name, *space, *offset));
+            }
+            Self::Name {
+                pattern_value,
+                symbol_table,
+            }
+            | Self::VarnodeList {
+                pattern_value,
+                symbol_table,
+                ..
+            } => {
+                let (index, range) = pattern_value
+                    .resolve_with_range::<R>(state)
+                    .expect("resolved");
+                if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
+                    operands.push_with(name, range);
+                }
+            }
+            Self::VarnodeListFilled {
+                pattern_value,
+                symbol_table,
+                ..
+            } => {
+                let (index, range) = pattern_value
+                    .resolve_with_range::<R>(state)
+                    .expect("resolved");
+                if let Some(name) = symbol_table.get(index as usize).copied() {
+                    operands.push_with(name, range);
+                }
+            }
+            Self::ValueMap {
+                pattern_value,
+                value_table,
+            } => {
+                let (index, range) = pattern_value
+                    .resolve_with_range::<R>(state)
+                    .expect("resolved");
+                if let Some(value) = value_table.get(index as usize).copied().flatten() {
+                    operands.push_with(value, range);
+                }
+            }
+            Self::ValueMapFilled {
+                pattern_value,
+                value_table,
+            } => {
+                let (index, range) = pattern_value
+                    .resolve_with_range::<R>(state)
+                    .expect("resolved");
+                let value = *value_table.get(index as usize).expect("resolved");
+                operands.push_with(value, range);
+            }
+            Self::Start { .. } => {
+                operands.push(state.address());
+            }
+            Self::End { .. } => {
+                operands.push(state.next_address());
+            }
+            Self::Next2 { .. } => {
+                operands.push(state.next2_address().expect("resolved"));
+            }
+            what => unreachable!("this state should not be reachable: {what:?}"),
+        }
     }
 
     /// # Safety

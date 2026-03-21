@@ -4,17 +4,17 @@ use smallvec::SmallVec;
 use crate::ir::{Address, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
-pub type SegmentBankId = u32;
+pub type AddressSpaceId = u32;
 
 #[derive(Debug)]
-pub struct SegmentBank {
-    id: SegmentBankId,
+pub struct AddressSpace {
+    id: AddressSpaceId,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
 }
 
-impl SegmentBank {
-    pub fn new(id: SegmentBankId) -> Self {
+impl AddressSpace {
+    pub fn new(id: AddressSpaceId) -> Self {
         Self {
             id,
             submaps: IntervalMap::new(),
@@ -22,7 +22,7 @@ impl SegmentBank {
         }
     }
 
-    pub fn id(&self) -> SegmentBankId {
+    pub fn id(&self) -> AddressSpaceId {
         self.id
     }
 
@@ -241,63 +241,63 @@ mod test {
 
     #[test]
     fn test_add_mapping_top() {
-        let mut bank = SegmentBank::new(0);
+        let mut space = AddressSpace::new(0);
         let properties = SegmentProperties::default();
 
-        bank.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
-        bank.add_mapping_top(make_ref(2), 0x1500u64, 0x301, properties);
+        space.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
+        space.add_mapping_top(make_ref(2), 0x1500u64, 0x301, properties);
 
-        let view = bank.find_containing(0x1500u64).unwrap();
+        let view = space.find_containing(0x1500u64).unwrap();
         assert_eq!(view.mapping_ref().mapping_id(), 2);
 
-        let view = bank.find_containing(0x1000u64).unwrap();
+        let view = space.find_containing(0x1000u64).unwrap();
         assert_eq!(view.mapping_ref().mapping_id(), 1);
 
-        let view = bank.find_containing(0x1900u64).unwrap();
+        let view = space.find_containing(0x1900u64).unwrap();
         assert_eq!(view.mapping_ref().mapping_id(), 1);
     }
 
     #[test]
     fn test_add_mapping_bottom() {
-        let mut bank = SegmentBank::new(0);
+        let mut space = AddressSpace::new(0);
         let properties = SegmentProperties::default();
 
-        bank.add_mapping_top(make_ref(1), 0x1000u64, 0x501, properties);
-        bank.add_mapping_bottom(make_ref(2), 0x1000u64, 0x1001, properties);
+        space.add_mapping_top(make_ref(1), 0x1000u64, 0x501, properties);
+        space.add_mapping_bottom(make_ref(2), 0x1000u64, 0x1001, properties);
 
-        let view = bank.find_containing(0x1200u64).unwrap();
+        let view = space.find_containing(0x1200u64).unwrap();
         assert_eq!(view.mapping_ref().mapping_id(), 1);
 
-        let view = bank.find_containing(0x1800u64).unwrap();
+        let view = space.find_containing(0x1800u64).unwrap();
         assert_eq!(view.mapping_ref().mapping_id(), 2);
     }
 
     #[test]
     fn test_remove_mapping() {
-        let mut bank = SegmentBank::new(0);
+        let mut space = AddressSpace::new(0);
         let properties = SegmentProperties::default();
 
-        bank.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
-        bank.add_mapping_top(make_ref(2), 0x3000u64, 0x1001, properties);
+        space.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
+        space.add_mapping_top(make_ref(2), 0x3000u64, 0x1001, properties);
 
-        bank.remove_mapping(1);
+        space.remove_mapping(1);
 
-        assert!(bank.find_containing(0x1500u64).is_none());
-        assert!(bank.find_containing(0x3500u64).is_some());
+        assert!(space.find_containing(0x1500u64).is_none());
+        assert!(space.find_containing(0x3500u64).is_some());
     }
 
     #[test]
     fn test_rebuild_range_priority_order() {
-        let mut bank = SegmentBank::new(0);
+        let mut space = AddressSpace::new(0);
         let props = SegmentProperties::default();
 
         // Add two overlapping mappings: mapping 1 at 0x1000-0x2000, mapping 2 at 0x1500-0x2500
-        bank.add_mapping_top(make_ref(1), 0x1000u64, 0x1000, props);
-        bank.add_mapping_top(make_ref(2), 0x1500u64, 0x1000, props);
+        space.add_mapping_top(make_ref(1), 0x1000u64, 0x1000, props);
+        space.add_mapping_top(make_ref(2), 0x1500u64, 0x1000, props);
 
         // Mapping 2 is on top, so it should be visible at 0x1800
         assert_eq!(
-            bank.find_containing(0x1800u64)
+            space.find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -305,7 +305,7 @@ mod test {
         );
 
         // Deprioritise mapping 2 (move to bottom of priority list)
-        bank.deprioritise(2);
+        space.deprioritise(2);
 
         // Rebuild the range where mapping 2 exists (0x1500-0x2500)
         // Mappings in priority order (lowest first): mapping 2, then mapping 1
@@ -313,11 +313,11 @@ mod test {
             (make_ref(2), Address::from(0x1500u64), 0x1000usize, props),
             (make_ref(1), Address::from(0x1000u64), 0x1000usize, props),
         ];
-        bank.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
+        space.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
 
         // Now mapping 1 should be visible at 0x1800 (overlap region)
         assert_eq!(
-            bank.find_containing(0x1800u64)
+            space.find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -326,7 +326,7 @@ mod test {
 
         // Mapping 1 should still be visible at 0x1200 (non-overlap region)
         assert_eq!(
-            bank.find_containing(0x1200u64)
+            space.find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -335,7 +335,7 @@ mod test {
 
         // Mapping 2 should be visible at 0x2100 (non-overlap region, past mapping 1's end)
         assert_eq!(
-            bank.find_containing(0x2100u64)
+            space.find_containing(0x2100u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -345,19 +345,19 @@ mod test {
 
     #[test]
     fn test_rebuild_range_clamps_to_bounds() {
-        let mut bank = SegmentBank::new(0);
+        let mut space = AddressSpace::new(0);
         let props = SegmentProperties::default();
 
         // Add a mapping at 0x1000-0x3000
-        bank.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
+        space.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
 
         // Rebuild only 0x1500-0x2000 with a new mapping
         let mappings = vec![(make_ref(2), Address::from(0x1000u64), 0x2000usize, props)];
-        bank.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
+        space.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
 
         // Mapping 1 should still be at 0x1200 (before rebuild range)
         assert_eq!(
-            bank.find_containing(0x1200u64)
+            space.find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -366,7 +366,7 @@ mod test {
 
         // Mapping 2 should be at 0x1800 (inside rebuild range)
         assert_eq!(
-            bank.find_containing(0x1800u64)
+            space.find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -375,7 +375,7 @@ mod test {
 
         // Mapping 1 should still be at 0x2500 (after rebuild range)
         assert_eq!(
-            bank.find_containing(0x2500u64)
+            space.find_containing(0x2500u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),

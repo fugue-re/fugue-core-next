@@ -1,6 +1,7 @@
 use crate::context::ContextBitRange;
-use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::language::Language;
+use crate::operand::Operands;
+use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 
 #[derive(Clone)]
 pub struct Lifter {
@@ -121,6 +122,16 @@ impl Lifter {
     ) -> Option<usize> {
         self.language
             .resolve(address, bytes, &mut self.context, apply_commits)
+    }
+
+    pub fn operands(
+        &mut self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        operands: &mut Operands,
+    ) -> Option<usize> {
+        self.language
+            .operands(address, bytes, &mut self.context, operands)
     }
 
     pub fn disassemble(

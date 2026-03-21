@@ -183,7 +183,7 @@ impl FunctionDiscoveryContext {
         let covered = self.covered(ftable, cbtable);
 
         let avail = segments
-            .current_bank()
+            .current_space()
             .iter()
             .filter(|segm| segm.properties().is_executable() && !segm.properties().is_external())
             .map(|segm| segm.range_inclusive())
@@ -472,9 +472,9 @@ where
         }
 
         if self.config().use_segment_function_hints() {
-            for _segm in project.segments().current_bank().iter() {
+            for _segm in project.segments().current_space().iter() {
                 // FIXME: function hints should be a view over the hints of a given
-                // mapping within a given bank, not the segment as a whole.
+                // mapping within a given address space, not the segment as a whole.
                 /*
                 for addr in segm.function_hints().iter() {
                     tracing::debug!(source = "segment", "function hint: {addr}");

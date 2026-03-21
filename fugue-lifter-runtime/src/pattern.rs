@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use crate::constructor::ConstructorResolver;
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
+use crate::operand::Operands;
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
 
@@ -94,16 +95,64 @@ impl PatternExpression {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
+    pub unsafe fn operands<R: ConstructorResolver>(
+        &self,
+        state: &mut LiftingContextState<'_>,
+        operands: &mut Operands,
+    ) {
+        let (value, range) = self
+            .resolve_with_range::<R>(state)
+            .expect("value previously resolved");
+        operands.push_with(value, range);
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn resolve<R: ConstructorResolver>(
         &self,
         input: &mut LiftingContextState<'_>,
     ) -> Option<i64> {
+        // XXX: this should be optimized by the compiler to avoid the range allocation since we
+        // only care about the value, but we may need to explicitly split this function if it
+        // doesn't optimize well
+        self.resolve_with_range::<R>(input).map(|(value, _)| value)
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    #[inline(always)]
+    pub(crate) unsafe fn resolve_with_range<R: ConstructorResolver>(
+        &self,
+        input: &mut LiftingContextState<'_>,
+    ) -> Option<(i64, Option<Range<u32>>)> {
         let mut stack = Vec::new();
         let operations = self.operations::<R>();
 
         // for xor(lhs, rhs), the operations will be [lhs, rhs, Xor]
         //
         // hence we will push lhs, push rhs, then pop lhs and rhs and compute lhs ^ rhs
+
+        let mut range = None;
+        let update_range = |c: &mut Option<Range<u32>>, new: Range<u32>| {
+            *c = Some(match c {
+                Some(old) => old.start.min(new.start)..old.end.max(new.end),
+                None => new,
+            })
+        };
+        let field_range = |input: &LiftingContextState<'_>,
+                           byte_start: u8,
+                           bit_start: u8,
+                           bit_end: u8,
+                           size: isize| {
+            let soff = 8u32 * ((byte_start as u32) + input.inputs.input.offset() as u32);
+            let eoff = 8u32 * (size as u32);
+            let loff = soff + eoff;
+            let soff_bits = loff - (bit_end as u32 + 1);
+            let eoff_bits = loff - (bit_start as u32);
+            soff_bits..eoff_bits
+        };
 
         'outer: for op in operations {
             match op {
@@ -149,6 +198,11 @@ impl PatternExpression {
                         .checked_shr(shift)
                         .unwrap_or(if res < 0 { -1 } else { 0 });
 
+                    update_range(
+                        &mut range,
+                        field_range(input, *byte_start, *bit_start, *bit_end, size as _),
+                    );
+
                     stack.push(if *sign_bit {
                         sign_extend(res, usize::from(bit_end - bit_start))
                     } else {
@@ -187,6 +241,11 @@ impl PatternExpression {
                     res = res
                         .checked_shr(shift)
                         .unwrap_or(if res < 0 { -1 } else { 0 });
+
+                    update_range(
+                        &mut range,
+                        field_range(input, *byte_start, *bit_start, *bit_end, size),
+                    );
 
                     stack.push(if *sign_bit {
                         sign_extend(res, usize::from(bit_end - bit_start))
@@ -232,7 +291,12 @@ impl PatternExpression {
                             }
 
                             // compute the value in the modified context
-                            let value = value.resolve::<R>(input)?;
+                            let (value, nrange) = value.resolve_with_range::<R>(input)?;
+
+                            // update range
+                            if let Some(nrange) = nrange {
+                                update_range(&mut range, nrange);
+                            }
 
                             // restore old state
                             {
@@ -290,7 +354,12 @@ impl PatternExpression {
                     }
 
                     // compute the value in the modified context
-                    let value = value.resolve::<R>(input)?;
+                    let (value, nrange) = value.resolve_with_range::<R>(input)?;
+
+                    // update range
+                    if let Some(nrange) = nrange {
+                        update_range(&mut range, nrange);
+                    }
 
                     // restore old state
                     {
@@ -384,6 +453,6 @@ impl PatternExpression {
             }
         }
 
-        stack.pop()
+        stack.pop().map(|value| (value, range))
     }
 }

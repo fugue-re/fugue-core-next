@@ -4,6 +4,7 @@ use arrayvec::ArrayVec;
 use bincode::{BorrowDecode, Decode, Encode};
 
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
+pub use fugue_lifter::runtime::operand as operand;
 
 use crate::ir::Address;
 
