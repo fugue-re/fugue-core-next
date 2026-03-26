@@ -13,6 +13,7 @@ pub use ustr::{
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
+    SymbolTableSelector,
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
@@ -346,7 +347,7 @@ impl SymbolProperties {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 #[repr(transparent)]
-pub struct SymbolIndex(usize);
+pub struct SymbolIndex(u64);
 
 impl Debug for SymbolIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -361,26 +362,36 @@ impl SymbolIndex {
     // Selector bits is the number of upper bits used to encode symbol index provenance;
     // for ELF we have two possibilities: the global symbol table, and the dynamic symbol
     // table.
-    const SELECTOR_BITS: usize = 1;
+    const SELECTOR_BITS: u32 = 8;
     // Selector bits mask is the mask for the selector bits.
-    const SELECTOR_MASK: usize = (1usize << Self::SELECTOR_BITS).wrapping_sub(1);
+    const SELECTOR_MASK: u64 = (1u64 << Self::SELECTOR_BITS).wrapping_sub(1);
     // Selector bits shift is the number of bits to shift the selector bits to the upper bits.
-    const SELECTOR_SHIFT: u32 = usize::BITS.wrapping_sub(Self::SELECTOR_BITS as u32);
+    const SELECTOR_SHIFT: u32 = u64::BITS.wrapping_sub(Self::SELECTOR_BITS);
     // Index mask is the upper bits used to determine the symbol index provenance.
-    const INDEX_MASK: usize = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
+    const INDEX_MASK: u64 = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
 
-    pub fn new(selector: usize, index: usize) -> Self {
+    pub fn new(selector: SymbolTableSelector, index: usize) -> Self {
+        let selector = selector.index() as u64;
+        let index = index as u64;
+
         assert_eq!(selector & !Self::SELECTOR_MASK, 0, "invalid selector bits");
         assert_eq!(index & !Self::INDEX_MASK, 0, "symbol index out of range");
+
         Self((selector << Self::SELECTOR_SHIFT) | index)
     }
 
     pub fn index(self) -> usize {
-        self.0 & Self::INDEX_MASK
+        (self.0 & Self::INDEX_MASK)
+            .try_into()
+            .expect("symbol index out of range")
     }
 
-    pub fn selector(self) -> usize {
-        (self.0 >> Self::SELECTOR_SHIFT) & Self::SELECTOR_MASK
+    pub fn selector(self) -> SymbolTableSelector {
+        SymbolTableSelector::new(
+            ((self.0 >> Self::SELECTOR_SHIFT) & Self::SELECTOR_MASK)
+                .try_into()
+                .expect("selector out of range"),
+        )
     }
 }
 
@@ -880,7 +891,7 @@ impl IndexedSymbolTable {
     // Iterator over all symbol entries for a given selector.
     pub fn iter_by_selector<'a>(
         &'a self,
-        selector: usize,
+        selector: SymbolTableSelector,
     ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
         self.indices.iter().filter_map(move |(&index, &id)| {
             if index.selector() == selector {
@@ -895,7 +906,8 @@ impl IndexedSymbolTable {
     pub fn iter_by_address<'a>(
         &'a self,
     ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
-        self.addresses.values()
+        self.addresses
+            .values()
             .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
     }
 
@@ -1129,7 +1141,7 @@ impl SymbolTableT for IndexedSymbolTable {
         BoxedSymbolEntryIter::new(self.iter())
     }
 
-    fn iter_by_selector(&self, selector: usize) -> Self::SymbolEntryIter<'_> {
+    fn iter_by_selector(&self, selector: SymbolTableSelector) -> Self::SymbolEntryIter<'_> {
         BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
     }
 
@@ -1173,32 +1185,36 @@ mod test {
     #[test]
     #[should_panic(expected = "invalid selector bits")]
     fn test_symbol_index_invalid_selector() {
-        let _ = SymbolIndex::new(2, 1);
+        let sel = SymbolTableSelector::new(0xffff);
+        let _ = SymbolIndex::new(sel, 1);
     }
 
     #[test]
     #[should_panic(expected = "symbol index out of range")]
     fn test_symbol_index_invalid_index() {
-        let _ = SymbolIndex::new(1, usize::MAX);
+        let sel = SymbolTableSelector::new(1);
+        let _ = SymbolIndex::new(sel, usize::MAX);
     }
 
     #[test]
     fn test_symbol_index_valid() {
-        let index = SymbolIndex::new(1, 42);
+        let sel = SymbolTableSelector::new(1);
+        let index = SymbolIndex::new(sel, 42);
         assert_eq!(index.index(), 42);
-        assert_eq!(index.selector(), 1);
+        assert_eq!(index.selector().index(), 1);
     }
 
     #[test]
     fn test_symbol_index_free_list() {
         let mut table = IndexedSymbolTable::new();
+        let sel = SymbolTableSelector::new(0);
 
         let (inserted1, id1) =
-            table.insert_local(SymbolIndex::new(0, 1), Address::from(0x1000u32), "symbol1");
+            table.insert_local(SymbolIndex::new(sel, 1), Address::from(0x1000u32), "symbol1");
         assert!(inserted1);
 
         let (inserted2, _id2) =
-            table.insert_local(SymbolIndex::new(0, 2), Address::from(0x2000u32), "symbol2");
+            table.insert_local(SymbolIndex::new(sel, 2), Address::from(0x2000u32), "symbol2");
         assert!(inserted2);
 
         assert_eq!(table.len(), 2);
@@ -1208,7 +1224,7 @@ mod test {
         assert_eq!(table.len(), 1);
 
         let (inserted3, id3) =
-            table.insert_local(SymbolIndex::new(0, 3), Address::from(0x3000u32), "symbol3");
+            table.insert_local(SymbolIndex::new(sel, 3), Address::from(0x3000u32), "symbol3");
         assert!(inserted3);
         assert_eq!(table.len(), 2);
 
@@ -1216,7 +1232,7 @@ mod test {
         assert_eq!(id1, id3);
 
         let (inserted4, id4) =
-            table.insert_local(SymbolIndex::new(0, 4), Address::from(0x3000u32), "symbol3");
+            table.insert_local(SymbolIndex::new(sel, 4), Address::from(0x3000u32), "symbol3");
         assert!(!inserted4);
         assert_eq!(table.len(), 2);
 
@@ -1224,7 +1240,7 @@ mod test {
         assert_eq!(id3, id4);
 
         let (inserted5, _id5) =
-            table.insert_local(SymbolIndex::new(0, 5), Address::from(0x3000u32), "symbol4");
+            table.insert_local(SymbolIndex::new(sel, 5), Address::from(0x3000u32), "symbol4");
         assert!(inserted5);
 
         // check that we inserted a new symbol referring to the same address as id3 and id4

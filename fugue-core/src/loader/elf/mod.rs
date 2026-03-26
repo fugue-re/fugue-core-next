@@ -20,6 +20,7 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
+use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
     Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
 };
@@ -41,8 +42,8 @@ pub use relocations::ElfSegmentRelocator;
 
 const STT_GNU_UNIQUE: u8 = STT_LOOS;
 
-pub const ELF_SYMTAB_SELECTOR: usize = 0;
-pub const ELF_DYNSYM_SELECTOR: usize = 1;
+pub const ELF_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
+pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
