@@ -198,7 +198,7 @@ pub struct LoadableSegment<'a> {
     bytes: Cow<'a, [u8]>,          // Bytes of the segment
     mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
     function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
-    space_index: AddressSpaceId,                // Address space (by index) this segment belongs to
+    space: AddressSpaceId,                      // Address space this segment belongs to
 }
 
 impl Display for LoadableSegment<'_> {
@@ -269,7 +269,7 @@ impl<'a> LoadableSegment<'a> {
             bytes: bytes.into(),
             mapping_hints: mapping_hints.into(),
             function_hints: function_hints.into(),
-            space_index: Default::default(),
+            space: Default::default(),
         }
     }
 
@@ -494,16 +494,16 @@ impl<'a> LoadableSegment<'a> {
             bytes: self.bytes.into_owned().into(),
             mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
-            space_index: self.space_index,
+            space: self.space,
         }
     }
 
-    pub fn space_index(&self) -> u32 {
-        self.space_index
+    pub fn space(&self) -> AddressSpaceId {
+        self.space
     }
 
-    pub fn with_space_index(mut self, space_index: u32) -> Self {
-        self.space_index = space_index;
+    pub fn with_space(mut self, space: AddressSpaceId) -> Self {
+        self.space = space;
         self
     }
 }

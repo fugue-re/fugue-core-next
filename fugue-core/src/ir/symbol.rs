@@ -1209,12 +1209,18 @@ mod test {
         let mut table = IndexedSymbolTable::new();
         let sel = SymbolTableSelector::new(0);
 
-        let (inserted1, id1) =
-            table.insert_local(SymbolIndex::new(sel, 1), Address::from(0x1000u32), "symbol1");
+        let (inserted1, id1) = table.insert_local(
+            SymbolIndex::new(sel, 1),
+            Address::from(0x1000u32),
+            "symbol1",
+        );
         assert!(inserted1);
 
-        let (inserted2, _id2) =
-            table.insert_local(SymbolIndex::new(sel, 2), Address::from(0x2000u32), "symbol2");
+        let (inserted2, _id2) = table.insert_local(
+            SymbolIndex::new(sel, 2),
+            Address::from(0x2000u32),
+            "symbol2",
+        );
         assert!(inserted2);
 
         assert_eq!(table.len(), 2);
@@ -1223,24 +1229,33 @@ mod test {
         assert!(removed);
         assert_eq!(table.len(), 1);
 
-        let (inserted3, id3) =
-            table.insert_local(SymbolIndex::new(sel, 3), Address::from(0x3000u32), "symbol3");
+        let (inserted3, id3) = table.insert_local(
+            SymbolIndex::new(sel, 3),
+            Address::from(0x3000u32),
+            "symbol3",
+        );
         assert!(inserted3);
         assert_eq!(table.len(), 2);
 
         // check that the reused ID is the same as the removed one
         assert_eq!(id1, id3);
 
-        let (inserted4, id4) =
-            table.insert_local(SymbolIndex::new(sel, 4), Address::from(0x3000u32), "symbol3");
+        let (inserted4, id4) = table.insert_local(
+            SymbolIndex::new(sel, 4),
+            Address::from(0x3000u32),
+            "symbol3",
+        );
         assert!(!inserted4);
         assert_eq!(table.len(), 2);
 
         // check that the ID is the same as the existing one (same referent, different symbol index)
         assert_eq!(id3, id4);
 
-        let (inserted5, _id5) =
-            table.insert_local(SymbolIndex::new(sel, 5), Address::from(0x3000u32), "symbol4");
+        let (inserted5, _id5) = table.insert_local(
+            SymbolIndex::new(sel, 5),
+            Address::from(0x3000u32),
+            "symbol4",
+        );
         assert!(inserted5);
 
         // check that we inserted a new symbol referring to the same address as id3 and id4

@@ -173,7 +173,7 @@ impl SegmentStorage {
         let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
         let mut space_providers =
-            BTreeMap::<u32, (AddressSpaceId, SegmentStorageProviderId)>::new();
+            BTreeMap::<AddressSpaceId, (AddressSpaceId, SegmentStorageProviderId)>::new();
 
         for (space_idx, range) in bounds.iter() {
             let space_id = if space_idx == 0 {
@@ -197,11 +197,11 @@ impl SegmentStorage {
 
         while let Some(segm) = siter.next()? {
             let (space_id, provider_id) = space_providers
-                .get(&segm.space_index())
+                .get(&segm.space())
                 .copied()
                 .unwrap_or((DEFAULT_SPACE_ID, DEFAULT_PROVIDER_ID));
 
-            let range = &bounds[segm.space_index() as usize];
+            let range = &bounds[segm.space() as usize];
             let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
 
             tracing::debug!(

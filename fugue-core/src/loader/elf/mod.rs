@@ -640,7 +640,7 @@ where
             bytes: Cow::Owned(bytes),
             mapping_hints: Cow::Owned(BTreeMap::new()),
             function_hints: Cow::Owned(function_hints),
-            space_index: Default::default(),
+            space: Default::default(),
         };
 
         Ok(Some(lsegm))

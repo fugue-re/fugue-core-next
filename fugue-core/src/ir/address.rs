@@ -7,10 +7,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::il::pcode::Varnode;
 use crate::lifter::{ContextSet, Language};
+use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Confidence;
 
 #[derive(
-    Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
 )]
 #[repr(transparent)]
 pub struct Address(u64);
@@ -628,5 +640,28 @@ where
         self.0
             .range((start, end))
             .map(|(k, v)| (Address::from(k), v))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MetaAddress {
+    address: Address,
+    space: AddressSpaceId,
+}
+
+impl MetaAddress {
+    pub fn new(space: AddressSpaceId, address: impl Into<Address>) -> Self {
+        Self {
+            address: address.into(),
+            space,
+        }
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.space
     }
 }

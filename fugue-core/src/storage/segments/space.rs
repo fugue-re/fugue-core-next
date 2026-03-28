@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 use crate::ir::{Address, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
-pub type AddressSpaceId = u32;
+pub type AddressSpaceId = u8;
 
 #[derive(Debug)]
 pub struct AddressSpace {

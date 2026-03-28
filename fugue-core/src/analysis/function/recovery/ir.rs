@@ -563,7 +563,7 @@ impl PartialFunction {
 
         for (i, block) in self.blocks.iter().enumerate() {
             let bid = bids[i];
-            let cb = cbtable.get_by_id_mut(bid).expect("code block exists");
+            let mut cb = cbtable.get_by_id_mut(bid).expect("code block exists");
 
             for &succ_idx in block.successors().iter() {
                 let succ_bid = bids[succ_idx];
