@@ -1,13 +1,23 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-use bincode::{Decode, Encode};
-
 use crate::il::pcode::Varnode;
 use crate::ir::Address;
 use crate::lifter::Language;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct Location {
     address: Address,
     position: u16,

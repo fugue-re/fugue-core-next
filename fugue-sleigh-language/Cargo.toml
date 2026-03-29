@@ -23,7 +23,7 @@ roxmltree = "0.21"
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
 tracing = { version = "0.1", optional = true }
-ustr = { version = "1.1", features = ["serde"] }
+ustr = { version = "1.1", package = "fugue-ustr", features = ["serde"] }
 walkdir = "2"
 
 [dev-dependencies]

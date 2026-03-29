@@ -68,11 +68,10 @@ impl Context {
                 shift: input.attribute_int("shift")?,
                 mask: input.attribute_int("mask")?,
                 pattern_value: input
-                    .children().find(xml::Node::is_element)
+                    .children()
+                    .find(xml::Node::is_element)
                     .map(PatternExpression::from_xml)
-                    .ok_or({
-                        DeserialiseError::Invariant("missing pattern for context_op")
-                    })??,
+                    .ok_or({ DeserialiseError::Invariant("missing pattern for context_op") })??,
             },
             "commit" => Self::Commit {
                 symbol_id: input.attribute_int("id")?,
@@ -381,12 +380,13 @@ impl DecisionNode {
     }
 
     pub fn count_children(&self) -> usize {
-        self.children.iter().map(|node| 1 + node.count_children()).sum()
+        self.children
+            .iter()
+            .map(|node| 1 + node.count_children())
+            .sum()
     }
 
-    pub fn from_decoder<D: Decoder>(
-        input: &mut D,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_decoder<D: Decoder>(input: &mut D) -> Result<Self, DeserialiseError> {
         // NOTE: we assume the element is opened
         #[cfg(feature = "tracing")]
         tracing::trace!("decoding decision node");
@@ -436,11 +436,9 @@ impl DecisionNode {
                 "pair" => {
                     let id = input.attribute_int("id")?;
                     let pattern = DisjointPattern::from_xml(
-                        input
-                            .children().find(xml::Node::is_element)
-                            .ok_or({
-                                DeserialiseError::Invariant("no pattern for disjoint pattern")
-                            })?,
+                        input.children().find(xml::Node::is_element).ok_or({
+                            DeserialiseError::Invariant("no pattern for disjoint pattern")
+                        })?,
                     )?;
                     patterns.push(DecisionPair { id, pattern });
                 }
@@ -488,18 +486,14 @@ pub enum DisjointPattern {
 }
 
 impl DisjointPattern {
-    pub fn from_decoder<D: Decoder>(
-        input: &mut D,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_decoder<D: Decoder>(input: &mut D) -> Result<Self, DeserialiseError> {
         #[cfg(feature = "tracing")]
         tracing::trace!("decoding decision node");
 
         let elem = input.peek_element()?;
 
         let pattern = match elem {
-            ELEM_INSTRUCT_PAT_ID => {
-                Self::Instruction(InstructionPattern::from_decoder(input)?)
-            }
+            ELEM_INSTRUCT_PAT_ID => Self::Instruction(InstructionPattern::from_decoder(input)?),
             ELEM_CONTEXT_PAT_ID => Self::Context(ContextPattern::from_decoder(input)?),
             _ => {
                 let sub_elem = input.open_element_with_id(&ELEM_COMBINE_PAT)?;
@@ -523,11 +517,15 @@ impl DisjointPattern {
                 let mut children = input.children().filter(xml::Node::is_element);
                 Self::Combine {
                     context: ContextPattern::from_xml(
-                        children.next().ok_or({
-                            DeserialiseError::Invariant("missing context pattern")
-                        })?,
+                        children
+                            .next()
+                            .ok_or({ DeserialiseError::Invariant("missing context pattern") })?,
                     )?,
-                    instruction: InstructionPattern::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing instruction pattern"))?)?,
+                    instruction: InstructionPattern::from_xml(
+                        children
+                            .next()
+                            .ok_or(DeserialiseError::Invariant("missing instruction pattern"))?,
+                    )?,
                 }
             }
         })
@@ -544,9 +542,7 @@ impl InstructionPattern {
         &self.mask_value
     }
 
-    pub fn from_decoder<D: Decoder>(
-        input: &mut D,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_decoder<D: Decoder>(input: &mut D) -> Result<Self, DeserialiseError> {
         #[cfg(feature = "tracing")]
         tracing::trace!("decoding instruction pattern");
 
@@ -563,7 +559,8 @@ impl InstructionPattern {
         Ok(Self {
             mask_value: PatternBlock::from_xml(
                 input
-                    .children().find(xml::Node::is_element)
+                    .children()
+                    .find(xml::Node::is_element)
                     .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
             )?,
         })
@@ -580,9 +577,7 @@ impl ContextPattern {
         &self.mask_value
     }
 
-    pub fn from_decoder<D: Decoder>(
-        input: &mut D,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_decoder<D: Decoder>(input: &mut D) -> Result<Self, DeserialiseError> {
         #[cfg(feature = "tracing")]
         tracing::trace!("decoding context pattern");
 
@@ -599,7 +594,8 @@ impl ContextPattern {
         Ok(Self {
             mask_value: PatternBlock::from_xml(
                 input
-                    .children().find(xml::Node::is_element)
+                    .children()
+                    .find(xml::Node::is_element)
                     .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
             )?,
         })
@@ -731,9 +727,7 @@ impl PatternBlock {
         self.non_zero_size = Some(non_zero_size);
     }
 
-    pub fn from_decoder<D: Decoder>(
-        input: &mut D,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_decoder<D: Decoder>(input: &mut D) -> Result<Self, DeserialiseError> {
         #[cfg(feature = "tracing")]
         tracing::trace!("decoding pattern block");
 

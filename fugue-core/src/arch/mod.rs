@@ -2,7 +2,8 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 
-use bincode::{Decode, Encode};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
@@ -78,25 +79,52 @@ impl From<LanguageVariant> for Arch {
     }
 }
 
-impl Encode for Arch {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.0.language_variant().to_string().encode(encoder)?;
-        Ok(())
+#[repr(transparent)]
+pub struct ArchivedArch(rkyv::Archived<String>);
+
+unsafe impl rkyv::Portable for ArchivedArch {}
+unsafe impl rkyv::traits::NoUndef for ArchivedArch {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedArch
+where
+    rkyv::Archived<String>: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { <rkyv::Archived<String>>::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for Arch {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let variant_str = String::decode(decoder)?;
-        let variant = parse_language(variant_str)
-            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+impl Archive for Arch {
+    type Archived = ArchivedArch;
+    type Resolver = <String as Archive>::Resolver;
 
-        Ok(Self::new(variant))
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<String>>() };
+        self.0
+            .language_variant()
+            .to_string()
+            .resolve(resolver, out_inner);
+    }
+}
+
+impl<S: Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer> Serialize<S> for Arch
+where
+    S::Error: rkyv::rancor::Source,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.0.language_variant().to_string().serialize(serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized> rkyv::Deserialize<Arch, D> for ArchivedArch
+where
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
+        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
+        Ok(Arch::new(
+            parse_language(variant_str).expect("invalid language variant"),
+        ))
     }
 }
 
@@ -118,7 +146,6 @@ impl Arch {
                 }
             }
             _ => {
-                // NOTE: should be unreachable
                 unreachable!("unsupported language: {variant}");
             }
         }

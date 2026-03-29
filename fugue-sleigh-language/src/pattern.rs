@@ -288,11 +288,15 @@ impl PatternExpression {
             }
             "minus_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
-                Self::Minus(Box::new(Self::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing operand of unary expression"))?)?))
+                Self::Minus(Box::new(Self::from_xml(children.next().ok_or(
+                    DeserialiseError::Invariant("missing operand of unary expression"),
+                )?)?))
             }
             "not_exp" => {
                 let mut children = input.children().filter(xml::Node::is_element);
-                Self::Not(Box::new(Self::from_xml(children.next().ok_or(DeserialiseError::Invariant("missing operand of unary expression"))?)?))
+                Self::Not(Box::new(Self::from_xml(children.next().ok_or(
+                    DeserialiseError::Invariant("missing operand of unary expression"),
+                )?)?))
             }
             name => return Err(DeserialiseError::TagUnexpected(name.to_owned())),
         })

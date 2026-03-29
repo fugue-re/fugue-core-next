@@ -3,7 +3,6 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 
 use bitflags::bitflags;
-
 use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
 

@@ -178,7 +178,9 @@ where
                             })
                             .collect::<ContextSet>();
 
-                        tracing::debug!("adding candidate at {start} with context {ctx:?} (confidence: {confidence})");
+                        tracing::debug!(
+                            "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
+                        );
 
                         state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
                     }

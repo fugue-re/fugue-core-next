@@ -7,17 +7,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use bitflags::bitflags;
-
 use fugue_lifter::{Language, PCodeOp};
 use fugue_sleigh::semantics::{CodeBlock, IRBuilder, IRBuilderError};
-
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use thiserror::Error;
 
 use crate::common::{
-    LanguageSpec, AttrOptWithVal, AttrWithVal, GroupOrValue, GroupOrValueVisitor, OneOrMany,
+    AttrOptWithVal, AttrWithVal, GroupOrValue, GroupOrValueVisitor, LanguageSpec, OneOrMany,
     PlatformConstraint, PlatformConstraints,
 };
 use crate::pattern::PatternsWithContext;
@@ -84,7 +81,8 @@ impl<'de> Deserialize<'de> for FunctionPatterns {
     where
         D: Deserializer<'de>,
     {
-        let d = Vec::<AttrOptWithVal<LanguageSpec, PatternsWithContext>>::deserialize(deserializer)?;
+        let d =
+            Vec::<AttrOptWithVal<LanguageSpec, PatternsWithContext>>::deserialize(deserializer)?;
         let mut m = BTreeMap::new();
 
         for d in d.into_iter() {
@@ -147,8 +145,7 @@ impl<'de> Deserialize<'de> for FunctionStub {
         D: Deserializer<'de>,
     {
         let source = String::deserialize(deserializer)?;
-        let ast =
-            CodeBlock::parse(&source).map_err(<D::Error as serde::de::Error>::custom)?;
+        let ast = CodeBlock::parse(&source).map_err(<D::Error as serde::de::Error>::custom)?;
 
         Ok(Self { source, ast })
     }
@@ -173,10 +170,7 @@ impl FunctionStub {
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn to_pcode(
-        &self,
-        language: &'static Language,
-    ) -> Result<Vec<PCodeOp>, IRBuilderError> {
+    pub fn to_pcode(&self, language: &'static Language) -> Result<Vec<PCodeOp>, IRBuilderError> {
         let mut builder = IRBuilder::new(language);
         let mut context = language.builder();
         builder.translate_parsed(&mut context, self.ast())
@@ -354,9 +348,8 @@ impl FunctionSpecs {
 mod test {
     use fugue_bytes::Endian;
 
-    use crate::common::GroupOrValueVisitor;
-
     use super::*;
+    use crate::common::GroupOrValueVisitor;
 
     #[test]
     fn test_constraint() -> Result<(), Box<dyn std::error::Error>> {
@@ -364,7 +357,13 @@ mod test {
         let input2 = "platform: posix";
 
         assert_eq!(
-            PlatformConstraint::Language(LanguageSpec::new_with("x86", Endian::Little, 32, None, None)),
+            PlatformConstraint::Language(LanguageSpec::new_with(
+                "x86",
+                Endian::Little,
+                32,
+                None,
+                None
+            )),
             serde_yaml::from_str(input1)?
         );
 

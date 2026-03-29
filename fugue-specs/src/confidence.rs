@@ -1,6 +1,10 @@
 use std::fmt::Display;
 
 use ordered_float::OrderedFloat;
+#[cfg(feature = "rkyv")]
+use rkyv::rancor::Fallible;
+#[cfg(feature = "rkyv")]
+use rkyv::{Archive, Place, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -43,33 +47,38 @@ impl From<Confidence> for f32 {
     }
 }
 
-#[cfg(feature = "bincode")]
-impl bincode::Encode for Confidence {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.0.encode(encoder)
+#[cfg(feature = "rkyv")]
+#[repr(transparent)]
+pub struct ArchivedConfidence(rkyv::Archived<f32>);
+
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::Portable for ArchivedConfidence {}
+#[cfg(feature = "rkyv")]
+unsafe impl rkyv::traits::NoUndef for ArchivedConfidence {}
+
+#[cfg(feature = "rkyv")]
+impl Archive for Confidence {
+    type Archived = ArchivedConfidence;
+    type Resolver = ();
+
+    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+        out.write(ArchivedConfidence(
+            rkyv::primitive::ArchivedF32::from_native(self.0 .0),
+        ));
     }
 }
 
-#[cfg(feature = "bincode")]
-impl<C> bincode::Decode<C> for Confidence {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let value = OrderedFloat(f32::decode(decoder)?);
-        Ok(Self(value))
+#[cfg(feature = "rkyv")]
+impl<S: Fallible + ?Sized> RkyvSerialize<S> for Confidence {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
     }
 }
 
-#[cfg(feature = "bincode")]
-impl<'de, C> bincode::BorrowDecode<'de, C> for Confidence {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let value = OrderedFloat(f32::borrow_decode(decoder)?);
-        Ok(Self(value))
+#[cfg(feature = "rkyv")]
+impl<D: Fallible + ?Sized> rkyv::Deserialize<Confidence, D> for ArchivedConfidence {
+    fn deserialize(&self, _: &mut D) -> Result<Confidence, D::Error> {
+        Ok(Confidence::new(self.0.to_native()))
     }
 }
 

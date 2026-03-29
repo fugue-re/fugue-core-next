@@ -12,11 +12,6 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
-use crate::loader::Loadable;
-use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
-use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::{AttributeMap, BytesOrSlice};
-
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
@@ -25,6 +20,10 @@ use super::{
     EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
+use crate::loader::Loadable;
+use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use crate::types::{AttributeMap, BytesOrSlice};
 
 const PROJECT_SQLITE_DATA: &str = "entities.db";
 const BATCH_SIZE: usize = 1024;
@@ -437,8 +436,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
             return Err(EntityStorageError::InvalidKeySize);
         }
 
-        let prefix = EntityKeyPrefix::try_from(prefix)
-            .map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
         if !self.table_exists(&prefix) {
             return Ok(Box::new(std::iter::empty()));
@@ -452,8 +451,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
             return Err(EntityStorageError::InvalidKeySize);
         }
 
-        let prefix = EntityKeyPrefix::try_from(prefix)
-            .map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
         if !self.table_exists(&prefix) {
             return Ok(Box::new(std::iter::empty()));
@@ -475,8 +474,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
             return Err(EntityStorageError::InvalidKeySize);
         }
 
-        let prefix = EntityKeyPrefix::try_from(prefix)
-            .map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
         if !self.table_exists(&prefix) {
             return Ok(Box::new(std::iter::empty()));
@@ -737,7 +736,9 @@ impl<'a, const P: StoragePersistence> SqliteEntityBytesBulkInserter<'a, P> {
 
 impl<const P: StoragePersistence> Drop for SqliteEntityBytesBulkInserter<'_, P> {
     fn drop(&mut self) {
-        if self.in_transaction && let Err(e) = self.conn.execute_batch("COMMIT") {
+        if self.in_transaction
+            && let Err(e) = self.conn.execute_batch("COMMIT")
+        {
             tracing::warn!("failed to flush batch to storage: {e}");
         }
     }
@@ -864,7 +865,9 @@ impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
 
 impl<const P: StoragePersistence> Drop for SqliteEntityWriter<'_, P> {
     fn drop(&mut self) {
-        if !self.committed && let Err(e) = self.conn.execute_batch("ROLLBACK") {
+        if !self.committed
+            && let Err(e) = self.conn.execute_batch("ROLLBACK")
+        {
             tracing::warn!("failed to rollback transaction: {e}");
         }
     }

@@ -1,7 +1,6 @@
 use fugue_sleigh_language::symbol::sub_table::Context;
 use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
-
 use proc_macro2::TokenStream;
 use quote::quote;
 

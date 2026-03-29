@@ -145,8 +145,7 @@ impl<'a> EntityTransactionalReader<'a> {
         self.inner
             .get(&key)?
             .map(|bytes| {
-                bincode::decode_from_slice::<E, _>(bytes.as_slice(), bincode::config::standard())
-                    .map(|(entity, _)| entity)
+                rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes.as_slice())
                     .map_err(EntityStorageError::decode)
             })
             .transpose()
@@ -207,8 +206,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         self.inner
             .get(&key)?
             .map(|bytes| {
-                bincode::decode_from_slice::<E, _>(bytes.as_slice(), bincode::config::standard())
-                    .map(|(entity, _)| entity)
+                rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes.as_slice())
                     .map_err(EntityStorageError::decode)
             })
             .transpose()
@@ -239,7 +237,8 @@ impl<'a> EntityTransactionalWriter<'a> {
         entity: &E,
     ) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
+            .map(|v| v.to_vec())
             .map_err(EntityStorageError::encode)?;
 
         let encoded = BytesOrSlice::from(encoded);
@@ -303,7 +302,8 @@ impl<'a> EntityBulkInserter<'a> {
         entity: &E,
     ) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
+            .map(|v| v.to_vec())
             .map_err(EntityStorageError::encode)?;
 
         let key = BytesOrSlice::from(key);
@@ -1084,8 +1084,7 @@ where
                 return Ok((key, EntityRef::from_arc(val)));
             }
 
-            let val = bincode::decode_from_slice::<E, _>(v, bincode::config::standard())
-                .map(|(entity, _)| entity)
+            let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(v)
                 .map_err(EntityStorageError::decode)?;
 
             Ok((key, EntityRef::new(val)))
@@ -1133,9 +1132,7 @@ impl EntityStorage {
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
         self.backing.get_as(&key, |bytes| {
-            bincode::decode_from_slice::<E, _>(bytes, bincode::config::standard())
-                .map(|(entity, _)| entity)
-                .map_err(EntityStorageError::decode)
+            rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes).map_err(EntityStorageError::decode)
         })
     }
 
@@ -1145,7 +1142,8 @@ impl EntityStorage {
         entity: &E,
     ) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-        let encoded = bincode::encode_to_vec(entity, bincode::config::standard())
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
+            .map(|v| v.to_vec())
             .map_err(EntityStorageError::encode)?;
         let encoded = BytesOrSlice::from(encoded);
 
@@ -1175,12 +1173,8 @@ impl EntityStorage {
                 result.and_then(|(key, value)| {
                     let key = schema::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    let val = bincode::decode_from_slice::<E, _>(
-                        value.as_slice(),
-                        bincode::config::standard(),
-                    )
-                    .map(|(entity, _)| entity)
-                    .map_err(EntityStorageError::decode)?;
+                    let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(value.as_slice())
+                        .map_err(EntityStorageError::decode)?;
                     Ok((key, val))
                 })
             })) as EntityIterator<'_, K, E>
@@ -1240,14 +1234,14 @@ impl EntityStorage {
 
 #[cfg(test)]
 mod test {
-    use bincode::{Decode, Encode};
-
     use super::*;
     use crate::ir::Address;
 
     #[test]
     fn test_entity_storage() {
-        #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+        #[derive(
+            Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+        )]
         struct TestEntity {
             id: u64,
             name: String,

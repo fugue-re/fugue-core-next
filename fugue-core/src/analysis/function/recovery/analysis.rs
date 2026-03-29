@@ -7,6 +7,11 @@ use std::time::Instant;
 use itertools::{Itertools, MinMaxResult};
 use tracing::Level;
 
+use super::{
+    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
+    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
+    PartialFunctionWithContext, Translator,
+};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{Address, AddressRangeSet, AddressWithContext};
@@ -14,12 +19,6 @@ use crate::project::{Project, ProjectMut};
 use crate::storage::project::InMemoryProvider;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 use crate::types::Confidence;
-
-use super::{
-    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
-    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
-    PartialFunctionWithContext, Translator,
-};
 
 pub struct FunctionRecovery<P = InMemoryProvider>
 where

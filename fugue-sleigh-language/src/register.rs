@@ -36,15 +36,13 @@ impl RegisterNames {
         }
 
         let range = offset..offset + size as u64;
-        self.overlaps
-            .iter(range.clone())
-            .find_map(|(r, v)| {
-                if r.start <= range.start && r.end >= range.end {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
+        self.overlaps.iter(range.clone()).find_map(|(r, v)| {
+            if r.start <= range.start && r.end >= range.end {
+                Some(v)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn get_by_name<N>(&self, name: N) -> Option<(&Ustr, u64, usize)>

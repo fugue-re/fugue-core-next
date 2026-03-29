@@ -1,7 +1,6 @@
 use std::hash::Hash;
 use std::mem;
 
-use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::ir::{Address, CodeBlock, Function, Id, Insn};
@@ -42,7 +41,9 @@ pub trait EntityKey: Clone + PartialEq + Eq + Hash {
     fn encode(&self, buf: &mut BytesMut);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 #[repr(u8)]
 pub enum ProjectEntity {
     Architecture = 0b0000_0000,
@@ -125,7 +126,22 @@ impl EntityKey for Id<Insn> {
     }
 }
 
-pub trait Entity<Context = ()>: Encode + Decode<Context> + Clone {
+pub trait Entity:
+    rkyv::Archive<
+        Archived: rkyv::Deserialize<
+            Self,
+            rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+        > + for<'a> rkyv::bytecheck::CheckBytes<
+            rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
+        >,
+    > + for<'a> rkyv::Serialize<
+        rkyv::api::high::HighSerializer<
+            rkyv::util::AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            rkyv::rancor::Error,
+        >,
+    > + Clone
+{
     const ID: EntityId;
 }
 

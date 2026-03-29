@@ -4,13 +4,13 @@ version = "0.3.0"
 edition = "2021"
 
 [features]
-bincode = ["dep:bincode"]
+rkyv = ["dep:rkyv"]
 serde = ["dep:serde"]
 default = []
 
 [dependencies]
 arrayvec = "0.7"
-bincode = { version = "2", features = ["derive"], optional = true }
+rkyv = { version = "0.8", features = ["arrayvec-0_7"], optional = true }
 itertools = "0.14"
 phf = { version = "0.13", features = ["macros"] }
 serde = { version = "1", features = ["derive"], optional = true }

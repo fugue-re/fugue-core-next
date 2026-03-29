@@ -8,9 +8,9 @@ use std::ops::{
 use std::str::FromStr;
 
 use fugue_bytes::Order;
-use malachite::Integer as BigInt;
 use malachite::base::num::conversion::traits::FromStringBase;
 use malachite::base::num::logic::traits::SignificantBits;
+use malachite::Integer as BigInt;
 
 use crate::error::{ParseError, TryFromBitVecError};
 use crate::{core_bigint, core_u64};
@@ -200,8 +200,7 @@ impl FromStr for BitVec {
 impl BitVec {
     pub fn from_str_radix(s: &str, radix: u32) -> Result<Self, ParseError> {
         let (cst, sz) = s.rsplit_once(':').ok_or(ParseError::InvalidFormat)?;
-        let val =
-            BigInt::from_string_base(radix as u8, cst).ok_or(ParseError::InvalidConst)?;
+        let val = BigInt::from_string_base(radix as u8, cst).ok_or(ParseError::InvalidConst)?;
 
         let bits = u32::from_str(sz).map_err(|_| ParseError::InvalidSize)?;
         Ok(Self::from_bigint(val, bits))

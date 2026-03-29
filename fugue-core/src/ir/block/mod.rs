@@ -1,7 +1,8 @@
 use std::num::NonZeroUsize;
 use std::ops::{Range, RangeInclusive};
 
-use bincode::{BorrowDecode, Decode, Encode};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 
 use crate::ir::{Address, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
@@ -13,7 +14,9 @@ pub use table::IndexedCodeBlockTable;
 
 pub type CodeBlockId = Id<CodeBlock>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Decode, Encode)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct CodeBlock {
     id: Id<Self>,
     start: Address,
@@ -66,30 +69,45 @@ bitflags::bitflags! {
     }
 }
 
-impl Encode for CodeBlockProperties {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+#[repr(transparent)]
+pub struct ArchivedCodeBlockProperties(rkyv::Archived<u32>);
+
+unsafe impl rkyv::Portable for ArchivedCodeBlockProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedCodeBlockProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedCodeBlockProperties
+where
+    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for CodeBlockProperties {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::decode(decoder)?;
-        Ok(CodeBlockProperties::from_bits(bits).unwrap_or(CodeBlockProperties::NONE))
+impl Archive for CodeBlockProperties {
+    type Archived = ArchivedCodeBlockProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+        out.write(ArchivedCodeBlockProperties(
+            rkyv::primitive::ArchivedU32::from_native(self.bits()),
+        ));
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for CodeBlockProperties {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::borrow_decode(decoder)?;
-        Ok(CodeBlockProperties::from_bits(bits).unwrap_or(CodeBlockProperties::NONE))
+impl<S: Fallible + ?Sized> Serialize<S> for CodeBlockProperties {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
+    for ArchivedCodeBlockProperties
+{
+    fn deserialize(&self, _: &mut D) -> Result<CodeBlockProperties, D::Error> {
+        Ok(CodeBlockProperties::from_bits(self.0.to_native())
+            .unwrap_or(CodeBlockProperties::NONE))
     }
 }
 

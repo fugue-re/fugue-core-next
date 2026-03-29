@@ -6,7 +6,6 @@ use fugue_lifter::runtime::language::Language;
 use fugue_lifter::runtime::operand::Operands;
 use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use fugue_lifter::{LifterBuilder, LifterBuilderError};
-
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;

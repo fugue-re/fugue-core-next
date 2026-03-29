@@ -4,14 +4,11 @@ use std::fmt::{Debug, Display};
 use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
-use bincode::{Decode, Encode};
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
-use smallvec::{SmallVec, smallvec};
-
 use fugue_bytes::traits::ByteCast;
 use fugue_bytes::{BE, LE};
-
+use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
@@ -508,7 +505,7 @@ impl<'a> LoadableSegment<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LoadableSegmentMetadata {
     name: String,
     address: Address,
@@ -875,9 +872,8 @@ impl Loadable for Loader<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::attributes;
-
     use super::*;
+    use crate::attributes;
 
     #[test]
     fn test_loader() -> Result<(), LoaderError> {

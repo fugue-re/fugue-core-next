@@ -3,13 +3,14 @@ use std::fmt;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-
 use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::loader::util::parse_language;
-use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError};
+use crate::loader::{
+    Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError,
+};
 use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 

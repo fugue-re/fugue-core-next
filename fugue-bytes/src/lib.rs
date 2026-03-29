@@ -1,5 +1,4 @@
-pub use byteorder::{BE, LE};
-pub use byteorder::NativeEndian as NE;
+pub use byteorder::{NativeEndian as NE, BE, LE};
 
 pub mod endian;
 pub use endian::Endian;

@@ -19,7 +19,8 @@ pub(crate) fn calculate_mask(index: usize) -> u64 {
 }
 
 pub(crate) fn zero_extend(value: i64, size: usize) -> i64 {
-    let mask = (!0i64).checked_shl(size as u32)
+    let mask = (!0i64)
+        .checked_shl(size as u32)
         .unwrap_or(0)
         .checked_shl(1)
         .unwrap_or(0);

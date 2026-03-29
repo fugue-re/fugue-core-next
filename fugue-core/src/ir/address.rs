@@ -1,7 +1,6 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::ops::{Add, AddAssign, RangeBounds, RangeInclusive, Sub, SubAssign};
 
-use bincode::{Decode, Encode};
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
@@ -10,8 +9,21 @@ use crate::lifter::{ContextSet, Language};
 use crate::types::Confidence;
 
 #[derive(
-    Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode, Deserialize, Serialize,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Deserialize,
+    Serialize,
 )]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct Address(u64);
 
@@ -390,7 +402,19 @@ impl ToAddress for Varnode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,

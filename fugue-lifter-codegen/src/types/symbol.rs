@@ -1,7 +1,6 @@
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::Symbol;
 use fugue_sleigh_language::Language;
-
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -15,7 +14,11 @@ pub(crate) struct SymbolAdaptor<'a, 'b> {
 }
 
 impl<'a, 'b> SymbolAdaptor<'a, 'b> {
-    pub(crate) fn new(language: &'a Language, symbol: &'a Symbol, tables: &'b mut Tables<'a>) -> Self {
+    pub(crate) fn new(
+        language: &'a Language,
+        symbol: &'a Symbol,
+        tables: &'b mut Tables<'a>,
+    ) -> Self {
         Self {
             language,
             symbol,

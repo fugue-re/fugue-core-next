@@ -3,9 +3,7 @@ use std::fmt::{Debug, Display};
 use std::mem;
 use std::sync::LazyLock;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use smallvec::SmallVec;
-
 pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
@@ -30,7 +28,19 @@ macro_rules! lazy_symbol {
     };
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct SymbolEntry {
     address: Address,
     symbol: Symbol,
@@ -61,76 +71,6 @@ impl Display for SymbolEntry {
         } else {
             write!(f, "<unnamed> at {}; {}", self.address, self.properties)
         }
-    }
-}
-
-impl Encode for SymbolEntry {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
-        self.address.encode(encoder)?;
-        Compat(&self.symbol).encode(encoder)?;
-        self.properties.encode(encoder)?;
-
-        self.indices.len().encode(encoder)?;
-        for index in &self.indices {
-            index.encode(encoder)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for SymbolEntry {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let address = Address::decode(decoder)?;
-        let Compat(symbol) = Compat::<Symbol>::decode(decoder)?;
-        let properties = SymbolProperties::decode(decoder)?;
-
-        let n = usize::decode(decoder)?;
-        let mut indices = SmallVec::with_capacity(n);
-        for _i in 0..n {
-            let index = SymbolIndex::decode(decoder)?;
-            indices.push(index);
-        }
-
-        Ok(Self {
-            address,
-            symbol,
-            properties,
-            indices,
-        })
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let address = Address::borrow_decode(decoder)?;
-        let Compat(symbol) = Compat::<Symbol>::borrow_decode(decoder)?;
-        let properties = SymbolProperties::borrow_decode(decoder)?;
-        let n = usize::borrow_decode(decoder)?;
-        let mut indices = SmallVec::with_capacity(n);
-        for _i in 0..n {
-            let index = SymbolIndex::borrow_decode(decoder)?;
-            indices.push(index);
-        }
-        Ok(Self {
-            address,
-            symbol,
-            properties,
-            indices,
-        })
     }
 }
 
@@ -269,30 +209,42 @@ impl Default for SymbolProperties {
     }
 }
 
-impl<C> Decode<C> for SymbolProperties {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let value = u8::decode(decoder)?;
-        Ok(SymbolProperties::from_bits_truncate(value))
+#[repr(transparent)]
+pub struct ArchivedSymbolProperties(u8);
+
+unsafe impl rkyv::Portable for ArchivedSymbolProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedSymbolProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedSymbolProperties
+where
+    u8: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { u8::check_bytes(value.cast(), context) }
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for SymbolProperties {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let value = u8::borrow_decode(decoder)?;
-        Ok(SymbolProperties::from_bits_truncate(value))
+impl rkyv::Archive for SymbolProperties {
+    type Archived = ArchivedSymbolProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedSymbolProperties(self.bits()));
     }
 }
 
-impl Encode for SymbolProperties {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for SymbolProperties {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SymbolProperties, D>
+    for ArchivedSymbolProperties
+{
+    fn deserialize(&self, _deserializer: &mut D) -> Result<SymbolProperties, D::Error> {
+        Ok(SymbolProperties::from_bits_truncate(self.0))
     }
 }
 
@@ -344,7 +296,19 @@ impl SymbolProperties {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct SymbolIndex(usize);
 
@@ -384,7 +348,9 @@ impl SymbolIndex {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct IndexedSymbolTable {
     // all known symbols
     symbols: Vec<SymbolEntry>,
@@ -396,130 +362,6 @@ pub struct IndexedSymbolTable {
     addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
     // indices of removed symbols that can be reused
     free_ids: Vec<Id<Symbol>>,
-}
-
-impl<C> Decode<C> for IndexedSymbolTable {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let symbols = Vec::<SymbolEntry>::decode(decoder)?;
-        let indices = BTreeMap::<SymbolIndex, Id<Symbol>>::decode(decoder)?;
-
-        let names_len = usize::decode(decoder)?;
-        let names = (0..names_len)
-            .map(|_| {
-                let Compat(sym) = Compat::<Symbol>::decode(decoder)?;
-                let ids_len = usize::decode(decoder)?;
-                let ids = (0..ids_len)
-                    .map(|_| Id::<Symbol>::decode(decoder))
-                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
-                Ok((sym, ids))
-            })
-            .collect::<Result<SymbolMap<SmallVec<[_; 2]>>, _>>()?;
-
-        let addresses_len = usize::decode(decoder)?;
-        let addresses = (0..addresses_len)
-            .map(|_| {
-                let addr = Address::decode(decoder)?;
-                let ids_len = usize::decode(decoder)?;
-                let ids = (0..ids_len)
-                    .map(|_| Id::<Symbol>::decode(decoder))
-                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
-                Ok((addr, ids))
-            })
-            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
-
-        let free_ids = Vec::<Id<Symbol>>::decode(decoder)?;
-
-        Ok(Self {
-            symbols,
-            indices,
-            names,
-            addresses,
-            free_ids,
-        })
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for IndexedSymbolTable {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let symbols = Vec::<SymbolEntry>::borrow_decode(decoder)?;
-        let indices = BTreeMap::<SymbolIndex, Id<Symbol>>::borrow_decode(decoder)?;
-
-        let names_len = usize::borrow_decode(decoder)?;
-        let names = (0..names_len)
-            .map(|_| {
-                let Compat(sym) = Compat::<Symbol>::borrow_decode(decoder)?;
-                let ids_len = usize::borrow_decode(decoder)?;
-                let ids = (0..ids_len)
-                    .map(|_| Id::<Symbol>::borrow_decode(decoder))
-                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
-                Ok((sym, ids))
-            })
-            .collect::<Result<SymbolMap<SmallVec<[_; 2]>>, _>>()?;
-
-        let addresses_len = usize::borrow_decode(decoder)?;
-        let addresses = (0..addresses_len)
-            .map(|_| {
-                let addr = Address::borrow_decode(decoder)?;
-                let ids_len = usize::borrow_decode(decoder)?;
-                let ids = (0..ids_len)
-                    .map(|_| Id::<Symbol>::borrow_decode(decoder))
-                    .collect::<Result<SmallVec<[_; 2]>, _>>()?;
-                Ok((addr, ids))
-            })
-            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
-
-        let free_ids = Vec::<Id<Symbol>>::borrow_decode(decoder)?;
-
-        Ok(Self {
-            symbols,
-            indices,
-            names,
-            addresses,
-            free_ids,
-        })
-    }
-}
-
-impl Encode for IndexedSymbolTable {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
-        self.symbols.encode(encoder)?;
-        self.indices.encode(encoder)?;
-
-        self.names.len().encode(encoder)?;
-        for (sym, ids) in &self.names {
-            Compat(sym).encode(encoder)?;
-            ids.len().encode(encoder)?;
-            for id in ids {
-                id.encode(encoder)?;
-            }
-        }
-
-        self.addresses.len().encode(encoder)?;
-        for (addr, ids) in &self.addresses {
-            addr.encode(encoder)?;
-            ids.len().encode(encoder)?;
-            for id in ids {
-                id.encode(encoder)?;
-            }
-        }
-
-        self.free_ids.encode(encoder)?;
-
-        Ok(())
-    }
 }
 
 impl Entity for IndexedSymbolTable {
@@ -895,7 +737,8 @@ impl IndexedSymbolTable {
     pub fn iter_by_address<'a>(
         &'a self,
     ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a {
-        self.addresses.values()
+        self.addresses
+            .values()
             .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
     }
 
@@ -1241,10 +1084,9 @@ mod test {
         assert_eq!(ntable.len(), 1);
 
         // check the roundtrip for encode/decode
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&table, config).unwrap();
-        let (decoded, _) =
-            bincode::decode_from_slice::<IndexedSymbolTable, _>(&encoded, config).unwrap();
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&table).unwrap();
+        let decoded =
+            rkyv::from_bytes::<IndexedSymbolTable, rkyv::rancor::Error>(&encoded).unwrap();
 
         assert_eq!(table, decoded);
     }

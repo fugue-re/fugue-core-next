@@ -1,7 +1,5 @@
 use std::mem;
-use std::ops::Range;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -16,69 +14,11 @@ use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IndexedCodeBlockTable {
     bounds: IntervalMap<Address, IdSet<CodeBlock>>,
     blocks: Vec<CodeBlock>,
     free_ids: Vec<Id<CodeBlock>>,
-}
-
-impl Encode for IndexedCodeBlockTable {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bounds.len().encode(encoder)?;
-        for (iv, val) in self.bounds.unsorted_iter() {
-            iv.encode(encoder)?;
-            val.encode(encoder)?;
-        }
-        self.blocks.encode(encoder)?;
-        self.free_ids.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for IndexedCodeBlockTable {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let nbounds = usize::decode(decoder)?;
-        let mut bounds = IntervalMap::with_capacity(nbounds);
-        for _ in 0..nbounds {
-            let iv = Range::<Address>::decode(decoder)?;
-            let val = IdSet::<CodeBlock>::decode(decoder)?;
-            bounds.force_insert(iv, val);
-        }
-        let blocks = Vec::<CodeBlock>::decode(decoder)?;
-        let free_ids = Vec::<Id<CodeBlock>>::decode(decoder)?;
-        Ok(Self {
-            bounds,
-            blocks,
-            free_ids,
-        })
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let nbounds = usize::borrow_decode(decoder)?;
-        let mut bounds = IntervalMap::with_capacity(nbounds);
-        for _ in 0..nbounds {
-            let iv = Range::<Address>::borrow_decode(decoder)?;
-            let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
-            bounds.force_insert(iv, val);
-        }
-        let blocks = Vec::<CodeBlock>::borrow_decode(decoder)?;
-        let free_ids = Vec::<Id<CodeBlock>>::borrow_decode(decoder)?;
-        Ok(Self {
-            bounds,
-            blocks,
-            free_ids,
-        })
-    }
 }
 
 impl IndexedCodeBlockTable {
@@ -368,9 +308,8 @@ impl PersistableProjectEntity for IndexedCodeBlockTable {
 
 #[cfg(test)]
 mod test {
-    use crate::ir::InsnList;
-
     use super::*;
+    use crate::ir::InsnList;
 
     #[test]
     fn test_basic_operations() {

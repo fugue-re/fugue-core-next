@@ -5,7 +5,6 @@ use std::io::{self, BufReader, BufWriter};
 use std::mem;
 use std::path::{Path, PathBuf};
 
-use bincode::{Decode, Encode};
 use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -27,15 +26,14 @@ use mapping::{
     SegmentMappingKind,
 };
 use provider::SegmentStorageProviderRegistry;
-use space::{AddressSpace, AddressSpaceId};
-use view::SegmentMappingView;
-
 pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, PersistableSegmentStorageProvider,
     SegmentStorageDescriptor, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
+use space::{AddressSpace, AddressSpaceId};
+use view::SegmentMappingView;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
@@ -82,20 +80,20 @@ impl SegmentStorageError {
     }
 }
 
-#[derive(Encode, Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct ProviderMetadata {
     id: SegmentStorageProviderId,
     stable_tag: String,
     permissions: SegmentProperties,
 }
 
-#[derive(Encode, Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct AddressSpaceMetadata {
     id: AddressSpaceId,
     mapping_ids: Vec<SegmentMappingId>,
 }
 
-#[derive(Encode, Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct MappingMetadata {
     name: String,
     virtual_start: u64,
@@ -110,7 +108,7 @@ struct MappingMetadata {
     provider_id: SegmentStorageProviderId,
 }
 
-#[derive(Encode, Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct SegmentStorageMetadata {
     providers: Vec<ProviderMetadata>,
     spaces: Vec<AddressSpaceMetadata>,
@@ -392,10 +390,12 @@ impl SegmentStorage {
             .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
         let mut writer = BufWriter::new(file);
 
-        bincode::encode_into_std_write(&metadata, &mut writer, bincode::config::standard())
-            .map_err(|e| {
-                SegmentStorageError::backing_with(format!("failed to encode metadata: {e}"))
-            })?;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).map_err(|e| {
+            SegmentStorageError::backing_with(format!("failed to encode metadata: {e}"))
+        })?;
+        io::Write::write_all(&mut writer, &bytes).map_err(|e| {
+            SegmentStorageError::backing_with(format!("failed to write metadata: {e}"))
+        })?;
 
         Ok(())
     }
@@ -411,13 +411,14 @@ impl SegmentStorage {
             .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
         let mut reader = BufReader::new(file);
 
-        let metadata = bincode::decode_from_std_read::<SegmentStorageMetadata, _, _>(
-            &mut reader,
-            bincode::config::standard(),
-        )
-        .map_err(|e| {
-            SegmentStorageError::backing_with(format!("failed to decode metadata: {e}"))
+        let mut bytes = Vec::new();
+        io::Read::read_to_end(&mut reader, &mut bytes).map_err(|e| {
+            SegmentStorageError::backing_with(format!("failed to read metadata: {e}"))
         })?;
+        let metadata = rkyv::from_bytes::<SegmentStorageMetadata, rkyv::rancor::Error>(&bytes)
+            .map_err(|e| {
+                SegmentStorageError::backing_with(format!("failed to decode metadata: {e}"))
+            })?;
 
         tracing::debug!(
             "loaded segment storage metadata; {} providers, {} spaces, {} mappings",

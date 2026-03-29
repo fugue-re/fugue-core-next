@@ -8,11 +8,11 @@ description = "A binary analysis framework written in Rust"
 homepage = "https://fugue.re"
 
 [features]
-bincode = ["dep:bincode"]
+rkyv = ["dep:rkyv"]
 default = []
 
 [dependencies]
-bincode = { version = "2", features = ["serde"], optional = true }
+rkyv = { version = "0.8", optional = true }
 bitflags = { version = "2", features = ["serde"] }
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }

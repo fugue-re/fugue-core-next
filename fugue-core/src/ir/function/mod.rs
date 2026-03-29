@@ -1,4 +1,5 @@
-use bincode::{BorrowDecode, Decode, Encode};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 use ustr::Ustr;
 
 use crate::ir::{Address, CodeBlockId, Id};
@@ -13,7 +14,9 @@ pub use table::IndexedFunctionTable;
 
 pub type FunctionId = Id<Function>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct Function {
     id: Id<Self>,
     name: Option<Ustr>,
@@ -51,72 +54,6 @@ impl MutableEntity<Address> for Function {
     }
 }
 
-impl Encode for Function {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use bincode::serde::Compat;
-
-        self.id.encode(encoder)?;
-        Compat(&self.name).encode(encoder)?;
-        self.entry.encode(encoder)?;
-        self.blocks.encode(encoder)?;
-        self.frame.encode(encoder)?;
-        self.properties.encode(encoder)?;
-
-        Ok(())
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for Function {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let id = Id::<Self>::borrow_decode(decoder)?;
-        let Compat(name) = Compat::<Option<Ustr>>::borrow_decode(decoder)?;
-        let entry = Address::borrow_decode(decoder)?;
-        let blocks = Vec::<(Address, CodeBlockId)>::borrow_decode(decoder)?;
-        let frame = FunctionFrame::borrow_decode(decoder)?;
-        let properties = FunctionProperties::borrow_decode(decoder)?;
-
-        Ok(Function {
-            id,
-            name,
-            entry,
-            blocks,
-            frame,
-            properties,
-        })
-    }
-}
-
-impl<C> Decode<C> for Function {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use bincode::serde::Compat;
-
-        let id = Id::<Self>::decode(decoder)?;
-        let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
-        let entry = Address::decode(decoder)?;
-        let blocks = Vec::<(Address, CodeBlockId)>::decode(decoder)?;
-        let frame = FunctionFrame::decode(decoder)?;
-        let properties = FunctionProperties::decode(decoder)?;
-
-        Ok(Function {
-            id,
-            name,
-            entry,
-            blocks,
-            frame,
-            properties,
-        })
-    }
-}
-
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct FunctionProperties: u32 {
@@ -130,30 +67,42 @@ bitflags::bitflags! {
     }
 }
 
-impl Encode for FunctionProperties {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+#[repr(transparent)]
+pub struct ArchivedFunctionProperties(rkyv::Archived<u32>);
+
+unsafe impl rkyv::Portable for ArchivedFunctionProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedFunctionProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedFunctionProperties
+where
+    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for FunctionProperties {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::borrow_decode(decoder)?;
-        Ok(FunctionProperties::from_bits_truncate(bits))
+impl Archive for FunctionProperties {
+    type Archived = ArchivedFunctionProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+        out.write(ArchivedFunctionProperties(
+            rkyv::primitive::ArchivedU32::from_native(self.bits()),
+        ));
     }
 }
 
-impl<C> Decode<C> for FunctionProperties {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::decode(decoder)?;
-        Ok(FunctionProperties::from_bits_truncate(bits))
+impl<S: Fallible + ?Sized> Serialize<S> for FunctionProperties {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: Fallible + ?Sized> rkyv::Deserialize<FunctionProperties, D> for ArchivedFunctionProperties {
+    fn deserialize(&self, _: &mut D) -> Result<FunctionProperties, D::Error> {
+        Ok(FunctionProperties::from_bits_truncate(self.0.to_native()))
     }
 }
 

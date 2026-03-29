@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use fallible_iterator::FallibleIterator;
-
 use fugue_core::analysis::core::FunctionRecoveryConfig;
 use fugue_core::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
@@ -20,7 +19,6 @@ use fugue_core::loader::{
 use fugue_core::project::Project;
 use fugue_core::storage::ProjectStorageProvider;
 use fugue_core::types::AttributeMap;
-
 use idalib::idb::{IDBOpenOptions, IDB};
 
 pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";

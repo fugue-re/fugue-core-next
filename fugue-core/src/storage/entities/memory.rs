@@ -7,10 +7,6 @@ use dashmap::mapref::one::Ref as DashMapRef;
 use skiplist::SkipMap;
 use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
-use crate::loader::Loadable;
-use crate::storage::{StoragePersistence, TRANSIENT};
-use crate::types::{AttributeMap, BytesOrSlice};
-
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
@@ -18,6 +14,9 @@ use super::{
     EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable,
 };
+use crate::loader::Loadable;
+use crate::storage::{StoragePersistence, TRANSIENT};
+use crate::types::{AttributeMap, BytesOrSlice};
 
 // Maximum batch size for bulk operations
 const BATCH_SIZE: usize = 1024;

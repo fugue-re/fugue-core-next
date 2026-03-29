@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Range, RangeInclusive};
 
-use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 use uuid::Uuid;
 
@@ -14,7 +13,9 @@ use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
 pub type SegmentMappingId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, bincode::Encode, bincode::Decode)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub enum SegmentMappingKind {
     #[default]
     None,
@@ -50,29 +51,48 @@ bitflags! {
     }
 }
 
-impl Encode for SegmentMappingFlags {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+#[repr(transparent)]
+pub struct ArchivedSegmentMappingFlags(rkyv::Archived<u32>);
+
+unsafe impl rkyv::Portable for ArchivedSegmentMappingFlags {}
+unsafe impl rkyv::traits::NoUndef for ArchivedSegmentMappingFlags {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedSegmentMappingFlags
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe {
+            <rkyv::Archived<u32> as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                value.cast(),
+                context,
+            )
+        }
     }
 }
 
-impl<C> Decode<C> for SegmentMappingFlags {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::decode(decoder)?;
-        Ok(SegmentMappingFlags::from_bits_truncate(bits))
+impl rkyv::Archive for SegmentMappingFlags {
+    type Archived = ArchivedSegmentMappingFlags;
+    type Resolver = rkyv::Resolver<u32>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let out = unsafe { out.cast_unchecked::<rkyv::Archived<u32>>() };
+        self.bits().resolve(resolver, out);
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for SegmentMappingFlags {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u32::borrow_decode(decoder)?;
+impl<S: rkyv::rancor::Fallible + rkyv::ser::Writer<S::Error> + ?Sized> rkyv::Serialize<S>
+    for SegmentMappingFlags
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.bits().serialize(serializer)
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SegmentMappingFlags, D>
+    for ArchivedSegmentMappingFlags
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<SegmentMappingFlags, D::Error> {
+        let bits = rkyv::Deserialize::<u32, D>::deserialize(&self.0, deserializer)?;
         Ok(SegmentMappingFlags::from_bits_truncate(bits))
     }
 }

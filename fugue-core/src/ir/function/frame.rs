@@ -1,8 +1,19 @@
-use bincode::{Decode, Encode};
-
 use crate::ir::Address;
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct StackChangePoint {
     /// The stack pointer change point.
     address: Address,
@@ -27,7 +38,19 @@ impl StackChangePoint {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct FunctionFrame {
     /// The size of local (stack) variables in bytes.
     locals_size: usize,

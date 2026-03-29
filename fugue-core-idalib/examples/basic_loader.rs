@@ -1,13 +1,11 @@
 use std::time::Instant;
 
 use fallible_iterator::FallibleIterator;
-
 use fugue_core::analysis::AnalysisPass;
 use fugue_core::attributes;
 use fugue_core::ir::traits::FunctionTable;
 use fugue_core::loader::{Loadable, LoadableAnalysers, LoadableFromFile};
 use fugue_core::project::InMemoryProject;
-
 use fugue_core_idalib::{IDABinary, ATTRIBUTE_IDA_DATABASE_PATH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

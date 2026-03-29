@@ -17,7 +17,7 @@ iset = "0.3"
 paste = "1"
 thiserror = "2"
 tracing = "0.1"
-ustr = "1"
+ustr = { version = "1", package = "fugue-ustr" }
 
 [lints]
 workspace = true

@@ -61,10 +61,14 @@ impl AddressSpace {
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
 
-            if view.start() < start && let Some(left) = view.with_end(start) {
+            if view.start() < start
+                && let Some(left) = view.with_end(start)
+            {
                 self.submaps.insert(left.range(), left);
             }
-            if view.last() > last && let Some(right) = view.with_start(end) {
+            if view.last() > last
+                && let Some(right) = view.with_start(end)
+            {
                 self.submaps.insert(right.range(), right);
             }
         }
@@ -297,7 +301,8 @@ mod test {
 
         // Mapping 2 is on top, so it should be visible at 0x1800
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -317,7 +322,8 @@ mod test {
 
         // Now mapping 1 should be visible at 0x1800 (overlap region)
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -326,7 +332,8 @@ mod test {
 
         // Mapping 1 should still be visible at 0x1200 (non-overlap region)
         assert_eq!(
-            space.find_containing(0x1200u64)
+            space
+                .find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -335,7 +342,8 @@ mod test {
 
         // Mapping 2 should be visible at 0x2100 (non-overlap region, past mapping 1's end)
         assert_eq!(
-            space.find_containing(0x2100u64)
+            space
+                .find_containing(0x2100u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -357,7 +365,8 @@ mod test {
 
         // Mapping 1 should still be at 0x1200 (before rebuild range)
         assert_eq!(
-            space.find_containing(0x1200u64)
+            space
+                .find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -366,7 +375,8 @@ mod test {
 
         // Mapping 2 should be at 0x1800 (inside rebuild range)
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -375,7 +385,8 @@ mod test {
 
         // Mapping 1 should still be at 0x2500 (after rebuild range)
         assert_eq!(
-            space.find_containing(0x2500u64)
+            space
+                .find_containing(0x2500u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),

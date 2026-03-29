@@ -1,16 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
+use super::{
+    FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
+};
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::ir::{Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
-
-use super::{
-    FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
-};
 
 pub struct PartialFunctionWithContext {
     pub config: FunctionRecoveryConfig,
@@ -274,10 +273,7 @@ impl FunctionBuilderContext {
 
             if !view.contains(block) {
                 if let Ok(nview) = segments.view_at(block) {
-                    tracing::debug!(
-                        "switching segment for {block} to segment {}",
-                        nview.name()
-                    );
+                    tracing::debug!("switching segment for {block} to segment {}", nview.name());
                     view = nview;
                 } else {
                     tracing::trace!("skipping {block}: not mapped in any segment");

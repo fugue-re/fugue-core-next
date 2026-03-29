@@ -3,7 +3,6 @@ use fugue_sleigh_language::construct::{
 };
 use fugue_sleigh_language::opcode::Opcode;
 use fugue_sleigh_language::Language;
-
 use quote::quote;
 
 use crate::core::Tables;
@@ -69,54 +68,61 @@ impl<'a, 'b> TplAdaptor<'a, 'b, HandleTpl> {
         let tmp_offset =
             TplAdaptor::new(&self.language, self.tpl.tmp_offset(), &mut self.tables).tokens();
 
-        self.tables.push_handle_tpl(self.tpl, quote! {
-            fugue_lifter_runtime::template::HandleTpl {
-                space: #space,
-                size: #size,
-                ptr_space: #ptr_space,
-                ptr_offset: #ptr_offset,
-                ptr_size: #ptr_size,
-                tmp_space: #tmp_space,
-                tmp_offset: #tmp_offset,
-            }
-        })
+        self.tables.push_handle_tpl(
+            self.tpl,
+            quote! {
+                fugue_lifter_runtime::template::HandleTpl {
+                    space: #space,
+                    size: #size,
+                    ptr_space: #ptr_space,
+                    ptr_offset: #ptr_offset,
+                    ptr_size: #ptr_size,
+                    tmp_space: #tmp_space,
+                    tmp_offset: #tmp_offset,
+                }
+            },
+        )
     }
 }
 
 impl<'a, 'b> TplAdaptor<'a, 'b, ConstTpl> {
     pub(crate) fn tokens(&mut self) -> u16 {
-        use ConstTpl as C;
-        use HandleKind as H;
+        use {ConstTpl as C, HandleKind as H};
 
-        self.tables.push_const_tpl(self.tpl, match self.tpl {
-            C::Real(val) => quote! { fugue_lifter_runtime::template::ConstTpl::Real(#val) },
-            C::Handle(index, kind) => {
-                let kind = match kind {
-                    H::Space => quote! { fugue_lifter_runtime::template::HandleKind::Space },
-                    H::Offset => quote! { fugue_lifter_runtime::template::HandleKind::Offset },
-                    H::Size => quote! { fugue_lifter_runtime::template::HandleKind::Size },
-                    H::OffsetPlus(val) => {
-                        quote! { fugue_lifter_runtime::template::HandleKind::OffsetPlus(#val) }
-                    }
-                };
-                quote! { fugue_lifter_runtime::template::ConstTpl::Handle(#index, #kind) }
-            }
-            C::Start => quote! { fugue_lifter_runtime::template::ConstTpl::Start },
-            C::Next => quote! { fugue_lifter_runtime::template::ConstTpl::Next },
-            C::Next2 => quote! { fugue_lifter_runtime::template::ConstTpl::Next2 },
-            C::CurrentSpace => quote! { fugue_lifter_runtime::template::ConstTpl::CurrentSpace },
-            C::CurrentSpaceSize => {
-                quote! { fugue_lifter_runtime::template::ConstTpl::CurrentSpaceSize }
-            }
-            C::SpaceId(id) => {
-                let id = id.index() as u8;
-                quote! { fugue_lifter_runtime::template::ConstTpl::SpaceId(#id) }
-            }
-            C::Relative(val) => {
-                quote! { fugue_lifter_runtime::template::ConstTpl::Relative(#val) }
-            }
-            _ => unimplemented!("flow operations not supported"),
-        })
+        self.tables.push_const_tpl(
+            self.tpl,
+            match self.tpl {
+                C::Real(val) => quote! { fugue_lifter_runtime::template::ConstTpl::Real(#val) },
+                C::Handle(index, kind) => {
+                    let kind = match kind {
+                        H::Space => quote! { fugue_lifter_runtime::template::HandleKind::Space },
+                        H::Offset => quote! { fugue_lifter_runtime::template::HandleKind::Offset },
+                        H::Size => quote! { fugue_lifter_runtime::template::HandleKind::Size },
+                        H::OffsetPlus(val) => {
+                            quote! { fugue_lifter_runtime::template::HandleKind::OffsetPlus(#val) }
+                        }
+                    };
+                    quote! { fugue_lifter_runtime::template::ConstTpl::Handle(#index, #kind) }
+                }
+                C::Start => quote! { fugue_lifter_runtime::template::ConstTpl::Start },
+                C::Next => quote! { fugue_lifter_runtime::template::ConstTpl::Next },
+                C::Next2 => quote! { fugue_lifter_runtime::template::ConstTpl::Next2 },
+                C::CurrentSpace => {
+                    quote! { fugue_lifter_runtime::template::ConstTpl::CurrentSpace }
+                }
+                C::CurrentSpaceSize => {
+                    quote! { fugue_lifter_runtime::template::ConstTpl::CurrentSpaceSize }
+                }
+                C::SpaceId(id) => {
+                    let id = id.index() as u8;
+                    quote! { fugue_lifter_runtime::template::ConstTpl::SpaceId(#id) }
+                }
+                C::Relative(val) => {
+                    quote! { fugue_lifter_runtime::template::ConstTpl::Relative(#val) }
+                }
+                _ => unimplemented!("flow operations not supported"),
+            },
+        )
     }
 }
 
@@ -231,12 +237,15 @@ impl<'a, 'b> TplAdaptor<'a, 'b, VarnodeTpl> {
         let offset = TplAdaptor::new(&self.language, self.tpl.offset(), &mut self.tables).tokens();
         let size = TplAdaptor::new(&self.language, self.tpl.size(), &mut self.tables).tokens();
 
-        self.tables.push_varnode_tpl(self.tpl, quote! {
-            fugue_lifter_runtime::template::VarnodeTpl {
-                space: #space,
-                offset: #offset,
-                size: #size,
-            }
-        })
+        self.tables.push_varnode_tpl(
+            self.tpl,
+            quote! {
+                fugue_lifter_runtime::template::VarnodeTpl {
+                    space: #space,
+                    offset: #offset,
+                    size: #size,
+                }
+            },
+        )
     }
 }

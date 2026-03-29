@@ -39,10 +39,9 @@ impl PrototypeOperand {
                 })
             }
             compiler::PrototypeOperand::RegisterJoin(ref first_name, ref second_name) => {
-                let (first_name, foffset, fsize) =
-                    registers.get_by_name(&**first_name).ok_or({
-                        DeserialiseError::Invariant("register for prototype operand invalid")
-                    })?;
+                let (first_name, foffset, fsize) = registers.get_by_name(&**first_name).ok_or({
+                    DeserialiseError::Invariant("register for prototype operand invalid")
+                })?;
 
                 let (second_name, soffset, ssize) =
                     registers.get_by_name(&**second_name).ok_or({
@@ -235,9 +234,9 @@ impl StackPointer {
         registers: &RegisterNames,
         spaces: &AddressSpaces,
     ) -> Result<Self, DeserialiseError> {
-        let space = spaces.space_by_name(&spec.space).ok_or({
-            DeserialiseError::Invariant("stack pointer space for convention invalid")
-        })?;
+        let space = spaces
+            .space_by_name(&spec.space)
+            .ok_or({ DeserialiseError::Invariant("stack pointer space for convention invalid") })?;
         let (name, offset, size) = registers
             .get_by_name(&*spec.register)
             .ok_or(DeserialiseError::Invariant("named stack pointer invalid"))?;

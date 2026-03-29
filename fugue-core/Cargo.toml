@@ -13,7 +13,7 @@ default = ["sqlite"]
 [dependencies]
 anyhow = "1"
 arrayvec = "0.7"
-bincode = { version = "2", features = ["serde"] }
+rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 bitflags = "2"
 bytes = "1"
 clone_dyn = "0.55"
@@ -23,12 +23,12 @@ downcast-rs = "2"
 fallible-iterator = "0.3"
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
-fugue-lifter = { version = "0.3", path = "../fugue-lifter", features = ["bincode"] }
-fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["bincode"] }
+fugue-lifter = { version = "0.3", path = "../fugue-lifter", features = ["rkyv"] }
+fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["rkyv"] }
 hex-display = "0.3"
 indexmap = "2.12"
 inventory = "0.3"
-iset = "0.3"
+iset = { version = "0.3", package = "fugue-iset", features = ["rkyv"] }
 itertools = "0.14"
 libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"
@@ -51,11 +51,11 @@ sha2 = "0.10"
 skiplist = "0.6"
 smallvec = "1.15"
 thiserror = "2"
-tinyset = "0.5"
+tinyset = { version = "0.5", package = "fugue-tinyset", features = ["rkyv"] }
 tracing = "0.1"
 typeid = "1"
 uuid = { version = "1", features = ["serde", "v7"] }
-ustr = { version = "1.1", features = ["serde"] }
+ustr = { version = "1.1", package = "fugue-ustr", features = ["rkyv", "serde"] }
 walkdir = "2.5"
 yaxpeax-arch = { version = "0.3", default-features = false }
 yaxpeax-arm = "0.4"

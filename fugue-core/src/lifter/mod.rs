@@ -1,10 +1,10 @@
 use std::fmt::Display;
 
 use arrayvec::ArrayVec;
-use bincode::{BorrowDecode, Decode, Encode};
-
+pub use fugue_lifter::runtime::operand;
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
-pub use fugue_lifter::runtime::operand as operand;
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 
 use crate::ir::Address;
 
@@ -18,7 +18,18 @@ pub mod traits;
 
 pub const MAX_CONTEXT_UPDATES: usize = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct ContextUpdate {
     bits: ContextBitRange,
     value: u32,
@@ -68,58 +79,44 @@ impl Display for ContextSet {
     }
 }
 
-impl Encode for ContextSet {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.0.len().encode(encoder)?;
-        for update in self.0.iter() {
-            update.encode(encoder)?;
-        }
-        Ok(())
+type ContextSetInner = ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>;
+
+#[repr(transparent)]
+pub struct ArchivedContextSet(rkyv::Archived<ContextSetInner>);
+
+unsafe impl rkyv::Portable for ArchivedContextSet {}
+unsafe impl rkyv::traits::NoUndef for ArchivedContextSet {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedContextSet
+where
+    rkyv::Archived<ContextSetInner>: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { <rkyv::Archived<ContextSetInner>>::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for ContextSet {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let len = usize::decode(decoder)?;
+impl Archive for ContextSet {
+    type Archived = ArchivedContextSet;
+    type Resolver = <ContextSetInner as Archive>::Resolver;
 
-        if len > MAX_CONTEXT_UPDATES {
-            return Err(bincode::error::DecodeError::OtherString(
-                "too many context updates".to_owned(),
-            ));
-        }
-
-        let mut context = ArrayVec::new();
-        for _ in 0..len {
-            context.push(ContextUpdate::decode(decoder)?);
-        }
-
-        Ok(Self(context))
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<ContextSetInner>>() };
+        self.0.resolve(resolver, out_inner);
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for ContextSet {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let len = usize::borrow_decode(decoder)?;
+impl<S: Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer> Serialize<S> for ContextSet {
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
 
-        if len > MAX_CONTEXT_UPDATES {
-            return Err(bincode::error::DecodeError::OtherString(
-                "too many context updates".to_owned(),
-            ));
-        }
-
-        let mut context = ArrayVec::new();
-        for _ in 0..len {
-            context.push(ContextUpdate::borrow_decode(decoder)?);
-        }
-
-        Ok(Self(context))
+impl<D: Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
+    fn deserialize(&self, deserializer: &mut D) -> Result<ContextSet, D::Error> {
+        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserializer)?;
+        Ok(ContextSet(inner))
     }
 }
 
@@ -205,7 +202,18 @@ impl ContextSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum ContextHintKind {
     Code(u8),
     Data,
@@ -259,7 +267,18 @@ impl ContextHintKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct ContextHint {
     kind: ContextHintKind,
     context: Option<ContextSet>,

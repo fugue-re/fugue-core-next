@@ -7,7 +7,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::common::{PlatformConstraints, PlatformConstraint, GroupOrValueVisitor};
+use crate::common::{GroupOrValueVisitor, PlatformConstraint, PlatformConstraints};
 use crate::pattern::{PatternGroup, PatternMatchIter, PatternOrGroupSeq, PatternsWithContext};
 
 #[derive(Debug, Error)]

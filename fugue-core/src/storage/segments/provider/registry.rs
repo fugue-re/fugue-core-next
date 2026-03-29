@@ -4,10 +4,9 @@ use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
+use super::{SegmentStorageError, SegmentStorageProvider};
 use crate::ir::Address;
 use crate::types::AttributeMap;
-
-use super::{SegmentStorageError, SegmentStorageProvider};
 
 static REGISTRY: OnceLock<SegmentStorageProviderRegistry> = OnceLock::new();
 
@@ -35,11 +34,7 @@ impl SegmentStorageProviderEntry {
         from_segment_range: FromSegmentRangeFn,
         from_storage: FromStorageFn,
     ) -> Self {
-        Self::new_with::<T>(
-            stable_tag,
-            from_segment_range,
-            Some(from_storage),
-        )
+        Self::new_with::<T>(stable_tag, from_segment_range, Some(from_storage))
     }
 
     pub const fn new_with<T: 'static>(
