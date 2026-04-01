@@ -1020,6 +1020,10 @@ impl SegmentStorage {
         self.fill_byte
     }
 
+    pub fn spaces(&self) -> impl Iterator<Item = &AddressSpace> {
+        self.spaces.values()
+    }
+
     pub fn resolve_to_offset(
         &self,
         addr: impl Into<MetaAddress>,

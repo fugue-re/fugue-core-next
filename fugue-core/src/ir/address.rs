@@ -775,9 +775,33 @@ impl Sub<&'_ MetaAddress> for MetaAddress {
     }
 }
 
+impl From<i32> for MetaAddress {
+    fn from(v: i32) -> Self {
+        Self::in_default_space(v as u64)
+    }
+}
+
 impl From<u64> for MetaAddress {
     fn from(offset: u64) -> Self {
         Self::in_default_space(offset)
+    }
+}
+
+impl From<u32> for MetaAddress {
+    fn from(v: u32) -> Self {
+        Self::in_default_space(v as u64)
+    }
+}
+
+impl From<u16> for MetaAddress {
+    fn from(v: u16) -> Self {
+        Self::in_default_space(v as u64)
+    }
+}
+
+impl From<u8> for MetaAddress {
+    fn from(v: u8) -> Self {
+        Self::in_default_space(v as u64)
     }
 }
 

@@ -12,6 +12,7 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, MetaAddress, MetaAddressWithContext};
 use crate::lifter::ContextSet;
 use crate::project::Project;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
@@ -76,18 +77,20 @@ impl FunctionRecoveryPatternMatcher {
             .map_err(|e| FunctionRecoveryPatternMatcherError::io(path, e))
     }
 
+    // NOTE: all segments are in the same space
     fn for_each_segment<'a>(
         segments: &'a SegmentStorage,
         segm: &mut Option<SegmentMappingView<'a>>,
+        space_id: AddressSpaceId,
         gap: RangeInclusive<Address>,
         mut f: impl FnMut(RangeInclusive<Address>, &[u8]),
     ) {
         let current_segment = segm;
         let gap_end = *gap.end();
-
         let mut current_start = *gap.start();
+
         let calculate_end = |segm: &SegmentMappingView| -> Address {
-            let segm_end = segm.last();
+            let segm_end = segm.last().address();
             if segm_end <= gap_end {
                 segm_end
             } else {
@@ -96,8 +99,9 @@ impl FunctionRecoveryPatternMatcher {
         };
 
         while current_start <= gap_end {
+            let current_meta = MetaAddress::new(space_id, current_start);
             let (range, segm) = if let Some(segm) = current_segment.as_ref()
-                && segm.contains(current_start)
+                && segm.contains(current_meta)
             {
                 let match_end = calculate_end(segm);
                 let range = current_start..=match_end;
@@ -106,7 +110,7 @@ impl FunctionRecoveryPatternMatcher {
 
                 (range, segm)
             } else {
-                let Ok(segment) = segments.view_at(current_start) else {
+                let Ok(segment) = segments.view_at(current_meta) else {
                     break;
                 };
 
@@ -121,28 +125,27 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.bytes_at(*range.start(), size) else {
+            let Some(bytes) = segm.bytes_at(MetaAddress::new(space_id, *range.start()), size)
+            else {
                 break;
             };
 
             f(range, &bytes);
         }
     }
-}
 
-impl<P> AnalysisPass<P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
-where
-    P: ProjectStorageProvider,
-{
-    fn analyse_with(
+    fn analyse_space<P>(
         &mut self,
-        project: &mut Project<P>,
+        project: &Project<P>,
         state: &mut FunctionDiscoveryContext,
-    ) -> Result<(), AnalysisError> {
+        space_id: AddressSpaceId,
+    ) -> Result<(), AnalysisError>
+    where
+        P: ProjectStorageProvider,
+    {
         let segments = project.segments();
-
         let gaps = state
-            .gaps(project.functions(), project.blocks(), segments)
+            .gaps(project.functions(), project.blocks(), segments, space_id)
             .map_err(|e| AnalysisError::pass_failed("function-recovery-pattern-matcher", e))?;
 
         if gaps.is_empty() {
@@ -157,16 +160,18 @@ where
 
         for gap in gaps.ranges() {
             tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
-            Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
+            Self::for_each_segment(segments, &mut current_segm, space_id, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
-                        let start = MetaAddress::in_default_space(*gap.start() + range.start);
+                        let start = MetaAddress::new(space_id, *gap.start() + range.start);
 
                         if arch.canonicalise_address(start).is_none() {
                             continue;
                         }
 
-                        if state.avoids().contains(start.offset()) || state.failures().contains(&start) {
+                        if state.avoids().contains(start.offset())
+                            || state.failures().contains(&start)
+                        {
                             continue;
                         }
 
@@ -178,12 +183,36 @@ where
                             })
                             .collect::<ContextSet>();
 
-                        tracing::debug!("adding candidate at {start} with context {ctx:?} (confidence: {confidence})");
+                        tracing::debug!(
+                            "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
+                        );
 
-                        state.add_candidate(MetaAddressWithContext::new_with(start, ctx, confidence));
+                        state.add_candidate(MetaAddressWithContext::new_with(
+                            start, ctx, confidence,
+                        ));
                     }
                 }
             });
+        }
+
+        Ok(())
+    }
+}
+
+impl<P> AnalysisPass<P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
+where
+    P: ProjectStorageProvider,
+{
+    fn analyse_with(
+        &mut self,
+        project: &mut Project<P>,
+        state: &mut FunctionDiscoveryContext,
+    ) -> Result<(), AnalysisError> {
+        let segments = project.segments();
+        let spaces = segments.spaces();
+
+        for space in spaces.map(|s| s.id()) {
+            self.analyse_space(project, state, space)?;
         }
 
         Ok(())

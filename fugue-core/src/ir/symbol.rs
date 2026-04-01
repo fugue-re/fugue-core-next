@@ -135,7 +135,11 @@ impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
 }
 
 impl SymbolEntry {
-    pub fn new(address: impl Into<MetaAddress>, symbol: impl Into<Symbol>, properties: SymbolProperties) -> Self {
+    pub fn new(
+        address: impl Into<MetaAddress>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> Self {
         Self {
             address: address.into(),
             symbol: symbol.into(),
@@ -1210,14 +1214,14 @@ mod test {
 
         let (inserted1, id1) = table.insert_local(
             SymbolIndex::new(sel, 1),
-            Address::from(0x1000u32),
+            MetaAddress::from(0x1000u32),
             "symbol1",
         );
         assert!(inserted1);
 
         let (inserted2, _id2) = table.insert_local(
             SymbolIndex::new(sel, 2),
-            Address::from(0x2000u32),
+            MetaAddress::from(0x2000u32),
             "symbol2",
         );
         assert!(inserted2);
@@ -1230,7 +1234,7 @@ mod test {
 
         let (inserted3, id3) = table.insert_local(
             SymbolIndex::new(sel, 3),
-            Address::from(0x3000u32),
+            MetaAddress::from(0x3000u32),
             "symbol3",
         );
         assert!(inserted3);
@@ -1241,7 +1245,7 @@ mod test {
 
         let (inserted4, id4) = table.insert_local(
             SymbolIndex::new(sel, 4),
-            Address::from(0x3000u32),
+            MetaAddress::from(0x3000u32),
             "symbol3",
         );
         assert!(!inserted4);
@@ -1252,7 +1256,7 @@ mod test {
 
         let (inserted5, _id5) = table.insert_local(
             SymbolIndex::new(sel, 5),
-            Address::from(0x3000u32),
+            MetaAddress::from(0x3000u32),
             "symbol4",
         );
         assert!(inserted5);
@@ -1267,7 +1271,7 @@ mod test {
         assert_eq!(table.len(), 2);
 
         // check we remove id3, id4, and id5, which will be two distinct symbols
-        assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
+        assert_eq!(ntable.remove_by_address(MetaAddress::from(0x3000u32)), 2);
         assert_eq!(ntable.len(), 1);
 
         // check the roundtrip for encode/decode

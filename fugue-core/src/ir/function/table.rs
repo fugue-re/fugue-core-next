@@ -224,7 +224,7 @@ mod test {
     fn test_basic_operations() {
         let mut table = IndexedFunctionTable::new();
 
-        let addr = Address::from(0x1000);
+        let addr = MetaAddress::from(0x1000);
         let func_id = table
             .insert(addr, |id, entry| Ok(Function::new(id, entry)))
             .unwrap();
@@ -244,9 +244,9 @@ mod test {
     fn test_removal_operations() {
         let mut table = IndexedFunctionTable::new();
 
-        let addr1 = Address::from(0x1000);
-        let addr2 = Address::from(0x2000);
-        let addr3 = Address::from(0x3000);
+        let addr1 = MetaAddress::from(0x1000);
+        let addr2 = MetaAddress::from(0x2000);
+        let addr3 = MetaAddress::from(0x3000);
 
         let func_id1 = table
             .insert(addr1, |id, entry| Ok(Function::new(id, entry)))

@@ -9,7 +9,9 @@ use thiserror::Error;
 use crate::arch::Arch;
 use crate::ir::{MetaAddress, SegmentProperties};
 use crate::loader::util::parse_language;
-use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError};
+use crate::loader::{
+    Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError,
+};
 use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -160,7 +162,7 @@ mod test {
     use fallible_iterator::FallibleIterator;
 
     use crate::attributes;
-    use crate::ir::Address;
+    use crate::ir::MetaAddress;
     use crate::loader::Loadable;
     use crate::loader::shellcode::Shellcode;
 
@@ -182,13 +184,13 @@ mod test {
         assert_eq!(regions.len(), 1);
 
         let region = &regions[0];
-        assert_eq!(region.address, Address::from(0x1000u32));
+        assert_eq!(region.address, MetaAddress::from(0x1000u32));
 
         let mut lifter = shellcode.architecture().lifter();
         let mut offset = 0usize;
         let mut output = String::new();
 
-        let address = shellcode.address().offset();
+        let address = shellcode.address();
         let bytes = shellcode.bytes();
 
         while offset < bytes.len() {
