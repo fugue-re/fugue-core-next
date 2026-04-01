@@ -3,7 +3,7 @@ use std::ops::{Range, RangeInclusive};
 
 use bincode::{BorrowDecode, Decode, Encode};
 
-use crate::ir::{Address, Id, IdSet, InsnList};
+use crate::ir::{Id, IdSet, InsnList, MetaAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
@@ -16,7 +16,7 @@ pub type CodeBlockId = Id<CodeBlock>;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Decode, Encode)]
 pub struct CodeBlock {
     id: Id<Self>,
-    start: Address,
+    start: MetaAddress,
     len: u16,
     instructions: InsnList,
     successors: IdSet<CodeBlock>,
@@ -94,13 +94,13 @@ impl<'de, C> BorrowDecode<'de, C> for CodeBlockProperties {
 }
 
 impl CodeBlock {
-    pub fn new(id: Id<Self>, start: Address, len: NonZeroUsize, instructions: InsnList) -> Self {
+    pub fn new(id: Id<Self>, start: MetaAddress, len: NonZeroUsize, instructions: InsnList) -> Self {
         Self::new_with(id, start, len, instructions, ContextSet::default())
     }
 
     pub fn new_with(
         id: Id<Self>,
-        start: Address,
+        start: MetaAddress,
         len: NonZeroUsize,
         instructions: InsnList,
         context: ContextSet,
@@ -122,7 +122,7 @@ impl CodeBlock {
 
     pub fn try_new(
         id: Id<Self>,
-        start: Address,
+        start: MetaAddress,
         len: usize,
         instructions: InsnList,
     ) -> Option<Self> {
@@ -131,7 +131,7 @@ impl CodeBlock {
 
     pub fn try_new_with(
         id: Id<Self>,
-        start: Address,
+        start: MetaAddress,
         len: usize,
         instructions: InsnList,
         context: ContextSet,
@@ -149,19 +149,19 @@ impl CodeBlock {
         self.id
     }
 
-    pub fn start(&self) -> Address {
+    pub fn start(&self) -> MetaAddress {
         self.start
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.start
     }
 
-    pub fn last_address(&self) -> Address {
+    pub fn last_address(&self) -> MetaAddress {
         self.start + self.len() - 1usize
     }
 
-    pub fn next_address(&self) -> Address {
+    pub fn next_address(&self) -> MetaAddress {
         self.start + self.len()
     }
 
@@ -173,11 +173,11 @@ impl CodeBlock {
         self.len == 0
     }
 
-    pub fn range(&self) -> Range<Address> {
+    pub fn range(&self) -> Range<MetaAddress> {
         self.address()..self.next_address()
     }
 
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+    pub fn range_inclusive(&self) -> RangeInclusive<MetaAddress> {
         self.address()..=self.last_address()
     }
 

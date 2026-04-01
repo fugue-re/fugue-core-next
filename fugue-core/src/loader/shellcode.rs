@@ -7,14 +7,14 @@ use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{MetaAddress, SegmentProperties};
 use crate::loader::util::parse_language;
 use crate::loader::{Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError};
 use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub struct Shellcode<'a> {
-    address: Address,
+    address: MetaAddress,
     bytes: BytesOrMapping<'a>,
     arch: Arch,
     metadata: LoadableMetadata,
@@ -33,7 +33,7 @@ impl fmt::Debug for Shellcode<'_> {
 #[derive(Debug, Error)]
 pub enum ShellcodeError {
     #[error("mapping {1} bytes at {0} will overflow the default address space")]
-    AddressOverflow(Address, usize),
+    AddressOverflow(MetaAddress, usize),
     #[error("buffer to map must be not be empty")]
     ZeroSized,
 }
@@ -41,7 +41,7 @@ pub enum ShellcodeError {
 impl<'a> Shellcode<'a> {
     pub fn new(
         language: impl AsRef<str>,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         bytes: impl Into<BytesOrMapping<'a>>,
     ) -> Result<Self, LoaderError> {
         Self::new_with(language, address, bytes, AttributeMap::default())
@@ -49,7 +49,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn new_with(
         language: impl AsRef<str>,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         bytes: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
@@ -91,7 +91,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn from_file(
         language: impl AsRef<str>,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         path: impl AsRef<Path>,
     ) -> Result<Self, LoaderError> {
         Self::from_file_with(language, address, path, AttributeMap::default())
@@ -99,7 +99,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn from_file_with(
         language: impl AsRef<str>,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
@@ -112,7 +112,7 @@ impl<'a> Shellcode<'a> {
         Ok(loaded)
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.address
     }
 

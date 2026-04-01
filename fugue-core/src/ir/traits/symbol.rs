@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{Address, Id, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
+use crate::ir::{Id, MetaAddress, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
 use crate::storage::project::FundamentalProjectEntity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,13 +131,13 @@ pub trait SymbolTable: FundamentalProjectEntity {
     fn insert(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: MetaAddress,
         symbol: Symbol,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>);
 
     fn remove(&mut self, symbol: &str) -> usize;
-    fn remove_by_address(&mut self, address: Address) -> usize;
+    fn remove_by_address(&mut self, address: MetaAddress) -> usize;
     fn remove_by_id(&mut self, id: Id<Symbol>) -> bool;
     fn remove_by_index(&mut self, index: SymbolIndex) -> bool;
 
@@ -167,26 +167,26 @@ pub trait SymbolTable: FundamentalProjectEntity {
         index: SymbolIndex,
     ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'a>)>;
 
-    fn get_by_address<'a>(&'a self, address: Address) -> Self::SymbolEntryIter<'a>;
-    fn get_by_address_mut<'a>(&'a mut self, address: Address) -> Self::SymbolEntryIterMut<'a>;
+    fn get_by_address<'a>(&'a self, address: MetaAddress) -> Self::SymbolEntryIter<'a>;
+    fn get_by_address_mut<'a>(&'a mut self, address: MetaAddress) -> Self::SymbolEntryIterMut<'a>;
 
     fn get_first_by_address<'a>(
         &'a self,
-        address: Address,
+        address: MetaAddress,
     ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'a>)> {
         self.get_by_address(address).next()
     }
 
     fn get_first_by_address_mut<'a>(
         &'a mut self,
-        address: Address,
+        address: MetaAddress,
     ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'a>)> {
         self.get_by_address_mut(address).next()
     }
 
     fn contains(&self, symbol: &str) -> bool;
     fn contains_index(&self, index: SymbolIndex) -> bool;
-    fn contains_address(&self, address: Address) -> bool;
+    fn contains_address(&self, address: MetaAddress) -> bool;
 
     fn iter<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
     fn iter_by_selector<'a>(&'a self, selector: SymbolTableSelector) -> Self::SymbolEntryIter<'a>;

@@ -403,13 +403,13 @@ impl ToAddress for Varnode {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
-pub struct AddressWithContext {
-    address: Address,
+pub struct MetaAddressWithContext {
+    address: MetaAddress,
     context: ContextSet,
     confidence: Confidence,
 }
 
-impl Display for AddressWithContext {
+impl Display for MetaAddressWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -419,40 +419,40 @@ impl Display for AddressWithContext {
     }
 }
 
-impl<A> From<A> for AddressWithContext
+impl<A> From<A> for MetaAddressWithContext
 where
-    A: Into<Address>,
+    A: Into<MetaAddress>,
 {
     fn from(address: A) -> Self {
         Self::new(address.into(), ContextSet::default())
     }
 }
 
-impl<A> From<(A, ContextSet)> for AddressWithContext
+impl<A> From<(A, ContextSet)> for MetaAddressWithContext
 where
-    A: Into<Address>,
+    A: Into<MetaAddress>,
 {
     fn from(parts: (A, ContextSet)) -> Self {
         Self::new(parts.0.into(), parts.1)
     }
 }
 
-impl<A> From<(A, ContextSet, Confidence)> for AddressWithContext
+impl<A> From<(A, ContextSet, Confidence)> for MetaAddressWithContext
 where
-    A: Into<Address>,
+    A: Into<MetaAddress>,
 {
     fn from(parts: (A, ContextSet, Confidence)) -> Self {
         Self::new_with(parts.0.into(), parts.1, parts.2)
     }
 }
 
-impl AddressWithContext {
-    pub fn new(address: impl Into<Address>, context: ContextSet) -> Self {
+impl MetaAddressWithContext {
+    pub fn new(address: impl Into<MetaAddress>, context: ContextSet) -> Self {
         Self::new_with(address.into(), context, Confidence::certain())
     }
 
     pub fn new_with(
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         context: ContextSet,
         confidence: Confidence,
     ) -> Self {
@@ -463,7 +463,7 @@ impl AddressWithContext {
         }
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.address
     }
 
@@ -489,7 +489,7 @@ impl AddressWithContext {
         }
     }
 
-    pub fn into_parts(self) -> (Address, ContextSet) {
+    pub fn into_parts(self) -> (MetaAddress, ContextSet) {
         (self.address, self.context)
     }
 }
@@ -513,6 +513,22 @@ impl FromIterator<RangeInclusive<Address>> for AddressRangeSet {
     }
 }
 
+impl FromIterator<MetaAddress> for AddressRangeSet {
+    fn from_iter<T: IntoIterator<Item = MetaAddress>>(iter: T) -> Self {
+        Self(iter.into_iter().map(|addr| addr.offset()).collect())
+    }
+}
+
+impl FromIterator<RangeInclusive<MetaAddress>> for AddressRangeSet {
+    fn from_iter<T: IntoIterator<Item = RangeInclusive<MetaAddress>>>(iter: T) -> Self {
+        Self(
+            iter.into_iter()
+                .map(|r| r.start().offset()..=r.end().offset())
+                .collect(),
+        )
+    }
+}
+
 impl AddressRangeSet {
     pub fn new() -> Self {
         Self(RangeSetBlaze::new())
@@ -524,6 +540,11 @@ impl AddressRangeSet {
 
     pub fn insert_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
         let range = range.into();
+        self.0
+            .ranges_insert(range.start().offset()..=range.end().offset());
+    }
+
+    pub fn insert_meta_range(&mut self, range: RangeInclusive<MetaAddress>) {
         self.0
             .ranges_insert(range.start().offset()..=range.end().offset());
     }
@@ -643,17 +664,286 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Decode,
+    Encode,
+    Deserialize,
+    Serialize,
+)]
 pub struct MetaAddress {
-    address: Address,
     space: AddressSpaceId,
+    address: Address,
+}
+
+impl Debug for MetaAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{:#x}", self.space, self.address.offset())
+    }
+}
+
+impl Display for MetaAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{:#x}", self.space, self.address.offset())
+    }
+}
+
+impl LowerHex for MetaAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.space)?;
+        LowerHex::fmt(&self.address, f)
+    }
+}
+
+impl UpperHex for MetaAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.space)?;
+        UpperHex::fmt(&self.address, f)
+    }
+}
+
+impl From<MetaAddress> for Address {
+    fn from(meta: MetaAddress) -> Self {
+        meta.address
+    }
+}
+
+impl From<&MetaAddress> for Address {
+    fn from(meta: &MetaAddress) -> Self {
+        meta.address
+    }
+}
+
+impl From<Address> for MetaAddress {
+    fn from(address: Address) -> Self {
+        Self::in_default_space(address)
+    }
+}
+
+impl Add<MetaAddress> for MetaAddress {
+    type Output = Self;
+
+    fn add(self, rhs: MetaAddress) -> Self {
+        assert!(
+            self.space == rhs.space,
+            "cannot add addresses from different spaces"
+        );
+        Self::new(self.space, self.address + rhs.address)
+    }
+}
+
+impl Sub<MetaAddress> for MetaAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: MetaAddress) -> Self {
+        assert!(
+            self.space == rhs.space,
+            "cannot subtract addresses from different spaces"
+        );
+        Self::new(self.space, self.address - rhs.address)
+    }
+}
+
+impl Add<&'_ MetaAddress> for MetaAddress {
+    type Output = Self;
+
+    fn add(self, rhs: &MetaAddress) -> Self {
+        assert!(
+            self.space == rhs.space,
+            "cannot add addresses from different spaces"
+        );
+        Self::new(self.space, self.address + rhs.address)
+    }
+}
+
+impl Sub<&'_ MetaAddress> for MetaAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: &MetaAddress) -> Self {
+        assert!(
+            self.space == rhs.space,
+            "cannot subtract addresses from different spaces"
+        );
+        Self::new(self.space, self.address - rhs.address)
+    }
+}
+
+impl From<u64> for MetaAddress {
+    fn from(offset: u64) -> Self {
+        Self::in_default_space(offset)
+    }
+}
+
+impl AsRef<Address> for MetaAddress {
+    fn as_ref(&self) -> &Address {
+        &self.address
+    }
+}
+
+impl Add<u64> for MetaAddress {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self {
+        Self {
+            space: self.space,
+            address: self.address + rhs,
+        }
+    }
+}
+
+impl Sub<u64> for MetaAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: u64) -> Self {
+        Self {
+            space: self.space,
+            address: self.address - rhs,
+        }
+    }
+}
+
+impl Add<u32> for MetaAddress {
+    type Output = Self;
+
+    fn add(self, rhs: u32) -> Self {
+        Self {
+            space: self.space,
+            address: self.address + rhs,
+        }
+    }
+}
+
+impl Sub<u32> for MetaAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: u32) -> Self {
+        Self {
+            space: self.space,
+            address: self.address - rhs,
+        }
+    }
+}
+
+impl Add<usize> for MetaAddress {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self {
+        Self {
+            space: self.space,
+            address: self.address + rhs,
+        }
+    }
+}
+
+impl Sub<usize> for MetaAddress {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self {
+        Self {
+            space: self.space,
+            address: self.address - rhs,
+        }
+    }
+}
+
+impl AddAssign<u64> for MetaAddress {
+    fn add_assign(&mut self, rhs: u64) {
+        self.address += rhs;
+    }
+}
+
+impl SubAssign<u64> for MetaAddress {
+    fn sub_assign(&mut self, rhs: u64) {
+        self.address -= rhs;
+    }
+}
+
+impl AddAssign<u32> for MetaAddress {
+    fn add_assign(&mut self, rhs: u32) {
+        self.address += rhs;
+    }
+}
+
+impl SubAssign<u32> for MetaAddress {
+    fn sub_assign(&mut self, rhs: u32) {
+        self.address -= rhs;
+    }
+}
+
+impl AddAssign<usize> for MetaAddress {
+    fn add_assign(&mut self, rhs: usize) {
+        self.address += rhs;
+    }
+}
+
+impl SubAssign<usize> for MetaAddress {
+    fn sub_assign(&mut self, rhs: usize) {
+        self.address -= rhs;
+    }
+}
+
+impl From<MetaAddress> for u64 {
+    fn from(meta: MetaAddress) -> Self {
+        meta.address.offset()
+    }
+}
+
+impl From<&MetaAddress> for u64 {
+    fn from(meta: &MetaAddress) -> Self {
+        meta.address.offset()
+    }
+}
+
+impl From<MetaAddress> for u32 {
+    fn from(meta: MetaAddress) -> Self {
+        meta.address.offset() as u32
+    }
+}
+
+impl From<&MetaAddress> for u32 {
+    fn from(meta: &MetaAddress) -> Self {
+        meta.address.offset() as u32
+    }
+}
+
+impl From<MetaAddress> for usize {
+    fn from(meta: MetaAddress) -> Self {
+        meta.address.offset() as usize
+    }
+}
+
+impl From<&MetaAddress> for usize {
+    fn from(meta: &MetaAddress) -> Self {
+        meta.address.offset() as usize
+    }
 }
 
 impl MetaAddress {
     pub fn new(space: AddressSpaceId, address: impl Into<Address>) -> Self {
         Self {
-            address: address.into(),
             space,
+            address: address.into(),
+        }
+    }
+
+    pub const fn zero(space: AddressSpaceId) -> Self {
+        Self {
+            space,
+            address: Address::zero(),
+        }
+    }
+
+    pub fn in_default_space(address: impl Into<Address>) -> Self {
+        Self {
+            space: AddressSpaceId::default(),
+            address: address.into(),
         }
     }
 
@@ -663,5 +953,31 @@ impl MetaAddress {
 
     pub fn space(&self) -> AddressSpaceId {
         self.space
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.address.offset()
+    }
+
+    pub fn wrap(&self, language: &Language) -> Self {
+        Self {
+            space: self.space,
+            address: self.address.wrap(language),
+        }
+    }
+
+    pub fn align(&self, alignment: usize) -> Self {
+        Self {
+            space: self.space,
+            address: self.address.align(alignment),
+        }
+    }
+
+    pub fn in_space_bounds(&self, language: &Language) -> bool {
+        self.address.in_space_bounds(language)
+    }
+
+    pub fn range_in_space_bounds(&self, language: &Language, size: usize) -> bool {
+        self.address.range_in_space_bounds(language, size)
     }
 }

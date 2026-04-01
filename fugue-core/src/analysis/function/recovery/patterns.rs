@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::ir::{Address, AddressWithContext};
+use crate::ir::{Address, MetaAddress, MetaAddressWithContext};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::segments::view::SegmentMappingView;
@@ -160,13 +160,13 @@ where
             Self::for_each_segment(segments, &mut current_segm, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
-                        let start = *gap.start() + range.start;
+                        let start = MetaAddress::in_default_space(*gap.start() + range.start);
 
                         if arch.canonicalise_address(start).is_none() {
                             continue;
                         }
 
-                        if state.avoids().contains(start) || state.failures().contains(&start) {
+                        if state.avoids().contains(start.offset()) || state.failures().contains(&start) {
                             continue;
                         }
 
@@ -180,7 +180,7 @@ where
 
                         tracing::debug!("adding candidate at {start} with context {ctx:?} (confidence: {confidence})");
 
-                        state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
+                        state.add_candidate(MetaAddressWithContext::new_with(start, ctx, confidence));
                     }
                 }
             });

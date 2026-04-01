@@ -4,7 +4,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::ir::{Address, Id, Location, ToAddress};
+use crate::ir::{Id, Location, MetaAddress, ToAddress};
 use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
@@ -14,7 +14,7 @@ pub type InsnList = Vec<Insn>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Insn {
-    address: Address,
+    address: MetaAddress,
     properties: InsnProperties,
     operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
@@ -44,7 +44,7 @@ impl<C> Decode<C> for Insn {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let address = Address::decode(decoder)?;
+        let address = MetaAddress::decode(decoder)?;
         let properties = InsnProperties::decode(decoder)?;
         let operations = Vec::<PCodeOp>::decode(decoder)?;
 
@@ -72,7 +72,7 @@ impl<'de, C> BorrowDecode<'de, C> for Insn {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let address = Address::borrow_decode(decoder)?;
+        let address = MetaAddress::borrow_decode(decoder)?;
         let properties = InsnProperties::borrow_decode(decoder)?;
         let operations = Vec::<PCodeOp>::borrow_decode(decoder)?;
 
@@ -99,7 +99,7 @@ impl<'de, C> BorrowDecode<'de, C> for Insn {
 impl Insn {
     pub(crate) fn from_lifted(
         language: &'static Language,
-        address: Address,
+        address: MetaAddress,
         length: usize,
         operations: Vec<PCodeOp>,
     ) -> Self {
@@ -126,7 +126,7 @@ impl Insn {
     }
 
     pub(crate) fn from_disassembly(
-        address: Address,
+        address: MetaAddress,
         length: usize,
         properties: InsnProperties,
     ) -> Self {
@@ -149,7 +149,7 @@ impl Insn {
         self.operations.clear();
         self.targets.clear();
 
-        let length = lifter.lift_into(self.address, bytes, &mut self.operations)?;
+        let length = lifter.lift_into(self.address.address(), bytes, &mut self.operations)?;
 
         self.length = length
             .try_into()
@@ -174,11 +174,11 @@ impl Insn {
         Ok(())
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.address
     }
 
-    pub fn next_address(&self) -> Address {
+    pub fn next_address(&self) -> MetaAddress {
         self.address + self.length as usize
     }
 
@@ -324,7 +324,7 @@ impl Insn {
 
     pub fn iter_targets<'a>(
         &'a self,
-    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
+    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, MetaAddress)> + 'a {
         use InsnTarget::*;
         use InsnTargetKind::*;
 
@@ -488,9 +488,9 @@ impl InsnTargetKind {
 pub enum InsnTarget {
     IntraIns(Location, bool),
     IntraBlk(Location, bool),
-    InterBlk(Address),
-    InterSub(Option<Address>),
-    InterRet(Option<Address>, bool),
+    InterBlk(MetaAddress),
+    InterSub(Option<MetaAddress>),
+    InterRet(Option<MetaAddress>, bool),
     Intrinsic,
     Unresolved,
 }
@@ -498,8 +498,8 @@ pub enum InsnTarget {
 impl InsnTarget {
     pub(crate) fn from_lifted(
         language: &'static Language,
-        address: Address,
-        naddress: Address,
+        address: MetaAddress,
+        naddress: MetaAddress,
         opns: &[PCodeOp],
     ) -> SmallVec<[(u16, Self); 2]> {
         let mut targets = SmallVec::new();
@@ -509,8 +509,8 @@ impl InsnTarget {
 
     fn from_lifted_into(
         language: &'static Language,
-        address: Address,
-        naddress: Address,
+        address: MetaAddress,
+        naddress: MetaAddress,
         opns: &[PCodeOp],
         targets: &mut SmallVec<[(u16, Self); 2]>,
     ) {
@@ -598,8 +598,8 @@ impl InsnTarget {
                     nfall(i, next, targets);
                 }
                 Op::Return => {
-                    let addr = inputs[0].to_address(language);
-                    targets.push((i, Self::InterRet(addr, i + 1 == op_count)));
+                    let ret_addr = inputs[0].to_address(language).map(|a| MetaAddress::new(address.space(), a));
+                    targets.push((i, Self::InterRet(ret_addr, i + 1 == op_count)));
                 }
                 Op::UserOp(_, _) => {
                     targets.push((i, Self::Intrinsic));

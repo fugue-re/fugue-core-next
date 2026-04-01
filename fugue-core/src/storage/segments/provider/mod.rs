@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::path::Path;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{MetaAddress, SegmentProperties};
 use crate::loader::Loadable;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
@@ -102,8 +102,8 @@ impl SegmentStorageDescriptor {
 
 pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'static {
     fn from_segment_range(
-        start: Address,
-        end: Address,
+        start: MetaAddress,
+        end: MetaAddress,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where

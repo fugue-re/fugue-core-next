@@ -69,7 +69,7 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
         ::inventory::submit! {
             ::fugue_core::storage::segments::provider::SegmentStorageProviderEntry::new_with::<#ty>(
                 #tag,
-                |start: ::fugue_core::ir::Address, end: ::fugue_core::ir::Address, attributes: &mut ::fugue_core::types::AttributeMap| ->
+                |start: ::fugue_core::ir::MetaAddress, end: ::fugue_core::ir::MetaAddress, attributes: &mut ::fugue_core::types::AttributeMap| ->
                     ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
 
                     let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromSegmentRange>::from_segment_range(start, end, attributes)?;

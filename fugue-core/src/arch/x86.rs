@@ -10,7 +10,7 @@ use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode}
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, MetaAddress};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 
@@ -131,7 +131,7 @@ impl X86Disassembler {
 impl DisassemblerT for X86Disassembler {
     fn disassemble(
         &mut self,
-        address: Address,
+        address: MetaAddress,
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {

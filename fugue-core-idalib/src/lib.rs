@@ -9,8 +9,8 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties,
-    SymbolIndex, SymbolProperties,
+    Address, MetaAddress, MetaAddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable,
+    SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::{
@@ -27,8 +27,8 @@ pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
 pub const ATTRIBUTE_IDA_DATABASE_ANALYSE: &str = "ida.database.analyse";
 pub const ATTRIBUTE_IDA_DATABASE_PERSIST: &str = "ida.database.persist";
 
-const FUNCTIONS_SELECTOR: usize = 0;
-const NAMES_SELECTOR: usize = 1;
+const FUNCTIONS_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
+const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
 pub struct IDABinary {
     database: Rc<IDB>,
@@ -288,7 +288,7 @@ impl Loadable for IDABinary {
             end = end.max(segm.end_address().into());
         }
 
-        LoadableSegmentBounds::new(start..end)
+        LoadableSegmentBounds::new(MetaAddress::in_default_space(start)..MetaAddress::in_default_space(end))
     }
 
     fn segments<'a>(
@@ -302,9 +302,9 @@ impl Loadable for IDABinary {
         let address_size = self.architecture.language().address_size();
 
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
-            let start = Address::from(segm.start_address());
-            let end = Address::from(segm.end_address().wrapping_sub(1));
-            let size = usize::from(end - start) + 1;
+            let start = MetaAddress::from(segm.start_address());
+            let end = MetaAddress::from(segm.end_address().wrapping_sub(1));
+            let size = (end.offset() - start.offset()) as usize + 1;
 
             tracing::trace!("loading segment {start}-{end}");
 
@@ -425,13 +425,13 @@ where
             });
 
         for (_, f) in self.database.functions() {
-            let addr = Address::from(f.start_address());
+            let addr = MetaAddress::from(f.start_address());
 
             if state.functions().contains_key(&addr) {
                 continue;
             }
 
-            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
+            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&Address::from(addr))) {
                 continue;
             }
 
@@ -442,7 +442,7 @@ where
                     ContextSet::single(T_MODE, 0)
                 };
 
-                state.add_candidate(AddressWithContext::new(addr, context));
+                state.add_candidate(MetaAddressWithContext::new(addr, context));
             } else {
                 state.add_candidate(addr);
             }
@@ -476,7 +476,7 @@ where
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();
-        let Some(f) = self.database.function_at(entry.into()) else {
+        let Some(f) = self.database.function_at(entry.offset()) else {
             return Ok(());
         };
 

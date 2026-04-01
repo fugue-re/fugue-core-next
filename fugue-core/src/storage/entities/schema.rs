@@ -4,7 +4,7 @@ use std::mem;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::ir::{Address, CodeBlock, Function, Id, Insn};
+use crate::ir::{Address, CodeBlock, Function, Id, Insn, MetaAddress};
 use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;
@@ -19,6 +19,7 @@ pub const ENTITY_KEY_ADDRESS_ENTITY_ID: EntityKeyId = 1;
 pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = 2;
 pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = 3;
 pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = 4;
+pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = 5;
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
@@ -86,6 +87,24 @@ impl EntityKey for Address {
 
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_u64(self.offset())
+    }
+}
+
+impl EntityKey for MetaAddress {
+    const ID: EntityKeyId = ENTITY_KEY_META_ADDRESS_ENTITY_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < 9 {
+            return None;
+        }
+        let space = buf[0];
+        let address = u64::from_be_bytes(buf[1..9].try_into().ok()?);
+        Some(MetaAddress::new(space, address))
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.space());
+        buf.put_u64(self.offset());
     }
 }
 

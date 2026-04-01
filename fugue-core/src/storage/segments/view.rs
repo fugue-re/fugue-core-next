@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{MetaAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
 use crate::storage::segments::provider::SegmentStorageDescriptor;
+use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Clone)]
 pub struct SegmentMappingView<'a> {
@@ -29,23 +30,27 @@ impl<'a> SegmentMappingView<'a> {
         }
     }
 
-    pub fn start(&self) -> Address {
+    pub fn start(&self) -> MetaAddress {
         self.submap.start()
     }
 
-    pub fn last(&self) -> Address {
+    pub fn last(&self) -> MetaAddress {
         self.submap.last()
     }
 
-    pub fn end(&self) -> Address {
+    pub fn end(&self) -> MetaAddress {
         self.submap.end()
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.mapping.space()
     }
 
     pub fn size(&self) -> usize {
         self.submap.size()
     }
 
-    pub fn contains(&self, addr: impl Into<Address>) -> bool {
+    pub fn contains(&self, addr: impl Into<MetaAddress>) -> bool {
         self.submap.contains(addr)
     }
 
@@ -61,15 +66,15 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.name()
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<MetaAddress, ContextHint> {
         self.mapping.mapping_hints()
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn function_hints(&self) -> &BTreeSet<MetaAddress> {
         self.mapping.function_hints()
     }
 
-    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_from(&self, addr: impl Into<MetaAddress>) -> Option<Cow<'a, [u8]>> {
         let addr = addr.into();
         if !self.submap.contains(addr) {
             return None;
@@ -78,7 +83,7 @@ impl<'a> SegmentMappingView<'a> {
         self.provider.provider().view_bytes_from(phys_offset).ok()
     }
 
-    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_at(&self, addr: impl Into<MetaAddress>, size: usize) -> Option<Cow<'a, [u8]>> {
         let addr = addr.into();
         if !self.submap.contains(addr) {
             return None;
@@ -89,7 +94,7 @@ impl<'a> SegmentMappingView<'a> {
 
     pub fn read_bytes(
         &self,
-        addr: impl Into<Address>,
+        addr: impl Into<MetaAddress>,
         buf: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
         let addr = addr.into();

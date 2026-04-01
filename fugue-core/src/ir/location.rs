@@ -4,18 +4,18 @@ use std::ops::{Add, AddAssign};
 use bincode::{Decode, Encode};
 
 use crate::il::pcode::Varnode;
-use crate::ir::Address;
+use crate::ir::{Address, MetaAddress};
 use crate::lifter::Language;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct Location {
-    address: Address,
+    address: MetaAddress,
     position: u16,
 }
 
 impl Default for Location {
     fn default() -> Self {
-        Address::default().into()
+        MetaAddress::default().into()
     }
 }
 
@@ -33,7 +33,7 @@ impl AsRef<Location> for Location {
 
 impl AsRef<Address> for Location {
     fn as_ref(&self) -> &Address {
-        &self.address
+        self.address.as_ref()
     }
 }
 
@@ -72,14 +72,14 @@ impl AddAssign<usize> for Location {
 }
 
 impl Location {
-    pub fn new(address: impl Into<Address>, position: u16) -> Location {
+    pub fn new(address: impl Into<MetaAddress>, position: u16) -> Location {
         Self {
             address: address.into(),
             position,
         }
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.address
     }
 
@@ -89,12 +89,12 @@ impl Location {
 
     pub fn absolute_from(
         language: &Language,
-        base: Address,
+        base: MetaAddress,
         address: Varnode,
         position: u16,
     ) -> Option<Self> {
         if language.in_default_space(&address) {
-            return Some(Self::new(address.offset(), 0));
+            return Some(Self::new(MetaAddress::new(base.space(), address.offset()), 0));
         }
 
         if !language.in_constant_space(&address) {
@@ -119,13 +119,10 @@ impl Location {
     }
 }
 
-impl<T> From<T> for Location
-where
-    Address: From<T>,
-{
-    fn from(value: T) -> Self {
+impl From<MetaAddress> for Location {
+    fn from(value: MetaAddress) -> Self {
         Self {
-            address: value.into(),
+            address: value,
             position: 0,
         }
     }

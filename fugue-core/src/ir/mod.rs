@@ -5,7 +5,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod address;
-pub use address::{Address, AddressMap, AddressRangeSet, AddressWithContext, ToAddress};
+pub use address::{Address, AddressMap, AddressRangeSet, MetaAddress, MetaAddressWithContext, ToAddress};
 
 pub mod block;
 pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};
@@ -33,7 +33,7 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 pub mod symbol;
 pub use symbol::{
     IndexedSymbolTable, LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap,
-    SymbolProperties,
+    SymbolProperties, SymbolTableSelector,
 };
 
 pub mod traits;

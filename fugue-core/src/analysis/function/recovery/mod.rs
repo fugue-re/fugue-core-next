@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::ir::Address;
+use crate::ir::MetaAddress;
 use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
@@ -52,13 +52,13 @@ pub enum FunctionRecoveryError {
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
     #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
-    InvalidFunctionSize(Address, usize, usize),
+    InvalidFunctionSize(MetaAddress, usize, usize),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
     #[error(
         "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
     )]
-    InvalidBlockSize(Address, usize, usize),
+    InvalidBlockSize(MetaAddress, usize, usize),
     #[error("invalid instruction index: {0}")]
     InvalidInstructionId(usize),
 }
@@ -78,11 +78,11 @@ impl FunctionRecoveryError {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
 
-    pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
+    pub fn invalid_block_size(addr: MetaAddress, num_insns: usize, max_insns: usize) -> Self {
         FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
     }
 
-    pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
+    pub fn invalid_function_size(addr: MetaAddress, num_blocks: usize, max_blocks: usize) -> Self {
         FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
     }
 }

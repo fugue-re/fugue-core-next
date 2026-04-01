@@ -1,7 +1,7 @@
 use iset::IntervalMap;
 use smallvec::SmallVec;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, MetaAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
 pub type AddressSpaceId = u8;
@@ -9,7 +9,7 @@ pub type AddressSpaceId = u8;
 #[derive(Debug)]
 pub struct AddressSpace {
     id: AddressSpaceId,
-    submaps: IntervalMap<Address, SegmentSubMapping>,
+    submaps: IntervalMap<MetaAddress, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
 }
 
@@ -48,7 +48,7 @@ impl AddressSpace {
         size: usize,
         properties: SegmentProperties,
     ) {
-        let start = addr.into();
+        let start = MetaAddress::new(self.id, addr.into());
         let end = start + size;
         let last = end - 1usize;
 
@@ -80,7 +80,7 @@ impl AddressSpace {
         size: usize,
         properties: SegmentProperties,
     ) {
-        let start = addr.into();
+        let start = MetaAddress::new(self.id, addr.into());
         let end = start + size;
 
         let mut gaps = SmallVec::<[_; 8]>::new();
@@ -118,7 +118,7 @@ impl AddressSpace {
     }
 
     pub fn find_containing(&self, addr: impl Into<Address>) -> Option<&SegmentSubMapping> {
-        let addr = addr.into();
+        let addr = MetaAddress::new(self.id, addr.into());
         self.submaps.values(addr..(addr + 1usize)).next()
     }
 
@@ -126,7 +126,7 @@ impl AddressSpace {
         &mut self,
         addr: impl Into<Address>,
     ) -> Option<&mut SegmentSubMapping> {
-        let addr = addr.into();
+        let addr = MetaAddress::new(self.id, addr.into());
         self.submaps.values_mut(addr..(addr + 1usize)).next()
     }
 
@@ -158,6 +158,8 @@ impl AddressSpace {
         range_end: Address,
         mappings: impl IntoIterator<Item = (SegmentMappingRef, Address, usize, SegmentProperties)>,
     ) {
+        let range_start = MetaAddress::new(self.id, range_start);
+        let range_end = MetaAddress::new(self.id, range_end);
         let range_last = range_end - 1usize;
 
         let overlapping = self
@@ -185,6 +187,9 @@ impl AddressSpace {
 
         for (mapping_ref, start, size, properties) in mappings {
             let end = start + size;
+
+            let range_start = range_start.address();
+            let range_end = range_end.address();
 
             if end <= range_start || start >= range_end {
                 continue;

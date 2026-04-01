@@ -10,12 +10,12 @@ pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
 
+pub use crate::ir::traits::SymbolTableSelector;
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
-    SymbolTableSelector,
 };
-use crate::ir::{Address, Id};
+use crate::ir::{Id, MetaAddress};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
@@ -33,7 +33,7 @@ macro_rules! lazy_symbol {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolEntry {
-    address: Address,
+    address: MetaAddress,
     symbol: Symbol,
     properties: SymbolProperties,
     indices: SmallVec<[SymbolIndex; 2]>,
@@ -53,14 +53,13 @@ impl AsMut<SymbolEntry> for SymbolEntry {
 
 impl Display for SymbolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let address = self.address;
+        let properties = self.properties;
         if !self.symbol.is_empty() {
-            write!(
-                f,
-                "{} at {}; {}",
-                self.symbol, self.address, self.properties
-            )
+            let symbol = self.symbol;
+            write!(f, "{symbol} at {address}; {properties}")
         } else {
-            write!(f, "<unnamed> at {}; {}", self.address, self.properties)
+            write!(f, "<unnamed> at {address}; {properties}")
         }
     }
 }
@@ -91,7 +90,7 @@ impl<C> Decode<C> for SymbolEntry {
     ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::serde::Compat;
 
-        let address = Address::decode(decoder)?;
+        let address = MetaAddress::decode(decoder)?;
         let Compat(symbol) = Compat::<Symbol>::decode(decoder)?;
         let properties = SymbolProperties::decode(decoder)?;
 
@@ -117,7 +116,7 @@ impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
     ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::serde::Compat;
 
-        let address = Address::borrow_decode(decoder)?;
+        let address = MetaAddress::borrow_decode(decoder)?;
         let Compat(symbol) = Compat::<Symbol>::borrow_decode(decoder)?;
         let properties = SymbolProperties::borrow_decode(decoder)?;
         let n = usize::borrow_decode(decoder)?;
@@ -136,16 +135,16 @@ impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
 }
 
 impl SymbolEntry {
-    pub fn new(address: Address, symbol: impl Into<Symbol>, properties: SymbolProperties) -> Self {
+    pub fn new(address: impl Into<MetaAddress>, symbol: impl Into<Symbol>, properties: SymbolProperties) -> Self {
         Self {
-            address,
+            address: address.into(),
             symbol: symbol.into(),
             properties,
             indices: SmallVec::new(),
         }
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.address
     }
 
@@ -308,7 +307,7 @@ impl Display for SymbolProperties {
         f.write_str(name)?;
 
         for (name, _) in names {
-            write!(f, "|{}", name)?;
+            write!(f, "|{name}")?;
         }
 
         Ok(())
@@ -404,7 +403,7 @@ pub struct IndexedSymbolTable {
     // map of symbol names to known symbols
     names: SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
     // map of addresses to known symbols
-    addresses: BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+    addresses: BTreeMap<MetaAddress, SmallVec<[Id<Symbol>; 2]>>,
     // indices of removed symbols that can be reused
     free_ids: Vec<Id<Symbol>>,
 }
@@ -433,14 +432,14 @@ impl<C> Decode<C> for IndexedSymbolTable {
         let addresses_len = usize::decode(decoder)?;
         let addresses = (0..addresses_len)
             .map(|_| {
-                let addr = Address::decode(decoder)?;
+                let addr = MetaAddress::decode(decoder)?;
                 let ids_len = usize::decode(decoder)?;
                 let ids = (0..ids_len)
                     .map(|_| Id::<Symbol>::decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((addr, ids))
             })
-            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
+            .collect::<Result<BTreeMap<MetaAddress, SmallVec<[_; 2]>>, _>>()?;
 
         let free_ids = Vec::<Id<Symbol>>::decode(decoder)?;
 
@@ -478,14 +477,14 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedSymbolTable {
         let addresses_len = usize::borrow_decode(decoder)?;
         let addresses = (0..addresses_len)
             .map(|_| {
-                let addr = Address::borrow_decode(decoder)?;
+                let addr = MetaAddress::borrow_decode(decoder)?;
                 let ids_len = usize::borrow_decode(decoder)?;
                 let ids = (0..ids_len)
                     .map(|_| Id::<Symbol>::borrow_decode(decoder))
                     .collect::<Result<SmallVec<[_; 2]>, _>>()?;
                 Ok((addr, ids))
             })
-            .collect::<Result<BTreeMap<Address, SmallVec<[_; 2]>>, _>>()?;
+            .collect::<Result<BTreeMap<MetaAddress, SmallVec<[_; 2]>>, _>>()?;
 
         let free_ids = Vec::<Id<Symbol>>::borrow_decode(decoder)?;
 
@@ -674,7 +673,7 @@ impl IndexedSymbolTable {
 
     pub fn get_by_address(
         &self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
     ) -> impl Iterator<Item = (Id<Symbol>, &SymbolEntry)> {
         let address = address.into();
         let ids = self
@@ -687,7 +686,7 @@ impl IndexedSymbolTable {
 
     pub fn get_by_address_mut(
         &mut self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
     ) -> impl Iterator<Item = (Id<Symbol>, &mut SymbolEntry)> {
         let address = address.into();
         let ids = self
@@ -700,14 +699,14 @@ impl IndexedSymbolTable {
 
     pub fn get_first_by_address(
         &self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
     ) -> Option<(Id<Symbol>, &SymbolEntry)> {
         self.get_by_address(address).next()
     }
 
     pub fn get_first_by_address_mut(
         &mut self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
     ) -> Option<(Id<Symbol>, &mut SymbolEntry)> {
         self.get_by_address_mut(address).next()
     }
@@ -723,14 +722,14 @@ impl IndexedSymbolTable {
         self.indices.contains_key(&index)
     }
 
-    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
+    pub fn contains_address(&self, address: impl Into<MetaAddress>) -> bool {
         self.addresses.contains_key(&address.into())
     }
 
     pub fn insert_local(
         &mut self,
         index: SymbolIndex,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         symbol: impl Into<Symbol>,
     ) -> (bool, Id<Symbol>) {
         self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
@@ -739,7 +738,7 @@ impl IndexedSymbolTable {
     pub fn insert_local_with(
         &mut self,
         index: SymbolIndex,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -749,7 +748,7 @@ impl IndexedSymbolTable {
     pub fn insert_extern(
         &mut self,
         index: SymbolIndex,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         symbol: impl Into<Symbol>,
     ) -> (bool, Id<Symbol>) {
         self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
@@ -758,7 +757,7 @@ impl IndexedSymbolTable {
     pub fn insert_extern_with(
         &mut self,
         index: SymbolIndex,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -771,7 +770,7 @@ impl IndexedSymbolTable {
     }
 
     fn insert_or_update(
-        addresses: &mut BTreeMap<Address, SmallVec<[Id<Symbol>; 2]>>,
+        addresses: &mut BTreeMap<MetaAddress, SmallVec<[Id<Symbol>; 2]>>,
         names: &mut SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
         symbols: &mut Vec<SymbolEntry>,
         free_ids: &mut Vec<Id<Symbol>>,
@@ -815,7 +814,7 @@ impl IndexedSymbolTable {
     pub fn insert(
         &mut self,
         index: SymbolIndex,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -965,7 +964,7 @@ impl IndexedSymbolTable {
         count
     }
 
-    pub fn remove_by_address(&mut self, address: impl Into<Address>) -> usize {
+    pub fn remove_by_address(&mut self, address: impl Into<MetaAddress>) -> usize {
         use std::collections::hash_map::Entry;
 
         let address = address.into();
@@ -1093,24 +1092,24 @@ impl SymbolTableT for IndexedSymbolTable {
         Self::get_by_index_mut(self, index)
     }
 
-    fn get_by_address(&self, address: Address) -> Self::SymbolEntryIter<'_> {
+    fn get_by_address(&self, address: MetaAddress) -> Self::SymbolEntryIter<'_> {
         BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
     }
 
-    fn get_by_address_mut(&mut self, address: Address) -> Self::SymbolEntryIterMut<'_> {
+    fn get_by_address_mut(&mut self, address: MetaAddress) -> Self::SymbolEntryIterMut<'_> {
         BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
     }
 
     fn get_first_by_address(
         &self,
-        address: Address,
+        address: MetaAddress,
     ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
         Self::get_first_by_address(self, address)
     }
 
     fn get_first_by_address_mut(
         &mut self,
-        address: Address,
+        address: MetaAddress,
     ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
         Self::get_first_by_address_mut(self, address)
     }
@@ -1123,14 +1122,14 @@ impl SymbolTableT for IndexedSymbolTable {
         Self::contains_index(self, index)
     }
 
-    fn contains_address(&self, address: Address) -> bool {
+    fn contains_address(&self, address: MetaAddress) -> bool {
         Self::contains_address(self, address)
     }
 
     fn insert(
         &mut self,
         index: SymbolIndex,
-        address: Address,
+        address: MetaAddress,
         symbol: Symbol,
         properties: SymbolProperties,
     ) -> (bool, Id<Symbol>) {
@@ -1165,7 +1164,7 @@ impl SymbolTableT for IndexedSymbolTable {
         Self::remove(self, symbol)
     }
 
-    fn remove_by_address(&mut self, address: Address) -> usize {
+    fn remove_by_address(&mut self, address: MetaAddress) -> usize {
         Self::remove_by_address(self, address)
     }
 

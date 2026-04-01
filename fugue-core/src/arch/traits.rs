@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::ir::{Endian, ExternFunctionTemplate, MetaAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
 };
@@ -101,17 +101,18 @@ pub trait Arch: Send + Sync + 'static {
         }
     }
 
-    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        let naddr = addr.wrap_and_align(self.language());
+    fn canonicalise_address(&self, addr: MetaAddress) -> Option<(MetaAddress, ContextSet)> {
+        let naddr = addr.wrap(self.language()).align(self.language().address_alignment());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 
+    // NOTE: we the lifting context associated should be tied to the address space the address
+    // belongs to.
     fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: MetaAddress,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
-        // NOTE: this supresses the warning about unused `context` parameter,
+    ) -> Option<(MetaAddress, ContextSet)> {
         let _ = context;
         self.canonicalise_address(addr)
     }

@@ -9,7 +9,7 @@ use tracing::Level;
 
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
-use crate::ir::{Address, AddressRangeSet, AddressWithContext};
+use crate::ir::{Address, AddressRangeSet, MetaAddress, MetaAddressWithContext};
 use crate::project::{Project, ProjectMut};
 use crate::storage::project::InMemoryProvider;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
@@ -25,34 +25,34 @@ pub struct FunctionRecovery<P = InMemoryProvider>
 where
     P: ProjectStorageProvider,
 {
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<MetaAddressWithContext>,
     builder: FunctionBuilder<P>,
     discovery_passes: AnalysisGroup<P, FunctionDiscoveryContext>,
     structuring_passes: AnalysisGroup<P, FunctionStructuringContext>,
     commit_hook: Option<Box<dyn FunctionRecoveryCommitHook<P> + 'static>>,
-    pending_functions: BTreeMap<Address, PartialFunction>,
+    pending_functions: BTreeMap<MetaAddress, PartialFunction>,
 }
 
 #[derive(Default)]
 pub struct FunctionDiscoveryContext {
     config: FunctionRecoveryConfig,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<MetaAddressWithContext>,
     avoids: AddressRangeSet,
-    failures: BTreeSet<Address>,
-    functions: BTreeMap<Address, Confidence>,
-    new_functions: BTreeMap<Address, Confidence>,
+    failures: BTreeSet<MetaAddress>,
+    functions: BTreeMap<MetaAddress, Confidence>,
+    new_functions: BTreeMap<MetaAddress, Confidence>,
 }
 
 #[derive(Default)]
 pub struct FunctionStructuringContext {
     config: FunctionRecoveryConfig,
     avoids: AddressRangeSet,
-    failures: BTreeSet<Address>,
-    functions: BTreeMap<Address, Confidence>,
-    new_functions: BTreeMap<Address, Confidence>,
-    pending_functions: BTreeMap<Address, PartialFunction>,
-    committed_functions: BTreeSet<Address>,
-    removed_functions: BTreeSet<Address>,
+    failures: BTreeSet<MetaAddress>,
+    functions: BTreeMap<MetaAddress, Confidence>,
+    new_functions: BTreeMap<MetaAddress, Confidence>,
+    pending_functions: BTreeMap<MetaAddress, PartialFunction>,
+    committed_functions: BTreeSet<MetaAddress>,
+    removed_functions: BTreeSet<MetaAddress>,
 }
 
 impl FunctionDiscoveryContext {
@@ -60,17 +60,17 @@ impl FunctionDiscoveryContext {
         &self.config
     }
 
-    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
+    pub fn candidates(&self) -> &VecDeque<MetaAddressWithContext> {
         &self.candidates
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<MetaAddressWithContext>) {
         self.candidates.push_back(candidate.into());
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<MetaAddressWithContext>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -92,19 +92,19 @@ impl FunctionDiscoveryContext {
         self.avoids.insert_range(range);
     }
 
-    pub fn failures(&self) -> &BTreeSet<Address> {
+    pub fn failures(&self) -> &BTreeSet<MetaAddress> {
         &self.failures
     }
 
-    pub fn add_failure(&mut self, address: impl Into<Address>) {
+    pub fn add_failure(&mut self, address: impl Into<MetaAddress>) {
         self.failures.insert(address.into());
     }
 
-    pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
+    pub fn functions(&self) -> &BTreeMap<MetaAddress, Confidence> {
         &self.functions
     }
 
-    pub fn new_functions(&self) -> &BTreeMap<Address, Confidence> {
+    pub fn new_functions(&self) -> &BTreeMap<MetaAddress, Confidence> {
         &self.new_functions
     }
 
@@ -123,7 +123,7 @@ impl FunctionDiscoveryContext {
                     let block = cbtable
                         .get_by_id(bid)
                         .expect("block should exist in code block table");
-                    covered.insert_range(block.range_inclusive());
+                    covered.insert_meta_range(block.range_inclusive());
                 }
                 MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
                     let min_block = cbtable
@@ -134,7 +134,7 @@ impl FunctionDiscoveryContext {
                         .expect("block should exist in code block table");
                     // we should probably have a threshold here to avoid huge ranges, where
                     // we have a function that has non-contiguous blocks
-                    covered.insert_range(min_block.address()..=max_block.last_address());
+                    covered.insert_meta_range(min_block.address()..=max_block.last_address());
                 }
                 _ => { /* no blocks, skip */ }
             }
@@ -155,7 +155,7 @@ impl FunctionDiscoveryContext {
                 let block = cbtable
                     .get_by_id(bid)
                     .expect("block should exist in code block table");
-                covered.insert_range(block.range_inclusive());
+                covered.insert_meta_range(block.range_inclusive());
             }
         }
 
@@ -206,37 +206,37 @@ impl FunctionStructuringContext {
         &mut self.avoids
     }
 
-    pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into());
+    pub fn add_avoid(&mut self, address: impl Into<MetaAddress>) {
+        self.avoids.insert(address.into().offset());
     }
 
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
-        self.avoids.insert_range(range);
+    pub fn add_avoid_range(&mut self, range: RangeInclusive<MetaAddress>) {
+        self.avoids.insert_meta_range(range);
     }
 
-    pub fn failures(&self) -> &BTreeSet<Address> {
+    pub fn failures(&self) -> &BTreeSet<MetaAddress> {
         &self.failures
     }
 
-    pub fn add_failure(&mut self, address: impl Into<Address>) {
+    pub fn add_failure(&mut self, address: impl Into<MetaAddress>) {
         self.failures.insert(address.into());
     }
 
-    pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
+    pub fn functions(&self) -> &BTreeMap<MetaAddress, Confidence> {
         &self.functions
     }
 
-    pub fn new_functions(&self) -> &BTreeMap<Address, Confidence> {
+    pub fn new_functions(&self) -> &BTreeMap<MetaAddress, Confidence> {
         &self.new_functions
     }
 
-    pub fn pending_functions(&self) -> &BTreeMap<Address, PartialFunction> {
+    pub fn pending_functions(&self) -> &BTreeMap<MetaAddress, PartialFunction> {
         &self.pending_functions
     }
 
     pub fn add_function(
         &mut self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         function: PartialFunction,
         confidence: Confidence,
     ) -> bool {
@@ -259,7 +259,7 @@ impl FunctionStructuringContext {
 
     pub fn modify_pending_function<F>(
         &mut self,
-        address: impl Into<Address>,
+        address: impl Into<MetaAddress>,
         f: F,
     ) -> Result<(), FunctionRecoveryError>
     where
@@ -272,7 +272,7 @@ impl FunctionStructuringContext {
         f(function)
     }
 
-    pub fn remove_function(&mut self, address: impl Into<Address>) {
+    pub fn remove_function(&mut self, address: impl Into<MetaAddress>) {
         let address = address.into();
         let mut removed = false;
 
@@ -290,7 +290,7 @@ impl FunctionStructuringContext {
         }
     }
 
-    pub fn commit_function(&mut self, address: impl Into<Address>) {
+    pub fn commit_function(&mut self, address: impl Into<MetaAddress>) {
         let address = address.into();
 
         if self.pending_functions.contains_key(&address) {
@@ -331,13 +331,13 @@ where
         self.builder.config()
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<MetaAddressWithContext>) {
         self.candidates.push_back(candidate.into());
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<MetaAddressWithContext>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -409,8 +409,8 @@ where
 }
 
 fn insert_function(
-    functions: &mut BTreeMap<Address, Confidence>,
-    address: Address,
+    functions: &mut BTreeMap<MetaAddress, Confidence>,
+    address: MetaAddress,
     confidence: Confidence,
 ) -> bool {
     use std::collections::btree_map::Entry;
@@ -425,8 +425,8 @@ fn insert_function(
 }
 
 fn update_function(
-    functions: &mut BTreeMap<Address, Confidence>,
-    address: Address,
+    functions: &mut BTreeMap<MetaAddress, Confidence>,
+    address: MetaAddress,
     confidence: Confidence,
 ) -> bool {
     use std::collections::btree_map::Entry;
@@ -503,7 +503,7 @@ where
                 let address = candidate.address();
                 let confidence = Confidence::certain();
 
-                if !project.segments().contains_segment(address) {
+                if !project.segments().space_contains_segment(address.space(), address.address()) {
                     tracing::trace!("skipping {address}: not mapped");
                     continue;
                 }

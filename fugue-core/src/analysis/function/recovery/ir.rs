@@ -5,8 +5,8 @@ use crate::analysis::function::recovery::builder::CodeBlockStructuringContext;
 use crate::analysis::function::recovery::{FunctionBuilderContext, FunctionRecoveryConfig};
 use crate::ir::traits::{CodeBlockTable, FunctionTable};
 use crate::ir::{
-    Address, CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn,
-    InsnList, Symbol,
+    CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn, InsnList,
+    MetaAddress, Symbol,
 };
 use crate::lifter::{ContextSet, LifterError};
 use crate::storage::SegmentStorage;
@@ -19,7 +19,7 @@ pub enum InsnEntry<'a> {
 }
 
 pub struct VacantInsnEntry<'a> {
-    entry: VacantEntry<'a, Address, usize>,
+    entry: VacantEntry<'a, MetaAddress, usize>,
     insns: &'a mut Vec<Insn>,
 }
 
@@ -33,7 +33,7 @@ impl<'a> VacantInsnEntry<'a> {
 }
 
 pub struct OccupiedInsnEntry<'a> {
-    entry: OccupiedEntry<'a, Address, usize>,
+    entry: OccupiedEntry<'a, MetaAddress, usize>,
     insns: &'a mut Vec<Insn>,
 }
 
@@ -46,7 +46,7 @@ impl<'a> OccupiedInsnEntry<'a> {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialCodeBlock {
-    start: Address,
+    start: MetaAddress,
     len: usize,
     context: ContextSet,
     properties: CodeBlockProperties,
@@ -56,7 +56,7 @@ pub struct PartialCodeBlock {
 }
 
 impl PartialCodeBlock {
-    pub fn new(start: Address, len: usize, insns: Vec<usize>, context: ContextSet) -> Self {
+    pub fn new(start: MetaAddress, len: usize, insns: Vec<usize>, context: ContextSet) -> Self {
         Self {
             start,
             len,
@@ -68,7 +68,7 @@ impl PartialCodeBlock {
         }
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> MetaAddress {
         self.start
     }
 
@@ -148,19 +148,19 @@ impl PartialCodeBlock {
 #[derive(Default)]
 pub struct PartialFunction {
     name: Option<Symbol>,
-    entry: Address,
+    entry: MetaAddress,
     blocks: Vec<PartialCodeBlock>,
     insns: Vec<Insn>,
-    insn_map: BTreeMap<Address, usize>,
+    insn_map: BTreeMap<MetaAddress, usize>,
     properties: FunctionProperties,
 }
 
 impl PartialFunction {
-    pub fn new(entry: Address) -> Self {
+    pub fn new(entry: MetaAddress) -> Self {
         Self::new_with(None, entry)
     }
 
-    pub fn new_with(name: impl Into<Option<Symbol>>, entry: Address) -> Self {
+    pub fn new_with(name: impl Into<Option<Symbol>>, entry: MetaAddress) -> Self {
         Self {
             name: name.into(),
             entry,
@@ -183,7 +183,7 @@ impl PartialFunction {
         self.name
     }
 
-    pub fn entry(&self) -> Address {
+    pub fn entry(&self) -> MetaAddress {
         self.entry
     }
 
@@ -204,18 +204,18 @@ impl PartialFunction {
         &self.blocks
     }
 
-    pub fn block_at(&self, address: Address) -> Option<&PartialCodeBlock> {
+    pub fn block_at(&self, address: MetaAddress) -> Option<&PartialCodeBlock> {
         self.blocks
             .binary_search_by_key(&address, |blk| blk.address())
             .ok()
             .map(|idx| &self.blocks[idx])
     }
 
-    pub fn contains_insn(&self, address: Address) -> bool {
+    pub fn contains_insn(&self, address: MetaAddress) -> bool {
         self.insn_map.contains_key(&address)
     }
 
-    pub fn insn_entry(&mut self, address: Address) -> InsnEntry {
+    pub fn insn_entry(&mut self, address: MetaAddress) -> InsnEntry {
         match self.insn_map.entry(address) {
             Entry::Vacant(entry) => InsnEntry::Vacant(VacantInsnEntry {
                 entry,
@@ -252,7 +252,7 @@ impl PartialFunction {
                 continue;
             }
 
-            let offset = usize::from(insn.address() - start);
+            let offset = (insn.address().offset() - start.offset()) as usize;
 
             let view = bytes
                 .get(offset..)
@@ -287,7 +287,7 @@ impl PartialFunction {
                     continue;
                 }
 
-                let offset = usize::from(insn.address() - block.address());
+                let offset = (insn.address().offset() - block.address().offset()) as usize;
 
                 let view = bytes
                     .get(offset..)
@@ -329,13 +329,13 @@ impl PartialFunction {
         Ok(Some(insn))
     }
 
-    pub fn insn(&self, address: Address) -> Option<&Insn> {
+    pub fn insn(&self, address: MetaAddress) -> Option<&Insn> {
         self.insn_map
             .get(&address)
             .and_then(|&id| self.insns.get(id))
     }
 
-    pub fn insn_mut(&mut self, address: Address) -> Option<&mut Insn> {
+    pub fn insn_mut(&mut self, address: MetaAddress) -> Option<&mut Insn> {
         self.insn_map
             .get(&address)
             .and_then(|&id| self.insns.get_mut(id))
