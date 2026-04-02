@@ -8,8 +8,8 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, SegmentProperties,
-    SymbolIndex, SymbolProperties,
+    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, RawAddress,
+    SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
 use fugue_core::loader::{
@@ -17,6 +17,7 @@ use fugue_core::loader::{
     LoadableSegmentBounds, LoaderError,
 };
 use fugue_core::project::Project;
+use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::storage::ProjectStorageProvider;
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
@@ -25,8 +26,8 @@ pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
 pub const ATTRIBUTE_IDA_DATABASE_ANALYSE: &str = "ida.database.analyse";
 pub const ATTRIBUTE_IDA_DATABASE_PERSIST: &str = "ida.database.persist";
 
-const FUNCTIONS_SELECTOR: usize = 0;
-const NAMES_SELECTOR: usize = 1;
+const FUNCTIONS_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
+const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
 pub struct IDABinary {
     database: Rc<IDB>,
@@ -278,15 +279,15 @@ impl Loadable for IDABinary {
     }
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let mut start = Address::MAX;
-        let mut end = Address::zero();
+        let mut start = RawAddress::MAX;
+        let mut end = RawAddress::zero();
 
         for (_, segm) in self.database.segments() {
             start = start.min(segm.start_address().into());
             end = end.max(segm.end_address().into());
         }
 
-        LoadableSegmentBounds::new(start..end)
+        LoadableSegmentBounds::new(Address::in_default_space(start)..Address::in_default_space(end))
     }
 
     fn segments<'a>(
@@ -302,7 +303,7 @@ impl Loadable for IDABinary {
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
             let start = Address::from(segm.start_address());
             let end = Address::from(segm.end_address().wrapping_sub(1));
-            let size = usize::from(end - start) + 1;
+            let size = (end.offset() - start.offset()) as usize + 1;
 
             tracing::trace!("loading segment {start}-{end}");
 
@@ -414,7 +415,7 @@ where
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
         let extern_bounds = segms
-            .iter_views()
+            .iter_views(DEFAULT_SPACE_ID)
             .map_err(|e| AnalysisError::pass_failed("ida-function-discovery", e))?
             .find_map(|view| {
                 view.properties()
@@ -474,7 +475,7 @@ where
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();
-        let Some(f) = self.database.function_at(entry.into()) else {
+        let Some(f) = self.database.function_at(entry.offset()) else {
             return Ok(());
         };
 

@@ -189,34 +189,32 @@ impl LoadableMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct LoadableSegment<'a> {
-    name: Cow<'a, str>,                                     // Name of the segment
-    address: Address,                                       // Starting address of the segment
-    properties: SegmentProperties, // Properties of the segment (e.g., permissions)
-    bytes: Cow<'a, [u8]>,          // Bytes of the segment
-    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>, // Mapping hints for ranges within the segment
-    function_hints: Cow<'a, BTreeSet<Address>>, // Hints for function start addresses within the segment
-    space_index: AddressSpaceId,                // Address space (by index) this segment belongs to
+    name: Cow<'a, str>,
+    address: Address,
+    properties: SegmentProperties,
+    bytes: Cow<'a, [u8]>,
+    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>,
+    function_hints: Cow<'a, BTreeSet<Address>>,
 }
 
 impl Display for LoadableSegment<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = &self.name;
+        let address = self.address;
+        let last_address = self.last_address();
+        let properties = self.properties;
+        let function_count = self.function_hints.len();
         write!(
             f,
-            "{} with bounds {}-{} and properties {:?}; at least {} potential functions",
-            self.name,
-            self.address,
-            self.last_address(),
-            self.properties,
-            self.function_hints.len(),
+            "{name} with bounds {address}-{last_address} and properties {properties:?}; at least {function_count} potential functions"
         )
     }
 }
 
 impl<'a> LoadableSegment<'a> {
-    /// Creates a new `LoadableSegment` with the given name, address, properties, and bytes.
     pub fn new(
         name: impl Into<Cow<'a, str>>,
-        address: Address,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> LoadableSegment<'a> {
@@ -230,10 +228,9 @@ impl<'a> LoadableSegment<'a> {
         )
     }
 
-    /// Creates a new `LoadableSegment` with the given name, address, properties, bytes, and hints.
     pub fn new_with_hints(
         name: impl Into<Cow<'a, str>>,
-        address: Address,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
         mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
@@ -249,11 +246,9 @@ impl<'a> LoadableSegment<'a> {
         )
     }
 
-    /// Creates a new `LoadableSegment` with the given name, address, properties, and bytes, and
-    /// hints.
     pub fn from_parts(
         name: impl Into<Cow<'a, str>>,
-        address: Address,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
         mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
@@ -261,71 +256,58 @@ impl<'a> LoadableSegment<'a> {
     ) -> LoadableSegment<'a> {
         Self {
             name: name.into(),
-            address,
+            address: address.into(),
             properties,
             bytes: bytes.into(),
             mapping_hints: mapping_hints.into(),
             function_hints: function_hints.into(),
-            space_index: Default::default(),
         }
     }
 
-    /// Returns the address of the segment.
     pub fn address(&self) -> Address {
         self.address
     }
 
-    /// Returns the next address after the segment.
     pub fn next_address(&self) -> Address {
         self.address + self.bytes.len()
     }
 
-    /// Returns the last address of the segment.
     pub fn last_address(&self) -> Address {
         self.address + self.bytes.len() - 1usize
     }
 
-    /// Returns the name of the segment.
     pub fn name(&self) -> &str {
         self.name.as_ref()
     }
 
-    /// Returns the properties of the segment.
     pub fn properties(&self) -> SegmentProperties {
         self.properties
     }
 
-    /// Returns the bytes of the segment.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Returns the context hints of the segment.
     pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
-    /// Returns a mutable reference to the context hints of the segment.
     pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
         self.mapping_hints.to_mut()
     }
 
-    // Adds a context hint to the segment.
     pub fn add_context_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
         self.mapping_hints.to_mut().insert(address.into(), hint);
     }
 
-    /// Returns the function hints of the segment.
     pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
-    /// Returns a mutable reference to the function hints of the segment.
     pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
         self.function_hints.to_mut()
     }
 
-    /// Adds a function hint to the segment.
     pub fn add_function_hint(&mut self, address: impl Into<Address>) {
         self.function_hints.to_mut().insert(address.into());
     }
@@ -340,21 +322,20 @@ impl<'a> LoadableSegment<'a> {
         self.bytes.is_empty()
     }
 
-    /// Returns the offset of the given address within the segment, if it is contained within the
-    /// segment.
     pub fn offset_of(&self, address: Address) -> Option<usize> {
-        if address < self.address || address > self.last_address() {
+        if address.space() != self.address.space()
+            || address < self.address
+            || address > self.last_address()
+        {
             return None;
         }
-        Some(usize::from(address - self.address))
+        Some((address.offset() - self.address.offset()) as usize)
     }
 
-    /// Checks if the segment contains the given address.
     pub fn contains_address(&self, address: Address) -> bool {
         address >= self.address && address <= self.last_address()
     }
 
-    /// Returns the value at the given offset, if the offset is valid.
     pub fn read_value<T: ByteCast>(&self, offset: usize) -> Option<T> {
         let range = self.view_bytes_at(offset, T::SIZEOF)?;
         Some(if self.properties.is_little_endian() {
@@ -364,7 +345,6 @@ impl<'a> LoadableSegment<'a> {
         })
     }
 
-    /// Updates the value at the given offset using the provided function, if the offset is valid.
     pub fn update_value<T: ByteCast>(
         &mut self,
         offset: usize,
@@ -380,7 +360,6 @@ impl<'a> LoadableSegment<'a> {
         Some(())
     }
 
-    /// Writes the value at the given offset, if the offset is valid.
     pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
         let is_le = self.properties.is_little_endian();
         let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
@@ -393,8 +372,6 @@ impl<'a> LoadableSegment<'a> {
         Some(())
     }
 
-    /// Returns a view of the segment's bytes from the given offset, if the offset and count
-    /// correspond to a valid range.
     pub fn view_bytes_at(&self, offset: usize, count: usize) -> Option<&[u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -412,14 +389,11 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
-    /// Returns a view of the segment's bytes at the given address, if the address and count
-    /// correspond to a valid range.
     pub fn view_bytes_at_address(&self, address: Address, count: usize) -> Option<&[u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_at(offset, count)
     }
 
-    /// Returns a view of the segment's bytes from the given offset, if the offset is valid.
     pub fn view_bytes_from(&self, offset: usize) -> Option<&[u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -429,14 +403,11 @@ impl<'a> LoadableSegment<'a> {
         Some(&self.bytes[offset..])
     }
 
-    /// Returns a view of the segment's bytes from the given address, if the address is valid.
     pub fn view_bytes_from_address(&self, address: Address) -> Option<&[u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_from(offset)
     }
 
-    /// Returns a mutable view of the segment's bytes at the given offset, if the offset and count
-    /// correspond to a valid range.
     pub fn view_bytes_at_mut(&mut self, offset: usize, count: usize) -> Option<&mut [u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -454,8 +425,6 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
-    /// Returns a mutable view of the segment's bytes at the given address, if the address and
-    /// count correspond to a valid range.
     pub fn view_bytes_at_address_mut(
         &mut self,
         address: Address,
@@ -465,8 +434,6 @@ impl<'a> LoadableSegment<'a> {
         self.view_bytes_at_mut(offset, count)
     }
 
-    /// Returns a mutable view of the segment's bytes from the given offset, if the offset is
-    /// valid.
     pub fn view_bytes_from_mut(&mut self, offset: usize) -> Option<&mut [u8]> {
         let len = self.bytes.len();
         if offset >= len {
@@ -476,8 +443,6 @@ impl<'a> LoadableSegment<'a> {
         Some(&mut self.bytes.to_mut()[offset..])
     }
 
-    /// Returns a mutable view of the segment's bytes from the given address, if the address is
-    /// valid.
     pub fn view_bytes_from_address_mut(&mut self, address: Address) -> Option<&mut [u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_from_mut(offset)
@@ -491,17 +456,11 @@ impl<'a> LoadableSegment<'a> {
             bytes: self.bytes.into_owned().into(),
             mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
             function_hints: Cow::Owned(self.function_hints.into_owned()),
-            space_index: self.space_index,
         }
     }
 
-    pub fn space_index(&self) -> u32 {
-        self.space_index
-    }
-
-    pub fn with_space_index(mut self, space_index: u32) -> Self {
-        self.space_index = space_index;
-        self
+    pub fn space(&self) -> AddressSpaceId {
+        self.address.space()
     }
 }
 
@@ -897,7 +856,9 @@ mod tests {
         let bounds = loaded.segment_bounds();
         let range = bounds.first();
 
-        println!("segment range: {:#x} - {:#x}", range.start, range.end);
+        let start = range.start;
+        let end = range.end;
+        println!("segment range: {start:#x} - {end:#x}");
 
         Ok(())
     }

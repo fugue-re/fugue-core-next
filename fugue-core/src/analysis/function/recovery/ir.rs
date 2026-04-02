@@ -251,7 +251,7 @@ impl PartialFunction {
                 continue;
             }
 
-            let offset = usize::from(insn.address() - start);
+            let offset = (insn.address().offset() - start.offset()) as usize;
 
             let view = bytes
                 .get(offset..)
@@ -286,7 +286,7 @@ impl PartialFunction {
                     continue;
                 }
 
-                let offset = usize::from(insn.address() - block.address());
+                let offset = (insn.address().offset() - block.address().offset()) as usize;
 
                 let view = bytes
                     .get(offset..)
@@ -562,7 +562,7 @@ impl PartialFunction {
 
         for (i, block) in self.blocks.iter().enumerate() {
             let bid = bids[i];
-            let cb = cbtable.get_by_id_mut(bid).expect("code block exists");
+            let mut cb = cbtable.get_by_id_mut(bid).expect("code block exists");
 
             for &succ_idx in block.successors().iter() {
                 let succ_bid = bids[succ_idx];

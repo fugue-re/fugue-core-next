@@ -2,7 +2,7 @@ use std::fmt;
 use std::ops::{Add, AddAssign};
 
 use crate::il::pcode::Varnode;
-use crate::ir::Address;
+use crate::ir::{Address, RawAddress};
 use crate::lifter::Language;
 
 #[derive(
@@ -41,9 +41,9 @@ impl AsRef<Location> for Location {
     }
 }
 
-impl AsRef<Address> for Location {
-    fn as_ref(&self) -> &Address {
-        &self.address
+impl AsRef<RawAddress> for Location {
+    fn as_ref(&self) -> &RawAddress {
+        self.address.as_ref()
     }
 }
 
@@ -104,7 +104,7 @@ impl Location {
         position: u16,
     ) -> Option<Self> {
         if language.in_default_space(&address) {
-            return Some(Self::new(address.offset(), 0));
+            return Some(Self::new(Address::new(base.space(), address.offset()), 0));
         }
 
         if !language.in_constant_space(&address) {
@@ -129,13 +129,10 @@ impl Location {
     }
 }
 
-impl<T> From<T> for Location
-where
-    Address: From<T>,
-{
-    fn from(value: T) -> Self {
+impl From<Address> for Location {
+    fn from(value: Address) -> Self {
         Self {
-            address: value.into(),
+            address: value,
             position: 0,
         }
     }

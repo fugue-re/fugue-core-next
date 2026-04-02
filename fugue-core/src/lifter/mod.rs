@@ -37,13 +37,10 @@ pub struct ContextUpdate {
 
 impl Display for ContextUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[{}:{}]={}",
-            self.bits.start_bit(),
-            self.bits.end_bit(),
-            self.value
-        )
+        let start = self.bits.start_bit();
+        let end = self.bits.end_bit();
+        let value = self.value;
+        write!(f, "[{start}:{end}]={value}")
     }
 }
 
@@ -189,7 +186,7 @@ impl ContextSet {
     pub fn apply(&self, address: Address, context: &mut LiftingContext) {
         for ContextUpdate { bits, value } in self.0.iter() {
             tracing::trace!("setting context bits {bits:?} to {value} at {address}");
-            context.set_variable_by_bits(bits, address.into(), *value);
+            context.set_variable_by_bits(bits, address.offset(), *value);
         }
     }
 
@@ -197,7 +194,12 @@ impl ContextSet {
     pub fn apply_range(&self, from: Address, to: Option<Address>, context: &mut LiftingContext) {
         for ContextUpdate { bits, value } in self.0.iter() {
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
-            context.set_variable_region_by_bits(bits, from.into(), to.map(Address::into), *value);
+            context.set_variable_region_by_bits(
+                bits,
+                from.offset(),
+                to.map(|a| a.offset()),
+                *value,
+            );
         }
     }
 }

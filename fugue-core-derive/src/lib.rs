@@ -30,12 +30,12 @@ impl ProviderAttr {
                 Ok(())
             } else if meta.path.is_ident("tag") {
                 meta.input.parse::<Token![=]>()?;
-                let lit: LitStr = meta.input.parse()?;
+                let lit = meta.input.parse::<LitStr>()?;
                 result.tag = Some(lit.value());
                 Ok(())
             } else if meta.path.is_ident("persistent") {
                 meta.input.parse::<Token![=]>()?;
-                let lit: LitBool = meta.input.parse()?;
+                let lit = meta.input.parse::<LitBool>()?;
                 result.persistent = Some(lit.value());
                 Ok(())
             } else {

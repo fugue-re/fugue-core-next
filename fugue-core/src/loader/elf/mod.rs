@@ -18,6 +18,7 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
+use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
     Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
 };
@@ -39,8 +40,8 @@ pub use relocations::ElfSegmentRelocator;
 
 const STT_GNU_UNIQUE: u8 = STT_LOOS;
 
-pub const ELF_SYMTAB_SELECTOR: usize = 0;
-pub const ELF_DYNSYM_SELECTOR: usize = 1;
+pub const ELF_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
+pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -268,10 +269,12 @@ impl ElfSymbolData {
                 continue;
             };
 
-            let address = symbol.address() + if is_object { section_start } else { 0 };
+            let address = Address::in_default_space(
+                symbol.address() + if is_object { section_start } else { 0 },
+            );
 
             tracing::trace!(
-                "symbol {} in section {section:?} at {address:#x}",
+                "symbol {} in section {section:?} at {address}",
                 symbol.name().ok().unwrap_or("<unnamed>"),
             );
 
@@ -281,7 +284,7 @@ impl ElfSymbolData {
                 && let Ok(name) = symbol.name()
                 && let Some(context) = arch.resolve_mapping_symbol(name)
             {
-                mapping_hints.insert(address.into(), context);
+                mapping_hints.insert(address, context);
                 continue;
             }
 
@@ -302,7 +305,7 @@ impl ElfSymbolData {
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
-                tracing::debug!("symbol {address:#x} is not a function or data: {st_type:x}");
+                tracing::debug!("symbol {address} is not a function or data: {st_type:x}");
                 SymbolProperties::NONE
             };
 
@@ -335,7 +338,7 @@ impl ElfSymbolData {
         // hit valid code, and return.
 
         let mut extern_segm = ExternSegment::new(
-            aligned_extern_base,
+            Address::in_default_space(aligned_extern_base),
             addr_align,
             arch.external_thunk_template(),
         );
@@ -383,7 +386,7 @@ impl ElfSymbolData {
             let addr = if kind.is_extern() {
                 extern_segm.add_extern()
             } else {
-                sym.address().into()
+                Address::in_default_space(sym.address())
             }; // FIXME: this needs to be mapped, see above.
             let sym = sym.name().ok();
 
@@ -395,8 +398,10 @@ impl ElfSymbolData {
             );
         }
 
-        let max_addr = extern_segm.last_address().unwrap_or(max_addr);
-        let bounds = min_addr..=max_addr;
+        let max_addr = extern_segm
+            .last_address()
+            .unwrap_or(Address::in_default_space(max_addr));
+        let bounds = Address::in_default_space(min_addr)..=max_addr;
 
         Self {
             bounds,
@@ -468,7 +473,7 @@ pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<
         return None;
     }
 
-    let address = Address::from(sect.address());
+    let address = Address::in_default_space(sect.address());
     let data = sect.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != sect.size() {
@@ -497,7 +502,7 @@ pub fn elf_segment<'a>(segm: &impl ObjectSegment<'a>) -> Option<LoadableSegment<
         return None;
     }
 
-    let address = Address::from(segm.address());
+    let address = Address::in_default_space(segm.address());
     let data = segm.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != segm.size() {
@@ -581,7 +586,7 @@ where
             segms: elf.segments(),
             covered: RangeSetBlaze::new(),
             segms_split: None,
-            current_base: Address::zero(),
+            current_base: Address::in_default_space(0u64),
             mapping_hints,
             symbols,
             extern_segm: Some(externs),
@@ -637,7 +642,6 @@ where
             bytes: Cow::Owned(bytes),
             mapping_hints: Cow::Owned(BTreeMap::new()),
             function_hints: Cow::Owned(function_hints),
-            space_index: Default::default(),
         };
 
         Ok(Some(lsegm))
@@ -671,7 +675,7 @@ where
             }
 
             let alignment_mask = sect.align().wrapping_sub(1);
-            let address = Address::from(
+            let address = Address::in_default_space(
                 self.current_base.offset().wrapping_add(alignment_mask) & !alignment_mask,
             );
             let last_address = address + size - 1usize;
@@ -696,7 +700,7 @@ where
 
             tracing::trace!("loading section {address}-{last_address}");
 
-            self.current_base = last_address + 1usize;
+            self.current_base = Address::from(last_address) + 1usize;
 
             let bytes = if data.len() as u64 != sect.size() {
                 let mut data = data.to_owned();
@@ -726,7 +730,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(Address::zero(), &mut lsegm, &sect)?;
+            relocator.apply(Address::in_default_space(0u64), &mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -764,7 +768,7 @@ where
                 Cow::Borrowed(&data[rvstart..rvend])
             };
 
-            let address = Address::from(*range.start());
+            let address = Address::in_default_space(*range.start());
             let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");
@@ -815,8 +819,8 @@ where
                 continue;
             }
 
-            let address = Address::from(sect.address());
-            let last_address = Address::from(sect.address() + size - 1);
+            let address = Address::in_default_space(sect.address());
+            let last_address = Address::in_default_space(sect.address() + size - 1);
 
             if last_address < address {
                 tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
@@ -936,7 +940,7 @@ where
                 Cow::Borrowed(&data[rvstart..rvend])
             };
 
-            let address = Address::from(*range.start());
+            let address = Address::in_default_space(*range.start());
             let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");

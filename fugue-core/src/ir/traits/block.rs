@@ -87,7 +87,7 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
     fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize;
 
     fn get_by_id<'a>(&'a self, id: Id<CodeBlock>) -> Option<Self::CodeBlockRef<'a>>;
-    fn get_by_id_mut<'a>(&'a mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut<'a>>;
+    fn get_by_id_mut<'a>(&'a mut self, id: Id<CodeBlock>) -> Option<Self::CodeBlockMut<'a>>;
 
     fn get_by_address<'a>(&'a self, addr: Address) -> Self::CodeBlockIter<'a>;
     fn get_by_address_mut<'a>(&'a mut self, addr: Address) -> Self::CodeBlockIterMut<'a>;

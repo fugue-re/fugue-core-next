@@ -102,16 +102,19 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        let naddr = addr.wrap_and_align(self.language());
+        let naddr = addr
+            .wrap(self.language())
+            .align(self.language().address_alignment());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 
+    // NOTE: we the lifting context associated should be tied to the address space the address
+    // belongs to.
     fn canonicalise_address_with(
         &self,
         addr: Address,
         context: &LiftingContext,
     ) -> Option<(Address, ContextSet)> {
-        // NOTE: this supresses the warning about unused `context` parameter,
         let _ = context;
         self.canonicalise_address(addr)
     }

@@ -14,9 +14,10 @@ use super::{
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
-use crate::ir::{Address, AddressRangeSet, AddressWithContext};
+use crate::ir::{Address, AddressWithContext, RawAddress, RawAddressRangeSet};
 use crate::project::{Project, ProjectMut};
 use crate::storage::project::InMemoryProvider;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 use crate::types::Confidence;
 
@@ -36,7 +37,7 @@ where
 pub struct FunctionDiscoveryContext {
     config: FunctionRecoveryConfig,
     candidates: VecDeque<AddressWithContext>,
-    avoids: AddressRangeSet,
+    avoids: RawAddressRangeSet,
     failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
@@ -45,7 +46,7 @@ pub struct FunctionDiscoveryContext {
 #[derive(Default)]
 pub struct FunctionStructuringContext {
     config: FunctionRecoveryConfig,
-    avoids: AddressRangeSet,
+    avoids: RawAddressRangeSet,
     failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
@@ -75,11 +76,11 @@ impl FunctionDiscoveryContext {
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
     }
 
-    pub fn avoids(&self) -> &AddressRangeSet {
+    pub fn avoids(&self) -> &RawAddressRangeSet {
         &self.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
         &mut self.avoids
     }
 
@@ -87,7 +88,7 @@ impl FunctionDiscoveryContext {
         self.avoids.insert(address.into());
     }
 
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
         self.avoids.insert_range(range);
     }
 
@@ -111,8 +112,8 @@ impl FunctionDiscoveryContext {
         &self,
         ftable: &impl FunctionTable,
         cbtable: &impl CodeBlockTable,
-    ) -> AddressRangeSet {
-        let mut covered = AddressRangeSet::new();
+    ) -> RawAddressRangeSet {
+        let mut covered = RawAddressRangeSet::new();
 
         for function in ftable.iter() {
             let mm = function.blocks().minmax_by_key(|&(addr, _)| addr);
@@ -122,7 +123,7 @@ impl FunctionDiscoveryContext {
                     let block = cbtable
                         .get_by_id(bid)
                         .expect("block should exist in code block table");
-                    covered.insert_range(block.range_inclusive());
+                    covered.insert_meta_range(block.range_inclusive());
                 }
                 MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
                     let min_block = cbtable
@@ -133,7 +134,7 @@ impl FunctionDiscoveryContext {
                         .expect("block should exist in code block table");
                     // we should probably have a threshold here to avoid huge ranges, where
                     // we have a function that has non-contiguous blocks
-                    covered.insert_range(min_block.address()..=max_block.last_address());
+                    covered.insert_meta_range(min_block.address()..=max_block.last_address());
                 }
                 _ => { /* no blocks, skip */ }
             }
@@ -146,15 +147,15 @@ impl FunctionDiscoveryContext {
         &self,
         ftable: &impl FunctionTable,
         cbtable: &impl CodeBlockTable,
-    ) -> AddressRangeSet {
-        let mut covered = AddressRangeSet::new();
+    ) -> RawAddressRangeSet {
+        let mut covered = RawAddressRangeSet::new();
 
         for function in ftable.iter() {
             for (_, bid) in function.blocks() {
                 let block = cbtable
                     .get_by_id(bid)
                     .expect("block should exist in code block table");
-                covered.insert_range(block.range_inclusive());
+                covered.insert_meta_range(block.range_inclusive());
             }
         }
 
@@ -165,7 +166,7 @@ impl FunctionDiscoveryContext {
         &self,
         ftable: &impl FunctionTable,
         cbtable: &impl CodeBlockTable,
-    ) -> AddressRangeSet {
+    ) -> RawAddressRangeSet {
         if self.config.use_fine_grained_block_coverage() {
             self.covered_by_all_block_bounds(ftable, cbtable)
         } else {
@@ -178,15 +179,15 @@ impl FunctionDiscoveryContext {
         ftable: &impl FunctionTable,
         cbtable: &impl CodeBlockTable,
         segments: &SegmentStorage,
-    ) -> Result<AddressRangeSet, FunctionRecoveryError> {
+        space_id: AddressSpaceId,
+    ) -> Result<RawAddressRangeSet, FunctionRecoveryError> {
         let covered = self.covered(ftable, cbtable);
 
         let avail = segments
-            .current_space()
-            .iter()
+            .iter_views(space_id)?
             .filter(|segm| segm.properties().is_executable() && !segm.properties().is_external())
-            .map(|segm| segm.range_inclusive())
-            .collect::<AddressRangeSet>();
+            .map(|segm| segm.start()..=segm.last())
+            .collect::<RawAddressRangeSet>();
 
         Ok(avail.difference(&covered))
     }
@@ -197,20 +198,20 @@ impl FunctionStructuringContext {
         &self.config
     }
 
-    pub fn avoids(&self) -> &AddressRangeSet {
+    pub fn avoids(&self) -> &RawAddressRangeSet {
         &self.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
         &mut self.avoids
     }
 
     pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into());
+        self.avoids.insert(address.into().offset());
     }
 
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
-        self.avoids.insert_range(range);
+    pub fn add_avoid_range(&mut self, range: RangeInclusive<Address>) {
+        self.avoids.insert_meta_range(range);
     }
 
     pub fn failures(&self) -> &BTreeSet<Address> {
@@ -471,16 +472,8 @@ where
         }
 
         if self.config().use_segment_function_hints() {
-            for _segm in project.segments().current_space().iter() {
-                // FIXME: function hints should be a view over the hints of a given
-                // mapping within a given address space, not the segment as a whole.
-                /*
-                for addr in segm.function_hints().iter() {
-                    tracing::debug!(source = "segment", "function hint: {addr}");
-                    self.add_candidate(*addr);
-                }
-                */
-            }
+            // FIXME: function hints should be a view over the hints of a given
+            // mapping within a given address space, not the segment as a whole.
         }
 
         // global state
@@ -502,7 +495,10 @@ where
                 let address = candidate.address();
                 let confidence = Confidence::certain();
 
-                if !project.segments().contains_segment(address) {
+                if !project
+                    .segments()
+                    .space_contains_segment(address.space(), address)
+                {
                     tracing::trace!("skipping {address}: not mapped");
                     continue;
                 }

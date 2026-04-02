@@ -38,7 +38,7 @@ use view::SegmentMappingView;
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
-const DEFAULT_SPACE_ID: AddressSpaceId = 0;
+pub const DEFAULT_SPACE_ID: AddressSpaceId = 0;
 const DEFAULT_FILL_BYTE: u8 = 0;
 const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = 0;
 
@@ -119,7 +119,6 @@ pub struct SegmentStorage {
     providers: BTreeMap<SegmentStorageProviderId, SegmentStorageDescriptor>,
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
     spaces: BTreeMap<AddressSpaceId, AddressSpace>,
-    current_space: AddressSpaceId,
     fill_byte: u8,
     next_provider_id: SegmentStorageProviderId,
     next_mapping_id: SegmentMappingId,
@@ -141,7 +140,6 @@ impl SegmentStorage {
             providers: BTreeMap::new(),
             mappings: BTreeMap::new(),
             spaces,
-            current_space: DEFAULT_SPACE_ID,
             fill_byte: DEFAULT_FILL_BYTE,
             next_provider_id: DEFAULT_PROVIDER_ID,
             next_mapping_id: 0,
@@ -171,7 +169,7 @@ impl SegmentStorage {
         let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
         let mut space_providers =
-            BTreeMap::<u32, (AddressSpaceId, SegmentStorageProviderId)>::new();
+            BTreeMap::<AddressSpaceId, (AddressSpaceId, SegmentStorageProviderId)>::new();
 
         for (space_idx, range) in bounds.iter() {
             let space_id = if space_idx == 0 {
@@ -195,11 +193,11 @@ impl SegmentStorage {
 
         while let Some(segm) = siter.next()? {
             let (space_id, provider_id) = space_providers
-                .get(&segm.space_index())
+                .get(&segm.space())
                 .copied()
                 .unwrap_or((DEFAULT_SPACE_ID, DEFAULT_PROVIDER_ID));
 
-            let range = &bounds[segm.space_index() as usize];
+            let range = &bounds[segm.space() as usize];
             let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
 
             tracing::debug!(
@@ -298,10 +296,11 @@ impl SegmentStorage {
             let space_id = *space_map
                 .get(&mapping_meta.space_id)
                 .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
+            let start = Address::new(space_id, mapping_meta.virtual_start);
 
             let mapping_id = storage.create_mapping_with_metadata(
                 provider_id,
-                Address::from(mapping_meta.virtual_start),
+                start,
                 mapping_meta.size,
                 mapping_meta.physical_offset,
                 mapping_meta.properties,
@@ -514,8 +513,8 @@ impl SegmentStorage {
         offset: u64,
         properties: SegmentProperties,
         name: impl Into<String>,
-        mapping_hints: std::collections::BTreeMap<Address, crate::lifter::ContextHint>,
-        function_hints: std::collections::BTreeSet<Address>,
+        mapping_hints: BTreeMap<Address, ContextHint>,
+        function_hints: BTreeSet<Address>,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
         if !self.providers.contains_key(&provider_id) {
             return Err(SegmentStorageError::backing_with("provider not found"));
@@ -658,24 +657,6 @@ impl SegmentStorage {
         id
     }
 
-    pub fn use_space(&mut self, id: AddressSpaceId) -> Result<(), SegmentStorageError> {
-        if !self.spaces.contains_key(&id) {
-            return Err(SegmentStorageError::backing_with("space not found"));
-        }
-        self.current_space = id;
-        Ok(())
-    }
-
-    pub fn current_space_id(&self) -> AddressSpaceId {
-        self.current_space
-    }
-
-    pub fn current_space(&self) -> &AddressSpace {
-        self.spaces
-            .get(&self.current_space)
-            .expect("current space should exist")
-    }
-
     pub fn add_mapping_to_space_top(
         &mut self,
         space_id: AddressSpaceId,
@@ -764,8 +745,8 @@ impl SegmentStorage {
             .get(&mapping_id)
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
 
-        let range_start = mapping.start();
-        let range_end = mapping.end();
+        let range_start = mapping.start().address();
+        let range_end = mapping.end().address();
 
         let space = self
             .spaces
@@ -777,8 +758,10 @@ impl SegmentStorage {
             .iter()
             .filter_map(|mref| {
                 self.mappings.get(&mref.mapping_id()).and_then(|m| {
-                    if m.end() > range_start && m.start() < range_end {
-                        Some((*mref, m.start(), m.size(), m.properties()))
+                    let m_start = m.start().address();
+                    let m_end = m.end().address();
+                    if m_end > range_start && m_start < range_end {
+                        Some((*mref, m_start, m.size(), m.properties()))
                     } else {
                         None
                     }
@@ -797,7 +780,8 @@ impl SegmentStorage {
         addr: impl Into<Address>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
-        self.read_bytes_from_space(self.current_space, addr, bytes)
+        let addr = addr.into();
+        self.read_bytes_from_space(addr.space(), addr, bytes)
     }
 
     pub fn read_bytes_from_space(
@@ -817,7 +801,7 @@ impl SegmentStorage {
             .get(&space_id)
             .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        let addr = addr.into();
+        let addr = Address::new(space_id, addr.into());
         let mut current_addr = addr;
         let mut remaining = bytes.len();
         let mut total_read = 0;
@@ -901,7 +885,8 @@ impl SegmentStorage {
         addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
-        self.write_bytes_to_space(self.current_space, addr, bytes)
+        let addr = addr.into();
+        self.write_bytes_to_space(addr.space(), addr, bytes)
     }
 
     pub fn write_bytes_to_space(
@@ -914,7 +899,7 @@ impl SegmentStorage {
             return Ok(0);
         }
 
-        let mut current_addr = addr.into();
+        let mut current_addr = Address::new(space_id, addr.into());
         let mut remaining = bytes.len();
         let mut total_written = 0;
         let mut write_offset = 0;
@@ -1019,7 +1004,7 @@ impl SegmentStorage {
 
     pub fn write_bytes_exact(
         &mut self,
-        addr: Address,
+        addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<(), SegmentStorageError> {
         if self.write_bytes(addr, bytes)? != bytes.len() {
@@ -1036,20 +1021,33 @@ impl SegmentStorage {
         self.fill_byte
     }
 
+    pub fn spaces(&self) -> impl Iterator<Item = &AddressSpace> {
+        self.spaces.values()
+    }
+
     pub fn resolve_to_offset(
         &self,
         addr: impl Into<Address>,
     ) -> Option<(SegmentStorageProviderId, u64)> {
         let addr = addr.into();
-        let space = self.spaces.get(&self.current_space)?;
+        let space = self.spaces.get(&addr.space())?;
         let view = space.find_containing(addr)?;
         let mapping = self.mappings.get(&view.mapping_ref().mapping_id())?;
         let offset = mapping.to_offset(addr);
         Some((mapping.provider_id(), offset))
     }
 
-    pub fn contains_segment(&self, at: Address) -> bool {
-        if let Some(space) = self.spaces.get(&self.current_space) {
+    pub fn contains_segment(&self, at: impl Into<Address>) -> bool {
+        let at = at.into();
+        if let Some(space) = self.spaces.get(&at.space()) {
+            space.find_containing(at).is_some()
+        } else {
+            false
+        }
+    }
+
+    pub fn space_contains_segment(&self, space_id: AddressSpaceId, at: Address) -> bool {
+        if let Some(space) = self.spaces.get(&space_id) {
             space.find_containing(at).is_some()
         } else {
             false
@@ -1060,7 +1058,8 @@ impl SegmentStorage {
         &self,
         addr: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
-        self.view_of_space_at(self.current_space, addr)
+        let addr = addr.into();
+        self.view_of_space_at(addr.space(), addr)
     }
 
     pub fn view_of_space_at(
@@ -1093,12 +1092,6 @@ impl SegmentStorage {
     }
 
     pub fn iter_views(
-        &self,
-    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
-        self.iter_views_of_space(self.current_space)
-    }
-
-    pub fn iter_views_of_space(
         &self,
         space_id: AddressSpaceId,
     ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {

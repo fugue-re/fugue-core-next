@@ -6,7 +6,9 @@ use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 
 pub mod address;
-pub use address::{Address, AddressMap, AddressRangeSet, AddressWithContext, ToAddress};
+pub use address::{
+    Address, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
+};
 
 pub mod block;
 pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};
@@ -33,7 +35,7 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 pub mod symbol;
 pub use symbol::{
     IndexedSymbolTable, LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap,
-    SymbolProperties,
+    SymbolProperties, SymbolTableSelector,
 };
 
 pub mod traits;

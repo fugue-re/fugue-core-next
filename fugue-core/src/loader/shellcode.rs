@@ -189,7 +189,7 @@ mod test {
         let mut offset = 0usize;
         let mut output = String::new();
 
-        let address = shellcode.address().offset();
+        let address = shellcode.address();
         let bytes = shellcode.bytes();
 
         while offset < bytes.len() {
