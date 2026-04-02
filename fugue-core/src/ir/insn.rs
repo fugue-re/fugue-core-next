@@ -4,7 +4,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::ir::{Address, Id, Location, ToAddress};
+use crate::ir::{Address, Id, Location, ToRawAddress};
 use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
@@ -149,7 +149,7 @@ impl Insn {
         self.operations.clear();
         self.targets.clear();
 
-        let length = lifter.lift_into(self.address, bytes, &mut self.operations)?;
+        let length = lifter.lift_into(self.address.address(), bytes, &mut self.operations)?;
 
         self.length = length
             .try_into()
@@ -598,8 +598,10 @@ impl InsnTarget {
                     nfall(i, next, targets);
                 }
                 Op::Return => {
-                    let addr = inputs[0].to_address(language);
-                    targets.push((i, Self::InterRet(addr, i + 1 == op_count)));
+                    let ret_addr = inputs[0]
+                        .to_address(language)
+                        .map(|a| Address::new(address.space(), a));
+                    targets.push((i, Self::InterRet(ret_addr, i + 1 == op_count)));
                 }
                 Op::UserOp(_, _) => {
                     targets.push((i, Self::Intrinsic));

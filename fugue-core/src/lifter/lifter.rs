@@ -6,7 +6,6 @@ use fugue_lifter::runtime::language::Language;
 use fugue_lifter::runtime::operand::Operands;
 use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use fugue_lifter::{LifterBuilder, LifterBuilderError};
-
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
@@ -153,13 +152,13 @@ impl Lifter {
         apply_commits: bool,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.resolve(address.into(), bytes, apply_commits)
+        self.0.resolve(address.offset(), bytes, apply_commits)
     }
 
     pub fn operands(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Option<Operands> {
         let address = address.into();
         let mut operands = Operands::new();
-        self.0.operands(address.into(), bytes, &mut operands)?;
+        self.0.operands(address.offset(), bytes, &mut operands)?;
         Some(operands)
     }
 
@@ -170,7 +169,7 @@ impl Lifter {
         operands: &mut Operands,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.operands(address.into(), bytes, operands)
+        self.0.operands(address.offset(), bytes, operands)
     }
 
     pub fn disassemble(
@@ -180,7 +179,7 @@ impl Lifter {
         output: &mut String,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.disassemble(address.into(), bytes, output)
+        self.0.disassemble(address.offset(), bytes, output)
     }
 
     pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
@@ -204,7 +203,7 @@ impl Lifter {
         output: &mut Vec<PCodeOp>,
     ) -> Result<usize, LifterError> {
         let address = addr.into();
-        let Some(length) = self.0.lift(address.into(), bytes, output) else {
+        let Some(length) = self.0.lift(address.offset(), bytes, output) else {
             return Err(LifterError::InvalidInstruction(address));
         };
 

@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-
 use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::{self, Arch};
@@ -94,7 +93,7 @@ impl<'a> Object<'a> {
         let entry = view.entry();
 
         if entry != 0 {
-            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::from(entry));
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::in_default_space(entry));
         }
 
         Ok(Self {
@@ -174,7 +173,7 @@ impl Loadable for Object<'_> {
                 return None;
             }
 
-            let address = Address::from(segm.address());
+            let address = Address::in_default_space(segm.address());
             let data = segm.data().unwrap_or_default();
 
             let bytes = if data.len() as u64 != segm.size() {
@@ -211,7 +210,7 @@ impl Loadable for Object<'_> {
                 continue;
             }
 
-            let nstart = Address::from(segm.address());
+            let nstart = Address::in_default_space(segm.address());
             let nend = nstart + segm.size();
 
             start = Some(start.map_or(nstart, |start| start.min(nstart)));

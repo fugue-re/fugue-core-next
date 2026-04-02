@@ -450,6 +450,7 @@ where
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use crate::attributes;
     #[cfg(feature = "mdbx")]
     use crate::storage::entities::MdbxEntityStorage;
@@ -459,8 +460,6 @@ mod test {
         DefaultPersistentProjectStorageProvider, DefaultTransientProjectStorageProvider,
     };
     use crate::storage::{DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage};
-
-    use super::*;
 
     fn with_logging(
         f: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
@@ -482,9 +481,7 @@ mod test {
                 Project::<DefaultTransientProjectStorageProvider>::from_file("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
-            project
-                .segments()
-                .read_bytes(0x4000u32, &mut bytes)?;
+            project.segments().read_bytes(0x4000u32, &mut bytes)?;
 
             assert_eq!(
                 &bytes,

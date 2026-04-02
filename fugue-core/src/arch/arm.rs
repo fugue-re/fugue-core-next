@@ -3,7 +3,6 @@ use fugue_lifter::arm::register::{
     LR, PC, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP,
 };
 pub use fugue_lifter::arm::*;
-
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
 
@@ -44,7 +43,7 @@ impl ArchT for Arm {
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
         let alignment = if t_mode != 0 { 2 } else { 4 };
-        let naddr = addr.wrap_and_align_with(self.language(), alignment);
+        let naddr = addr.wrap(self.language()).align(alignment);
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
     }
 
@@ -54,9 +53,9 @@ impl ArchT for Arm {
         context: &LiftingContext,
     ) -> Option<(Address, ContextSet)> {
         let t_mode =
-            addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.into()) == 1;
+            addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.offset()) == 1;
         let alignment = if t_mode { 2 } else { 4 };
-        let naddr = addr.wrap_and_align_with(self.language(), alignment);
+        let naddr = addr.wrap(self.language()).align(alignment);
         (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode as u32)))
     }
 
@@ -157,7 +156,7 @@ impl DisassemblerT for ArmDisassembler {
         bytes: &[u8],
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let in_thumb = context.get_variable_by_bits(T_MODE, address.into());
+        let in_thumb = context.get_variable_by_bits(T_MODE, address.offset());
 
         self.decoder.set_thumb_mode(in_thumb == 1);
 
@@ -171,7 +170,7 @@ impl DisassemblerT for ArmDisassembler {
                     // NOTE: we propagate the T_MODE variable to the next instruction
                     // mimicking the behaviour of the language spec.
                     let naddress = address + size;
-                    context.set_variable_by_bits(T_MODE, naddress.into(), in_thumb);
+                    context.set_variable_by_bits(T_MODE, naddress.offset(), in_thumb);
                     InsnProperties::FALL
                 };
 

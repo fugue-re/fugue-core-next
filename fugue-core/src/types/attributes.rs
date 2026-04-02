@@ -265,8 +265,9 @@ macro_rules! attributes_value {
 
 #[cfg(test)]
 mod test {
-    use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
+
+    use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
     #[test]

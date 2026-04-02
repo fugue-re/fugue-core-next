@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::mem;
 use std::ops::Range;
 
@@ -9,16 +10,17 @@ use thiserror::Error;
 use crate::ir::traits::{
     CodeBlockIter, CodeBlockIterMut, CodeBlockMut, CodeBlockRef, CodeBlockTable as CodeBlockTableT,
 };
-use crate::ir::{Address, CodeBlock, Id, IdSet};
+use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_KEY_CODE_BLOCK_ENTITY_ID;
 use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 #[derive(Debug, Clone, Default)]
 pub struct IndexedCodeBlockTable {
-    bounds: IntervalMap<Address, IdSet<CodeBlock>>,
+    bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     blocks: Vec<CodeBlock>,
     free_ids: Vec<Id<CodeBlock>>,
 }
@@ -29,10 +31,17 @@ impl Encode for IndexedCodeBlockTable {
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
         self.bounds.len().encode(encoder)?;
-        for (iv, val) in self.bounds.unsorted_iter() {
-            iv.encode(encoder)?;
-            val.encode(encoder)?;
+
+        for (space_id, iv_map) in self.bounds.iter() {
+            space_id.encode(encoder)?;
+            iv_map.len().encode(encoder)?;
+
+            for (iv, val) in iv_map.unsorted_iter() {
+                iv.encode(encoder)?;
+                val.encode(encoder)?;
+            }
         }
+
         self.blocks.encode(encoder)?;
         self.free_ids.encode(encoder)?;
         Ok(())
@@ -44,14 +53,26 @@ impl<C> Decode<C> for IndexedCodeBlockTable {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let nbounds = usize::decode(decoder)?;
-        let mut bounds = IntervalMap::with_capacity(nbounds);
+        let mut bounds = BTreeMap::new();
+
         for _ in 0..nbounds {
-            let iv = Range::<Address>::decode(decoder)?;
-            let val = IdSet::<CodeBlock>::decode(decoder)?;
-            bounds.force_insert(iv, val);
+            let space_id = AddressSpaceId::decode(decoder)?;
+            let nintervals = usize::decode(decoder)?;
+
+            let mut sbounds = IntervalMap::with_capacity(nintervals);
+
+            for _ in 0..nintervals {
+                let iv = Range::<RawAddress>::decode(decoder)?;
+                let val = IdSet::<CodeBlock>::decode(decoder)?;
+                sbounds.force_insert(iv, val);
+            }
+
+            bounds.insert(space_id, sbounds);
         }
+
         let blocks = Vec::<CodeBlock>::decode(decoder)?;
         let free_ids = Vec::<Id<CodeBlock>>::decode(decoder)?;
+
         Ok(Self {
             bounds,
             blocks,
@@ -65,14 +86,26 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let nbounds = usize::borrow_decode(decoder)?;
-        let mut bounds = IntervalMap::with_capacity(nbounds);
+        let mut bounds = BTreeMap::new();
+
         for _ in 0..nbounds {
-            let iv = Range::<Address>::borrow_decode(decoder)?;
-            let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
-            bounds.force_insert(iv, val);
+            let space_id = AddressSpaceId::borrow_decode(decoder)?;
+            let nintervals = usize::borrow_decode(decoder)?;
+
+            let mut sbounds = IntervalMap::with_capacity(nintervals);
+
+            for _ in 0..nintervals {
+                let iv = Range::<RawAddress>::borrow_decode(decoder)?;
+                let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
+                sbounds.force_insert(iv, val);
+            }
+
+            bounds.insert(space_id, sbounds);
         }
+
         let blocks = Vec::<CodeBlock>::borrow_decode(decoder)?;
         let free_ids = Vec::<Id<CodeBlock>>::borrow_decode(decoder)?;
+
         Ok(Self {
             bounds,
             blocks,
@@ -138,7 +171,14 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             return Err(IndexedCodeBlockTableError::AddressMismatch);
         }
 
-        self.bounds.entry(nblk.range()).or_default().insert(id);
+        let range = nblk.start().address()..nblk.next_address().address();
+
+        self.bounds
+            .entry(addr.space())
+            .or_default()
+            .entry(range)
+            .or_default()
+            .insert(id);
 
         if reuse {
             self.free_ids.pop();
@@ -159,7 +199,11 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             return false;
         };
 
-        let Entry::Occupied(mut entry) = self.bounds.entry(blk.range()) else {
+        let range = blk.start().address()..blk.next_address().address();
+
+        let Some(Entry::Occupied(mut entry)) =
+            self.bounds.get_mut(&blk.space()).map(|m| m.entry(range))
+        else {
             // this should never happen
             return false;
         };
@@ -181,14 +225,20 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
     fn remove_by_address(&mut self, addr: Address) -> usize {
         let mut removed = 0;
 
-        let ranges_to_remove = self
-            .bounds
+        let space = addr.space();
+        let addr = addr.address();
+
+        let Some(bounds) = self.bounds.get_mut(&space) else {
+            return removed;
+        };
+
+        let ranges_to_remove = bounds
             .intervals_overlap(addr)
             .filter(|iv| iv.start == addr)
             .collect::<SmallVec<[_; 2]>>();
 
         for range in ranges_to_remove.into_iter() {
-            let Some(id_set) = self.bounds.remove(range) else {
+            let Some(id_set) = bounds.remove(range) else {
                 // this should never happen
                 continue;
             };
@@ -208,14 +258,20 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
     fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
         let mut removed = 0;
 
-        let ranges_to_remove = self
-            .bounds
+        let space = addr.space();
+        let addr = addr.address();
+
+        let Some(bounds) = self.bounds.get_mut(&space) else {
+            return removed;
+        };
+
+        let ranges_to_remove = bounds
             .intervals_overlap(addr)
             .filter(|iv| iv.start == addr)
             .collect::<SmallVec<[_; 2]>>();
 
         for range in ranges_to_remove.into_iter() {
-            let Entry::Occupied(id_set) = self.bounds.entry(range) else {
+            let Entry::Occupied(id_set) = bounds.entry(range) else {
                 // this should never happen
                 continue;
             };
@@ -252,31 +308,55 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             .filter(|blk| blk.id().is_valid())
     }
 
-    fn get_by_address(&self, addr: Address) -> CodeBlockIter {
-        CodeBlockIter::new(self.bounds.values(addr..=addr).flat_map(move |id_set| {
+    fn get_by_address(&self, maddr: Address) -> CodeBlockIter {
+        let space = maddr.space();
+        let addr = maddr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIter::new(std::iter::empty()),
+        };
+
+        CodeBlockIter::new(bounds.values(addr..=addr).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
                 let block = &self.blocks[id.index()];
-                (block.start() == addr).then_some(block)
+                (block.start() == maddr).then_some(block)
             })
         }))
     }
 
     fn get_by_address_and_context<'a>(
         &'a self,
-        addr: Address,
+        maddr: Address,
         context: &'a ContextSet,
     ) -> CodeBlockIter<'a> {
-        CodeBlockIter::new(self.bounds.values(addr..=addr).flat_map(move |id_set| {
+        let space = maddr.space();
+        let addr = maddr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIter::new(std::iter::empty()),
+        };
+
+        CodeBlockIter::new(bounds.values(addr..=addr).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
                 let block = &self.blocks[id.index()];
-                (block.start() == addr && block.context() == context).then_some(block)
+                (block.start() == maddr && block.context() == context).then_some(block)
             })
         }))
     }
 
-    fn get_by_address_mut(&mut self, addr: Address) -> CodeBlockIterMut {
+    fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut {
+        let space = maddr.space();
+        let addr = maddr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIterMut::new(std::iter::empty()),
+        };
+
         let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(self.bounds.values(addr..=addr).flat_map(move |id_set| {
+        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
                 // SAFETY:
                 //
@@ -287,41 +367,70 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
                 // from the IdSet<CodeBlock> which only contains valid indices.
                 //
                 let block = unsafe { &mut *blocks_ptr.add(id.index()) };
-                (block.start() == addr).then_some(block)
+                (block.start() == maddr).then_some(block)
             })
         }))
     }
 
     fn get_by_address_and_context_mut<'a>(
         &'a mut self,
-        addr: Address,
+        maddr: Address,
         context: &'a ContextSet,
     ) -> CodeBlockIterMut<'a> {
+        let space = maddr.space();
+        let addr = maddr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIterMut::new(std::iter::empty()),
+        };
+
         let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(self.bounds.values(addr..=addr).flat_map(move |id_set| {
+        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
                 // SAFETY: see `get_by_address_mut` for justification.
                 let block = unsafe { &mut *blocks_ptr.add(id.index()) };
-                (block.start() == addr && block.context() == context).then_some(block)
+                (block.start() == maddr && block.context() == context).then_some(block)
             })
         }))
     }
 
     fn contains(&self, addr: Address) -> bool {
-        self.bounds.has_overlap(addr..=addr)
+        let space = addr.space();
+        let addr = addr.address();
+
+        self.bounds
+            .get(&space)
+            .map_or(false, |bounds| bounds.has_overlap(addr..=addr))
     }
 
     fn overlaps<'a>(&'a self, addr: Address) -> CodeBlockIter<'a> {
+        let space = addr.space();
+        let addr = addr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIter::new(std::iter::empty()),
+        };
+
         CodeBlockIter::new(
-            self.bounds
+            bounds
                 .values(addr..=addr)
                 .flat_map(|id_set| id_set.iter().map(|id| &self.blocks[id.index()])),
         )
     }
 
     fn overlaps_mut<'a>(&'a mut self, addr: Address) -> CodeBlockIterMut<'a> {
+        let space = addr.space();
+        let addr = addr.address();
+
+        let bounds = match self.bounds.get(&space) {
+            Some(bounds) => bounds,
+            None => return CodeBlockIterMut::new(std::iter::empty()),
+        };
+
         let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(self.bounds.values(addr..=addr).flat_map(move |id_set| {
+        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
             id_set.iter().map(move |id| {
                 // SAFETY: see `get_by_address_mut` for justification.
                 unsafe { &mut *blocks_ptr.add(id.index()) }
@@ -368,9 +477,8 @@ impl PersistableProjectEntity for IndexedCodeBlockTable {
 
 #[cfg(test)]
 mod test {
-    use crate::ir::InsnList;
-
     use super::*;
+    use crate::ir::InsnList;
 
     #[test]
     fn test_basic_operations() {

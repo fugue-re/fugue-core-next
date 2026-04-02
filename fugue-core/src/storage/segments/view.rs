@@ -6,6 +6,7 @@ use crate::lifter::ContextHint;
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
 use crate::storage::segments::provider::SegmentStorageDescriptor;
+use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Clone)]
 pub struct SegmentMappingView<'a> {
@@ -39,6 +40,10 @@ impl<'a> SegmentMappingView<'a> {
 
     pub fn end(&self) -> Address {
         self.submap.end()
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.mapping.space()
     }
 
     pub fn size(&self) -> usize {

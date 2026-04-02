@@ -41,7 +41,7 @@ where
     ) -> Self {
         Self {
             elf,
-            base: Address::zero(),
+            base: Address::in_default_space(0u64),
             symbols,
             is_object,
         }

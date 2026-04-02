@@ -1,10 +1,10 @@
 use iset::IntervalMap;
 use smallvec::SmallVec;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
-pub type AddressSpaceId = u32;
+pub type AddressSpaceId = u8;
 
 #[derive(Debug)]
 pub struct AddressSpace {
@@ -48,7 +48,7 @@ impl AddressSpace {
         size: usize,
         properties: SegmentProperties,
     ) {
-        let start = addr.into();
+        let start = Address::new(self.id, addr.into());
         let end = start + size;
         let last = end - 1usize;
 
@@ -61,10 +61,14 @@ impl AddressSpace {
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
 
-            if view.start() < start && let Some(left) = view.with_end(start) {
+            if view.start() < start
+                && let Some(left) = view.with_end(start)
+            {
                 self.submaps.insert(left.range(), left);
             }
-            if view.last() > last && let Some(right) = view.with_start(end) {
+            if view.last() > last
+                && let Some(right) = view.with_start(end)
+            {
                 self.submaps.insert(right.range(), right);
             }
         }
@@ -80,7 +84,7 @@ impl AddressSpace {
         size: usize,
         properties: SegmentProperties,
     ) {
-        let start = addr.into();
+        let start = Address::new(self.id, addr.into());
         let end = start + size;
 
         let mut gaps = SmallVec::<[_; 8]>::new();
@@ -118,7 +122,7 @@ impl AddressSpace {
     }
 
     pub fn find_containing(&self, addr: impl Into<Address>) -> Option<&SegmentSubMapping> {
-        let addr = addr.into();
+        let addr = Address::new(self.id, addr.into());
         self.submaps.values(addr..(addr + 1usize)).next()
     }
 
@@ -126,7 +130,7 @@ impl AddressSpace {
         &mut self,
         addr: impl Into<Address>,
     ) -> Option<&mut SegmentSubMapping> {
-        let addr = addr.into();
+        let addr = Address::new(self.id, addr.into());
         self.submaps.values_mut(addr..(addr + 1usize)).next()
     }
 
@@ -154,10 +158,12 @@ impl AddressSpace {
 
     pub(crate) fn rebuild_range(
         &mut self,
-        range_start: Address,
-        range_end: Address,
-        mappings: impl IntoIterator<Item = (SegmentMappingRef, Address, usize, SegmentProperties)>,
+        range_start: RawAddress,
+        range_end: RawAddress,
+        mappings: impl IntoIterator<Item = (SegmentMappingRef, RawAddress, usize, SegmentProperties)>,
     ) {
+        let range_start = Address::new(self.id, range_start);
+        let range_end = Address::new(self.id, range_end);
         let range_last = range_end - 1usize;
 
         let overlapping = self
@@ -185,6 +191,9 @@ impl AddressSpace {
 
         for (mapping_ref, start, size, properties) in mappings {
             let end = start + size;
+
+            let range_start = range_start.address();
+            let range_end = range_end.address();
 
             if end <= range_start || start >= range_end {
                 continue;
@@ -297,7 +306,8 @@ mod test {
 
         // Mapping 2 is on top, so it should be visible at 0x1800
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -310,14 +320,19 @@ mod test {
         // Rebuild the range where mapping 2 exists (0x1500-0x2500)
         // Mappings in priority order (lowest first): mapping 2, then mapping 1
         let mappings = vec![
-            (make_ref(2), Address::from(0x1500u64), 0x1000usize, props),
-            (make_ref(1), Address::from(0x1000u64), 0x1000usize, props),
+            (make_ref(2), RawAddress::from(0x1500u64), 0x1000usize, props),
+            (make_ref(1), RawAddress::from(0x1000u64), 0x1000usize, props),
         ];
-        space.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
+        space.rebuild_range(
+            RawAddress::from(0x1500u64),
+            RawAddress::from(0x2000u64),
+            mappings,
+        );
 
         // Now mapping 1 should be visible at 0x1800 (overlap region)
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -326,7 +341,8 @@ mod test {
 
         // Mapping 1 should still be visible at 0x1200 (non-overlap region)
         assert_eq!(
-            space.find_containing(0x1200u64)
+            space
+                .find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -335,7 +351,8 @@ mod test {
 
         // Mapping 2 should be visible at 0x2100 (non-overlap region, past mapping 1's end)
         assert_eq!(
-            space.find_containing(0x2100u64)
+            space
+                .find_containing(0x2100u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -352,12 +369,17 @@ mod test {
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
 
         // Rebuild only 0x1500-0x2000 with a new mapping
-        let mappings = vec![(make_ref(2), Address::from(0x1000u64), 0x2000usize, props)];
-        space.rebuild_range(Address::from(0x1500u64), Address::from(0x2000u64), mappings);
+        let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000usize, props)];
+        space.rebuild_range(
+            RawAddress::from(0x1500u64),
+            RawAddress::from(0x2000u64),
+            mappings,
+        );
 
         // Mapping 1 should still be at 0x1200 (before rebuild range)
         assert_eq!(
-            space.find_containing(0x1200u64)
+            space
+                .find_containing(0x1200u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -366,7 +388,8 @@ mod test {
 
         // Mapping 2 should be at 0x1800 (inside rebuild range)
         assert_eq!(
-            space.find_containing(0x1800u64)
+            space
+                .find_containing(0x1800u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
@@ -375,7 +398,8 @@ mod test {
 
         // Mapping 1 should still be at 0x2500 (after rebuild range)
         assert_eq!(
-            space.find_containing(0x2500u64)
+            space
+                .find_containing(0x2500u64)
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),

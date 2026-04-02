@@ -5,11 +5,7 @@ use std::path::{Path, PathBuf};
 
 use libmdbx as mdbx;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, FromInto};
-
-use crate::loader::Loadable;
-use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use crate::types::{AttributeMap, BytesOrSlice};
+use serde_with::{FromInto, serde_as};
 
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
@@ -18,6 +14,9 @@ use super::{
     EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
+use crate::loader::Loadable;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use crate::types::{AttributeMap, BytesOrSlice};
 
 pub const ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS: &str = "storage.entities.mdbx.options";
 

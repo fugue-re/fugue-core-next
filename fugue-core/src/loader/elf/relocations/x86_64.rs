@@ -6,9 +6,8 @@ use object::elf::{
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation};
 
-use crate::loader::LoadableSegment;
-
 use super::ElfSegmentRelocator;
+use crate::loader::LoadableSegment;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where

@@ -3,7 +3,6 @@ use fugue_lifter::x86::register::{
 };
 use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 pub use fugue_lifter::x86::*;
-
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 

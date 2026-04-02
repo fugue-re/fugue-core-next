@@ -1,7 +1,27 @@
+use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Address, Id, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
 use crate::storage::project::FundamentalProjectEntity;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolTableSelector(usize);
+
+impl SymbolTableSelector {
+    pub const fn new(selector: usize) -> Self {
+        Self(selector)
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0
+    }
+}
+
+impl Display for SymbolTableSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}", self.0)
+    }
+}
 
 pub struct SymbolEntryIter<'a> {
     inner: Box<dyn Iterator<Item = (Id<Symbol>, &'a SymbolEntry)> + 'a>,
@@ -169,7 +189,7 @@ pub trait SymbolTable: FundamentalProjectEntity {
     fn contains_address(&self, address: Address) -> bool;
 
     fn iter<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
-    fn iter_by_selector<'a>(&'a self, selector: usize) -> Self::SymbolEntryIter<'a>;
+    fn iter_by_selector<'a>(&'a self, selector: SymbolTableSelector) -> Self::SymbolEntryIter<'a>;
     fn iter_by_address<'a>(&'a self) -> Self::SymbolEntryIter<'a>;
     fn iter_by_index<'a>(&'a self) -> Self::SymbolIndexAndEntryIter<'a>;
 

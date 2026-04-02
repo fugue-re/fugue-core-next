@@ -1,9 +1,8 @@
-use crate::project::Project;
-use crate::storage::project::InMemoryProvider;
-use crate::storage::ProjectStorageProvider;
-use crate::types::Confidence;
-
 use super::{FunctionRecoveryError, PartialFunction};
+use crate::project::Project;
+use crate::storage::ProjectStorageProvider;
+use crate::storage::project::InMemoryProvider;
+use crate::types::Confidence;
 
 pub struct FunctionRecoveryCommitContext {
     function: PartialFunction,

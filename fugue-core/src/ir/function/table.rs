@@ -158,9 +158,7 @@ impl FunctionTableT for IndexedFunctionTable {
     }
 
     fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.functions
-            .get(id.index())
-            .filter(|f| f.id().is_valid())
+        self.functions.get(id.index()).filter(|f| f.id().is_valid())
     }
 
     fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {

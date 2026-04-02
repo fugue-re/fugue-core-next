@@ -1,14 +1,13 @@
 use thiserror::Error;
 
-use crate::loader::Loadable;
-use crate::storage::{StoragePersistence, TRANSIENT};
-use crate::types::{AttributeMap, BytesOrSlice};
-
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
     EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
     EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
+use crate::loader::Loadable;
+use crate::storage::{StoragePersistence, TRANSIENT};
+use crate::types::{AttributeMap, BytesOrSlice};
 
 #[derive(Debug, Error)]
 #[error("{0} operation not supported")]

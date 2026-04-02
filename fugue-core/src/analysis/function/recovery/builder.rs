@@ -1,16 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 
-use crate::analysis::{AnalysisGroup, AnalysisPass};
-use crate::arch::Arch;
-use crate::ir::{Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget};
-use crate::lifter::ContextSet;
-use crate::project::Project;
-use crate::storage::{ProjectStorageProvider, SegmentStorage};
-
 use super::{
     FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
 };
+use crate::analysis::{AnalysisGroup, AnalysisPass};
+use crate::arch::Arch;
+use crate::ir::{Address, AddressWithContext, FlowKind, FlowTarget, RawAddressRangeSet};
+use crate::lifter::ContextSet;
+use crate::project::Project;
+use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 pub struct PartialFunctionWithContext {
     pub config: FunctionRecoveryConfig,
@@ -28,7 +27,7 @@ pub(crate) struct CodeBlockStructuringContext<'a> {
 #[derive(Default)]
 pub struct FunctionBuilderContext {
     entry: Address,
-    avoids: AddressRangeSet,
+    avoids: RawAddressRangeSet,
     candidates: VecDeque<AddressWithContext>,
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
@@ -130,11 +129,11 @@ where
         )
     }
 
-    pub fn avoids(&self) -> &AddressRangeSet {
+    pub fn avoids(&self) -> &RawAddressRangeSet {
         &self.context.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
         &mut self.context.avoids
     }
 
@@ -235,7 +234,7 @@ impl FunctionBuilderContext {
     }
 
     pub fn clear(&mut self) {
-        self.entry = Address::zero();
+        self.entry = Address::default();
         self.candidates.clear();
         self.contexts.clear();
         self.local_targets.clear();
@@ -266,7 +265,7 @@ impl FunctionBuilderContext {
             // the address space, and also extracts context updates indicated by the address,
             // e.g., if we are in Thumb context or not for ARM.
             let Some((block, ncontext)) =
-                arch.canonicalise_address_with(block, translator.context())
+                arch.canonicalise_address_with(block.into(), translator.context())
             else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
@@ -274,10 +273,7 @@ impl FunctionBuilderContext {
 
             if !view.contains(block) {
                 if let Ok(nview) = segments.view_at(block) {
-                    tracing::debug!(
-                        "switching segment for {block} to segment {}",
-                        nview.name()
-                    );
+                    tracing::debug!("switching segment for {block} to segment {}", nview.name());
                     view = nview;
                 } else {
                     tracing::trace!("skipping {block}: not mapped in any segment");
@@ -473,7 +469,7 @@ impl FunctionBuilderContext {
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
-        self.entry = candidate.address();
+        self.entry = candidate.address().into();
 
         if config.use_segment_mapping_hints() {
             // NOTE: this expect is safe because the entry address must be valid to reach this
