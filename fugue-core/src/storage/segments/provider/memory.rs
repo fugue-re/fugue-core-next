@@ -31,7 +31,7 @@ impl SegmentStorageProviderFromSegmentRange for InMemorySegmentStorage {
         end: Address,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let total_size = usize::from(end - start) + 1usize;
+        let total_size = (end.offset() - start.offset()) as usize + 1usize;
 
         tracing::trace!("creating in-memory storage with size {total_size} bytes");
 

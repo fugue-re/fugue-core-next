@@ -326,7 +326,10 @@ where
             .and_then(|pass| pass.as_ref().downcast_ref::<T>())
     }
 
-    pub fn get_boxed_pass_mut(&mut self, name: impl Borrow<str>) -> Option<&mut BoxedAnalysisPass<P, S>> {
+    pub fn get_boxed_pass_mut(
+        &mut self,
+        name: impl Borrow<str>,
+    ) -> Option<&mut BoxedAnalysisPass<P, S>> {
         self.passes.get_mut(name.borrow())
     }
 

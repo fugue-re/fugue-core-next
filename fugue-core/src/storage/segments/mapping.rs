@@ -10,6 +10,7 @@ use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
 pub type SegmentMappingId = u32;
@@ -176,6 +177,10 @@ impl SegmentMapping {
         self.offset
     }
 
+    pub fn space(&self) -> AddressSpaceId {
+        self.start.space()
+    }
+
     pub fn provider_id(&self) -> SegmentStorageProviderId {
         self.provider_id
     }
@@ -236,7 +241,7 @@ impl SegmentMapping {
 
     pub fn to_address(&self, phys_offset: u64) -> Address {
         let relative = phys_offset - self.offset;
-        Address::from(self.start.offset() + relative)
+        Address::new(self.start.space(), self.start.offset() + relative)
     }
 
     pub fn set_start(&mut self, start: impl Into<Address>) {
@@ -360,20 +365,29 @@ impl SegmentSubMapping {
         self.start..=self.last()
     }
 
+    pub fn space(&self) -> AddressSpaceId {
+        self.start.space()
+    }
+
     pub fn properties(&self) -> SegmentProperties {
         self.properties
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
         let addr = addr.into();
-        addr >= self.start && addr < self.end()
+        self.space() == addr.space() && addr >= self.start && addr < self.end()
     }
 
     pub fn with_start(&self, new_start: impl Into<Address>) -> Option<Self> {
         let new_start = new_start.into();
+        if new_start.space() != self.space() {
+            return None;
+        }
+
         if new_start >= self.end() {
             return None;
         }
+
         let new_size = usize::from(self.end() - new_start);
         Some(Self::new(
             self.mapping_ref,
@@ -385,9 +399,14 @@ impl SegmentSubMapping {
 
     pub fn with_end(&self, new_end: impl Into<Address>) -> Option<Self> {
         let new_end = new_end.into();
+        if new_end.space() != self.space() {
+            return None;
+        }
+
         if new_end <= self.start {
             return None;
         }
+
         let new_size = usize::from(new_end - self.start);
         Some(Self::new(
             self.mapping_ref,
@@ -399,6 +418,9 @@ impl SegmentSubMapping {
 
     pub fn split_at(&self, addr: impl Into<Address>) -> (Option<Self>, Option<Self>) {
         let addr = addr.into();
+        if addr.space() != self.space() {
+            return (None, None);
+        }
 
         if addr <= self.start {
             return (None, Some(self.clone()));
@@ -408,7 +430,7 @@ impl SegmentSubMapping {
             return (Some(self.clone()), None);
         }
 
-        let left_size = usize::from(addr - self.start);
+        let left_size = usize::from(addr - self.start().offset());
         let right_size = usize::from(self.end() - addr);
 
         let left = Self::new(self.mapping_ref, self.start, left_size, self.properties);

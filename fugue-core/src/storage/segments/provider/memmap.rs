@@ -3,21 +3,19 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use fugue_core_derive::SegmentStorageProvider;
 use memmap2::MmapMut;
 use thiserror::Error;
-
-use fugue_core_derive::SegmentStorageProvider;
-
-use crate::ir::Address;
-use crate::storage::segments::SegmentStorageError;
-use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
-use crate::types::AttributeMap;
-use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 use super::{
     SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage,
 };
+use crate::ir::Address;
+use crate::storage::segments::SegmentStorageError;
+use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
+use crate::types::AttributeMap;
+use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
 
@@ -171,7 +169,9 @@ impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
 
         let data_path = self.project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        if data_path.exists() && let Err(e) = fs::remove_file(&data_path) {
+        if data_path.exists()
+            && let Err(e) = fs::remove_file(&data_path)
+        {
             tracing::error!(
                 "failed to clean-up memory-mapped storage backing at {}: {e}",
                 data_path.display()

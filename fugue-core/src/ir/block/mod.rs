@@ -7,6 +7,7 @@ use crate::ir::{Address, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::segments::space::AddressSpaceId;
 
 pub mod table;
 pub use table::IndexedCodeBlockTable;
@@ -163,6 +164,10 @@ impl CodeBlock {
 
     pub fn next_address(&self) -> Address {
         self.start + self.len()
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.start.space()
     }
 
     pub fn len(&self) -> usize {

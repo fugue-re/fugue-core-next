@@ -5,11 +5,11 @@ use std::sync::LazyLock;
 
 use bincode::{BorrowDecode, Decode, Encode};
 use smallvec::SmallVec;
-
 pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
 
+pub use crate::ir::traits::SymbolTableSelector;
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
@@ -53,14 +53,13 @@ impl AsMut<SymbolEntry> for SymbolEntry {
 
 impl Display for SymbolEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let address = self.address;
+        let properties = self.properties;
         if !self.symbol.is_empty() {
-            write!(
-                f,
-                "{} at {}; {}",
-                self.symbol, self.address, self.properties
-            )
+            let symbol = self.symbol;
+            write!(f, "{symbol} at {address}; {properties}")
         } else {
-            write!(f, "<unnamed> at {}; {}", self.address, self.properties)
+            write!(f, "<unnamed> at {address}; {properties}")
         }
     }
 }
@@ -136,9 +135,13 @@ impl<'de, C> BorrowDecode<'de, C> for SymbolEntry {
 }
 
 impl SymbolEntry {
-    pub fn new(address: Address, symbol: impl Into<Symbol>, properties: SymbolProperties) -> Self {
+    pub fn new(
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> Self {
         Self {
-            address,
+            address: address.into(),
             symbol: symbol.into(),
             properties,
             indices: SmallVec::new(),
@@ -308,7 +311,7 @@ impl Display for SymbolProperties {
         f.write_str(name)?;
 
         for (name, _) in names {
-            write!(f, "|{}", name)?;
+            write!(f, "|{name}")?;
         }
 
         Ok(())
