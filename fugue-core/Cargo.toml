@@ -13,7 +13,6 @@ default = ["sqlite"]
 [dependencies]
 anyhow = "1"
 arrayvec = "0.7"
-rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 bitflags = "2"
 bytes = "1"
 clone_dyn = "0.55"
@@ -37,9 +36,10 @@ object = "0.38"
 ouroboros = "0.18"
 quick_cache = "0.6"
 parking_lot = "0.12"
-range-set-blaze = "0.4"
 r2d2 = { version = "0.8", optional = true }
 r2d2_sqlite = { version = "0.32", optional = true }
+range-set-blaze = "0.4"
+rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 rocksdb = { version = "0.24", features = ["serde1", "snappy"], optional = true }
 rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 rustc-hash = "2.1"

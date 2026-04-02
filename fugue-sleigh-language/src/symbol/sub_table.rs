@@ -71,7 +71,9 @@ impl Context {
                     .children()
                     .find(xml::Node::is_element)
                     .map(PatternExpression::from_xml)
-                    .ok_or({ DeserialiseError::Invariant("missing pattern for context_op") })??,
+                    .ok_or(DeserialiseError::Invariant(
+                        "missing pattern for context_op",
+                    ))??,
             },
             "commit" => Self::Commit {
                 symbol_id: input.attribute_int("id")?,
@@ -519,7 +521,7 @@ impl DisjointPattern {
                     context: ContextPattern::from_xml(
                         children
                             .next()
-                            .ok_or({ DeserialiseError::Invariant("missing context pattern") })?,
+                            .ok_or(DeserialiseError::Invariant("missing context pattern"))?,
                     )?,
                     instruction: InstructionPattern::from_xml(
                         children

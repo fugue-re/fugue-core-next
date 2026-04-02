@@ -30,6 +30,7 @@ pub const MAX_CONTEXT_UPDATES: usize = 2;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct ContextUpdate {
     bits: ContextBitRange,
     value: u32,
@@ -58,7 +59,16 @@ impl ContextUpdate {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 #[repr(transparent)]
 pub struct ContextSet(ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>);
 
@@ -78,6 +88,7 @@ impl Display for ContextSet {
 
 type ContextSetInner = ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>;
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct ArchivedContextSet(rkyv::Archived<ContextSetInner>);
 

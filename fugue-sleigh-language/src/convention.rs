@@ -236,7 +236,9 @@ impl StackPointer {
     ) -> Result<Self, DeserialiseError> {
         let space = spaces
             .space_by_name(&spec.space)
-            .ok_or({ DeserialiseError::Invariant("stack pointer space for convention invalid") })?;
+            .ok_or(DeserialiseError::Invariant(
+                "stack pointer space for convention invalid",
+            ))?;
         let (name, offset, size) = registers
             .get_by_name(&*spec.register)
             .ok_or(DeserialiseError::Invariant("named stack pointer invalid"))?;

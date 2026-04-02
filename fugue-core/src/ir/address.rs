@@ -403,19 +403,7 @@ impl ToRawAddress for Varnode {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
@@ -689,11 +677,13 @@ where
     PartialOrd,
     Ord,
     Hash,
-    Decode,
-    Encode,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
     Deserialize,
     Serialize,
 )]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct Address {
     space: AddressSpaceId,
     address: RawAddress,
