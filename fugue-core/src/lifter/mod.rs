@@ -6,7 +6,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
 pub use fugue_lifter::runtime::operand as operand;
 
-use crate::ir::MetaAddress;
+use crate::ir::Address;
 
 pub mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
@@ -186,7 +186,7 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn apply(&self, address: MetaAddress, context: &mut LiftingContext) {
+    pub fn apply(&self, address: Address, context: &mut LiftingContext) {
         for ContextUpdate { bits, value } in self.0.iter() {
             tracing::trace!("setting context bits {bits:?} to {value} at {address}");
             context.set_variable_by_bits(bits, address.offset(), *value);
@@ -194,7 +194,7 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn apply_range(&self, from: MetaAddress, to: Option<MetaAddress>, context: &mut LiftingContext) {
+    pub fn apply_range(&self, from: Address, to: Option<Address>, context: &mut LiftingContext) {
         for ContextUpdate { bits, value } in self.0.iter() {
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
             context.set_variable_region_by_bits(bits, from.offset(), to.map(|a| a.offset()), *value);

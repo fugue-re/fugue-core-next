@@ -9,7 +9,7 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::arm::context::T_MODE;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, MetaAddress, MetaAddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable,
+    RawAddress, Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable,
     SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, LanguageVariant};
@@ -18,6 +18,7 @@ use fugue_core::loader::{
     LoadableSegmentBounds, LoaderError,
 };
 use fugue_core::project::Project;
+use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::storage::ProjectStorageProvider;
 use fugue_core::types::AttributeMap;
 
@@ -280,15 +281,15 @@ impl Loadable for IDABinary {
     }
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let mut start = Address::MAX;
-        let mut end = Address::zero();
+        let mut start = RawAddress::MAX;
+        let mut end = RawAddress::zero();
 
         for (_, segm) in self.database.segments() {
             start = start.min(segm.start_address().into());
             end = end.max(segm.end_address().into());
         }
 
-        LoadableSegmentBounds::new(MetaAddress::in_default_space(start)..MetaAddress::in_default_space(end))
+        LoadableSegmentBounds::new(Address::in_default_space(start)..Address::in_default_space(end))
     }
 
     fn segments<'a>(
@@ -302,8 +303,8 @@ impl Loadable for IDABinary {
         let address_size = self.architecture.language().address_size();
 
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
-            let start = MetaAddress::from(segm.start_address());
-            let end = MetaAddress::from(segm.end_address().wrapping_sub(1));
+            let start = Address::from(segm.start_address());
+            let end = Address::from(segm.end_address().wrapping_sub(1));
             let size = (end.offset() - start.offset()) as usize + 1;
 
             tracing::trace!("loading segment {start}-{end}");
@@ -416,7 +417,7 @@ where
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
         let extern_bounds = segms
-            .iter_views()
+            .iter_views(DEFAULT_SPACE_ID)
             .map_err(|e| AnalysisError::pass_failed("ida-function-discovery", e))?
             .find_map(|view| {
                 view.properties()
@@ -425,13 +426,13 @@ where
             });
 
         for (_, f) in self.database.functions() {
-            let addr = MetaAddress::from(f.start_address());
+            let addr = Address::from(f.start_address());
 
             if state.functions().contains_key(&addr) {
                 continue;
             }
 
-            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&Address::from(addr))) {
+            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
                 continue;
             }
 
@@ -442,7 +443,7 @@ where
                     ContextSet::single(T_MODE, 0)
                 };
 
-                state.add_candidate(MetaAddressWithContext::new(addr, context));
+                state.add_candidate(AddressWithContext::new(addr, context));
             } else {
                 state.add_candidate(addr);
             }

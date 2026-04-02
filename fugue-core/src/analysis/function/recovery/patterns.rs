@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::ir::{Address, MetaAddress, MetaAddressWithContext};
+use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
@@ -82,14 +82,14 @@ impl FunctionRecoveryPatternMatcher {
         segments: &'a SegmentStorage,
         segm: &mut Option<SegmentMappingView<'a>>,
         space_id: AddressSpaceId,
-        gap: RangeInclusive<Address>,
-        mut f: impl FnMut(RangeInclusive<Address>, &[u8]),
+        gap: RangeInclusive<RawAddress>,
+        mut f: impl FnMut(RangeInclusive<RawAddress>, &[u8]),
     ) {
         let current_segment = segm;
         let gap_end = *gap.end();
         let mut current_start = *gap.start();
 
-        let calculate_end = |segm: &SegmentMappingView| -> Address {
+        let calculate_end = |segm: &SegmentMappingView| -> RawAddress {
             let segm_end = segm.last().address();
             if segm_end <= gap_end {
                 segm_end
@@ -99,7 +99,7 @@ impl FunctionRecoveryPatternMatcher {
         };
 
         while current_start <= gap_end {
-            let current_meta = MetaAddress::new(space_id, current_start);
+            let current_meta = Address::new(space_id, current_start);
             let (range, segm) = if let Some(segm) = current_segment.as_ref()
                 && segm.contains(current_meta)
             {
@@ -125,7 +125,7 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.bytes_at(MetaAddress::new(space_id, *range.start()), size)
+            let Some(bytes) = segm.bytes_at(Address::new(space_id, *range.start()), size)
             else {
                 break;
             };
@@ -163,7 +163,7 @@ impl FunctionRecoveryPatternMatcher {
             Self::for_each_segment(segments, &mut current_segm, space_id, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
-                        let start = MetaAddress::new(space_id, *gap.start() + range.start);
+                        let start = Address::new(space_id, *gap.start() + range.start);
 
                         if arch.canonicalise_address(start).is_none() {
                             continue;
@@ -187,7 +187,7 @@ impl FunctionRecoveryPatternMatcher {
                             "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
                         );
 
-                        state.add_candidate(MetaAddressWithContext::new_with(
+                        state.add_candidate(AddressWithContext::new_with(
                             start, ctx, confidence,
                         ));
                     }

@@ -1,7 +1,7 @@
 use bincode::{BorrowDecode, Decode, Encode};
 use ustr::Ustr;
 
-use crate::ir::{CodeBlockId, Id, MetaAddress};
+use crate::ir::{CodeBlockId, Id, Address};
 use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
@@ -17,8 +17,8 @@ pub type FunctionId = Id<Function>;
 pub struct Function {
     id: Id<Self>,
     name: Option<Ustr>,
-    entry: MetaAddress,
-    blocks: Vec<(MetaAddress, CodeBlockId)>,
+    entry: Address,
+    blocks: Vec<(Address, CodeBlockId)>,
     frame: FunctionFrame,
     properties: FunctionProperties,
 }
@@ -45,8 +45,8 @@ impl MutableEntity<FunctionId> for Function {
     }
 }
 
-impl MutableEntity<MetaAddress> for Function {
-    fn entity_key(&self) -> MetaAddress {
+impl MutableEntity<Address> for Function {
+    fn entity_key(&self) -> Address {
         self.entry
     }
 }
@@ -77,8 +77,8 @@ impl<'de, C> BorrowDecode<'de, C> for Function {
 
         let id = Id::<Self>::borrow_decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::borrow_decode(decoder)?;
-        let entry = MetaAddress::borrow_decode(decoder)?;
-        let blocks = Vec::<(MetaAddress, CodeBlockId)>::borrow_decode(decoder)?;
+        let entry = Address::borrow_decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::borrow_decode(decoder)?;
         let frame = FunctionFrame::borrow_decode(decoder)?;
         let properties = FunctionProperties::borrow_decode(decoder)?;
 
@@ -101,8 +101,8 @@ impl<C> Decode<C> for Function {
 
         let id = Id::<Self>::decode(decoder)?;
         let Compat(name) = Compat::<Option<Ustr>>::decode(decoder)?;
-        let entry = MetaAddress::decode(decoder)?;
-        let blocks = Vec::<(MetaAddress, CodeBlockId)>::decode(decoder)?;
+        let entry = Address::decode(decoder)?;
+        let blocks = Vec::<(Address, CodeBlockId)>::decode(decoder)?;
         let frame = FunctionFrame::decode(decoder)?;
         let properties = FunctionProperties::decode(decoder)?;
 
@@ -158,13 +158,13 @@ impl<C> Decode<C> for FunctionProperties {
 }
 
 impl Function {
-    pub fn new(id: FunctionId, entry: impl Into<MetaAddress>) -> Self {
+    pub fn new(id: FunctionId, entry: impl Into<Address>) -> Self {
         Self::new_with(id, entry, None)
     }
 
     pub fn new_with(
         id: FunctionId,
-        entry: impl Into<MetaAddress>,
+        entry: impl Into<Address>,
         name: impl Into<Option<Ustr>>,
     ) -> Self {
         Function {
@@ -210,11 +210,11 @@ impl Function {
         self.name
     }
 
-    pub fn entry(&self) -> MetaAddress {
+    pub fn entry(&self) -> Address {
         self.entry
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.entry
     }
 
@@ -223,7 +223,7 @@ impl Function {
             .expect("entry block should always exist")
     }
 
-    pub fn add_block(&mut self, address: MetaAddress, block: CodeBlockId) {
+    pub fn add_block(&mut self, address: Address, block: CodeBlockId) {
         self.blocks.insert(
             self.blocks
                 .binary_search_by_key(&address, |(addr, _)| *addr)
@@ -232,21 +232,21 @@ impl Function {
         );
     }
 
-    pub fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (MetaAddress, CodeBlockId)>) {
+    pub fn add_blocks(&mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) {
         self.blocks.extend(blocks);
         self.blocks.sort_by_key(|(addr, _)| *addr);
     }
 
-    pub fn with_blocks(mut self, blocks: impl IntoIterator<Item = (MetaAddress, CodeBlockId)>) -> Self {
+    pub fn with_blocks(mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) -> Self {
         self.add_blocks(blocks);
         self
     }
 
-    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (MetaAddress, CodeBlockId)> + '_ {
+    pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, CodeBlockId)> + '_ {
         self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
     }
 
-    pub fn block_at(&self, address: MetaAddress) -> Option<CodeBlockId> {
+    pub fn block_at(&self, address: Address) -> Option<CodeBlockId> {
         self.blocks
             .binary_search_by_key(&address, |(addr, _)| *addr)
             .ok()

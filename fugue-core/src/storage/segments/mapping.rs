@@ -6,7 +6,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 use uuid::Uuid;
 
-use crate::ir::{MetaAddress, SegmentProperties};
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
@@ -81,7 +81,7 @@ impl<'de, C> BorrowDecode<'de, C> for SegmentMappingFlags {
 #[derive(Debug)]
 pub struct SegmentMapping {
     id: SegmentMappingId,
-    start: MetaAddress,
+    start: Address,
     size: usize,
     offset: u64,
     provider_id: SegmentStorageProviderId,
@@ -91,14 +91,14 @@ pub struct SegmentMapping {
     overlay: OverlayTree,
     version: u64,
     name: String,
-    mapping_hints: BTreeMap<MetaAddress, ContextHint>,
-    function_hints: BTreeSet<MetaAddress>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
 }
 
 impl SegmentMapping {
     pub fn new(
         id: SegmentMappingId,
-        start: impl Into<MetaAddress>,
+        start: impl Into<Address>,
         size: usize,
         offset: u64,
         provider_id: SegmentStorageProviderId,
@@ -123,14 +123,14 @@ impl SegmentMapping {
 
     pub fn new_with_metadata(
         id: SegmentMappingId,
-        start: impl Into<MetaAddress>,
+        start: impl Into<Address>,
         size: usize,
         offset: u64,
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
         name: impl Into<String>,
-        mapping_hints: BTreeMap<MetaAddress, ContextHint>,
-        function_hints: BTreeSet<MetaAddress>,
+        mapping_hints: BTreeMap<Address, ContextHint>,
+        function_hints: BTreeSet<Address>,
     ) -> Self {
         Self {
             id,
@@ -153,7 +153,7 @@ impl SegmentMapping {
         self.id
     }
 
-    pub fn start(&self) -> MetaAddress {
+    pub fn start(&self) -> Address {
         self.start
     }
 
@@ -161,15 +161,15 @@ impl SegmentMapping {
         self.size
     }
 
-    pub fn end(&self) -> MetaAddress {
+    pub fn end(&self) -> Address {
         self.start + self.size
     }
 
-    pub fn last(&self) -> MetaAddress {
+    pub fn last(&self) -> Address {
         self.end() - 1usize
     }
 
-    pub fn range(&self) -> Range<MetaAddress> {
+    pub fn range(&self) -> Range<Address> {
         self.start..self.end()
     }
 
@@ -228,23 +228,23 @@ impl SegmentMapping {
         self.version += 1;
     }
 
-    pub fn contains(&self, addr: impl Into<MetaAddress>) -> bool {
+    pub fn contains(&self, addr: impl Into<Address>) -> bool {
         let addr = addr.into();
         addr >= self.start && addr < self.end()
     }
 
-    pub fn to_offset(&self, addr: impl Into<MetaAddress>) -> u64 {
+    pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
         let addr = addr.into();
         let relative = addr.offset() - self.start.offset();
         self.offset + relative
     }
 
-    pub fn to_address(&self, phys_offset: u64) -> MetaAddress {
+    pub fn to_address(&self, phys_offset: u64) -> Address {
         let relative = phys_offset - self.offset;
-        MetaAddress::new(self.start.space(), self.start.offset() + relative)
+        Address::new(self.start.space(), self.start.offset() + relative)
     }
 
-    pub fn set_start(&mut self, start: impl Into<MetaAddress>) {
+    pub fn set_start(&mut self, start: impl Into<Address>) {
         self.start = start.into();
         self.touch();
     }
@@ -263,19 +263,19 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
         &mut self.mapping_hints
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<MetaAddress> {
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<MetaAddress> {
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
         &mut self.function_hints
     }
 
@@ -317,7 +317,7 @@ impl SegmentMappingRef {
 #[derive(Debug, Clone)]
 pub struct SegmentSubMapping {
     mapping_ref: SegmentMappingRef,
-    start: MetaAddress,
+    start: Address,
     size: usize,
     properties: SegmentProperties,
 }
@@ -325,7 +325,7 @@ pub struct SegmentSubMapping {
 impl SegmentSubMapping {
     pub fn new(
         mapping_ref: SegmentMappingRef,
-        start: impl Into<MetaAddress>,
+        start: impl Into<Address>,
         size: usize,
         properties: SegmentProperties,
     ) -> Self {
@@ -341,7 +341,7 @@ impl SegmentSubMapping {
         self.mapping_ref
     }
 
-    pub fn start(&self) -> MetaAddress {
+    pub fn start(&self) -> Address {
         self.start
     }
 
@@ -349,19 +349,19 @@ impl SegmentSubMapping {
         self.size
     }
 
-    pub fn end(&self) -> MetaAddress {
+    pub fn end(&self) -> Address {
         self.start + self.size
     }
 
-    pub fn last(&self) -> MetaAddress {
+    pub fn last(&self) -> Address {
         self.end() - 1usize
     }
 
-    pub fn range(&self) -> Range<MetaAddress> {
+    pub fn range(&self) -> Range<Address> {
         self.start..self.end()
     }
 
-    pub fn range_inclusive(&self) -> RangeInclusive<MetaAddress> {
+    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
         self.start..=self.last()
     }
 
@@ -373,12 +373,12 @@ impl SegmentSubMapping {
         self.properties
     }
 
-    pub fn contains(&self, addr: impl Into<MetaAddress>) -> bool {
+    pub fn contains(&self, addr: impl Into<Address>) -> bool {
         let addr = addr.into();
         self.space() == addr.space() && addr >= self.start && addr < self.end()
     }
 
-    pub fn with_start(&self, new_start: impl Into<MetaAddress>) -> Option<Self> {
+    pub fn with_start(&self, new_start: impl Into<Address>) -> Option<Self> {
         let new_start = new_start.into();
         if new_start.space() != self.space() {
             return None;
@@ -397,7 +397,7 @@ impl SegmentSubMapping {
         ))
     }
 
-    pub fn with_end(&self, new_end: impl Into<MetaAddress>) -> Option<Self> {
+    pub fn with_end(&self, new_end: impl Into<Address>) -> Option<Self> {
         let new_end = new_end.into();
         if new_end.space() != self.space() {
             return None;
@@ -416,7 +416,7 @@ impl SegmentSubMapping {
         ))
     }
 
-    pub fn split_at(&self, addr: impl Into<MetaAddress>) -> (Option<Self>, Option<Self>) {
+    pub fn split_at(&self, addr: impl Into<Address>) -> (Option<Self>, Option<Self>) {
         let addr = addr.into();
         if addr.space() != self.space() {
             return (None, None);
@@ -462,7 +462,7 @@ impl Ord for SegmentSubMapping {
 
 #[derive(Debug)]
 pub struct SegmentMappingBuilder {
-    start: MetaAddress,
+    start: Address,
     size: usize,
     offset: u64,
     provider_id: SegmentStorageProviderId,
@@ -470,13 +470,13 @@ pub struct SegmentMappingBuilder {
     kind: SegmentMappingKind,
     flags: SegmentMappingFlags,
     name: String,
-    mapping_hints: BTreeMap<MetaAddress, ContextHint>,
-    function_hints: BTreeSet<MetaAddress>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
 }
 
 impl SegmentMappingBuilder {
     pub fn new(
-        start: impl Into<MetaAddress>,
+        start: impl Into<Address>,
         size: usize,
         offset: u64,
         provider_id: SegmentStorageProviderId,
@@ -495,15 +495,15 @@ impl SegmentMappingBuilder {
         }
     }
 
-    pub fn start(&self) -> MetaAddress {
+    pub fn start(&self) -> Address {
         self.start
     }
 
-    pub fn set_start(&mut self, start: impl Into<MetaAddress>) {
+    pub fn set_start(&mut self, start: impl Into<Address>) {
         self.start = start.into();
     }
 
-    pub fn with_start(mut self, start: impl Into<MetaAddress>) -> Self {
+    pub fn with_start(mut self, start: impl Into<Address>) -> Self {
         self.set_start(start);
         self
     }
@@ -599,55 +599,55 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
     pub fn set_mapping_hints(
         &mut self,
-        mapping_hints: impl Into<BTreeMap<MetaAddress, ContextHint>>,
+        mapping_hints: impl Into<BTreeMap<Address, ContextHint>>,
     ) {
         self.mapping_hints = mapping_hints.into();
     }
 
     pub fn extend_mapping_hints(
         &mut self,
-        mapping_hints: impl IntoIterator<Item = (MetaAddress, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
     ) {
         self.mapping_hints.extend(mapping_hints);
     }
 
-    pub fn add_mapping_hint(&mut self, address: impl Into<MetaAddress>, hint: ContextHint) {
+    pub fn add_mapping_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
         self.mapping_hints.insert(address.into(), hint);
     }
 
     pub fn with_mapping_hints(
         mut self,
-        mapping_hints: impl IntoIterator<Item = (MetaAddress, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
     ) -> Self {
         self.extend_mapping_hints(mapping_hints);
         self
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<MetaAddress> {
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
-    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<MetaAddress>>) {
+    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<Address>>) {
         self.function_hints = function_hints.into();
     }
 
-    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = MetaAddress>) {
+    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = Address>) {
         self.function_hints.extend(function_hints);
     }
 
-    pub fn add_function_hint(&mut self, address: impl Into<MetaAddress>) {
+    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
         self.function_hints.insert(address.into());
     }
 
     pub fn with_function_hints(
         mut self,
-        function_hints: impl IntoIterator<Item = MetaAddress>,
+        function_hints: impl IntoIterator<Item = Address>,
     ) -> Self {
         self.extend_function_hints(function_hints);
         self

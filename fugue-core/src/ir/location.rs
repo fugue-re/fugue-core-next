@@ -4,18 +4,18 @@ use std::ops::{Add, AddAssign};
 use bincode::{Decode, Encode};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, MetaAddress};
+use crate::ir::{Address, RawAddress};
 use crate::lifter::Language;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
 pub struct Location {
-    address: MetaAddress,
+    address: Address,
     position: u16,
 }
 
 impl Default for Location {
     fn default() -> Self {
-        MetaAddress::default().into()
+        Address::default().into()
     }
 }
 
@@ -31,8 +31,8 @@ impl AsRef<Location> for Location {
     }
 }
 
-impl AsRef<Address> for Location {
-    fn as_ref(&self) -> &Address {
+impl AsRef<RawAddress> for Location {
+    fn as_ref(&self) -> &RawAddress {
         self.address.as_ref()
     }
 }
@@ -72,14 +72,14 @@ impl AddAssign<usize> for Location {
 }
 
 impl Location {
-    pub fn new(address: impl Into<MetaAddress>, position: u16) -> Location {
+    pub fn new(address: impl Into<Address>, position: u16) -> Location {
         Self {
             address: address.into(),
             position,
         }
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
@@ -89,12 +89,12 @@ impl Location {
 
     pub fn absolute_from(
         language: &Language,
-        base: MetaAddress,
+        base: Address,
         address: Varnode,
         position: u16,
     ) -> Option<Self> {
         if language.in_default_space(&address) {
-            return Some(Self::new(MetaAddress::new(base.space(), address.offset()), 0));
+            return Some(Self::new(Address::new(base.space(), address.offset()), 0));
         }
 
         if !language.in_constant_space(&address) {
@@ -119,8 +119,8 @@ impl Location {
     }
 }
 
-impl From<MetaAddress> for Location {
-    fn from(value: MetaAddress) -> Self {
+impl From<Address> for Location {
+    fn from(value: Address) -> Self {
         Self {
             address: value,
             position: 0,

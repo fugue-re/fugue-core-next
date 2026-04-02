@@ -18,7 +18,7 @@ use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
-use crate::ir::{MetaAddress, SegmentProperties};
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
@@ -193,11 +193,11 @@ impl LoadableMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct LoadableSegment<'a> {
     name: Cow<'a, str>,
-    address: MetaAddress,
+    address: Address,
     properties: SegmentProperties,
     bytes: Cow<'a, [u8]>,
-    mapping_hints: Cow<'a, BTreeMap<MetaAddress, ContextHint>>,
-    function_hints: Cow<'a, BTreeSet<MetaAddress>>,
+    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>,
+    function_hints: Cow<'a, BTreeSet<Address>>,
 }
 
 impl Display for LoadableSegment<'_> {
@@ -217,7 +217,7 @@ impl Display for LoadableSegment<'_> {
 impl<'a> LoadableSegment<'a> {
     pub fn new(
         name: impl Into<Cow<'a, str>>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> LoadableSegment<'a> {
@@ -233,11 +233,11 @@ impl<'a> LoadableSegment<'a> {
 
     pub fn new_with_hints(
         name: impl Into<Cow<'a, str>>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<MetaAddress, ContextHint>>>,
-        function_hints: impl Into<Cow<'a, BTreeSet<MetaAddress>>>,
+        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
+        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
     ) -> LoadableSegment<'a> {
         Self::from_parts(
             name,
@@ -251,11 +251,11 @@ impl<'a> LoadableSegment<'a> {
 
     pub fn from_parts(
         name: impl Into<Cow<'a, str>>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<MetaAddress, ContextHint>>>,
-        function_hints: impl Into<Cow<'a, BTreeSet<MetaAddress>>>,
+        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
+        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
     ) -> LoadableSegment<'a> {
         Self {
             name: name.into(),
@@ -267,15 +267,15 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
-    pub fn next_address(&self) -> MetaAddress {
+    pub fn next_address(&self) -> Address {
         self.address + self.bytes.len()
     }
 
-    pub fn last_address(&self) -> MetaAddress {
+    pub fn last_address(&self) -> Address {
         self.address + self.bytes.len() - 1usize
     }
 
@@ -291,27 +291,27 @@ impl<'a> LoadableSegment<'a> {
         &self.bytes
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
         self.mapping_hints.to_mut()
     }
 
-    pub fn add_context_hint(&mut self, address: impl Into<MetaAddress>, hint: ContextHint) {
+    pub fn add_context_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
         self.mapping_hints.to_mut().insert(address.into(), hint);
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<MetaAddress> {
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<MetaAddress> {
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
         self.function_hints.to_mut()
     }
 
-    pub fn add_function_hint(&mut self, address: impl Into<MetaAddress>) {
+    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
         self.function_hints.to_mut().insert(address.into());
     }
 
@@ -325,7 +325,7 @@ impl<'a> LoadableSegment<'a> {
         self.bytes.is_empty()
     }
 
-    pub fn offset_of(&self, address: MetaAddress) -> Option<usize> {
+    pub fn offset_of(&self, address: Address) -> Option<usize> {
         if address.space() != self.address.space()
             || address < self.address
             || address > self.last_address()
@@ -335,7 +335,7 @@ impl<'a> LoadableSegment<'a> {
         Some((address.offset() - self.address.offset()) as usize)
     }
 
-    pub fn contains_address(&self, address: MetaAddress) -> bool {
+    pub fn contains_address(&self, address: Address) -> bool {
         address >= self.address && address <= self.last_address()
     }
 
@@ -392,7 +392,7 @@ impl<'a> LoadableSegment<'a> {
         }
     }
 
-    pub fn view_bytes_at_address(&self, address: MetaAddress, count: usize) -> Option<&[u8]> {
+    pub fn view_bytes_at_address(&self, address: Address, count: usize) -> Option<&[u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_at(offset, count)
     }
@@ -406,7 +406,7 @@ impl<'a> LoadableSegment<'a> {
         Some(&self.bytes[offset..])
     }
 
-    pub fn view_bytes_from_address(&self, address: MetaAddress) -> Option<&[u8]> {
+    pub fn view_bytes_from_address(&self, address: Address) -> Option<&[u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_from(offset)
     }
@@ -430,7 +430,7 @@ impl<'a> LoadableSegment<'a> {
 
     pub fn view_bytes_at_address_mut(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         count: usize,
     ) -> Option<&mut [u8]> {
         let offset = self.offset_of(address)?;
@@ -446,7 +446,7 @@ impl<'a> LoadableSegment<'a> {
         Some(&mut self.bytes.to_mut()[offset..])
     }
 
-    pub fn view_bytes_from_address_mut(&mut self, address: MetaAddress) -> Option<&mut [u8]> {
+    pub fn view_bytes_from_address_mut(&mut self, address: Address) -> Option<&mut [u8]> {
         let offset = self.offset_of(address)?;
         self.view_bytes_from_mut(offset)
     }
@@ -466,7 +466,7 @@ impl<'a> LoadableSegment<'a> {
         self.address.space()
     }
 
-    pub fn with_address(mut self, address: impl Into<MetaAddress>) -> Self {
+    pub fn with_address(mut self, address: impl Into<Address>) -> Self {
         self.address = address.into();
         self
     }
@@ -475,12 +475,12 @@ impl<'a> LoadableSegment<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct LoadableSegmentMetadata {
     name: String,
-    address: MetaAddress,
+    address: Address,
     physical_offset: Option<usize>,
     properties: SegmentProperties,
     size: usize,
-    mapping_hints: BTreeMap<MetaAddress, ContextHint>,
-    function_hints: BTreeSet<MetaAddress>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    function_hints: BTreeSet<Address>,
 }
 
 impl LoadableSegmentMetadata {
@@ -500,23 +500,23 @@ impl LoadableSegmentMetadata {
         &self.name
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
-    pub fn last_address(&self) -> MetaAddress {
+    pub fn last_address(&self) -> Address {
         self.address + self.size as u64 - 1usize
     }
 
-    pub fn next_address(&self) -> MetaAddress {
+    pub fn next_address(&self) -> Address {
         self.address + self.size
     }
 
-    pub fn range(&self) -> Range<MetaAddress> {
+    pub fn range(&self) -> Range<Address> {
         self.address()..self.next_address()
     }
 
-    pub fn range_inclusive(&self) -> RangeInclusive<MetaAddress> {
+    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
         self.address()..=self.last_address()
     }
 
@@ -533,11 +533,11 @@ impl LoadableSegmentMetadata {
         self.properties
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<MetaAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<MetaAddress> {
+    pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
@@ -552,17 +552,17 @@ impl LoadableSegmentMetadata {
 
 #[derive(Debug, Clone)]
 pub struct LoadableSegmentBounds {
-    banks: SmallVec<[Range<MetaAddress>; 4]>,
+    banks: SmallVec<[Range<Address>; 4]>,
 }
 
 impl LoadableSegmentBounds {
-    pub fn new(range: Range<MetaAddress>) -> Self {
+    pub fn new(range: Range<Address>) -> Self {
         Self {
             banks: smallvec![range],
         }
     }
 
-    pub fn with_bank(mut self, range: Range<MetaAddress>) -> Self {
+    pub fn with_bank(mut self, range: Range<Address>) -> Self {
         self.banks.push(range);
         self
     }
@@ -575,17 +575,17 @@ impl LoadableSegmentBounds {
         false
     }
 
-    pub fn first(&self) -> &Range<MetaAddress> {
+    pub fn first(&self) -> &Range<Address> {
         &self.banks[0]
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (usize, &Range<MetaAddress>)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &Range<Address>)> + '_ {
         self.banks.iter().enumerate()
     }
 }
 
 impl std::ops::Index<usize> for LoadableSegmentBounds {
-    type Output = Range<MetaAddress>;
+    type Output = Range<Address>;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.banks[index]

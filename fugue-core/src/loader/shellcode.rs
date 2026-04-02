@@ -7,7 +7,7 @@ use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{MetaAddress, SegmentProperties};
+use crate::ir::{Address, SegmentProperties};
 use crate::loader::util::parse_language;
 use crate::loader::{
     Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError,
@@ -16,7 +16,7 @@ use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub struct Shellcode<'a> {
-    address: MetaAddress,
+    address: Address,
     bytes: BytesOrMapping<'a>,
     arch: Arch,
     metadata: LoadableMetadata,
@@ -35,7 +35,7 @@ impl fmt::Debug for Shellcode<'_> {
 #[derive(Debug, Error)]
 pub enum ShellcodeError {
     #[error("mapping {1} bytes at {0} will overflow the default address space")]
-    AddressOverflow(MetaAddress, usize),
+    AddressOverflow(Address, usize),
     #[error("buffer to map must be not be empty")]
     ZeroSized,
 }
@@ -43,7 +43,7 @@ pub enum ShellcodeError {
 impl<'a> Shellcode<'a> {
     pub fn new(
         language: impl AsRef<str>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         bytes: impl Into<BytesOrMapping<'a>>,
     ) -> Result<Self, LoaderError> {
         Self::new_with(language, address, bytes, AttributeMap::default())
@@ -51,7 +51,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn new_with(
         language: impl AsRef<str>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         bytes: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
@@ -93,7 +93,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn from_file(
         language: impl AsRef<str>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         path: impl AsRef<Path>,
     ) -> Result<Self, LoaderError> {
         Self::from_file_with(language, address, path, AttributeMap::default())
@@ -101,7 +101,7 @@ impl<'a> Shellcode<'a> {
 
     pub fn from_file_with(
         language: impl AsRef<str>,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
@@ -114,7 +114,7 @@ impl<'a> Shellcode<'a> {
         Ok(loaded)
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
@@ -162,7 +162,7 @@ mod test {
     use fallible_iterator::FallibleIterator;
 
     use crate::attributes;
-    use crate::ir::MetaAddress;
+    use crate::ir::Address;
     use crate::loader::Loadable;
     use crate::loader::shellcode::Shellcode;
 
@@ -184,7 +184,7 @@ mod test {
         assert_eq!(regions.len(), 1);
 
         let region = &regions[0];
-        assert_eq!(region.address, MetaAddress::from(0x1000u32));
+        assert_eq!(region.address, Address::from(0x1000u32));
 
         let mut lifter = shellcode.architecture().lifter();
         let mut offset = 0usize;

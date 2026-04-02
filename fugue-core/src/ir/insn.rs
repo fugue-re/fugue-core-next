@@ -4,7 +4,7 @@ use bincode::{BorrowDecode, Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::ir::{Id, Location, MetaAddress, ToAddress};
+use crate::ir::{Id, Location, Address, ToRawAddress};
 use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
@@ -14,7 +14,7 @@ pub type InsnList = Vec<Insn>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Insn {
-    address: MetaAddress,
+    address: Address,
     properties: InsnProperties,
     operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
@@ -44,7 +44,7 @@ impl<C> Decode<C> for Insn {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let address = MetaAddress::decode(decoder)?;
+        let address = Address::decode(decoder)?;
         let properties = InsnProperties::decode(decoder)?;
         let operations = Vec::<PCodeOp>::decode(decoder)?;
 
@@ -72,7 +72,7 @@ impl<'de, C> BorrowDecode<'de, C> for Insn {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let address = MetaAddress::borrow_decode(decoder)?;
+        let address = Address::borrow_decode(decoder)?;
         let properties = InsnProperties::borrow_decode(decoder)?;
         let operations = Vec::<PCodeOp>::borrow_decode(decoder)?;
 
@@ -99,7 +99,7 @@ impl<'de, C> BorrowDecode<'de, C> for Insn {
 impl Insn {
     pub(crate) fn from_lifted(
         language: &'static Language,
-        address: MetaAddress,
+        address: Address,
         length: usize,
         operations: Vec<PCodeOp>,
     ) -> Self {
@@ -126,7 +126,7 @@ impl Insn {
     }
 
     pub(crate) fn from_disassembly(
-        address: MetaAddress,
+        address: Address,
         length: usize,
         properties: InsnProperties,
     ) -> Self {
@@ -174,11 +174,11 @@ impl Insn {
         Ok(())
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
-    pub fn next_address(&self) -> MetaAddress {
+    pub fn next_address(&self) -> Address {
         self.address + self.length as usize
     }
 
@@ -324,7 +324,7 @@ impl Insn {
 
     pub fn iter_targets<'a>(
         &'a self,
-    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, MetaAddress)> + 'a {
+    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
         use InsnTarget::*;
         use InsnTargetKind::*;
 
@@ -488,9 +488,9 @@ impl InsnTargetKind {
 pub enum InsnTarget {
     IntraIns(Location, bool),
     IntraBlk(Location, bool),
-    InterBlk(MetaAddress),
-    InterSub(Option<MetaAddress>),
-    InterRet(Option<MetaAddress>, bool),
+    InterBlk(Address),
+    InterSub(Option<Address>),
+    InterRet(Option<Address>, bool),
     Intrinsic,
     Unresolved,
 }
@@ -498,8 +498,8 @@ pub enum InsnTarget {
 impl InsnTarget {
     pub(crate) fn from_lifted(
         language: &'static Language,
-        address: MetaAddress,
-        naddress: MetaAddress,
+        address: Address,
+        naddress: Address,
         opns: &[PCodeOp],
     ) -> SmallVec<[(u16, Self); 2]> {
         let mut targets = SmallVec::new();
@@ -509,8 +509,8 @@ impl InsnTarget {
 
     fn from_lifted_into(
         language: &'static Language,
-        address: MetaAddress,
-        naddress: MetaAddress,
+        address: Address,
+        naddress: Address,
         opns: &[PCodeOp],
         targets: &mut SmallVec<[(u16, Self); 2]>,
     ) {
@@ -598,7 +598,7 @@ impl InsnTarget {
                     nfall(i, next, targets);
                 }
                 Op::Return => {
-                    let ret_addr = inputs[0].to_address(language).map(|a| MetaAddress::new(address.space(), a));
+                    let ret_addr = inputs[0].to_address(language).map(|a| Address::new(address.space(), a));
                     targets.push((i, Self::InterRet(ret_addr, i + 1 == op_count)));
                 }
                 Op::UserOp(_, _) => {

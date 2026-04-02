@@ -6,7 +6,7 @@ use fallible_iterator::FallibleIterator;
 use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::{self, Arch};
-use crate::ir::{MetaAddress, SegmentProperties};
+use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
@@ -94,7 +94,7 @@ impl<'a> Object<'a> {
         let entry = view.entry();
 
         if entry != 0 {
-            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, MetaAddress::in_default_space(entry));
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::in_default_space(entry));
         }
 
         Ok(Self {
@@ -174,7 +174,7 @@ impl Loadable for Object<'_> {
                 return None;
             }
 
-            let address = MetaAddress::in_default_space(segm.address());
+            let address = Address::in_default_space(segm.address());
             let data = segm.data().unwrap_or_default();
 
             let bytes = if data.len() as u64 != segm.size() {
@@ -203,15 +203,15 @@ impl Loadable for Object<'_> {
     }
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let mut start = None::<MetaAddress>;
-        let mut end = None::<MetaAddress>;
+        let mut start = None::<Address>;
+        let mut end = None::<Address>;
 
         for segm in self.object.borrow_view().segments() {
             if segm.size() == 0 {
                 continue;
             }
 
-            let nstart = MetaAddress::in_default_space(segm.address());
+            let nstart = Address::in_default_space(segm.address());
             let nend = nstart + segm.size();
 
             start = Some(start.map_or(nstart, |start| start.min(nstart)));

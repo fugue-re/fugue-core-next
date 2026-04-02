@@ -10,7 +10,7 @@ use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand,
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, MetaAddress, Symbol};
+use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Address, Symbol};
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
@@ -41,7 +41,7 @@ impl ArchT for Arm {
         Lifter::new(self.language.language(), self.language.context()())
     }
 
-    fn canonicalise_address(&self, addr: MetaAddress) -> Option<(MetaAddress, ContextSet)> {
+    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
         let alignment = if t_mode != 0 { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
@@ -50,9 +50,9 @@ impl ArchT for Arm {
 
     fn canonicalise_address_with(
         &self,
-        addr: MetaAddress,
+        addr: Address,
         context: &LiftingContext,
-    ) -> Option<(MetaAddress, ContextSet)> {
+    ) -> Option<(Address, ContextSet)> {
         let t_mode =
             addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.offset()) == 1;
         let alignment = if t_mode { 2 } else { 4 };
@@ -153,7 +153,7 @@ impl ArmDisassembler {
 impl DisassemblerT for ArmDisassembler {
     fn disassemble(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         bytes: &[u8],
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {

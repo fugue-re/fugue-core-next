@@ -9,20 +9,20 @@ use fugue_lifter::{LifterBuilder, LifterBuilderError};
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
-use crate::ir::{Insn, MetaAddress};
+use crate::ir::{Insn, Address};
 
 #[derive(Debug, Error)]
 pub enum LifterError {
     #[error(transparent)]
     Builder(#[from] LifterBuilderError),
     #[error("invalid instruction at {0}")]
-    InvalidInstruction(MetaAddress),
+    InvalidInstruction(Address),
     #[error(transparent)]
     Lifter(anyhow::Error),
 }
 
 impl LifterError {
-    pub fn invalid_instruction(address: MetaAddress) -> Self {
+    pub fn invalid_instruction(address: Address) -> Self {
         Self::InvalidInstruction(address)
     }
 
@@ -147,7 +147,7 @@ impl Lifter {
 
     pub fn resolve(
         &mut self,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         bytes: &[u8],
         apply_commits: bool,
     ) -> Option<usize> {
@@ -155,7 +155,7 @@ impl Lifter {
         self.0.resolve(address.offset(), bytes, apply_commits)
     }
 
-    pub fn operands(&mut self, address: impl Into<MetaAddress>, bytes: &[u8]) -> Option<Operands> {
+    pub fn operands(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Option<Operands> {
         let address = address.into();
         let mut operands = Operands::new();
         self.0.operands(address.offset(), bytes, &mut operands)?;
@@ -164,7 +164,7 @@ impl Lifter {
 
     pub fn operands_into(
         &mut self,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         bytes: &[u8],
         operands: &mut Operands,
     ) -> Option<usize> {
@@ -174,7 +174,7 @@ impl Lifter {
 
     pub fn disassemble(
         &mut self,
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         bytes: &[u8],
         output: &mut String,
     ) -> Option<usize> {
@@ -182,7 +182,7 @@ impl Lifter {
         self.0.disassemble(address.offset(), bytes, output)
     }
 
-    pub fn lift(&mut self, address: impl Into<MetaAddress>, bytes: &[u8]) -> Result<Insn, LifterError> {
+    pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
         let address = address.into();
         let mut operations = Vec::new();
 
@@ -198,7 +198,7 @@ impl Lifter {
 
     pub fn lift_into(
         &mut self,
-        addr: impl Into<MetaAddress>,
+        addr: impl Into<Address>,
         bytes: &[u8],
         output: &mut Vec<PCodeOp>,
     ) -> Result<usize, LifterError> {

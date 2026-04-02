@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use bincode::{Decode, Encode};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Endian, ExternFunctionTemplate, MetaAddress, Symbol};
+use crate::ir::{Endian, ExternFunctionTemplate, Address, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
 };
@@ -136,15 +136,15 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn canonicalise_address(&self, addr: MetaAddress) -> Option<(MetaAddress, ContextSet)> {
+    pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         self.0.canonicalise_address(addr)
     }
 
     pub fn canonicalise_address_with(
         &self,
-        addr: MetaAddress,
+        addr: Address,
         context: &LiftingContext,
-    ) -> Option<(MetaAddress, ContextSet)> {
+    ) -> Option<(Address, ContextSet)> {
         self.0.canonicalise_address_with(addr, context)
     }
 

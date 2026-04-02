@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::ir::traits::{
     FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
 };
-use crate::ir::{Function, Id, MetaAddress};
+use crate::ir::{Function, Id, Address};
 use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
 use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
@@ -27,7 +27,7 @@ use crate::storage::{EntityStorage, EntityStorageError};
 //
 #[derive(Debug, Clone, Default, Decode, Encode)]
 pub struct IndexedFunctionTable {
-    addresses: BTreeMap<MetaAddress, Id<Function>>,
+    addresses: BTreeMap<Address, Id<Function>>,
     functions: Vec<Function>,
     free_ids: Vec<Id<Function>>,
 }
@@ -81,9 +81,9 @@ impl FunctionTableT for IndexedFunctionTable {
     type FunctionIter<'a> = FunctionIter<'a>;
     type FunctionIterMut<'a> = FunctionIterMut<'a>;
 
-    fn insert<F>(&mut self, addr: MetaAddress, f: F) -> Result<Id<Function>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: FnOnce(Id<Function>, MetaAddress) -> Result<Function, Self::Error>,
+        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>,
     {
         if let Some(existing) = self.get_by_address_mut(addr) {
             let nf = f(existing.id(), addr)?;
@@ -138,7 +138,7 @@ impl FunctionTableT for IndexedFunctionTable {
         true
     }
 
-    fn remove_by_address(&mut self, addr: MetaAddress) -> bool {
+    fn remove_by_address(&mut self, addr: Address) -> bool {
         let Some(id) = self.addresses.remove(&addr) else {
             return false;
         };
@@ -169,21 +169,21 @@ impl FunctionTableT for IndexedFunctionTable {
             .filter(|f| f.id().is_valid())
     }
 
-    fn get_by_address(&self, addr: MetaAddress) -> Option<FunctionRef> {
+    fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
         self.addresses
             .get(&addr)
             .copied()
             .and_then(|id| self.get_by_id(id))
     }
 
-    fn get_by_address_mut(&mut self, addr: MetaAddress) -> Option<FunctionMut> {
+    fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
         self.addresses
             .get(&addr)
             .copied()
             .and_then(|id| self.get_by_id_mut(id))
     }
 
-    fn addresses<'a>(&'a self) -> impl Iterator<Item = MetaAddress> + 'a {
+    fn addresses<'a>(&'a self) -> impl Iterator<Item = Address> + 'a {
         self.addresses.keys().copied()
     }
 
@@ -224,7 +224,7 @@ mod test {
     fn test_basic_operations() {
         let mut table = IndexedFunctionTable::new();
 
-        let addr = MetaAddress::from(0x1000);
+        let addr = Address::from(0x1000);
         let func_id = table
             .insert(addr, |id, entry| Ok(Function::new(id, entry)))
             .unwrap();
@@ -244,9 +244,9 @@ mod test {
     fn test_removal_operations() {
         let mut table = IndexedFunctionTable::new();
 
-        let addr1 = MetaAddress::from(0x1000);
-        let addr2 = MetaAddress::from(0x2000);
-        let addr3 = MetaAddress::from(0x3000);
+        let addr1 = Address::from(0x1000);
+        let addr2 = Address::from(0x2000);
+        let addr3 = Address::from(0x3000);
 
         let func_id1 = table
             .insert(addr1, |id, entry| Ok(Function::new(id, entry)))

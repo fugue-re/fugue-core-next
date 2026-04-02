@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::ir::MetaAddress;
+use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::provider::{
     SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
@@ -27,8 +27,8 @@ impl InMemorySegmentStorage {
 
 impl SegmentStorageProviderFromSegmentRange for InMemorySegmentStorage {
     fn from_segment_range(
-        start: MetaAddress,
-        end: MetaAddress,
+        start: Address,
+        end: Address,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let total_size = (end.offset() - start.offset()) as usize + 1usize;

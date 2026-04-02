@@ -1,10 +1,10 @@
-use crate::ir::{Insn, MetaAddress};
+use crate::ir::{Insn, Address};
 use crate::lifter::{DisassemblerError, LiftingContext};
 
 pub trait Disassembler {
     fn disassemble(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         bytes: &[u8],
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError>;

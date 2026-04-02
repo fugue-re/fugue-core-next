@@ -5,7 +5,7 @@ use bitflags::bitflags;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::MetaAddress;
+use crate::ir::Address;
 use crate::lifter::ContextSet;
 
 bitflags! {
@@ -158,7 +158,7 @@ impl ExternFunctionTemplate {
 
 #[derive(Debug, Clone)]
 pub struct ExternSegment {
-    address: MetaAddress,
+    address: Address,
     alignment: usize,
     symbols: usize,
     template: ExternFunctionTemplate,
@@ -167,9 +167,9 @@ pub struct ExternSegment {
 #[derive(Debug, Error)]
 pub enum ExternSegmentError {
     #[error("extern address {0} out of bounds")]
-    AddressOutOfBounds(MetaAddress),
+    AddressOutOfBounds(Address),
     #[error("extern address {0} is misaligned")]
-    AddressMisaligned(MetaAddress),
+    AddressMisaligned(Address),
 }
 
 impl Encode for ExternSegment {
@@ -189,7 +189,7 @@ impl<C> Decode<C> for ExternSegment {
     fn decode<D: bincode::de::Decoder>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let address = MetaAddress::decode(decoder)?;
+        let address = Address::decode(decoder)?;
         let alignment = usize::decode(decoder)?;
         let symbols = usize::decode(decoder)?;
         let template = ExternFunctionTemplate::decode(decoder)?;
@@ -205,7 +205,7 @@ impl<C> Decode<C> for ExternSegment {
 
 impl ExternSegment {
     pub fn new(
-        address: impl Into<MetaAddress>,
+        address: impl Into<Address>,
         alignment: usize,
         template: ExternFunctionTemplate,
     ) -> Self {
@@ -217,13 +217,13 @@ impl ExternSegment {
         }
     }
 
-    pub fn add_extern(&mut self) -> MetaAddress {
+    pub fn add_extern(&mut self) -> Address {
         let addr = self.address() + self.size();
         self.symbols += 1;
         addr
     }
 
-    pub fn add_extern_at(&mut self, address: impl Into<MetaAddress>) -> Result<(), ExternSegmentError> {
+    pub fn add_extern_at(&mut self, address: impl Into<Address>) -> Result<(), ExternSegmentError> {
         let address = address.into();
         if address < self.address() {
             return Err(ExternSegmentError::AddressOutOfBounds(address));
@@ -247,19 +247,19 @@ impl ExternSegment {
         Ok(())
     }
 
-    pub fn address(&self) -> MetaAddress {
+    pub fn address(&self) -> Address {
         self.address
     }
 
-    pub fn last_address(&self) -> Option<MetaAddress> {
+    pub fn last_address(&self) -> Option<Address> {
         (self.symbols != 0).then(|| self.address() + self.size() - 1usize)
     }
 
-    pub fn range(&self) -> Option<std::ops::Range<MetaAddress>> {
+    pub fn range(&self) -> Option<std::ops::Range<Address>> {
         self.last_address().map(|last| self.address()..(last + 1usize))
     }
 
-    pub fn range_inclusive(&self) -> Option<RangeInclusive<MetaAddress>> {
+    pub fn range_inclusive(&self) -> Option<RangeInclusive<Address>> {
         self.last_address().map(|last| self.address()..=last)
     }
 
@@ -284,7 +284,7 @@ impl ExternSegment {
         (template_size + self.alignment.wrapping_sub(1)) & !self.alignment.wrapping_sub(1)
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = MetaAddress> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = Address> {
         let start = self.address();
         let step = self.aligned_template_size();
         (0..self.symbols).map(move |i| start + i * step)

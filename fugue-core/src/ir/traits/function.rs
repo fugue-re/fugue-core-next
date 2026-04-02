@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{Function, Id, MetaAddress};
+use crate::ir::{Function, Id, Address};
 use crate::storage::project::FundamentalProjectEntity;
 
 pub type FunctionRef<'a> = &'a Function; // EntityRef<'a, Function>;
@@ -87,20 +87,20 @@ pub trait FunctionTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
-    fn insert<F>(&mut self, addr: MetaAddress, f: F) -> Result<Id<Function>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: FnOnce(Id<Function>, MetaAddress) -> Result<Function, Self::Error>;
+        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<Function>) -> bool;
-    fn remove_by_address(&mut self, addr: MetaAddress) -> bool;
+    fn remove_by_address(&mut self, addr: Address) -> bool;
 
     fn get_by_id<'a>(&'a self, id: Id<Function>) -> Option<Self::FunctionRef<'a>>;
     fn get_by_id_mut<'a>(&'a mut self, id: Id<Function>) -> Option<Self::FunctionMut<'a>>;
 
-    fn get_by_address<'a>(&'a self, addr: MetaAddress) -> Option<Self::FunctionRef<'a>>;
-    fn get_by_address_mut<'a>(&'a mut self, addr: MetaAddress) -> Option<Self::FunctionMut<'a>>;
+    fn get_by_address<'a>(&'a self, addr: Address) -> Option<Self::FunctionRef<'a>>;
+    fn get_by_address_mut<'a>(&'a mut self, addr: Address) -> Option<Self::FunctionMut<'a>>;
 
-    fn addresses<'a>(&'a self) -> impl Iterator<Item = MetaAddress> + 'a;
+    fn addresses<'a>(&'a self) -> impl Iterator<Item = Address> + 'a;
 
     fn iter<'a>(&'a self) -> Self::FunctionIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> Self::FunctionIterMut<'a>;

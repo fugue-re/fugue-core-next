@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{CodeBlock, Id, MetaAddress};
+use crate::ir::{CodeBlock, Id, Address};
 use crate::lifter::ContextSet;
 use crate::storage::project::FundamentalProjectEntity;
 
@@ -78,52 +78,52 @@ pub trait CodeBlockTable: FundamentalProjectEntity {
     where
         Self: 'a;
 
-    fn insert<F>(&mut self, addr: MetaAddress, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
     where
-        F: Fn(Id<CodeBlock>, MetaAddress) -> Result<CodeBlock, Self::Error>;
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>;
 
     fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool;
-    fn remove_by_address(&mut self, addr: MetaAddress) -> usize;
-    fn remove_by_address_and_context(&mut self, addr: MetaAddress, context: &ContextSet) -> usize;
+    fn remove_by_address(&mut self, addr: Address) -> usize;
+    fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize;
 
     fn get_by_id<'a>(&'a self, id: Id<CodeBlock>) -> Option<Self::CodeBlockRef<'a>>;
     fn get_by_id_mut<'a>(&'a mut self, id: Id<CodeBlock>) -> Option<Self::CodeBlockMut<'a>>;
 
-    fn get_by_address<'a>(&'a self, addr: MetaAddress) -> Self::CodeBlockIter<'a>;
-    fn get_by_address_mut<'a>(&'a mut self, addr: MetaAddress) -> Self::CodeBlockIterMut<'a>;
+    fn get_by_address<'a>(&'a self, addr: Address) -> Self::CodeBlockIter<'a>;
+    fn get_by_address_mut<'a>(&'a mut self, addr: Address) -> Self::CodeBlockIterMut<'a>;
 
     fn get_by_address_and_context<'a>(
         &'a self,
-        addr: MetaAddress,
+        addr: Address,
         context: &'a ContextSet,
     ) -> Self::CodeBlockIter<'a>;
 
     fn get_by_address_and_context_mut<'a>(
         &'a mut self,
-        addr: MetaAddress,
+        addr: Address,
         context: &'a ContextSet,
     ) -> Self::CodeBlockIterMut<'a>;
 
-    fn get_first_by_address<'a>(&'a self, addr: MetaAddress) -> Option<Self::CodeBlockRef<'a>> {
+    fn get_first_by_address<'a>(&'a self, addr: Address) -> Option<Self::CodeBlockRef<'a>> {
         self.get_by_address(addr).next()
     }
 
-    fn get_first_by_address_mut<'a>(&'a mut self, addr: MetaAddress) -> Option<Self::CodeBlockMut<'a>> {
+    fn get_first_by_address_mut<'a>(&'a mut self, addr: Address) -> Option<Self::CodeBlockMut<'a>> {
         self.get_by_address_mut(addr).next()
     }
 
     fn get_first_by_address_and_context<'a>(
         &'a self,
-        addr: MetaAddress,
+        addr: Address,
         context: &'a ContextSet,
     ) -> Option<Self::CodeBlockRef<'a>> {
         self.get_by_address_and_context(addr, context).next()
     }
 
-    fn overlaps<'a>(&'a self, addr: MetaAddress) -> Self::CodeBlockIter<'a>;
-    fn overlaps_mut<'a>(&'a mut self, addr: MetaAddress) -> Self::CodeBlockIterMut<'a>;
+    fn overlaps<'a>(&'a self, addr: Address) -> Self::CodeBlockIter<'a>;
+    fn overlaps_mut<'a>(&'a mut self, addr: Address) -> Self::CodeBlockIterMut<'a>;
 
-    fn contains(&self, addr: MetaAddress) -> bool;
+    fn contains(&self, addr: Address) -> bool;
 
     fn iter<'a>(&'a self) -> Self::CodeBlockIter<'a>;
     fn iter_mut<'a>(&'a mut self) -> Self::CodeBlockIterMut<'a>;

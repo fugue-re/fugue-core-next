@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::ir::traits::{
     CodeBlockIter, CodeBlockIterMut, CodeBlockMut, CodeBlockRef, CodeBlockTable as CodeBlockTableT,
 };
-use crate::ir::{Address, CodeBlock, Id, IdSet, MetaAddress};
+use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_KEY_CODE_BLOCK_ENTITY_ID;
 use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
@@ -20,7 +20,7 @@ use crate::storage::{EntityStorage, EntityStorageError};
 
 #[derive(Debug, Clone, Default)]
 pub struct IndexedCodeBlockTable {
-    bounds: BTreeMap<AddressSpaceId, IntervalMap<Address, IdSet<CodeBlock>>>,
+    bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     blocks: Vec<CodeBlock>,
     free_ids: Vec<Id<CodeBlock>>,
 }
@@ -62,7 +62,7 @@ impl<C> Decode<C> for IndexedCodeBlockTable {
             let mut sbounds = IntervalMap::with_capacity(nintervals);
 
             for _ in 0..nintervals {
-                let iv = Range::<Address>::decode(decoder)?;
+                let iv = Range::<RawAddress>::decode(decoder)?;
                 let val = IdSet::<CodeBlock>::decode(decoder)?;
                 sbounds.force_insert(iv, val);
             }
@@ -95,7 +95,7 @@ impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
             let mut sbounds = IntervalMap::with_capacity(nintervals);
 
             for _ in 0..nintervals {
-                let iv = Range::<Address>::borrow_decode(decoder)?;
+                let iv = Range::<RawAddress>::borrow_decode(decoder)?;
                 let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
                 sbounds.force_insert(iv, val);
             }
@@ -155,9 +155,9 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
     type CodeBlockIter<'a> = CodeBlockIter<'a>;
     type CodeBlockIterMut<'a> = CodeBlockIterMut<'a>;
 
-    fn insert<F>(&mut self, addr: MetaAddress, f: F) -> Result<Id<CodeBlock>, Self::Error>
+    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
     where
-        F: Fn(Id<CodeBlock>, MetaAddress) -> Result<CodeBlock, Self::Error>,
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
     {
         let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
             (true, free_id)
@@ -222,7 +222,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         true
     }
 
-    fn remove_by_address(&mut self, addr: MetaAddress) -> usize {
+    fn remove_by_address(&mut self, addr: Address) -> usize {
         let mut removed = 0;
 
         let space = addr.space();
@@ -255,7 +255,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         removed
     }
 
-    fn remove_by_address_and_context(&mut self, addr: MetaAddress, context: &ContextSet) -> usize {
+    fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
         let mut removed = 0;
 
         let space = addr.space();
@@ -308,7 +308,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             .filter(|blk| blk.id().is_valid())
     }
 
-    fn get_by_address(&self, maddr: MetaAddress) -> CodeBlockIter {
+    fn get_by_address(&self, maddr: Address) -> CodeBlockIter {
         let space = maddr.space();
         let addr = maddr.address();
 
@@ -327,7 +327,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
 
     fn get_by_address_and_context<'a>(
         &'a self,
-        maddr: MetaAddress,
+        maddr: Address,
         context: &'a ContextSet,
     ) -> CodeBlockIter<'a> {
         let space = maddr.space();
@@ -346,7 +346,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn get_by_address_mut(&mut self, maddr: MetaAddress) -> CodeBlockIterMut {
+    fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut {
         let space = maddr.space();
         let addr = maddr.address();
 
@@ -374,7 +374,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
 
     fn get_by_address_and_context_mut<'a>(
         &'a mut self,
-        maddr: MetaAddress,
+        maddr: Address,
         context: &'a ContextSet,
     ) -> CodeBlockIterMut<'a> {
         let space = maddr.space();
@@ -395,7 +395,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn contains(&self, addr: MetaAddress) -> bool {
+    fn contains(&self, addr: Address) -> bool {
         let space = addr.space();
         let addr = addr.address();
 
@@ -404,7 +404,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             .map_or(false, |bounds| bounds.has_overlap(addr..=addr))
     }
 
-    fn overlaps<'a>(&'a self, addr: MetaAddress) -> CodeBlockIter<'a> {
+    fn overlaps<'a>(&'a self, addr: Address) -> CodeBlockIter<'a> {
         let space = addr.space();
         let addr = addr.address();
 
@@ -420,7 +420,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         )
     }
 
-    fn overlaps_mut<'a>(&'a mut self, addr: MetaAddress) -> CodeBlockIterMut<'a> {
+    fn overlaps_mut<'a>(&'a mut self, addr: Address) -> CodeBlockIterMut<'a> {
         let space = addr.space();
         let addr = addr.address();
 
@@ -487,7 +487,7 @@ mod test {
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
 
-        let addr = MetaAddress::from(0x1000);
+        let addr = Address::from(0x1000);
         let blk_id = table
             .insert(addr, |id, start| {
                 Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
@@ -510,9 +510,9 @@ mod test {
     fn test_overlapped() {
         let mut table = IndexedCodeBlockTable::new();
 
-        let addr1 = MetaAddress::from(0x1000);
-        let addr2 = MetaAddress::from(0x1000); // overlaps with addr1
-        let addr3 = MetaAddress::from(0x1005);
+        let addr1 = Address::from(0x1000);
+        let addr2 = Address::from(0x1000); // overlaps with addr1
+        let addr3 = Address::from(0x1005);
 
         let blk_id1 = table
             .insert(addr1, |id, start| {
@@ -531,14 +531,14 @@ mod test {
             .unwrap();
 
         let overlaps = table
-            .overlaps(MetaAddress::from(0x1007))
+            .overlaps(Address::from(0x1007))
             .collect::<Vec<_>>();
         assert_eq!(overlaps.len(), 3); // all three blocks overlap at 0x1007
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id1));
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id2));
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id3));
 
-        let removed_count = table.remove_by_address(MetaAddress::from(0x1000));
+        let removed_count = table.remove_by_address(Address::from(0x1000));
         assert_eq!(removed_count, 2);
 
         let remaining_blk = table.get_by_id(blk_id3).unwrap();

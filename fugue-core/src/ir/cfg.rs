@@ -1,4 +1,4 @@
-use crate::ir::{Insn, InsnTarget, MetaAddress};
+use crate::ir::{Insn, InsnTarget, Address};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FlowKind {
@@ -85,13 +85,13 @@ impl FlowKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlowTarget {
-    from: MetaAddress,
-    to: MetaAddress,
+    from: Address,
+    to: Address,
     kind: FlowKind,
 }
 
 impl FlowTarget {
-    pub fn new(from: impl Into<MetaAddress>, to: impl Into<MetaAddress>, kind: FlowKind) -> Self {
+    pub fn new(from: impl Into<Address>, to: impl Into<Address>, kind: FlowKind) -> Self {
         FlowTarget {
             from: from.into(),
             to: to.into(),
@@ -102,17 +102,17 @@ impl FlowTarget {
     pub fn from_insn_target(
         insn: &Insn,
         target: &InsnTarget,
-        to: impl Into<MetaAddress>,
+        to: impl Into<Address>,
     ) -> Option<Self> {
         let kind = FlowKind::from_insn_target(insn, target)?;
         Some(Self::new(insn.address(), to.into(), kind))
     }
 
-    pub fn from(&self) -> MetaAddress {
+    pub fn from(&self) -> Address {
         self.from
     }
 
-    pub fn to(&self) -> MetaAddress {
+    pub fn to(&self) -> Address {
         self.to
     }
 

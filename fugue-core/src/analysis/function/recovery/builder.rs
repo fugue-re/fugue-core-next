@@ -3,7 +3,7 @@ use std::mem;
 
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::ir::{Address, AddressRangeSet, MetaAddress, MetaAddressWithContext, FlowKind, FlowTarget};
+use crate::ir::{Address, AddressWithContext, FlowKind, FlowTarget, RawAddressRangeSet};
 use crate::lifter::ContextSet;
 use crate::project::Project;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
@@ -19,25 +19,25 @@ pub struct PartialFunctionWithContext {
 }
 
 pub(crate) struct CodeBlockStructuringContext<'a> {
-    pub(crate) block_starts: &'a mut BTreeMap<MetaAddress, usize>,
-    pub(crate) block_ends: &'a mut BTreeMap<MetaAddress, usize>,
+    pub(crate) block_starts: &'a mut BTreeMap<Address, usize>,
+    pub(crate) block_ends: &'a mut BTreeMap<Address, usize>,
     pub(crate) cut_points: &'a mut Vec<usize>,
-    pub(crate) contexts: &'a BTreeMap<MetaAddress, ContextSet>,
+    pub(crate) contexts: &'a BTreeMap<Address, ContextSet>,
 }
 
 #[derive(Default)]
 pub struct FunctionBuilderContext {
-    entry: MetaAddress,
-    avoids: AddressRangeSet,
-    candidates: VecDeque<MetaAddressWithContext>,
-    contexts: BTreeMap<MetaAddress, ContextSet>,
+    entry: Address,
+    avoids: RawAddressRangeSet,
+    candidates: VecDeque<AddressWithContext>,
+    contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
-    global_targets: BTreeSet<MetaAddressWithContext>,
+    global_targets: BTreeSet<AddressWithContext>,
     // These are used to structure the blocks after lifting; we keep them here
     // to avoid having to reallocate on each function analysis. They refer to
     // the partial function being constructed.
-    block_starts: BTreeMap<MetaAddress, usize>,
-    block_ends: BTreeMap<MetaAddress, usize>,
+    block_starts: BTreeMap<Address, usize>,
+    block_ends: BTreeMap<Address, usize>,
     cut_points: Vec<usize>,
 }
 
@@ -118,7 +118,7 @@ where
         &mut self,
         project: &mut Project<P>,
         translator: &mut Translator,
-        candidate: impl Into<MetaAddressWithContext>,
+        candidate: impl Into<AddressWithContext>,
     ) -> Result<PartialFunction, FunctionRecoveryError> {
         self.context.analyse(
             project,
@@ -130,11 +130,11 @@ where
         )
     }
 
-    pub fn avoids(&self) -> &AddressRangeSet {
+    pub fn avoids(&self) -> &RawAddressRangeSet {
         &self.context.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
         &mut self.context.avoids
     }
 
@@ -142,7 +142,7 @@ where
         &self.context.local_targets
     }
 
-    pub fn global_targets(&self) -> &BTreeSet<MetaAddressWithContext> {
+    pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.context.global_targets
     }
 }
@@ -152,7 +152,7 @@ impl<'a> CodeBlockStructuringContext<'a> {
         self.cut_points.push(insn_idx);
     }
 
-    pub fn is_flow_target(&self, address: MetaAddress) -> bool {
+    pub fn is_flow_target(&self, address: Address) -> bool {
         self.contexts.contains_key(&address)
     }
 
@@ -195,30 +195,30 @@ impl FunctionBuilderContext {
         Self::default()
     }
 
-    pub fn entry(&self) -> MetaAddress {
+    pub fn entry(&self) -> Address {
         self.entry
     }
 
-    pub fn candidates(&self) -> &VecDeque<MetaAddressWithContext> {
+    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
         &self.candidates
     }
 
-    pub fn add_candidate(&mut self, address: impl Into<MetaAddress>) {
+    pub fn add_candidate(&mut self, address: impl Into<Address>) {
         self.add_candidate_with_context(address, ContextSet::new());
     }
 
-    pub fn add_candidate_with_context(&mut self, address: impl Into<MetaAddress>, context: ContextSet) {
+    pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
         self.candidates
-            .push_back(MetaAddressWithContext::new(address, context));
+            .push_back(AddressWithContext::new(address, context));
     }
 
-    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<MetaAddress>>) {
+    pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
         self.add_candidates_with_context(addresses.into_iter().map(|addr| addr.into()));
     }
 
     pub fn add_candidates_with_context(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<MetaAddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -235,7 +235,7 @@ impl FunctionBuilderContext {
     }
 
     pub fn clear(&mut self) {
-        self.entry = MetaAddress::default();
+        self.entry = Address::default();
         self.candidates.clear();
         self.contexts.clear();
         self.local_targets.clear();
@@ -368,11 +368,11 @@ impl FunctionBuilderContext {
 
                                     if self.local_targets.insert(target) {
                                         self.candidates
-                                            .push_back(MetaAddressWithContext::new(addr, context));
+                                            .push_back(AddressWithContext::new(addr, context));
                                     }
                                 } else if !self.avoids.contains(addr) {
                                     self.global_targets
-                                        .insert(MetaAddressWithContext::new(addr, context));
+                                        .insert(AddressWithContext::new(addr, context));
                                 }
                             }
 
@@ -399,11 +399,11 @@ impl FunctionBuilderContext {
         }
     }
 
-    pub fn contexts(&self) -> &BTreeMap<MetaAddress, ContextSet> {
+    pub fn contexts(&self) -> &BTreeMap<Address, ContextSet> {
         &self.contexts
     }
 
-    pub fn is_flow_target(&self, address: MetaAddress) -> bool {
+    pub fn is_flow_target(&self, address: Address) -> bool {
         self.contexts.contains_key(&address)
     }
 
@@ -411,15 +411,15 @@ impl FunctionBuilderContext {
         &self.local_targets
     }
 
-    pub fn global_targets(&self) -> &BTreeSet<MetaAddressWithContext> {
+    pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.global_targets
     }
 
-    pub fn block_starts(&self) -> &BTreeMap<MetaAddress, usize> {
+    pub fn block_starts(&self) -> &BTreeMap<Address, usize> {
         &self.block_starts
     }
 
-    pub fn block_ends(&self) -> &BTreeMap<MetaAddress, usize> {
+    pub fn block_ends(&self) -> &BTreeMap<Address, usize> {
         &self.block_ends
     }
 
@@ -444,7 +444,7 @@ impl FunctionBuilderContext {
         &mut self,
         project: &mut Project<S>,
         translator: &mut Translator,
-        candidate: impl Into<MetaAddressWithContext>,
+        candidate: impl Into<AddressWithContext>,
         config: &FunctionRecoveryConfig,
         initialisation_passes: &mut AnalysisGroup<S, FunctionBuilderContext>,
         post_lifting_passes: &mut AnalysisGroup<S, PartialFunctionWithContext>,

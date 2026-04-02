@@ -10,7 +10,7 @@ use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, MetaAddress};
+use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, Address};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 
@@ -110,7 +110,7 @@ impl AArch64Disassembler {
 impl DisassemblerT for AArch64Disassembler {
     fn disassemble(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {

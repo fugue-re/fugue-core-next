@@ -4,7 +4,7 @@ use std::mem;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::ir::{Address, CodeBlock, Function, Id, Insn, MetaAddress};
+use crate::ir::{RawAddress, CodeBlock, Function, Id, Insn, Address};
 use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;
@@ -76,13 +76,13 @@ impl EntityKey for ProjectEntity {
     }
 }
 
-impl EntityKey for Address {
+impl EntityKey for RawAddress {
     const ID: EntityKeyId = ENTITY_KEY_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         <[u8; mem::size_of::<Self>()]>::try_from(buf)
             .ok()
-            .map(|val| Address::from(u64::from_be_bytes(val)))
+            .map(|val| RawAddress::from(u64::from_be_bytes(val)))
     }
 
     fn encode(&self, buf: &mut BytesMut) {
@@ -90,7 +90,7 @@ impl EntityKey for Address {
     }
 }
 
-impl EntityKey for MetaAddress {
+impl EntityKey for Address {
     const ID: EntityKeyId = ENTITY_KEY_META_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
@@ -99,7 +99,7 @@ impl EntityKey for MetaAddress {
         }
         let space = buf[0];
         let address = u64::from_be_bytes(buf[1..9].try_into().ok()?);
-        Some(MetaAddress::new(space, address))
+        Some(Address::new(space, address))
     }
 
     fn encode(&self, buf: &mut BytesMut) {

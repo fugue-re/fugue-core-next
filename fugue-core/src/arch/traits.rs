@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Endian, ExternFunctionTemplate, MetaAddress, Symbol};
+use crate::ir::{Endian, ExternFunctionTemplate, Address, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
 };
@@ -101,7 +101,7 @@ pub trait Arch: Send + Sync + 'static {
         }
     }
 
-    fn canonicalise_address(&self, addr: MetaAddress) -> Option<(MetaAddress, ContextSet)> {
+    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let naddr = addr.wrap(self.language()).align(self.language().address_alignment());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
@@ -110,9 +110,9 @@ pub trait Arch: Send + Sync + 'static {
     // belongs to.
     fn canonicalise_address_with(
         &self,
-        addr: MetaAddress,
+        addr: Address,
         context: &LiftingContext,
-    ) -> Option<(MetaAddress, ContextSet)> {
+    ) -> Option<(Address, ContextSet)> {
         let _ = context;
         self.canonicalise_address(addr)
     }

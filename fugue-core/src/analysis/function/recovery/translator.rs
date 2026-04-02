@@ -1,4 +1,4 @@
-use crate::ir::{Insn, MetaAddress};
+use crate::ir::{Insn, Address};
 use crate::lifter::{Disassembler, Lifter, LiftingContext};
 use crate::project::Project;
 use crate::storage::ProjectStorageProvider;
@@ -26,7 +26,7 @@ impl Translator {
 
     pub fn disassemble(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, FunctionRecoveryError> {
         let bytes = bytes.as_ref();
@@ -43,7 +43,7 @@ impl Translator {
 
     pub fn lift(
         &mut self,
-        address: MetaAddress,
+        address: Address,
         bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, FunctionRecoveryError> {
         self.lifter

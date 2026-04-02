@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use fugue_core_derive::SegmentStorageProvider;
 
-use crate::ir::MetaAddress;
+use crate::ir::Address;
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::AttributeMap;
@@ -193,8 +193,8 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
     fn from_segment_range(
-        start: MetaAddress,
-        end: MetaAddress,
+        start: Address,
+        end: Address,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let project = attributes
