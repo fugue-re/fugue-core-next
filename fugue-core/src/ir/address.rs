@@ -1008,26 +1008,3 @@ impl Address {
         self.address.range_in_space_bounds(language, size)
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MetaAddress {
-    address: Address,
-    space: AddressSpaceId,
-}
-
-impl MetaAddress {
-    pub fn new(space: AddressSpaceId, address: impl Into<Address>) -> Self {
-        Self {
-            address: address.into(),
-            space,
-        }
-    }
-
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn space(&self) -> AddressSpaceId {
-        self.space
-    }
-}

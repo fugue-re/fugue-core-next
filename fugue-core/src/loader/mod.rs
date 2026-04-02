@@ -463,11 +463,6 @@ impl<'a> LoadableSegment<'a> {
     pub fn space(&self) -> AddressSpaceId {
         self.address.space()
     }
-
-    pub fn with_address(mut self, address: impl Into<Address>) -> Self {
-        self.address = address.into();
-        self
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]

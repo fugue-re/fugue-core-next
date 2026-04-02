@@ -13,7 +13,6 @@ pub use crate::ir::traits::SymbolTableSelector;
 use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
-    SymbolTableSelector,
 };
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
