@@ -1,4 +1,4 @@
-use crate::ir::{Insn, Address};
+use crate::ir::{Address, Insn};
 use crate::lifter::{DisassemblerError, LiftingContext};
 
 pub trait Disassembler {

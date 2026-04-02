@@ -1,9 +1,8 @@
-use crate::ir::{Insn, Address};
+use super::FunctionRecoveryError;
+use crate::ir::{Address, Insn};
 use crate::lifter::{Disassembler, Lifter, LiftingContext};
 use crate::project::Project;
 use crate::storage::ProjectStorageProvider;
-
-use super::FunctionRecoveryError;
 
 pub struct Translator {
     disassembler: Disassembler,

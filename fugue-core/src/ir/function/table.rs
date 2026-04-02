@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::ir::traits::{
     FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
 };
-use crate::ir::{Function, Id, Address};
+use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
 use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
@@ -158,9 +158,7 @@ impl FunctionTableT for IndexedFunctionTable {
     }
 
     fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.functions
-            .get(id.index())
-            .filter(|f| f.id().is_valid())
+        self.functions.get(id.index()).filter(|f| f.id().is_valid())
     }
 
     fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {

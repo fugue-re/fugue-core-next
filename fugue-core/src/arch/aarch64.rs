@@ -3,14 +3,13 @@ use fugue_lifter::aarch64::register::{
     X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
 };
 pub use fugue_lifter::aarch64::*;
-
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, Address};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 

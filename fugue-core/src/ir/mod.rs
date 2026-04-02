@@ -5,14 +5,15 @@ use bincode::{BorrowDecode, Decode, Encode};
 use bytes::{BufMut, BytesMut};
 
 pub mod address;
-pub use address::{Address, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress};
+pub use address::{
+    Address, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
+};
 
 pub mod block;
 pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};
 
 pub mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
-
 pub use fugue_bytes::Endian;
 
 pub mod function;

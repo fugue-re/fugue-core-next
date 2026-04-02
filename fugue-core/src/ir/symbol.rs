@@ -5,7 +5,6 @@ use std::sync::LazyLock;
 
 use bincode::{BorrowDecode, Decode, Encode};
 use smallvec::SmallVec;
-
 pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
@@ -15,7 +14,7 @@ use crate::ir::traits::{
     SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
     SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
 };
-use crate::ir::{Id, Address};
+use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};

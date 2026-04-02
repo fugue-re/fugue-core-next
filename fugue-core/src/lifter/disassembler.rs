@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use thiserror::Error;
 
-use crate::ir::{Insn, Address};
+use crate::ir::{Address, Insn};
 use crate::lifter::LiftingContext;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 

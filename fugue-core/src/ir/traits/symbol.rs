@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{Id, Address, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
+use crate::ir::{Address, Id, Symbol, SymbolEntry, SymbolIndex, SymbolProperties};
 use crate::storage::project::FundamentalProjectEntity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

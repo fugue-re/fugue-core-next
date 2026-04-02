@@ -3,7 +3,6 @@ use std::fmt;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-
 use thiserror::Error;
 
 use crate::arch::Arch;

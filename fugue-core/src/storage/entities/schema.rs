@@ -4,7 +4,7 @@ use std::mem;
 use bincode::{Decode, Encode};
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::ir::{RawAddress, CodeBlock, Function, Id, Insn, Address};
+use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
 use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;

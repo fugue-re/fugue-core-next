@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-
 use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::{self, Arch};

@@ -603,10 +603,7 @@ impl SegmentMappingBuilder {
         &self.mapping_hints
     }
 
-    pub fn set_mapping_hints(
-        &mut self,
-        mapping_hints: impl Into<BTreeMap<Address, ContextHint>>,
-    ) {
+    pub fn set_mapping_hints(&mut self, mapping_hints: impl Into<BTreeMap<Address, ContextHint>>) {
         self.mapping_hints = mapping_hints.into();
     }
 

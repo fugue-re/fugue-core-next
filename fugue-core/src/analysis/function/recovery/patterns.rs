@@ -125,8 +125,7 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.bytes_at(Address::new(space_id, *range.start()), size)
-            else {
+            let Some(bytes) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
                 break;
             };
 
@@ -187,9 +186,7 @@ impl FunctionRecoveryPatternMatcher {
                             "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
                         );
 
-                        state.add_candidate(AddressWithContext::new_with(
-                            start, ctx, confidence,
-                        ));
+                        state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
                     }
                 }
             });

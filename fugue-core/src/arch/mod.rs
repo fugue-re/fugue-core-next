@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use bincode::{Decode, Encode};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Endian, ExternFunctionTemplate, Address, Symbol};
+use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
 };

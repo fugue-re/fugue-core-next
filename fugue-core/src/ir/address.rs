@@ -655,7 +655,10 @@ where
         self.0.iter().map(|(k, v)| (RawAddress::from(k), v))
     }
 
-    pub fn range(&self, range: impl RangeBounds<RawAddress>) -> impl Iterator<Item = (RawAddress, V)> {
+    pub fn range(
+        &self,
+        range: impl RangeBounds<RawAddress>,
+    ) -> impl Iterator<Item = (RawAddress, V)> {
         let start = range.start_bound().map(|addr| addr.offset());
         let end = range.end_bound().map(|addr| addr.offset());
         self.0

@@ -27,15 +27,14 @@ use mapping::{
     SegmentMappingKind,
 };
 use provider::SegmentStorageProviderRegistry;
-use space::{AddressSpace, AddressSpaceId};
-use view::SegmentMappingView;
-
 pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, PersistableSegmentStorageProvider,
     SegmentStorageDescriptor, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
+use space::{AddressSpace, AddressSpaceId};
+use view::SegmentMappingView;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;

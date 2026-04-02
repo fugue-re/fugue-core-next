@@ -8,7 +8,6 @@ use fugue_bytes::order::{ReadBytesExt as _, WriteBytesExt as _};
 use hex_display::HexDisplayExt;
 use thiserror::Error;
 use walkdir::WalkDir;
-
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
@@ -425,7 +424,9 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
         let result = self.cleanup_storage_aux();
         if result.is_err() {
             let path = self.path.with_extension("fdbz");
-            if path.exists() && let Err(e) = fs::remove_file(&path) {
+            if path.exists()
+                && let Err(e) = fs::remove_file(&path)
+            {
                 tracing::error!(
                     "failed to remove packed project file `{}`: {e}",
                     path.display()

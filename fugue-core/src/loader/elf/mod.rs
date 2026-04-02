@@ -4,7 +4,6 @@ use std::ops::RangeInclusive;
 use std::path::Path;
 
 use fallible_iterator::FallibleIterator;
-
 use object::elf::{
     FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
     STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT, STT_TLS,
@@ -16,14 +15,12 @@ use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
     SectionFlags, SegmentFlags, SymbolFlags,
 };
-
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -1112,10 +1109,9 @@ impl Loadable for Elf<'_> {
 mod test {
     use fallible_iterator::FallibleIterator;
 
+    use super::Elf;
     use crate::loader::Loadable;
     use crate::types::BytesOrMapping;
-
-    use super::Elf;
 
     #[test]
     fn test_elf_exe() -> Result<(), Box<dyn std::error::Error>> {

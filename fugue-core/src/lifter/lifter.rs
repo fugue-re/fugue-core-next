@@ -9,7 +9,7 @@ use fugue_lifter::{LifterBuilder, LifterBuilderError};
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
-use crate::ir::{Insn, Address};
+use crate::ir::{Address, Insn};
 
 #[derive(Debug, Error)]
 pub enum LifterError {

@@ -1,7 +1,7 @@
 use bincode::{BorrowDecode, Decode, Encode};
 use ustr::Ustr;
 
-use crate::ir::{CodeBlockId, Id, Address};
+use crate::ir::{Address, CodeBlockId, Id};
 use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 

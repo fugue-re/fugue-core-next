@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{Function, Id, Address};
+use crate::ir::{Address, Function, Id};
 use crate::storage::project::FundamentalProjectEntity;
 
 pub type FunctionRef<'a> = &'a Function; // EntityRef<'a, Function>;

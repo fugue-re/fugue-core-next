@@ -7,6 +7,11 @@ use std::time::Instant;
 use itertools::{Itertools, MinMaxResult};
 use tracing::Level;
 
+use super::{
+    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
+    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
+    PartialFunctionWithContext, Translator,
+};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
 use crate::ir::{Address, AddressWithContext, RawAddress, RawAddressRangeSet};
@@ -15,12 +20,6 @@ use crate::storage::project::InMemoryProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{ProjectStorageProvider, SegmentStorage};
 use crate::types::Confidence;
-
-use super::{
-    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
-    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
-    PartialFunctionWithContext, Translator,
-};
 
 pub struct FunctionRecovery<P = InMemoryProvider>
 where
@@ -496,7 +495,10 @@ where
                 let address = candidate.address();
                 let confidence = Confidence::certain();
 
-                if !project.segments().space_contains_segment(address.space(), address) {
+                if !project
+                    .segments()
+                    .space_contains_segment(address.space(), address)
+                {
                     tracing::trace!("skipping {address}: not mapped");
                     continue;
                 }

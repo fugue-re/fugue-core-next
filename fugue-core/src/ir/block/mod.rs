@@ -3,7 +3,7 @@ use std::ops::{Range, RangeInclusive};
 
 use bincode::{BorrowDecode, Decode, Encode};
 
-use crate::ir::{Id, IdSet, InsnList, Address};
+use crate::ir::{Address, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};

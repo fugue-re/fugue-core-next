@@ -1,17 +1,16 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 
+use super::{FunctionRecoveryError, Translator};
 use crate::analysis::function::recovery::builder::CodeBlockStructuringContext;
 use crate::analysis::function::recovery::{FunctionBuilderContext, FunctionRecoveryConfig};
 use crate::ir::traits::{CodeBlockTable, FunctionTable};
 use crate::ir::{
-    CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn, InsnList,
-    Address, Symbol,
+    Address, CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn,
+    InsnList, Symbol,
 };
 use crate::lifter::{ContextSet, LifterError};
 use crate::storage::SegmentStorage;
-
-use super::{FunctionRecoveryError, Translator};
 
 pub enum InsnEntry<'a> {
     Vacant(VacantInsnEntry<'a>),

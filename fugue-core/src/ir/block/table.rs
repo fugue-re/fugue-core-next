@@ -477,9 +477,8 @@ impl PersistableProjectEntity for IndexedCodeBlockTable {
 
 #[cfg(test)]
 mod test {
-    use crate::ir::InsnList;
-
     use super::*;
+    use crate::ir::InsnList;
 
     #[test]
     fn test_basic_operations() {
@@ -530,9 +529,7 @@ mod test {
             })
             .unwrap();
 
-        let overlaps = table
-            .overlaps(Address::from(0x1007))
-            .collect::<Vec<_>>();
+        let overlaps = table.overlaps(Address::from(0x1007)).collect::<Vec<_>>();
         assert_eq!(overlaps.len(), 3); // all three blocks overlap at 0x1007
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id1));
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id2));

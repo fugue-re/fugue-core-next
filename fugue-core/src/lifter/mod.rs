@@ -2,9 +2,8 @@ use std::fmt::Display;
 
 use arrayvec::ArrayVec;
 use bincode::{BorrowDecode, Decode, Encode};
-
+pub use fugue_lifter::runtime::operand;
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
-pub use fugue_lifter::runtime::operand as operand;
 
 use crate::ir::Address;
 
@@ -197,7 +196,12 @@ impl ContextSet {
     pub fn apply_range(&self, from: Address, to: Option<Address>, context: &mut LiftingContext) {
         for ContextUpdate { bits, value } in self.0.iter() {
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
-            context.set_variable_region_by_bits(bits, from.offset(), to.map(|a| a.offset()), *value);
+            context.set_variable_region_by_bits(
+                bits,
+                from.offset(),
+                to.map(|a| a.offset()),
+                *value,
+            );
         }
     }
 }

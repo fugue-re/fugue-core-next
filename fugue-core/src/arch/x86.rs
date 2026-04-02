@@ -3,14 +3,13 @@ use fugue_lifter::x86::register::{
 };
 use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
 pub use fugue_lifter::x86::*;
-
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
-use crate::ir::{ExternFunctionTemplate, Insn, InsnProperties, Address};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
 

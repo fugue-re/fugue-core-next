@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 
-use crate::ir::{CodeBlock, Id, Address};
+use crate::ir::{Address, CodeBlock, Id};
 use crate::lifter::ContextSet;
 use crate::storage::project::FundamentalProjectEntity;
 
