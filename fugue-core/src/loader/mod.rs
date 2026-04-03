@@ -4,7 +4,6 @@ use std::fmt::{Debug, Display};
 use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
-use bincode::{Decode, Encode};
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
 use fugue_bytes::traits::ByteCast;
@@ -465,7 +464,7 @@ impl<'a> LoadableSegment<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct LoadableSegmentMetadata {
     name: String,
     address: Address,

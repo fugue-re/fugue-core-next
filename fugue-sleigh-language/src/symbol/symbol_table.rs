@@ -2,7 +2,6 @@ use std::mem::take;
 
 use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
-
 use ustr::Ustr;
 
 use crate::deserialise::{DeserialiseError, XmlExt};

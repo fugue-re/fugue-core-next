@@ -1,6 +1,5 @@
 use std::ops::RangeInclusive;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use bitflags::bitflags;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -26,30 +25,41 @@ bitflags! {
     }
 }
 
-impl Encode for SegmentProperties {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+#[repr(transparent)]
+pub struct ArchivedSegmentProperties(u8);
+unsafe impl rkyv::Portable for ArchivedSegmentProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedSegmentProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedSegmentProperties
+where
+    u8: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { u8::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for SegmentProperties {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u8::decode(decoder)?;
-        Ok(SegmentProperties::from_bits_truncate(bits))
+impl rkyv::Archive for SegmentProperties {
+    type Archived = ArchivedSegmentProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedSegmentProperties(self.bits()));
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for SegmentProperties {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u8::borrow_decode(decoder)?;
-        Ok(SegmentProperties::from_bits_truncate(bits))
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for SegmentProperties {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SegmentProperties, D>
+    for ArchivedSegmentProperties
+{
+    fn deserialize(&self, _deserializer: &mut D) -> Result<SegmentProperties, D::Error> {
+        Ok(SegmentProperties::from_bits_truncate(self.0))
     }
 }
 
@@ -83,7 +93,7 @@ impl SegmentProperties {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ExternFunctionTemplate {
     bytes: SmallVec<[u8; 16]>,
     context: ContextSet,
@@ -95,35 +105,6 @@ where
 {
     fn from(value: T) -> Self {
         Self::new(value)
-    }
-}
-
-impl Encode for ExternFunctionTemplate {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bytes.len().encode(encoder)?;
-        for b in &self.bytes {
-            b.encode(encoder)?;
-        }
-        self.context.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for ExternFunctionTemplate {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bytes_len = usize::decode(decoder)?;
-        let mut bytes = SmallVec::<[u8; 16]>::with_capacity(bytes_len);
-        for _ in 0..bytes_len {
-            let b = u8::decode(decoder)?;
-            bytes.push(b);
-        }
-        let context = ContextSet::decode(decoder)?;
-        Ok(Self { bytes, context })
     }
 }
 
@@ -156,7 +137,7 @@ impl ExternFunctionTemplate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ExternSegment {
     address: Address,
     alignment: usize,
@@ -170,37 +151,6 @@ pub enum ExternSegmentError {
     AddressOutOfBounds(Address),
     #[error("extern address {0} is misaligned")]
     AddressMisaligned(Address),
-}
-
-impl Encode for ExternSegment {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.address.encode(encoder)?;
-        self.alignment.encode(encoder)?;
-        self.symbols.encode(encoder)?;
-        self.template.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for ExternSegment {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let address = Address::decode(decoder)?;
-        let alignment = usize::decode(decoder)?;
-        let symbols = usize::decode(decoder)?;
-        let template = ExternFunctionTemplate::decode(decoder)?;
-
-        Ok(Self {
-            address,
-            alignment,
-            symbols,
-            template,
-        })
-    }
 }
 
 impl ExternSegment {

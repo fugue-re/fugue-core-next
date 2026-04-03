@@ -27,7 +27,7 @@ compiled = [
 ]
 
 # Features for serialisation
-bincode = ["fugue-lifter-runtime/bincode"]
+rkyv = ["fugue-lifter-runtime/rkyv"]
 serde = ["fugue-lifter-runtime/serde"]
 
 default = ["arm", "aarch64", "bundled", "x86", "x86-64"]

@@ -8,11 +8,10 @@ description = "A binary analysis framework written in Rust"
 homepage = "https://fugue.re"
 
 [features]
-bincode = ["dep:bincode"]
+rkyv = ["dep:rkyv"]
 default = []
 
 [dependencies]
-bincode = { version = "2", features = ["serde"], optional = true }
 bitflags = { version = "2", features = ["serde"] }
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
@@ -21,6 +20,7 @@ fugue-sleigh = { version = "0.3", path = "../fugue-sleigh" }
 ordered-float = { version = "5", features = ["serde"] }
 nom = "8"
 regex = "1"
+rkyv = { version = "0.8", optional = true }
 serde = "1"
 serde-yaml = { version = "0.0.12", package = "serde-saphyr" }
 thiserror = "2"

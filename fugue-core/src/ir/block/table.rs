@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::mem;
-use std::ops::Range;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -18,100 +16,11 @@ use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IndexedCodeBlockTable {
     bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     blocks: Vec<CodeBlock>,
     free_ids: Vec<Id<CodeBlock>>,
-}
-
-impl Encode for IndexedCodeBlockTable {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bounds.len().encode(encoder)?;
-
-        for (space_id, iv_map) in self.bounds.iter() {
-            space_id.encode(encoder)?;
-            iv_map.len().encode(encoder)?;
-
-            for (iv, val) in iv_map.unsorted_iter() {
-                iv.encode(encoder)?;
-                val.encode(encoder)?;
-            }
-        }
-
-        self.blocks.encode(encoder)?;
-        self.free_ids.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for IndexedCodeBlockTable {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let nbounds = usize::decode(decoder)?;
-        let mut bounds = BTreeMap::new();
-
-        for _ in 0..nbounds {
-            let space_id = AddressSpaceId::decode(decoder)?;
-            let nintervals = usize::decode(decoder)?;
-
-            let mut sbounds = IntervalMap::with_capacity(nintervals);
-
-            for _ in 0..nintervals {
-                let iv = Range::<RawAddress>::decode(decoder)?;
-                let val = IdSet::<CodeBlock>::decode(decoder)?;
-                sbounds.force_insert(iv, val);
-            }
-
-            bounds.insert(space_id, sbounds);
-        }
-
-        let blocks = Vec::<CodeBlock>::decode(decoder)?;
-        let free_ids = Vec::<Id<CodeBlock>>::decode(decoder)?;
-
-        Ok(Self {
-            bounds,
-            blocks,
-            free_ids,
-        })
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for IndexedCodeBlockTable {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let nbounds = usize::borrow_decode(decoder)?;
-        let mut bounds = BTreeMap::new();
-
-        for _ in 0..nbounds {
-            let space_id = AddressSpaceId::borrow_decode(decoder)?;
-            let nintervals = usize::borrow_decode(decoder)?;
-
-            let mut sbounds = IntervalMap::with_capacity(nintervals);
-
-            for _ in 0..nintervals {
-                let iv = Range::<RawAddress>::borrow_decode(decoder)?;
-                let val = IdSet::<CodeBlock>::borrow_decode(decoder)?;
-                sbounds.force_insert(iv, val);
-            }
-
-            bounds.insert(space_id, sbounds);
-        }
-
-        let blocks = Vec::<CodeBlock>::borrow_decode(decoder)?;
-        let free_ids = Vec::<Id<CodeBlock>>::borrow_decode(decoder)?;
-
-        Ok(Self {
-            bounds,
-            blocks,
-            free_ids,
-        })
-    }
 }
 
 impl IndexedCodeBlockTable {

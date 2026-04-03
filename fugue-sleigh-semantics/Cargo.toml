@@ -16,7 +16,7 @@ pest = "2.8"
 pest_derive = "2.8"
 smallvec = "1.15"
 thiserror = "2"
-ustr = "1"
+ustr = { version = "1", package = "fugue-ustr" }
 
 [dev-dependencies]
 fugue-lifter = { path = "../fugue-lifter", version = "0.3", features = ["x86-64"], default-features = false }

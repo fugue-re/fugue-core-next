@@ -1,8 +1,9 @@
 use std::fmt::{Debug, LowerHex, UpperHex};
 use std::hash::Hash;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use bytes::{BufMut, BytesMut};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 
 pub mod address;
 pub use address::{
@@ -226,79 +227,87 @@ impl<T> IdSet<T> {
     }
 }
 
-impl<T> Encode for Id<T> {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.id.encode(encoder)?;
+#[repr(transparent)]
+pub struct ArchivedId(rkyv::primitive::ArchivedU32);
+
+unsafe impl rkyv::Portable for ArchivedId {}
+unsafe impl rkyv::traits::NoUndef for ArchivedId {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedId
+where
+    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
+    }
+}
+
+impl<T> Archive for Id<T> {
+    type Archived = ArchivedId;
+    type Resolver = ();
+
+    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+        out.write(ArchivedId(rkyv::primitive::ArchivedU32::from_native(
+            self.id,
+        )));
+    }
+}
+
+impl<S: Fallible + ?Sized, T> Serialize<S> for Id<T> {
+    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<'de, T, C> BorrowDecode<'de, C> for Id<T> {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let id = u32::borrow_decode(decoder)?;
+impl<D: Fallible + ?Sized, T> rkyv::Deserialize<Id<T>, D> for ArchivedId {
+    fn deserialize(&self, _: &mut D) -> Result<Id<T>, D::Error> {
         Ok(Id {
-            id,
+            id: self.0.to_native(),
             _marker: std::marker::PhantomData,
         })
     }
 }
 
-impl<T, C> Decode<C> for Id<T> {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let id = u32::decode(decoder)?;
-        Ok(Id {
-            id,
+#[repr(transparent)]
+pub struct ArchivedIdSet(rkyv::Archived<tinyset::SetU32>);
+
+unsafe impl rkyv::Portable for ArchivedIdSet {}
+unsafe impl rkyv::traits::NoUndef for ArchivedIdSet {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedIdSet
+where
+    rkyv::Archived<tinyset::SetU32>: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { <rkyv::Archived<tinyset::SetU32>>::check_bytes(value.cast(), context) }
+    }
+}
+
+impl<T> Archive for IdSet<T> {
+    type Archived = ArchivedIdSet;
+    type Resolver = <tinyset::SetU32 as Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<tinyset::SetU32>>() };
+        self.set.resolve(resolver, out_inner);
+    }
+}
+
+impl<S: Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized, T> Serialize<S> for IdSet<T> {
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.set.serialize(serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized, T> rkyv::Deserialize<IdSet<T>, D> for ArchivedIdSet
+where
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<IdSet<T>, D::Error> {
+        let set = rkyv::Deserialize::<tinyset::SetU32, D>::deserialize(&self.0, deserializer)?;
+        Ok(IdSet {
+            set,
             _marker: std::marker::PhantomData,
         })
-    }
-}
-
-impl<T> Encode for IdSet<T> {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        // TODO: figure out a more optimal encoding, since this expands the whole
-        // set--defeating the purpose of using SetU32 (at least for storage).
-        self.len().encode(encoder)?;
-        for id in self.iter() {
-            id.encode(encoder)?;
-        }
-        Ok(())
-    }
-}
-
-impl<'de, T, C> BorrowDecode<'de, C> for IdSet<T> {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let len = usize::borrow_decode(decoder)?;
-        let mut set = IdSet::<T>::new();
-        for _ in 0..len {
-            let id = Id::<T>::borrow_decode(decoder)?;
-            set.insert(id);
-        }
-        Ok(set)
-    }
-}
-
-impl<T, C> Decode<C> for IdSet<T> {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let len = usize::decode(decoder)?;
-        let mut set = IdSet::<T>::new();
-        for _ in 0..len {
-            let id = Id::<T>::decode(decoder)?;
-            set.insert(id);
-        }
-        Ok(set)
     }
 }

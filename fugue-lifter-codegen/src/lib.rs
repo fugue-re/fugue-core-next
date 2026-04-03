@@ -93,8 +93,7 @@ pub fn build_with(
         ));
         #[cfg(feature = "bundled-compiler")]
         {
-            let slaf = out_or_temp_dir()
-                .join(sla_file.file_name().expect("sla file name"));
+            let slaf = out_or_temp_dir().join(sla_file.file_name().expect("sla file name"));
             let spec = sla_file.with_extension("");
             let slac = SleighCompiler::new()?
                 .build_with(spec, slaf)?

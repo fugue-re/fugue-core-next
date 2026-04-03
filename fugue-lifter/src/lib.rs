@@ -9,7 +9,6 @@ pub use fugue_lifter_x86::x86_64;
 
 pub mod builder;
 pub use builder::{LifterBuilder, LifterBuilderError};
-
 pub use fugue_lifter_runtime as runtime;
 pub use runtime::context::ContextBitRange;
 pub use runtime::language::{Language, LanguageId, LanguageVariant};

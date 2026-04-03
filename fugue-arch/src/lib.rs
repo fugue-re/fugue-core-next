@@ -1,8 +1,7 @@
-use fugue_bytes::endian::Endian;
-
 use std::fmt;
 use std::str::FromStr;
 
+use fugue_bytes::endian::Endian;
 use thiserror::Error;
 
 #[derive(

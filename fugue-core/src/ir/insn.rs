@@ -1,6 +1,5 @@
 use std::fmt;
 
-use bincode::{BorrowDecode, Decode, Encode};
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
@@ -12,88 +11,24 @@ pub type InsnId = Id<Insn>;
 // TODO: review the choice of Vec
 pub type InsnList = Vec<Insn>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct Insn {
     address: Address,
     properties: InsnProperties,
     operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
     length: u8,
-}
-
-impl Encode for Insn {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.address.encode(encoder)?;
-        self.properties.encode(encoder)?;
-        self.operations.encode(encoder)?;
-
-        self.targets.len().encode(encoder)?;
-        for target in self.targets.iter() {
-            target.encode(encoder)?;
-        }
-
-        self.length.encode(encoder)?;
-        Ok(())
-    }
-}
-
-impl<C> Decode<C> for Insn {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let address = Address::decode(decoder)?;
-        let properties = InsnProperties::decode(decoder)?;
-        let operations = Vec::<PCodeOp>::decode(decoder)?;
-
-        let targets_len = usize::decode(decoder)?;
-        let mut targets = SmallVec::with_capacity(targets_len);
-
-        for _ in 0..targets_len {
-            let target = <(u16, InsnTarget)>::decode(decoder)?;
-            targets.push(target);
-        }
-
-        let length = u8::decode(decoder)?;
-
-        Ok(Self {
-            address,
-            properties,
-            operations,
-            targets,
-            length,
-        })
-    }
-}
-
-impl<'de, C> BorrowDecode<'de, C> for Insn {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let address = Address::borrow_decode(decoder)?;
-        let properties = InsnProperties::borrow_decode(decoder)?;
-        let operations = Vec::<PCodeOp>::borrow_decode(decoder)?;
-
-        let targets_len = usize::borrow_decode(decoder)?;
-        let mut targets = SmallVec::with_capacity(targets_len);
-
-        for _ in 0..targets_len {
-            let target = <(u16, InsnTarget)>::borrow_decode(decoder)?;
-            targets.push(target);
-        }
-
-        let length = u8::borrow_decode(decoder)?;
-
-        Ok(Self {
-            address,
-            properties,
-            operations,
-            targets,
-            length,
-        })
-    }
 }
 
 impl Insn {
@@ -421,30 +356,43 @@ impl Default for InsnProperties {
     }
 }
 
-impl Encode for InsnProperties {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.bits().encode(encoder)
+#[repr(transparent)]
+pub struct ArchivedInsnProperties(rkyv::primitive::ArchivedU16);
+unsafe impl rkyv::Portable for ArchivedInsnProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedInsnProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedInsnProperties
+where
+    rkyv::primitive::ArchivedU16: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { rkyv::primitive::ArchivedU16::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for InsnProperties {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u16::decode(decoder)?;
-        Ok(InsnProperties::from_bits_truncate(bits))
+impl rkyv::Archive for InsnProperties {
+    type Archived = ArchivedInsnProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedInsnProperties(
+            rkyv::primitive::ArchivedU16::from_native(self.bits()),
+        ));
     }
 }
 
-impl<'de, C> BorrowDecode<'de, C> for InsnProperties {
-    fn borrow_decode<D: bincode::de::BorrowDecoder<'de>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let bits = u16::borrow_decode(decoder)?;
-        Ok(InsnProperties::from_bits_truncate(bits))
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for InsnProperties {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<InsnProperties, D>
+    for ArchivedInsnProperties
+{
+    fn deserialize(&self, _deserializer: &mut D) -> Result<InsnProperties, D::Error> {
+        Ok(InsnProperties::from_bits_truncate(self.0.to_native()))
     }
 }
 
@@ -468,7 +416,19 @@ impl InsnProperties {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum InsnTargetKind {
     Local,
     Global,
@@ -484,7 +444,18 @@ impl InsnTargetKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Decode, Encode)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum InsnTarget {
     IntraIns(Location, bool),
     IntraBlk(Location, bool),

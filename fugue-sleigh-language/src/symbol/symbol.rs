@@ -1,6 +1,5 @@
 use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::{AddressSpaceRef, Decoder};
-
 use ustr::Ustr;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
@@ -347,9 +346,8 @@ impl SymbolBuilder {
                     .max_value()
                     .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
-                let table_is_filled = min >= 0
-                    && max < value_table.len() as i64
-                    && !value_table.contains(&0xbadbeef);
+                let table_is_filled =
+                    min >= 0 && max < value_table.len() as i64 && !value_table.contains(&0xbadbeef);
 
                 Symbol::ValueMap {
                     id: self.id,
@@ -668,11 +666,9 @@ impl SymbolBuilder {
                     ));
                 }
                 let pattern_value = PatternExpression::from_xml(
-                    input
-                        .children().find(xml::Node::is_element)
-                        .ok_or({
-                            DeserialiseError::Invariant("missing pattern expression for value")
-                        })?,
+                    input.children().find(xml::Node::is_element).ok_or({
+                        DeserialiseError::Invariant("missing pattern expression for value")
+                    })?,
                 )?;
 
                 Symbol::Value {
@@ -689,10 +685,9 @@ impl SymbolBuilder {
                     ));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
-                let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or({
-                        DeserialiseError::Invariant("missing pattern expression for name")
-                    })?)?;
+                let pattern_value = PatternExpression::from_xml(children.next().ok_or({
+                    DeserialiseError::Invariant("missing pattern expression for name")
+                })?)?;
 
                 let value_table = children
                     .map(|v| v.attribute_int("val"))
@@ -705,9 +700,8 @@ impl SymbolBuilder {
                     .max_value()
                     .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
 
-                let table_is_filled = min >= 0
-                    && max < value_table.len() as i64
-                    && !value_table.contains(&0xbadbeef);
+                let table_is_filled =
+                    min >= 0 && max < value_table.len() as i64 && !value_table.contains(&0xbadbeef);
 
                 Symbol::ValueMap {
                     id: self.id,
@@ -725,10 +719,9 @@ impl SymbolBuilder {
                     ));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
-                let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or({
-                        DeserialiseError::Invariant("missing pattern expression for value")
-                    })?)?;
+                let pattern_value = PatternExpression::from_xml(children.next().ok_or({
+                    DeserialiseError::Invariant("missing pattern expression for value")
+                })?)?;
 
                 let name_table = children
                     .map(|v| {
@@ -795,11 +788,9 @@ impl SymbolBuilder {
                 }
 
                 let pattern_value = PatternExpression::from_xml(
-                    input
-                        .children().find(xml::Node::is_element)
-                        .ok_or({
-                            DeserialiseError::Invariant("missing pattern expression for context")
-                        })?,
+                    input.children().find(xml::Node::is_element).ok_or({
+                        DeserialiseError::Invariant("missing pattern expression for context")
+                    })?,
                 )?;
 
                 let varnode_id = input.attribute_int("varnode")?;
@@ -825,10 +816,9 @@ impl SymbolBuilder {
                     ));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
-                let pattern_value =
-                    PatternExpression::from_xml(children.next().ok_or({
-                        DeserialiseError::Invariant("missing pattern expression for varnodelist")
-                    })?)?;
+                let pattern_value = PatternExpression::from_xml(children.next().ok_or({
+                    DeserialiseError::Invariant("missing pattern expression for varnodelist")
+                })?)?;
 
                 let varnode_table = children
                     .map(|input| {
@@ -892,10 +882,9 @@ impl SymbolBuilder {
                 };
 
                 let mut children = input.children().filter(xml::Node::is_element);
-                let local_expr =
-                    PatternExpression::from_xml(children.next().ok_or({
-                        DeserialiseError::Invariant("missing local expression for operand")
-                    })?)?;
+                let local_expr = PatternExpression::from_xml(children.next().ok_or({
+                    DeserialiseError::Invariant("missing local expression for operand")
+                })?)?;
 
                 let def_expr = children
                     .next()

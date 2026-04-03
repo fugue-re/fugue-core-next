@@ -7,7 +7,6 @@ use fugue_sleigh_language::symbol::sub_table::{
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
 use fugue_sleigh_language::Language;
-
 use indexmap::IndexMap;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens, TokenStreamExt};
@@ -56,7 +55,10 @@ impl<'a> Tables<'a> {
         u16::try_from(self.symbol_id_mapping[&sym_id]).expect("symbol id fits in u16")
     }
 
-    pub(crate) fn extend_pattern_ops(&mut self, iter: impl ExactSizeIterator<Item = TokenStream>) -> (u16, u16) {
+    pub(crate) fn extend_pattern_ops(
+        &mut self,
+        iter: impl ExactSizeIterator<Item = TokenStream>,
+    ) -> (u16, u16) {
         let spos = self.pattern_ops.len();
         self.pattern_ops.extend(iter);
         let epos = self.pattern_ops.len();

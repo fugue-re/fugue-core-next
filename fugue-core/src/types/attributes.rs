@@ -1,7 +1,8 @@
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 
-use bincode::{Decode, Encode};
+use rkyv::rancor::Fallible;
+use rkyv::{Archive, Place, Serialize};
 use rustc_hash::FxHashMap;
 
 pub extern crate serde_json;
@@ -19,145 +20,129 @@ pub const ATTRIBUTE_IMAGE_BASE: &str = "project.image_base";
 #[serde(transparent)]
 pub struct AttributeMap(FxHashMap<String, serde_json::Value>);
 
-struct AttributeValue<T>(T);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Decode, Encode)]
-#[repr(u8)]
-enum AttributeKind {
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(serialize_bounds(
+    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+    <__S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
+))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
+#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
+pub enum JsonValue {
     Null,
-    Bool,
-    Signed,
-    Unsigned,
-    Float,
-    String,
-    Array,
-    Object,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    String(String),
+    Array(#[rkyv(omit_bounds)] Vec<JsonValue>),
+    Object(#[rkyv(omit_bounds)] Vec<(String, JsonValue)>),
 }
 
-impl Encode for AttributeValue<&'_ serde_json::Value> {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        use serde_json::Value;
-
-        match self.0 {
-            Value::Null => {
-                AttributeKind::Null.encode(encoder)?;
-            }
-            Value::Bool(b) => {
-                AttributeKind::Bool.encode(encoder)?;
-                b.encode(encoder)?;
-            }
-            Value::Number(num) => {
-                if num.is_i64() {
-                    AttributeKind::Signed.encode(encoder)?;
-                    num.as_i64().unwrap().encode(encoder)?
-                } else if num.is_u64() {
-                    AttributeKind::Unsigned.encode(encoder)?;
-                    num.as_u64().unwrap().encode(encoder)?
+impl From<serde_json::Value> for JsonValue {
+    fn from(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => JsonValue::Null,
+            serde_json::Value::Bool(b) => JsonValue::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    JsonValue::I64(i)
+                } else if let Some(u) = n.as_u64() {
+                    JsonValue::U64(u)
                 } else {
-                    AttributeKind::Float.encode(encoder)?;
-                    num.as_f64().unwrap().encode(encoder)?
+                    JsonValue::F64(n.as_f64().unwrap_or(0.0))
                 }
             }
-            Value::String(s) => {
-                AttributeKind::String.encode(encoder)?;
-                s.encode(encoder)?
+            serde_json::Value::String(s) => JsonValue::String(s),
+            serde_json::Value::Array(a) => {
+                JsonValue::Array(a.into_iter().map(Into::into).collect())
             }
-            Value::Array(arr) => {
-                AttributeKind::Array.encode(encoder)?;
-                arr.len().encode(encoder)?;
-                for item in arr.iter() {
-                    AttributeValue(item).encode(encoder)?;
-                }
-            }
-            Value::Object(obj) => {
-                AttributeKind::Object.encode(encoder)?;
-                obj.len().encode(encoder)?;
-                for (key, value) in obj.iter() {
-                    key.encode(encoder)?;
-                    AttributeValue(value).encode(encoder)?;
-                }
+            serde_json::Value::Object(o) => {
+                JsonValue::Object(o.into_iter().map(|(k, v)| (k, v.into())).collect())
             }
         }
-
-        Ok(())
     }
 }
 
-impl<C> Decode<C> for AttributeValue<serde_json::Value> {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        use serde_json::value::Number;
-        use serde_json::{Map, Value};
-
-        let kind = AttributeKind::decode(decoder)?;
-        let value = match kind {
-            AttributeKind::Null => Value::Null,
-            AttributeKind::Bool => Value::Bool(bool::decode(decoder)?),
-            AttributeKind::Signed => Value::Number(Number::from(i64::decode(decoder)?)),
-            AttributeKind::Unsigned => Value::Number(Number::from(u64::decode(decoder)?)),
-            AttributeKind::Float => {
-                serde_json::Value::Number(Number::from_f64(f64::decode(decoder)?).unwrap())
+impl From<JsonValue> for serde_json::Value {
+    fn from(v: JsonValue) -> Self {
+        match v {
+            JsonValue::Null => serde_json::Value::Null,
+            JsonValue::Bool(b) => serde_json::Value::Bool(b),
+            JsonValue::I64(i) => serde_json::Value::Number(i.into()),
+            JsonValue::U64(u) => serde_json::Value::Number(u.into()),
+            JsonValue::F64(f) => serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            JsonValue::String(s) => serde_json::Value::String(s),
+            JsonValue::Array(a) => {
+                serde_json::Value::Array(a.into_iter().map(Into::into).collect())
             }
-            AttributeKind::String => Value::String(String::decode(decoder)?),
-            AttributeKind::Array => {
-                let len = usize::decode(decoder)?;
-                let mut arr = Vec::with_capacity(len);
-                for _ in 0..len {
-                    arr.push(AttributeValue::<Value>::decode(decoder)?.0);
-                }
-                Value::Array(arr)
+            JsonValue::Object(o) => {
+                serde_json::Value::Object(o.into_iter().map(|(k, v)| (k, v.into())).collect())
             }
-            AttributeKind::Object => {
-                let len = usize::decode(decoder)?;
-                let mut obj = Map::default();
-                for _ in 0..len {
-                    let key = String::decode(decoder)?;
-                    let value = AttributeValue::<Value>::decode(decoder)?.0;
-                    obj.insert(key, value);
-                }
-                Value::Object(obj)
-            }
-        };
-
-        Ok(Self(value))
+        }
     }
 }
 
-impl Encode for AttributeMap {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        self.0.len().encode(encoder)?;
-        for (key, value) in &self.0 {
-            key.encode(encoder)?;
-            AttributeValue(value).encode(encoder)?;
-        }
+type AttributeMapInner = Vec<(String, JsonValue)>;
 
-        Ok(())
+#[repr(transparent)]
+pub struct ArchivedAttributeMap(rkyv::Archived<AttributeMapInner>);
+
+unsafe impl rkyv::Portable for ArchivedAttributeMap {}
+unsafe impl rkyv::traits::NoUndef for ArchivedAttributeMap {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedAttributeMap
+where
+    rkyv::Archived<AttributeMapInner>: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { <rkyv::Archived<AttributeMapInner>>::check_bytes(value.cast(), context) }
     }
 }
 
-impl<C> Decode<C> for AttributeMap {
-    fn decode<D: bincode::de::Decoder>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let len = usize::decode(decoder)?;
+impl Archive for AttributeMap {
+    type Archived = ArchivedAttributeMap;
+    type Resolver = <AttributeMapInner as Archive>::Resolver;
 
-        let mut map = FxHashMap::default();
-        map.reserve(len);
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<AttributeMapInner>>() };
+        let entries = self
+            .0
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone().into()))
+            .collect::<AttributeMapInner>();
+        entries.resolve(resolver, out_inner);
+    }
+}
 
-        for _ in 0..len {
-            let key = String::decode(decoder)?;
-            let AttributeValue(value) = AttributeValue::<serde_json::Value>::decode(decoder)?;
-            map.insert(key, value);
-        }
+impl<
+    S: Fallible<Error: rkyv::rancor::Source> + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer,
+> Serialize<S> for AttributeMap
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        let entries = self
+            .0
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone().into()))
+            .collect::<AttributeMapInner>();
+        entries.serialize(serializer)
+    }
+}
 
-        Ok(Self(map))
+impl<D: Fallible + ?Sized> rkyv::Deserialize<AttributeMap, D> for ArchivedAttributeMap
+where
+    D::Error: rkyv::rancor::Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<AttributeMap, D::Error> {
+        let entries =
+            rkyv::Deserialize::<AttributeMapInner, D>::deserialize(&self.0, deserializer)?;
+        let map = entries
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect::<FxHashMap<String, serde_json::Value>>();
+        Ok(AttributeMap(map))
     }
 }
 
@@ -250,14 +235,11 @@ macro_rules! attributes {
     };
 }
 
-// Helper macro to handle different value types
 #[macro_export]
 macro_rules! attributes_value {
-    // If it's a braced block, treat as JSON
     ({ $($json:tt)* }) => {
         $crate::types::attributes::serde_json::json!({ $($json)* })
     };
-    // Otherwise, use the value as-is
     ($value:expr) => {
         $value
     };

@@ -5,12 +5,10 @@ use std::str::FromStr;
 
 use fugue_arch::ArchitectureDef;
 use fugue_bytes::Endian;
-
 use serde::de::value::StringDeserializer;
 use serde::de::{Error, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use thiserror::Error;
 
 #[derive(Clone, Deserialize, Serialize)]

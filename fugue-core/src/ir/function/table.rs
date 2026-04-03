@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use bincode::{Decode, Encode};
 use thiserror::Error;
 
 use crate::ir::traits::{
@@ -25,7 +24,7 @@ use crate::storage::{EntityStorage, EntityStorageError};
 // changes until the project is explicitly persisted or the owning project is
 // dropped.
 //
-#[derive(Debug, Clone, Default, Decode, Encode)]
+#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IndexedFunctionTable {
     addresses: BTreeMap<Address, Id<Function>>,
     functions: Vec<Function>,

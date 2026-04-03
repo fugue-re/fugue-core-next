@@ -1,9 +1,8 @@
-use std::array;
 use std::cell::RefCell;
 use std::collections::BTreeMap as Map;
-use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
+use std::{array, mem};
 
 use itertools::Itertools;
 
@@ -117,7 +116,14 @@ impl ContextPostAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(
+    feature = "rkyv",
+    rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextBitRange {
     word: usize,
@@ -198,7 +204,10 @@ impl ContextBitRange {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackedContext {
     location: Varnode,
@@ -216,7 +225,10 @@ impl TrackedContext {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(transparent)]
 pub struct TrackedSet(Vec<TrackedContext>);
@@ -242,7 +254,10 @@ impl DerefMut for TrackedSet {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FreeArray {
     values: Vec<u32>,
@@ -270,7 +285,10 @@ pub const CONTEXT_CACHE_BITS: usize = 8;
 pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCacheEntry {
     address: u64,
@@ -305,7 +323,10 @@ impl ContextCacheEntry {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCache {
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
@@ -369,12 +390,16 @@ impl ContextCache {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextDatabase {
     size: usize,
     variables: Map<String, ContextBitRange>,
     database: PartMap<u64, FreeArray>,
+    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
     database_cache: Rc<RefCell<ContextCache>>,
     trackbase: PartMap<u64, TrackedSet>,
     address_limit: u64,

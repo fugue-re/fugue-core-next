@@ -11,10 +11,8 @@ use nom::error::{Error, ErrorKind};
 use nom::multi::fold_many1;
 use nom::sequence::delimited;
 use nom::{Err, Finish, IResult, Parser};
-
 use regex::bytes::RegexBuilder;
 pub use regex::bytes::{Match, Regex};
-
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

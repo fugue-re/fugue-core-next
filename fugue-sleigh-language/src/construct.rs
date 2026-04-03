@@ -227,21 +227,21 @@ impl HandleTpl {
             size: children
                 .next()
                 .ok_or(DeserialiseError::Invariant("size missing for HandleTpl"))??,
-            ptr_space: children
-                .next()
-                .ok_or(DeserialiseError::Invariant("ptr_space missing for HandleTpl"))??,
-            ptr_offset: children
-                .next()
-                .ok_or(DeserialiseError::Invariant("ptr_offset missing for HandleTpl"))??,
-            ptr_size: children
-                .next()
-                .ok_or(DeserialiseError::Invariant("ptr_size missing for HandleTpl"))??,
-            tmp_space: children
-                .next()
-                .ok_or(DeserialiseError::Invariant("tmp_space missing for HandleTpl"))??,
-            tmp_offset: children
-                .next()
-                .ok_or(DeserialiseError::Invariant("tmp_offset missing for HandleTpl"))??,
+            ptr_space: children.next().ok_or(DeserialiseError::Invariant(
+                "ptr_space missing for HandleTpl",
+            ))??,
+            ptr_offset: children.next().ok_or(DeserialiseError::Invariant(
+                "ptr_offset missing for HandleTpl",
+            ))??,
+            ptr_size: children.next().ok_or(DeserialiseError::Invariant(
+                "ptr_size missing for HandleTpl",
+            ))??,
+            tmp_space: children.next().ok_or(DeserialiseError::Invariant(
+                "tmp_space missing for HandleTpl",
+            ))??,
+            tmp_offset: children.next().ok_or(DeserialiseError::Invariant(
+                "tmp_offset missing for HandleTpl",
+            ))??,
         })
     }
 }
@@ -501,7 +501,9 @@ impl ConstructTpl {
                 }
                 .transpose()
             })
-            .ok_or(DeserialiseError::Invariant("result missing for ConstructTpl"))??;
+            .ok_or(DeserialiseError::Invariant(
+                "result missing for ConstructTpl",
+            ))??;
 
         let operations = children
             .map(|o| OpTpl::from_xml(o, spaces))

@@ -1,8 +1,3 @@
-use fugue_bytes::Order;
-
-use num_integer::{ExtendedGcd, Integer};
-use num_traits::{AsPrimitive, ToPrimitive};
-
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
@@ -11,6 +6,10 @@ use std::ops::{
     Mul, MulAssign, Neg, Not, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub, SubAssign,
 };
 use std::str::FromStr;
+
+use fugue_bytes::Order;
+use num_integer::{ExtendedGcd, Integer};
+use num_traits::{AsPrimitive, ToPrimitive};
 
 use crate::error::{ParseError, TryFromBitVecError};
 
@@ -1543,11 +1542,7 @@ impl Shr<u32> for BitVec {
             }
         } else if self.is_negative() {
             // perform ASR
-            let mask = self.mask_bits()
-                ^ 1u64
-                    .checked_shl(size - rhs)
-                    .unwrap_or(0)
-                    .wrapping_sub(1);
+            let mask = self.mask_bits() ^ 1u64.checked_shl(size - rhs).unwrap_or(0).wrapping_sub(1);
             Self::from_uint_with(
                 self.0.checked_shr(rhs).unwrap_or(0) | mask,
                 self.mask_bits(),
@@ -1571,11 +1566,7 @@ impl Shr<u32> for &BitVec {
             }
         } else if self.is_negative() {
             // perform ASR
-            let mask = self.mask_bits()
-                ^ 1u64
-                    .checked_shl(size - rhs)
-                    .unwrap_or(0)
-                    .wrapping_sub(1);
+            let mask = self.mask_bits() ^ 1u64.checked_shl(size - rhs).unwrap_or(0).wrapping_sub(1);
             BitVec::from_uint_with(
                 self.0.checked_shr(rhs).unwrap_or(0) | mask,
                 self.mask_bits(),
@@ -1598,11 +1589,7 @@ impl ShrAssign<u32> for BitVec {
             }
         } else if self.is_negative() {
             // perform ASR
-            let mask = self.mask_bits()
-                ^ 1u64
-                    .checked_shl(size - rhs)
-                    .unwrap_or(0)
-                    .wrapping_sub(1);
+            let mask = self.mask_bits() ^ 1u64.checked_shl(size - rhs).unwrap_or(0).wrapping_sub(1);
             self.0 = self.0.checked_shr(rhs).unwrap_or(0) | mask;
             self.mask_assign();
         } else {
