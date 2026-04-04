@@ -11,7 +11,8 @@ use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
 };
-use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
+use crate::storage::segments::space::AddressSpaceId;
+use crate::types::attributes::{ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]
@@ -27,6 +28,7 @@ pub struct Object<'a> {
     arch: Arch,
     metadata: LoadableMetadata,
     attributes: AttributeMap,
+    base: Address,
 }
 
 pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
@@ -90,10 +92,17 @@ impl<'a> Object<'a> {
 
         let mut attributes = attributes.into();
 
+        let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+
+        let base = attributes
+            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .map(|addr| Address::in_space_or_default(addr, target_space))
+            .unwrap_or_else(|| Address::in_space_or_default(0u64, target_space));
+
         let entry = view.entry();
 
         if entry != 0 {
-            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::in_default_space(entry));
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::new(base.space(), entry));
         }
 
         Ok(Self {
@@ -101,6 +110,7 @@ impl<'a> Object<'a> {
             arch,
             metadata,
             attributes,
+            base,
         })
     }
 
@@ -164,16 +174,17 @@ impl Loadable for Object<'_> {
         &'a self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
         let view = self.object.borrow_view();
+        let space = self.base.space();
 
         // NOTE: we need to apply relocations
         // NOTE: we need to make a mapping of externs
 
-        fallible_iterator::convert(view.segments().filter_map(|segm| {
+        fallible_iterator::convert(view.segments().filter_map(move |segm| {
             if segm.size() == 0 {
                 return None;
             }
 
-            let address = Address::in_default_space(segm.address());
+            let address = Address::new(space, segm.address());
             let data = segm.data().unwrap_or_default();
 
             let bytes = if data.len() as u64 != segm.size() {
@@ -202,6 +213,7 @@ impl Loadable for Object<'_> {
     }
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
+        let space = self.base.space();
         let mut start = None::<Address>;
         let mut end = None::<Address>;
 
@@ -210,7 +222,7 @@ impl Loadable for Object<'_> {
                 continue;
             }
 
-            let nstart = Address::in_default_space(segm.address());
+            let nstart = Address::new(space, segm.address());
             let nend = nstart + segm.size();
 
             start = Some(start.map_or(nstart, |start| start.min(nstart)));

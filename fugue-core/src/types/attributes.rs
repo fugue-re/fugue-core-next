@@ -14,6 +14,7 @@ pub const ATTRIBUTE_FILE_PATH: &str = "project.input_path";
 pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
 pub const ATTRIBUTE_ENTRY_POINT: &str = "project.entry_point";
 pub const ATTRIBUTE_IMAGE_BASE: &str = "project.image_base";
+pub const ATTRIBUTE_ADDRESS_SPACE: &str = "loader.address_space";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(transparent)]
