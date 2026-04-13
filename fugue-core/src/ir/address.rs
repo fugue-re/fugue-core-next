@@ -977,6 +977,16 @@ impl Address {
         }
     }
 
+    pub fn in_space_or_default(
+        address: impl Into<RawAddress>,
+        space: impl Into<Option<AddressSpaceId>>,
+    ) -> Self {
+        match space.into() {
+            Some(space_id) => Self::new(space_id, address),
+            None => Self::in_default_space(address),
+        }
+    }
+
     pub fn address(&self) -> RawAddress {
         self.address
     }
