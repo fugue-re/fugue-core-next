@@ -59,10 +59,16 @@ fn generate_from_storage_fn(ty: &impl quote::ToTokens) -> TokenStream2 {
 }
 
 fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool) -> TokenStream2 {
-    let from_storage_fn = if persistent {
-        generate_from_storage_fn(ty)
+    let (from_storage_fn, persistence) = if persistent {
+        (
+            generate_from_storage_fn(ty),
+            quote! { ::fugue_core::storage::PERSISTENT },
+        )
     } else {
-        quote! { None }
+        (
+            quote! { None },
+            quote! { ::fugue_core::storage::TRANSIENT },
+        )
     };
 
     quote! {
@@ -79,11 +85,16 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
             )
         }
 
-        impl ::fugue_core::storage::segments::provider::PersistableSegmentStorageProvider for #ty {
+        impl ::fugue_core::storage::segments::provider::SegmentStorageProviderDescriptor for #ty {
             const STABLE_TAG: &'static str = #tag;
+            const PERSISTENCE: ::fugue_core::storage::StoragePersistence = #persistence;
 
             fn stable_tag(&self) -> &'static str {
                 Self::STABLE_TAG
+            }
+
+            fn persistence(&self) -> ::fugue_core::storage::StoragePersistence {
+                Self::PERSISTENCE
             }
         }
     }

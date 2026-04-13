@@ -12,6 +12,8 @@ use thiserror::Error;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{Loadable, LoaderError};
+use crate::storage::PERSISTENT;
+use crate::storage::segments::provider::SegmentStorageProviderDescriptor;
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
@@ -154,9 +156,11 @@ impl SegmentStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
-        S: SegmentStorageProviderFromLoadable + PersistableSegmentStorageProvider + 'static,
+        S: SegmentStorageProviderFromLoadable + 'static,
     {
-        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            && S::PERSISTENCE == PERSISTENT
+        {
             let meta_path = project_path.join(SEGMENT_STORAGE_FILE);
 
             if meta_path.exists() {
@@ -224,7 +228,9 @@ impl SegmentStorage {
             storage.add_mapping_to_space_top(space_id, mapping_id)?;
         }
 
-        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            && storage.is_persistable()
+        {
             storage.persist_storage(&project_path)?;
         }
 
@@ -318,7 +324,25 @@ impl SegmentStorage {
         Ok(storage)
     }
 
+    fn is_persistable(&self) -> bool {
+        self.providers.values().all(|p| {
+            SegmentStorageProviderRegistry::get()
+                .get_by_tag(p.stable_tag())
+                .is_some_and(|reg| reg.is_persistable())
+        })
+    }
+
+    fn is_transient(&self) -> bool {
+        !self.is_persistable()
+    }
+
     fn persist_storage(&self, path: impl AsRef<Path>) -> Result<(), SegmentStorageError> {
+        if self.is_transient() {
+            return Err(SegmentStorageError::backing_with(
+                "storage contains non-persistable providers",
+            ));
+        }
+
         let meta_path = path.as_ref().join(SEGMENT_STORAGE_FILE);
 
         tracing::debug!("persisting segment storage to {}", meta_path.display());
@@ -326,11 +350,6 @@ impl SegmentStorage {
         let providers = self
             .providers
             .values()
-            .filter(|p| {
-                SegmentStorageProviderRegistry::get()
-                    .get_by_tag(p.stable_tag())
-                    .is_some_and(|reg| reg.is_persistable())
-            })
             .map(|p| {
                 tracing::debug!(
                     "persisting segment storage provider `{}` with tag `{}`",
@@ -437,7 +456,7 @@ impl SegmentStorage {
         permissions: SegmentProperties,
     ) -> SegmentStorageProviderId
     where
-        S: PersistableSegmentStorageProvider + 'static,
+        S: SegmentStorageProviderDescriptor + 'static,
     {
         let id = self.next_provider_id;
         self.next_provider_id += 1;
