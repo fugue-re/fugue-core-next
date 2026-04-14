@@ -4,6 +4,7 @@ use std::mem;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
+use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
 pub type EntityKeyId = u8;
@@ -98,13 +99,13 @@ impl EntityKey for Address {
         if buf.len() < 9 {
             return None;
         }
-        let space = buf[0];
+        let space = AddressSpaceId::from(buf[0]);
         let address = u64::from_be_bytes(buf[1..9].try_into().ok()?);
         Some(Address::new(space, address))
     }
 
     fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.space());
+        buf.put_u8(self.space().index() as u8);
         buf.put_u64(self.offset());
     }
 }

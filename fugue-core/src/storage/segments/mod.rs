@@ -12,6 +12,8 @@ use thiserror::Error;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{Loadable, LoaderError};
+use crate::storage::PERSISTENT;
+use crate::storage::segments::provider::SegmentStorageProviderDescriptor;
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
@@ -27,10 +29,10 @@ use mapping::{
 };
 use provider::SegmentStorageProviderRegistry;
 pub use provider::{
-    InMemorySegmentStorage, MemoryMappedSegmentStorage, PersistableSegmentStorageProvider,
-    SegmentStorageDescriptor, SegmentStorageProvider, SegmentStorageProviderFromLoadable,
+    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
+    SegmentStorageProvider, SegmentStorageProviderFromLoadable,
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
-    SegmentStorageProviderId,
+    SegmentStorageProviderId, PersistableSegmentStorageProvider,
 };
 use space::{AddressSpace, AddressSpaceId};
 use view::SegmentMappingView;
@@ -38,7 +40,7 @@ use view::SegmentMappingView;
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
-pub const DEFAULT_SPACE_ID: AddressSpaceId = 0;
+pub const DEFAULT_SPACE_ID: AddressSpaceId = AddressSpaceId::new(0);
 const DEFAULT_FILL_BYTE: u8 = 0;
 const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = 0;
 
@@ -58,6 +60,8 @@ pub enum SegmentStorageError {
     Loader(#[from] LoaderError),
     #[error("failed to load project data from `{0}`: {1}")]
     ProjectData(PathBuf, io::ErrorKind),
+    #[error("address space overflow: {0}")]
+    AddressSpaceOverflow(#[from] space::AddressSpaceError),
 }
 
 impl SegmentStorageError {
@@ -143,7 +147,7 @@ impl SegmentStorage {
             fill_byte: DEFAULT_FILL_BYTE,
             next_provider_id: DEFAULT_PROVIDER_ID,
             next_mapping_id: 0,
-            next_space_id: 1,
+            next_space_id: AddressSpaceId::new(1),
         }
     }
 
@@ -152,9 +156,11 @@ impl SegmentStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
-        S: SegmentStorageProviderFromLoadable + PersistableSegmentStorageProvider + 'static,
+        S: SegmentStorageProviderFromLoadable + 'static,
     {
-        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            && S::PERSISTENCE == PERSISTENT
+        {
             let meta_path = project_path.join(SEGMENT_STORAGE_FILE);
 
             if meta_path.exists() {
@@ -175,7 +181,7 @@ impl SegmentStorage {
             let space_id = if space_idx == 0 {
                 DEFAULT_SPACE_ID
             } else {
-                storage.create_space()
+                storage.create_space()?
             };
 
             let provider = S::from_segment_range(range.start, range.end, attributes)?;
@@ -197,7 +203,7 @@ impl SegmentStorage {
                 .copied()
                 .unwrap_or((DEFAULT_SPACE_ID, DEFAULT_PROVIDER_ID));
 
-            let range = &bounds[segm.space() as usize];
+            let range = &bounds[segm.space().index()];
             let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
 
             tracing::debug!(
@@ -222,7 +228,9 @@ impl SegmentStorage {
             storage.add_mapping_to_space_top(space_id, mapping_id)?;
         }
 
-        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
+        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            && storage.is_persistable()
+        {
             storage.persist_storage(&project_path)?;
         }
 
@@ -281,7 +289,7 @@ impl SegmentStorage {
 
         for space_meta in &metadata.spaces {
             if space_meta.id != DEFAULT_SPACE_ID {
-                let new_id = storage.create_space();
+                let new_id = storage.create_space()?;
                 space_map.insert(space_meta.id, new_id);
             }
         }
@@ -316,7 +324,25 @@ impl SegmentStorage {
         Ok(storage)
     }
 
+    fn is_persistable(&self) -> bool {
+        self.providers.values().all(|p| {
+            SegmentStorageProviderRegistry::get()
+                .get_by_tag(p.stable_tag())
+                .is_some_and(|reg| reg.is_persistable())
+        })
+    }
+
+    fn is_transient(&self) -> bool {
+        !self.is_persistable()
+    }
+
     fn persist_storage(&self, path: impl AsRef<Path>) -> Result<(), SegmentStorageError> {
+        if self.is_transient() {
+            return Err(SegmentStorageError::backing_with(
+                "storage contains non-persistable providers",
+            ));
+        }
+
         let meta_path = path.as_ref().join(SEGMENT_STORAGE_FILE);
 
         tracing::debug!("persisting segment storage to {}", meta_path.display());
@@ -324,11 +350,6 @@ impl SegmentStorage {
         let providers = self
             .providers
             .values()
-            .filter(|p| {
-                SegmentStorageProviderRegistry::get()
-                    .get_by_tag(p.stable_tag())
-                    .is_some_and(|reg| reg.is_persistable())
-            })
             .map(|p| {
                 tracing::debug!(
                     "persisting segment storage provider `{}` with tag `{}`",
@@ -435,7 +456,7 @@ impl SegmentStorage {
         permissions: SegmentProperties,
     ) -> SegmentStorageProviderId
     where
-        S: PersistableSegmentStorageProvider + 'static,
+        S: SegmentStorageProviderDescriptor + 'static,
     {
         let id = self.next_provider_id;
         self.next_provider_id += 1;
@@ -650,11 +671,11 @@ impl SegmentStorage {
         Ok(())
     }
 
-    pub fn create_space(&mut self) -> AddressSpaceId {
+    pub fn create_space(&mut self) -> Result<AddressSpaceId, SegmentStorageError> {
         let id = self.next_space_id;
-        self.next_space_id += 1;
+        self.next_space_id = AddressSpaceId::try_from(id.index() + 1)?;
         self.spaces.insert(id, AddressSpace::new(id));
-        id
+        Ok(id)
     }
 
     pub fn add_mapping_to_space_top(

@@ -1,4 +1,3 @@
-use std::any::TypeId;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -22,7 +21,6 @@ type FromStorageFn = fn(
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
 pub struct SegmentStorageProviderEntry {
-    type_id: TypeId,
     stable_tag: &'static str,
     from_segment_range: FromSegmentRangeFn,
     from_storage: Option<FromStorageFn>,
@@ -43,11 +41,14 @@ impl SegmentStorageProviderEntry {
         from_storage: Option<FromStorageFn>,
     ) -> Self {
         Self {
-            type_id: TypeId::of::<T>(),
             stable_tag,
             from_segment_range,
             from_storage,
         }
+    }
+
+    pub fn stable_tag(&self) -> &'static str {
+        self.stable_tag
     }
 
     pub fn is_persistable(&self) -> bool {
@@ -58,29 +59,22 @@ impl SegmentStorageProviderEntry {
 inventory::collect!(SegmentStorageProviderEntry);
 
 pub struct SegmentStorageProviderRegistry {
-    by_type_id: FxHashMap<TypeId, &'static SegmentStorageProviderEntry>,
     by_tag: FxHashMap<&'static str, &'static SegmentStorageProviderEntry>,
 }
 
 impl SegmentStorageProviderRegistry {
     fn new() -> Self {
-        let mut by_type_id = FxHashMap::default();
         let mut by_tag = FxHashMap::default();
 
         for entry in inventory::iter::<SegmentStorageProviderEntry> {
-            by_type_id.insert(entry.type_id, entry);
             by_tag.insert(entry.stable_tag, entry);
         }
 
-        Self { by_type_id, by_tag }
+        Self { by_tag }
     }
 
     pub fn get() -> &'static Self {
         REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
-    }
-
-    pub fn get_by_type_id(&self, id: TypeId) -> Option<&SegmentStorageProviderEntry> {
-        self.by_type_id.get(&id).copied()
     }
 
     pub fn get_by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {

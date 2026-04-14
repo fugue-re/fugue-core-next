@@ -29,7 +29,8 @@ use crate::loader::{
     LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
 use crate::storage::ProjectStorageProvider;
-use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
+use crate::storage::segments::space::AddressSpaceId;
+use crate::types::attributes::{ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -111,9 +112,12 @@ impl<'a> Elf<'a> {
 
         let attributes = attributes.into();
 
+        let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+
         let base = attributes
             .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
-            .unwrap_or_default();
+            .map(|addr| Address::in_space_or_default(addr, target_space))
+            .unwrap_or_else(|| Address::in_space_or_default(0u64, target_space));
 
         let ElfSymbolData {
             bounds,
@@ -151,7 +155,7 @@ impl<'a> Elf<'a> {
 
     pub fn entry(&self) -> Option<Address> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
-        (addr == 0).then_some(self.base + addr)
+        (addr != 0).then_some(Address::new(self.base.space(), self.base.offset() + addr))
     }
 
     pub fn convention(&self) -> Option<&'a str> {
@@ -180,6 +184,10 @@ impl<'a> Elf<'a> {
             elf | elf.kind() == ObjectKind::Relocatable
         )
     }
+
+    pub fn target_space(&self) -> AddressSpaceId {
+        self.base.space()
+    }
 }
 
 struct ElfSymbolData {
@@ -191,6 +199,7 @@ struct ElfSymbolData {
 
 impl ElfSymbolData {
     fn from_elf<'a>(elf: &'a impl Object<'a>, arch: &Arch, base_addr: Address) -> Self {
+        let target_space = base_addr.space();
         // TODO:
         // - base address should be configurable.
         // - determine if GNU and hence IFUNC and UNIQUE are supported.
@@ -269,7 +278,8 @@ impl ElfSymbolData {
                 continue;
             };
 
-            let address = Address::in_default_space(
+            let address = Address::new(
+                target_space,
                 symbol.address() + if is_object { section_start } else { 0 },
             );
 
@@ -338,7 +348,7 @@ impl ElfSymbolData {
         // hit valid code, and return.
 
         let mut extern_segm = ExternSegment::new(
-            Address::in_default_space(aligned_extern_base),
+            Address::new(target_space, aligned_extern_base),
             addr_align,
             arch.external_thunk_template(),
         );
@@ -386,7 +396,7 @@ impl ElfSymbolData {
             let addr = if kind.is_extern() {
                 extern_segm.add_extern()
             } else {
-                Address::in_default_space(sym.address())
+                Address::new(target_space, sym.address())
             }; // FIXME: this needs to be mapped, see above.
             let sym = sym.name().ok();
 
@@ -400,8 +410,8 @@ impl ElfSymbolData {
 
         let max_addr = extern_segm
             .last_address()
-            .unwrap_or(Address::in_default_space(max_addr));
-        let bounds = Address::in_default_space(min_addr)..=max_addr;
+            .unwrap_or(Address::new(target_space, max_addr));
+        let bounds = Address::new(target_space, min_addr)..=max_addr;
 
         Self {
             bounds,
@@ -464,7 +474,10 @@ pub fn elf_segment_properties<'a>(segm: &impl ObjectSegment<'a>) -> SegmentPrope
     props
 }
 
-pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<'a>> {
+pub fn elf_section<'a>(
+    sect: &impl ObjectSection<'a>,
+    space: impl Into<Option<AddressSpaceId>>,
+) -> Option<LoadableSegment<'a>> {
     let SectionFlags::Elf { sh_flags } = sect.flags() else {
         return None;
     };
@@ -473,7 +486,7 @@ pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<
         return None;
     }
 
-    let address = Address::in_default_space(sect.address());
+    let address = Address::in_space_or_default(sect.address(), space);
     let data = sect.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != sect.size() {
@@ -497,12 +510,15 @@ pub fn elf_section<'a>(sect: &impl ObjectSection<'a>) -> Option<LoadableSegment<
     })
 }
 
-pub fn elf_segment<'a>(segm: &impl ObjectSegment<'a>) -> Option<LoadableSegment<'a>> {
+pub fn elf_segment<'a>(
+    segm: &impl ObjectSegment<'a>,
+    space: impl Into<Option<AddressSpaceId>>,
+) -> Option<LoadableSegment<'a>> {
     if segm.size() == 0 {
         return None;
     }
 
-    let address = Address::in_default_space(segm.address());
+    let address = Address::in_space_or_default(segm.address(), space);
     let data = segm.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != segm.size() {
@@ -529,14 +545,18 @@ pub fn elf_segment<'a>(segm: &impl ObjectSegment<'a>) -> Option<LoadableSegment<
 
 pub fn elf_sections<'a>(
     elf: &'a impl Object<'a>,
+    space: impl Into<Option<AddressSpaceId>> + Copy,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    elf.sections().filter_map(|sect| elf_section(&sect))
+    let space = space.into();
+    elf.sections().filter_map(move |sect| elf_section(&sect, space))
 }
 
 pub fn elf_segments<'a>(
     elf: &'a impl Object<'a>,
+    space: impl Into<Option<AddressSpaceId>> + Copy,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    elf.segments().filter_map(|segm| elf_segment(&segm))
+    let space = space.into();
+    elf.segments().filter_map(move |segm| elf_segment(&segm, space))
 }
 
 pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
@@ -578,6 +598,7 @@ where
         mapping_hints: &'file BTreeMap<Address, ContextHint>,
         symbols: &'file IndexedSymbolTable,
         externs: &'file ExternSegment,
+        space: AddressSpaceId,
     ) -> Self {
         let is_object = elf.kind() == ObjectKind::Relocatable;
         Self {
@@ -586,7 +607,7 @@ where
             segms: elf.segments(),
             covered: RangeSetBlaze::new(),
             segms_split: None,
-            current_base: Address::in_default_space(0u64),
+            current_base: Address::new(space, 0u64),
             mapping_hints,
             symbols,
             extern_segm: Some(externs),
@@ -675,7 +696,8 @@ where
             }
 
             let alignment_mask = sect.align().wrapping_sub(1);
-            let address = Address::in_default_space(
+            let address = Address::new(
+                self.current_base.space(),
                 self.current_base.offset().wrapping_add(alignment_mask) & !alignment_mask,
             );
             let last_address = address + size - 1usize;
@@ -730,7 +752,7 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(Address::in_default_space(0u64), &mut lsegm, &sect)?;
+            relocator.apply(Address::new(self.current_base.space(), 0u64), &mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -768,7 +790,7 @@ where
                 Cow::Borrowed(&data[rvstart..rvend])
             };
 
-            let address = Address::in_default_space(*range.start());
+            let address = Address::new(self.current_base.space(), *range.start());
             let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");
@@ -819,8 +841,9 @@ where
                 continue;
             }
 
-            let address = Address::in_default_space(sect.address());
-            let last_address = Address::in_default_space(sect.address() + size - 1);
+            let space = self.current_base.space();
+            let address = Address::new(space, sect.address());
+            let last_address = Address::new(space, sect.address() + size - 1);
 
             if last_address < address {
                 tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
@@ -890,8 +913,9 @@ where
                 continue;
             }
 
-            let address = Address::from(segm.address());
-            let last_address = Address::from(segm.address() + size - 1);
+            let space = self.current_base.space();
+            let address = Address::new(space, segm.address());
+            let last_address = Address::new(space, segm.address() + size - 1);
 
             if last_address < address {
                 tracing::debug!("segment bounds {address}-{last_address} overflow; skipping");
@@ -940,7 +964,7 @@ where
                 Cow::Borrowed(&data[rvstart..rvend])
             };
 
-            let address = Address::in_default_space(*range.start());
+            let address = Address::new(space, *range.start());
             let last_address = address + bytes.len() - 1usize;
 
             tracing::trace!("loading segment {address}-{last_address}");
@@ -1085,7 +1109,8 @@ impl Loadable for Elf<'_> {
                 elf,
                 &self.mapping_hints,
                 &self.symbols,
-                &self.extern_segm
+                &self.extern_segm,
+                self.base.space()
             ))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )

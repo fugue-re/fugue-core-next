@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::ir::{Address, SegmentProperties};
 use crate::loader::Loadable;
+use crate::storage::StoragePersistence;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
 
@@ -38,7 +39,7 @@ impl Debug for SegmentStorageDescriptor {
 impl SegmentStorageDescriptor {
     pub fn new(
         id: SegmentStorageProviderId,
-        provider: impl PersistableSegmentStorageProvider + 'static,
+        provider: impl SegmentStorageProviderDescriptor + 'static,
         permissions: SegmentProperties,
     ) -> Self {
         Self {
@@ -110,7 +111,9 @@ pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'stat
         Self: Sized;
 }
 
-pub trait SegmentStorageProviderFromLoadable: SegmentStorageProviderFromSegmentRange {
+pub trait SegmentStorageProviderFromLoadable:
+    SegmentStorageProviderFromSegmentRange + SegmentStorageProviderDescriptor
+{
     fn from_loadable(
         loader: &impl Loadable,
         attributes: &mut AttributeMap,
@@ -124,23 +127,18 @@ pub trait SegmentStorageProviderFromLoadable: SegmentStorageProviderFromSegmentR
     }
 }
 
-impl<T: SegmentStorageProviderFromSegmentRange> SegmentStorageProviderFromLoadable for T {}
-
-pub trait SegmentStorageProviderFromStorage:
-    SegmentStorageProviderFromLoadable + PersistableSegmentStorageProvider
+impl<T> SegmentStorageProviderFromLoadable for T where
+    T: SegmentStorageProviderFromSegmentRange + SegmentStorageProviderDescriptor
 {
+}
+
+pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable {
     fn from_storage(
         path: impl AsRef<Path>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
         Self: Sized;
-}
-
-pub trait PersistableSegmentStorageProvider: SegmentStorageProvider {
-    const STABLE_TAG: &'static str;
-
-    fn stable_tag(&self) -> &'static str;
 }
 
 pub trait SegmentStorageProvider {
@@ -174,5 +172,18 @@ pub trait SegmentStorageProvider {
 
     fn flush(&mut self) -> Result<(), SegmentStorageError> {
         Ok(())
+    }
+}
+
+pub trait SegmentStorageProviderDescriptor: SegmentStorageProvider {
+    const STABLE_TAG: &'static str;
+    const PERSISTENCE: StoragePersistence;
+
+    fn stable_tag(&self) -> &'static str {
+        Self::STABLE_TAG
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        Self::PERSISTENCE
     }
 }

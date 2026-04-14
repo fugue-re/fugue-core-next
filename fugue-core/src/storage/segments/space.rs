@@ -1,10 +1,80 @@
+use std::fmt;
+
 use iset::IntervalMap;
 use smallvec::SmallVec;
+use thiserror::Error;
 
 use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
-pub type AddressSpaceId = u8;
+#[derive(Debug, Error)]
+pub enum AddressSpaceError {
+    #[error("address space index {0} out of range")]
+    IndexOutOfRange(usize),
+}
+
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[repr(transparent)]
+pub struct AddressSpaceId(u8);
+
+impl fmt::Display for AddressSpaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#x}", self.0)
+    }
+}
+
+impl AddressSpaceId {
+    pub fn try_new(index: usize) -> Result<Self, AddressSpaceError> {
+        u8::try_from(index)
+            .map(Self)
+            .map_err(|_| AddressSpaceError::IndexOutOfRange(index))
+    }
+
+    pub const fn new(index: usize) -> Self {
+        assert!(index <= u8::MAX as usize, "address space index out of range");
+        Self(index as u8)
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl TryFrom<usize> for AddressSpaceId {
+    type Error = AddressSpaceError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        Self::try_new(index)
+    }
+}
+
+impl From<u8> for AddressSpaceId {
+    fn from(id: u8) -> Self {
+        Self(id)
+    }
+}
+
+impl From<AddressSpaceId> for usize {
+    fn from(id: AddressSpaceId) -> Self {
+        id.0 as usize
+    }
+}
 
 #[derive(Debug)]
 pub struct AddressSpace {
@@ -250,7 +320,7 @@ mod test {
 
     #[test]
     fn test_add_mapping_top() {
-        let mut space = AddressSpace::new(0);
+        let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let properties = SegmentProperties::default();
 
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
@@ -268,7 +338,7 @@ mod test {
 
     #[test]
     fn test_add_mapping_bottom() {
-        let mut space = AddressSpace::new(0);
+        let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let properties = SegmentProperties::default();
 
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x501, properties);
@@ -283,7 +353,7 @@ mod test {
 
     #[test]
     fn test_remove_mapping() {
-        let mut space = AddressSpace::new(0);
+        let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let properties = SegmentProperties::default();
 
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
@@ -297,7 +367,7 @@ mod test {
 
     #[test]
     fn test_rebuild_range_priority_order() {
-        let mut space = AddressSpace::new(0);
+        let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let props = SegmentProperties::default();
 
         // Add two overlapping mappings: mapping 1 at 0x1000-0x2000, mapping 2 at 0x1500-0x2500
@@ -362,7 +432,7 @@ mod test {
 
     #[test]
     fn test_rebuild_range_clamps_to_bounds() {
-        let mut space = AddressSpace::new(0);
+        let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let props = SegmentProperties::default();
 
         // Add a mapping at 0x1000-0x3000
