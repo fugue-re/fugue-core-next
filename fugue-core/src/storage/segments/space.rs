@@ -314,8 +314,8 @@ impl AddressSpace {
 mod test {
     use super::*;
 
-    fn make_ref(id: u32) -> SegmentMappingRef {
-        SegmentMappingRef::new(id, 1)
+    fn make_ref(id: usize) -> SegmentMappingRef {
+        SegmentMappingRef::new(SegmentMappingId::new(id), 1)
     }
 
     #[test]
@@ -327,13 +327,13 @@ mod test {
         space.add_mapping_top(make_ref(2), 0x1500u64, 0x301, properties);
 
         let view = space.find_containing(0x1500u64).unwrap();
-        assert_eq!(view.mapping_ref().mapping_id(), 2);
+        assert_eq!(view.mapping_ref().mapping_id(), SegmentMappingId::new(2));
 
         let view = space.find_containing(0x1000u64).unwrap();
-        assert_eq!(view.mapping_ref().mapping_id(), 1);
+        assert_eq!(view.mapping_ref().mapping_id(), SegmentMappingId::new(1));
 
         let view = space.find_containing(0x1900u64).unwrap();
-        assert_eq!(view.mapping_ref().mapping_id(), 1);
+        assert_eq!(view.mapping_ref().mapping_id(), SegmentMappingId::new(1));
     }
 
     #[test]
@@ -345,10 +345,10 @@ mod test {
         space.add_mapping_bottom(make_ref(2), 0x1000u64, 0x1001, properties);
 
         let view = space.find_containing(0x1200u64).unwrap();
-        assert_eq!(view.mapping_ref().mapping_id(), 1);
+        assert_eq!(view.mapping_ref().mapping_id(), SegmentMappingId::new(1));
 
         let view = space.find_containing(0x1800u64).unwrap();
-        assert_eq!(view.mapping_ref().mapping_id(), 2);
+        assert_eq!(view.mapping_ref().mapping_id(), SegmentMappingId::new(2));
     }
 
     #[test]
@@ -359,7 +359,7 @@ mod test {
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x1001, properties);
         space.add_mapping_top(make_ref(2), 0x3000u64, 0x1001, properties);
 
-        space.remove_mapping(1);
+        space.remove_mapping(SegmentMappingId::new(1));
 
         assert!(space.find_containing(0x1500u64).is_none());
         assert!(space.find_containing(0x3500u64).is_some());
@@ -381,11 +381,11 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            2
+            SegmentMappingId::new(2)
         );
 
         // Deprioritise mapping 2 (move to bottom of priority list)
-        space.deprioritise(2);
+        space.deprioritise(SegmentMappingId::new(2));
 
         // Rebuild the range where mapping 2 exists (0x1500-0x2500)
         // Mappings in priority order (lowest first): mapping 2, then mapping 1
@@ -406,7 +406,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            1
+            SegmentMappingId::new(1)
         );
 
         // Mapping 1 should still be visible at 0x1200 (non-overlap region)
@@ -416,7 +416,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            1
+            SegmentMappingId::new(1)
         );
 
         // Mapping 2 should be visible at 0x2100 (non-overlap region, past mapping 1's end)
@@ -426,7 +426,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            2
+            SegmentMappingId::new(2)
         );
     }
 
@@ -453,7 +453,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            1
+            SegmentMappingId::new(1)
         );
 
         // Mapping 2 should be at 0x1800 (inside rebuild range)
@@ -463,7 +463,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            2
+            SegmentMappingId::new(2)
         );
 
         // Mapping 1 should still be at 0x2500 (after rebuild range)
@@ -473,7 +473,7 @@ mod test {
                 .unwrap()
                 .mapping_ref()
                 .mapping_id(),
-            1
+            SegmentMappingId::new(1)
         );
     }
 }

@@ -7,30 +7,73 @@ use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
-pub type EntityKeyId = u8;
-pub type EntityId = u8;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EntityKeyId(u8);
+
+impl EntityKeyId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u8::MAX as usize, "index out of range");
+        Self(index as u8)
+    }
+
+    const fn index(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl TryFrom<usize> for EntityKeyId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u8::try_from(index).map(Self)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EntityId(u8);
+
+impl EntityId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u8::MAX as usize, "index out of range");
+        Self(index as u8)
+    }
+
+    const fn index(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl TryFrom<usize> for EntityId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u8::try_from(index).map(Self)
+    }
+}
 
 // Packed entity key ID and entity (value) ID
 pub const ENTITY_PREFIX_SIZE: usize = mem::size_of::<EntityKeyId>() + mem::size_of::<EntityId>();
 
 // Entity key identifiers
-pub const ENTITY_KEY_PROJECT_ENTITY_ID: EntityKeyId = 0;
-pub const ENTITY_KEY_ADDRESS_ENTITY_ID: EntityKeyId = 1;
-pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = 2;
-pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = 3;
-pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = 4;
-pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = 5;
+pub const ENTITY_KEY_PROJECT_ENTITY_ID: EntityKeyId = EntityKeyId::new(0);
+pub const ENTITY_KEY_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(1);
+pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = EntityKeyId::new(2);
+pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = EntityKeyId::new(3);
+pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = EntityKeyId::new(4);
+pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(5);
 
 // Entity identifiers
-pub const ENTITY_ARCHITECTURE_ID: EntityId = 0;
-pub const ENTITY_ATTRIBUTES_ID: EntityId = 1;
-pub const ENTITY_SYMBOL_TABLE_ID: EntityId = 2;
-pub const ENTITY_FUNCTION_TABLE_ID: EntityId = 3;
-pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = 4;
+pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
+pub const ENTITY_ATTRIBUTES_ID: EntityId = EntityId::new(1);
+pub const ENTITY_SYMBOL_TABLE_ID: EntityId = EntityId::new(2);
+pub const ENTITY_FUNCTION_TABLE_ID: EntityId = EntityId::new(3);
+pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = EntityId::new(4);
 
-pub const ENTITY_FUNCTION_ID: EntityId = 5;
-pub const ENTITY_CODE_BLOCK_ID: EntityId = 6;
-pub const ENTITY_INSN_ID: EntityId = 7;
+pub const ENTITY_FUNCTION_ID: EntityId = EntityId::new(5);
+pub const ENTITY_CODE_BLOCK_ID: EntityId = EntityId::new(6);
+pub const ENTITY_INSN_ID: EntityId = EntityId::new(7);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -96,11 +139,15 @@ impl EntityKey for Address {
     const ID: EntityKeyId = ENTITY_KEY_META_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < 9 {
+        const PACKED_SIZE: usize = mem::size_of::<RawAddress>() + mem::size_of::<AddressSpaceId>();
+
+        if buf.len() < PACKED_SIZE {
             return None;
         }
+
         let space = AddressSpaceId::from(buf[0]);
-        let address = u64::from_be_bytes(buf[1..9].try_into().ok()?);
+        let address = u64::from_be_bytes(buf[1..PACKED_SIZE].try_into().ok()?);
+
         Some(Address::new(space, address))
     }
 
@@ -166,7 +213,7 @@ pub trait Entity:
 }
 
 pub(crate) fn make_prefix<K: EntityKey, V: Entity>() -> EntityKeyPrefix {
-    [K::ID, V::ID]
+    [K::ID.index() as u8, V::ID.index() as u8]
 }
 
 pub(crate) fn make_key<K: EntityKey, V: Entity>(k: &K) -> Bytes {
@@ -177,7 +224,7 @@ pub(crate) fn make_key<K: EntityKey, V: Entity>(k: &K) -> Bytes {
 }
 
 pub(crate) fn extract_key<K: EntityKey, V: Entity>(buf: BytesOrSlice<'_>) -> Option<K> {
-    if buf.len() < 2 || buf[0] != K::ID || buf[1] != V::ID {
+    if buf.len() < 2 || buf[0] != K::ID.index() as u8 || buf[1] != V::ID.index() as u8 {
         return None;
     }
     K::decode(&buf[2..])

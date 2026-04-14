@@ -7,8 +7,8 @@ use crate::ir::traits::{
     FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
 };
 use crate::ir::{Address, Function, Id};
-use crate::storage::entities::schema::ENTITY_KEY_FUNCTION_ENTITY_ID;
-use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
+use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
+use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
 
@@ -194,7 +194,7 @@ impl FunctionTableT for IndexedFunctionTable {
 }
 
 impl Entity for IndexedFunctionTable {
-    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_ENTITY_ID;
+    const ID: EntityId = ENTITY_FUNCTION_TABLE_ID;
 }
 
 impl ProjectEntityFromStorage for IndexedFunctionTable {

@@ -10,8 +10,8 @@ use crate::ir::traits::{
 };
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
-use crate::storage::entities::schema::ENTITY_KEY_CODE_BLOCK_ENTITY_ID;
-use crate::storage::entities::{Entity, EntityKeyId, ProjectEntity};
+use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
+use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
@@ -365,7 +365,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
 }
 
 impl Entity for IndexedCodeBlockTable {
-    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_ENTITY_ID;
+    const ID: EntityId = ENTITY_CODE_BLOCK_TABLE_ID;
 }
 
 impl ProjectEntityFromStorage for IndexedCodeBlockTable {

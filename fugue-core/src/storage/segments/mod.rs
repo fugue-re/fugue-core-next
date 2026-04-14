@@ -32,7 +32,7 @@ pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
     SegmentStorageProvider, SegmentStorageProviderFromLoadable,
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
-    SegmentStorageProviderId, PersistableSegmentStorageProvider,
+    SegmentStorageProviderId,
 };
 use space::{AddressSpace, AddressSpaceId};
 use view::SegmentMappingView;
@@ -42,7 +42,7 @@ pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
 pub const DEFAULT_SPACE_ID: AddressSpaceId = AddressSpaceId::new(0);
 const DEFAULT_FILL_BYTE: u8 = 0;
-const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = 0;
+const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = SegmentStorageProviderId::new(0);
 
 const SEGMENT_STORAGE_FILE: &str = "segment.storage.bin";
 
@@ -124,9 +124,9 @@ pub struct SegmentStorage {
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
     spaces: BTreeMap<AddressSpaceId, AddressSpace>,
     fill_byte: u8,
-    next_provider_id: SegmentStorageProviderId,
-    next_mapping_id: SegmentMappingId,
-    next_space_id: AddressSpaceId,
+    provider_ctr: usize,
+    mapping_ctr: usize,
+    space_ctr: usize,
 }
 
 impl Default for SegmentStorage {
@@ -145,9 +145,9 @@ impl SegmentStorage {
             mappings: BTreeMap::new(),
             spaces,
             fill_byte: DEFAULT_FILL_BYTE,
-            next_provider_id: DEFAULT_PROVIDER_ID,
-            next_mapping_id: 0,
-            next_space_id: AddressSpaceId::new(1),
+            provider_ctr: 0,
+            mapping_ctr: 0,
+            space_ctr: 1,
         }
     }
 
@@ -185,12 +185,11 @@ impl SegmentStorage {
             };
 
             let provider = S::from_segment_range(range.start, range.end, attributes)?;
-
             let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
 
             space_providers.insert(
                 AddressSpaceId::try_from(space_idx)
-                    .expect("space index is convertable to a space id"),
+                    .expect("space index is convertable to a space identifier"),
                 (space_id, provider_id),
             );
         }
@@ -225,6 +224,7 @@ impl SegmentStorage {
                 segm.mapping_hints().clone(),
                 segm.function_hints().clone(),
             )?;
+
             storage.add_mapping_to_space_top(space_id, mapping_id)?;
         }
 
@@ -279,8 +279,10 @@ impl SegmentStorage {
                 prov_meta.id,
                 prov_meta.stable_tag
             );
+
             let new_id =
                 storage.open_boxed_provider(provider, prov_meta.permissions, prov_meta.stable_tag);
+
             provider_map.insert(prov_meta.id, new_id);
         }
 
@@ -458,8 +460,8 @@ impl SegmentStorage {
     where
         S: SegmentStorageProviderDescriptor + 'static,
     {
-        let id = self.next_provider_id;
-        self.next_provider_id += 1;
+        let id = SegmentStorageProviderId::new(self.provider_ctr);
+        self.provider_ctr += 1;
 
         let descriptor = SegmentStorageDescriptor::new(id, provider, permissions);
         self.providers.insert(id, descriptor);
@@ -473,8 +475,8 @@ impl SegmentStorage {
         permissions: SegmentProperties,
         stable_tag: impl Into<Cow<'static, str>>,
     ) -> SegmentStorageProviderId {
-        let id = self.next_provider_id;
-        self.next_provider_id += 1;
+        let id = SegmentStorageProviderId::new(self.provider_ctr);
+        self.provider_ctr += 1;
 
         let descriptor =
             SegmentStorageDescriptor::from_boxed(id, provider, permissions, stable_tag);
@@ -517,8 +519,8 @@ impl SegmentStorage {
             return Err(SegmentStorageError::backing_with("provider not found"));
         }
 
-        let id = self.next_mapping_id;
-        self.next_mapping_id += 1;
+        let id = SegmentMappingId::new(self.mapping_ctr);
+        self.mapping_ctr += 1;
 
         let mapping = SegmentMapping::new(id, start, size, offset, provider_id, properties);
         self.mappings.insert(id, mapping);
@@ -541,8 +543,8 @@ impl SegmentStorage {
             return Err(SegmentStorageError::backing_with("provider not found"));
         }
 
-        let id = self.next_mapping_id;
-        self.next_mapping_id += 1;
+        let id = SegmentMappingId::new(self.mapping_ctr);
+        self.mapping_ctr += 1;
 
         let mapping = SegmentMapping::new_with_metadata(
             id,
@@ -568,8 +570,8 @@ impl SegmentStorage {
             return Err(SegmentStorageError::backing_with("provider not found"));
         }
 
-        let id = self.next_mapping_id;
-        self.next_mapping_id += 1;
+        let id = SegmentMappingId::new(self.mapping_ctr);
+        self.mapping_ctr += 1;
 
         let mut mapping = SegmentMapping::new_with_metadata(
             id,
@@ -672,8 +674,8 @@ impl SegmentStorage {
     }
 
     pub fn create_space(&mut self) -> Result<AddressSpaceId, SegmentStorageError> {
-        let id = self.next_space_id;
-        self.next_space_id = AddressSpaceId::try_from(id.index() + 1)?;
+        let id = AddressSpaceId::try_from(self.space_ctr)?;
+        self.space_ctr += 1;
         self.spaces.insert(id, AddressSpace::new(id));
         Ok(id)
     }

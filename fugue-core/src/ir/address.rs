@@ -977,7 +977,7 @@ impl Address {
         }
     }
 
-    pub fn in_space_or_default(
+    pub fn in_space(
         address: impl Into<RawAddress>,
         space: impl Into<Option<AddressSpaceId>>,
     ) -> Self {

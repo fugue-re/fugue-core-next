@@ -116,8 +116,8 @@ impl<'a> Elf<'a> {
 
         let base = attributes
             .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
-            .map(|addr| Address::in_space_or_default(addr, target_space))
-            .unwrap_or_else(|| Address::in_space_or_default(0u64, target_space));
+            .map(|addr| Address::in_space(addr, target_space))
+            .unwrap_or_else(|| Address::in_space(0u64, target_space));
 
         let ElfSymbolData {
             bounds,
@@ -486,7 +486,7 @@ pub fn elf_section<'a>(
         return None;
     }
 
-    let address = Address::in_space_or_default(sect.address(), space);
+    let address = Address::in_space(sect.address(), space);
     let data = sect.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != sect.size() {
@@ -518,7 +518,7 @@ pub fn elf_segment<'a>(
         return None;
     }
 
-    let address = Address::in_space_or_default(segm.address(), space);
+    let address = Address::in_space(segm.address(), space);
     let data = segm.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != segm.size() {

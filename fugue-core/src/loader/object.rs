@@ -96,8 +96,8 @@ impl<'a> Object<'a> {
 
         let base = attributes
             .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
-            .map(|addr| Address::in_space_or_default(addr, target_space))
-            .unwrap_or_else(|| Address::in_space_or_default(0u64, target_space));
+            .map(|addr| Address::in_space(addr, target_space))
+            .unwrap_or_else(|| Address::in_space(0u64, target_space));
 
         let entry = view.entry();
 

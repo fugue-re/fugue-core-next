@@ -17,7 +17,48 @@ pub use memory::InMemorySegmentStorage;
 pub mod registry;
 pub use registry::*;
 
-pub type SegmentStorageProviderId = u32;
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[repr(transparent)]
+pub struct SegmentStorageProviderId(u32);
+
+impl SegmentStorageProviderId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u32::MAX as usize, "index out of range");
+        Self(index as u32)
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl std::fmt::Display for SegmentStorageProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<usize> for SegmentStorageProviderId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u32::try_from(index).map(Self)
+    }
+}
 
 pub struct SegmentStorageDescriptor {
     id: SegmentStorageProviderId,

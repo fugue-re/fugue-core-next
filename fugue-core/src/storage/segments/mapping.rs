@@ -12,7 +12,48 @@ use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
-pub type SegmentMappingId = u32;
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[repr(transparent)]
+pub struct SegmentMappingId(u32);
+
+impl SegmentMappingId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u32::MAX as usize, "index out of range");
+        Self(index as u32)
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl std::fmt::Display for SegmentMappingId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<usize> for SegmentMappingId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u32::try_from(index).map(Self)
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,

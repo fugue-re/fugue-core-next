@@ -1248,7 +1248,7 @@ mod test {
         }
 
         impl Entity for TestEntity {
-            const ID: EntityId = 0;
+            const ID: EntityId = EntityId::new(0);
         }
 
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
