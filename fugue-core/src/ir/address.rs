@@ -539,15 +539,14 @@ impl RawAddressRangeSet {
         self.0.insert(address.into().offset())
     }
 
-    pub fn insert_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
-        let range = range.into();
-        self.0
-            .ranges_insert(range.start().offset()..=range.end().offset());
-    }
-
-    pub fn insert_meta_range(&mut self, range: RangeInclusive<Address>) {
-        self.0
-            .ranges_insert(range.start().offset()..=range.end().offset());
+    pub fn insert_range<A>(&mut self, range: impl Into<RangeInclusive<A>>)
+    where
+        A: Into<RawAddress>,
+    {
+        let (start, end) = range.into().into_inner();
+        let start = start.into().offset();
+        let end = end.into().offset();
+        self.0.ranges_insert(start..=end);
     }
 
     pub fn difference(&self, other: &Self) -> Self {

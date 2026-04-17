@@ -168,9 +168,7 @@ impl FunctionRecoveryPatternMatcher {
                             continue;
                         }
 
-                        if state.avoids().contains(start.offset())
-                            || state.failures().contains(&start)
-                        {
+                        if state.avoids().contains(&start) || state.failures().contains(&start) {
                             continue;
                         }
 

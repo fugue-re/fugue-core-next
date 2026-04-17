@@ -123,7 +123,7 @@ impl FunctionDiscoveryContext {
                     let block = cbtable
                         .get_by_id(bid)
                         .expect("block should exist in code block table");
-                    covered.insert_meta_range(block.range_inclusive());
+                    covered.insert_range(block.range_inclusive());
                 }
                 MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
                     let min_block = cbtable
@@ -134,7 +134,7 @@ impl FunctionDiscoveryContext {
                         .expect("block should exist in code block table");
                     // we should probably have a threshold here to avoid huge ranges, where
                     // we have a function that has non-contiguous blocks
-                    covered.insert_meta_range(min_block.address()..=max_block.last_address());
+                    covered.insert_range(min_block.address()..=max_block.last_address());
                 }
                 _ => { /* no blocks, skip */ }
             }
@@ -155,7 +155,7 @@ impl FunctionDiscoveryContext {
                 let block = cbtable
                     .get_by_id(bid)
                     .expect("block should exist in code block table");
-                covered.insert_meta_range(block.range_inclusive());
+                covered.insert_range(block.range_inclusive());
             }
         }
 
@@ -207,11 +207,11 @@ impl FunctionStructuringContext {
     }
 
     pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into().offset());
+        self.avoids.insert(address.into());
     }
 
     pub fn add_avoid_range(&mut self, range: RangeInclusive<Address>) {
-        self.avoids.insert_meta_range(range);
+        self.avoids.insert_range(range);
     }
 
     pub fn failures(&self) -> &BTreeSet<Address> {
