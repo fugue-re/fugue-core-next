@@ -8,109 +8,23 @@ use crate::LifterPackagerError;
 
 const UPSTREAM_REPOSITORY: &str = "https://github.com/NationalSecurityAgency/ghidra.git";
 
-const AARCH64_FILES: &[&str] = &[
-    "AARCH64.cspec",
-    "AARCH64.dwarf",
-    "AARCH64.ldefs",
-    "AARCH64.opinion",
-    "AARCH64.pspec",
-    "AARCH64.slaspec",
-    "AARCH64BE.slaspec",
-    "AARCH64_AMXext.sinc",
-    "AARCH64_AppleSilicon.slaspec",
-    "AARCH64_base_PACoptions.sinc",
-    "AARCH64_ilp32.cspec",
-    "AARCH64_win.cspec",
-    "AARCH64base.sinc",
-    "AARCH64instructions.sinc",
-    "AARCH64ldst.sinc",
-    "AARCH64neon.sinc",
-    "AARCH64sve.sinc",
-    "AppleSilicon.ldefs",
-];
-
-const ARM_FILES: &[&str] = &[
-    "ARM.cspec",
-    "ARM.dwarf",
-    "ARM.gdis",
-    "ARM.ldefs",
-    "ARM.opinion",
-    "ARM.sinc",
-    "ARM8_be.slaspec",
-    "ARM8_le.slaspec",
-    "ARM8m_be.slaspec",
-    "ARM8m_le.slaspec",
-    "ARMCortex.pspec",
-    "ARMTHUMBinstructions.sinc",
-    "ARM_CDE.sinc",
-    "ARM_v45.cspec",
-    "ARM_win.cspec",
-    "ARMinstructions.sinc",
-    "ARMneon.dwarf",
-    "ARMneon.sinc",
-    "ARMt.pspec",
-    "ARMtTHUMB.pspec",
-    "ARMv8.sinc",
-];
-
-const X86_FILES: &[&str] = &[
-    "adx.sinc",
-    "avx.sinc",
-    "avx2.sinc",
-    "avx2_manual.sinc",
-    "avx_manual.sinc",
-    "bmi1.sinc",
-    "bmi2.sinc",
-    "cet.sinc",
-    "clwb.sinc",
-    "fma.sinc",
-    "ia.sinc",
-    "lockable.sinc",
-    "lzcnt.sinc",
-    "macros.sinc",
-    "mpx.sinc",
-    "pclmulqdq.sinc",
-    "rdrand.sinc",
-    "sgx.sinc",
-    "sha.sinc",
-    "smx.sinc",
-    "x86-64-compat32.pspec",
-    "x86-64-gcc.cspec",
-    "x86-64-golang.cspec",
-    "x86-64-golang.register.info",
-    "x86-64-win.cspec",
-    "x86-64.dwarf",
-    "x86-64.pspec",
-    "x86-64.slaspec",
-    "x86.dwarf",
-    "x86.ldefs",
-    "x86.pspec",
-    "x86.slaspec",
-    "x86gcc.cspec",
-    "x86win.cspec",
-];
-
 struct SyncTarget {
     source_processor: &'static str,
     destination: &'static str,
-    files: &'static [&'static str],
 }
 
 const SYNC_TARGETS: &[SyncTarget] = &[
     SyncTarget {
         source_processor: "AARCH64",
         destination: "fugue-lifter-aarch64/data/processors/AARCH64",
-        files: AARCH64_FILES,
     },
     SyncTarget {
         source_processor: "ARM",
         destination: "fugue-lifter-arm/data/processors/ARM",
-        files: ARM_FILES,
     },
     SyncTarget {
         source_processor: "x86",
         destination: "fugue-lifter-x86/data/processors/x86",
-        files: X86_FILES,
     },
 ];
 
@@ -369,6 +283,7 @@ fn stage_and_replace(
 
     for target in SYNC_TARGETS {
         let destination = workspace_root.join(target.destination);
+        let whitelist = current_whitelist(&destination)?;
         let destination_parent = destination
             .parent()
             .expect("sync target destination must have a parent");
@@ -387,16 +302,11 @@ fn stage_and_replace(
         let source_directory = processors_root
             .join(target.source_processor)
             .join("data/languages");
-        for file in target.files {
-            let source = source_directory.join(file);
-            if !source.is_file() {
-                return Err(LifterPackagerError::missing_path("source file", source));
-            }
-
-            let staged_file = staged_directory.join(file);
-            fs::copy(&source, &staged_file)
-                .map_err(|source| LifterPackagerError::io("write file", &staged_file, source))?;
+        for file in &whitelist {
+            copy_file(&source_directory, &staged_directory, file)?;
         }
+
+        copy_required_sinc_includes(&source_directory, &staged_directory)?;
 
         staged_targets.push(StagedTarget {
             _staging_root: staging_root,
@@ -410,6 +320,106 @@ fn stage_and_replace(
     }
 
     Ok(())
+}
+
+fn current_whitelist(directory: &Path) -> Result<Vec<String>, LifterPackagerError> {
+    if !directory.is_dir() {
+        return Err(LifterPackagerError::invalid_path(
+            "vendored language directory",
+            directory,
+        ));
+    }
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|source| LifterPackagerError::io("read directory", directory, source))?
+    {
+        let entry =
+            entry.map_err(|source| LifterPackagerError::io("read directory", directory, source))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            files.push(name.to_owned());
+        }
+    }
+    files.sort();
+
+    Ok(files)
+}
+
+fn copy_required_sinc_includes(
+    source_directory: &Path,
+    staged_directory: &Path,
+) -> Result<(), LifterPackagerError> {
+    let missing = collect_missing_sinc_includes(staged_directory)?;
+    for file in missing {
+        copy_file(source_directory, staged_directory, &file)?;
+    }
+
+    Ok(())
+}
+
+fn copy_file(
+    source_directory: &Path,
+    destination_directory: &Path,
+    file: &str,
+) -> Result<(), LifterPackagerError> {
+    let source = source_directory.join(file);
+    if !source.is_file() {
+        return Err(LifterPackagerError::missing_path("source file", source));
+    }
+
+    let destination = destination_directory.join(file);
+    fs::copy(&source, &destination)
+        .map_err(|source| LifterPackagerError::io("write file", &destination, source))?;
+
+    Ok(())
+}
+
+fn collect_missing_sinc_includes(directory: &Path) -> Result<Vec<String>, LifterPackagerError> {
+    let mut missing = Vec::new();
+
+    for file in current_whitelist(directory)? {
+        if !file.ends_with(".slaspec") {
+            continue;
+        }
+
+        let path = directory.join(file);
+        let contents = fs::read(&path)
+            .map_err(|source| LifterPackagerError::io("read file", &path, source))?;
+        let contents = String::from_utf8_lossy(&contents);
+        for include in extract_sinc_includes(&contents) {
+            if !directory.join(&include).exists() && !missing.contains(&include) {
+                missing.push(include);
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+fn extract_sinc_includes(contents: &str) -> Vec<String> {
+    let mut includes = Vec::new();
+    let mut remainder = contents;
+    let prefix = "@include \"";
+
+    while let Some(start) = remainder.find(prefix) {
+        let value_start = start + prefix.len();
+        remainder = &remainder[value_start..];
+        let Some(end) = remainder.find('"') else {
+            break;
+        };
+        let include = &remainder[..end];
+        if include.ends_with(".sinc") && !includes.iter().any(|value| value == include) {
+            includes.push(include.to_owned());
+        }
+        remainder = &remainder[end + 1..];
+    }
+
+    includes
 }
 
 fn replace_directory(
@@ -506,8 +516,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
+        collect_missing_sinc_includes, current_whitelist, extract_sinc_includes,
         latest_stable_release_tag, parse_release_version, sync_languages_with_repo, SyncOptions,
-        AARCH64_FILES, ARM_FILES, SYNC_TARGETS, X86_FILES,
+        SYNC_TARGETS,
     };
 
     fn create_source_tree(root: &Path) {
@@ -517,9 +528,20 @@ mod tests {
                 .join(target.source_processor)
                 .join("data/languages");
             fs::create_dir_all(&source_directory).unwrap();
-            for file in target.files {
-                fs::write(source_directory.join(file), format!("source:{file}")).unwrap();
-            }
+            fs::write(
+                source_directory.join(format!("{}.slaspec", target.source_processor)),
+                format!(
+                    "@include \"{}.sinc\"\n@include \"extra.sinc\"\n",
+                    target.source_processor
+                ),
+            )
+            .unwrap();
+            fs::write(
+                source_directory.join(format!("{}.sinc", target.source_processor)),
+                format!("source:{}.sinc", target.source_processor),
+            )
+            .unwrap();
+            fs::write(source_directory.join("extra.sinc"), "source:extra.sinc").unwrap();
         }
     }
 
@@ -527,7 +549,16 @@ mod tests {
         for target in SYNC_TARGETS {
             let destination_directory = root.join(target.destination);
             fs::create_dir_all(&destination_directory).unwrap();
-            fs::write(destination_directory.join("stale.txt"), "stale").unwrap();
+            fs::write(
+                destination_directory.join(format!("{}.slaspec", target.source_processor)),
+                "old slaspec",
+            )
+            .unwrap();
+            fs::write(
+                destination_directory.join(format!("{}.sinc", target.source_processor)),
+                "old sinc",
+            )
+            .unwrap();
         }
     }
 
@@ -551,7 +582,7 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
     }
 
     #[test]
-    fn syncs_from_local_directory_and_removes_stale_files() {
+    fn syncs_from_local_directory_and_copies_required_sincs() {
         let root = tempfile::tempdir().unwrap();
         let workspace_root = root.path().join("workspace");
         let source_root = root.path().join("ghidra");
@@ -568,12 +599,27 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
 
         for target in SYNC_TARGETS {
             let destination_directory = workspace_root.join(target.destination);
-            assert!(!destination_directory.join("stale.txt").exists());
-
-            for file in target.files {
-                let path = destination_directory.join(file);
-                assert_eq!(fs::read_to_string(path).unwrap(), format!("source:{file}"));
-            }
+            assert_eq!(
+                fs::read_to_string(
+                    destination_directory.join(format!("{}.slaspec", target.source_processor))
+                )
+                .unwrap(),
+                format!(
+                    "@include \"{}.sinc\"\n@include \"extra.sinc\"\n",
+                    target.source_processor
+                )
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    destination_directory.join(format!("{}.sinc", target.source_processor))
+                )
+                .unwrap(),
+                format!("source:{}.sinc", target.source_processor)
+            );
+            assert_eq!(
+                fs::read_to_string(destination_directory.join("extra.sinc")).unwrap(),
+                "source:extra.sinc"
+            );
         }
     }
 
@@ -588,7 +634,7 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
 
         let missing = source_root
             .join("Ghidra/Processors/x86/data/languages")
-            .join(X86_FILES[0]);
+            .join("x86.sinc");
         fs::remove_file(missing).unwrap();
 
         let error = sync_languages_with_repo(
@@ -609,16 +655,62 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
         for target in SYNC_TARGETS {
             let destination_directory = workspace_root.join(target.destination);
             assert_eq!(
-                fs::read_to_string(destination_directory.join("stale.txt")).unwrap(),
-                "stale"
+                fs::read_to_string(
+                    destination_directory.join(format!("{}.slaspec", target.source_processor))
+                )
+                .unwrap(),
+                "old slaspec"
             );
         }
     }
 
     #[test]
-    fn manifests_cover_expected_file_counts() {
-        assert_eq!(AARCH64_FILES.len(), 18);
-        assert_eq!(ARM_FILES.len(), 21);
-        assert_eq!(X86_FILES.len(), 34);
+    fn reads_current_directory_as_whitelist() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path();
+
+        fs::write(directory.join("b.sinc"), "").unwrap();
+        fs::write(directory.join("a.slaspec"), "").unwrap();
+        fs::create_dir_all(directory.join("nested")).unwrap();
+
+        let whitelist = current_whitelist(directory).unwrap();
+
+        assert_eq!(whitelist, vec!["a.slaspec", "b.sinc"]);
+    }
+
+    #[test]
+    fn extracts_sinc_includes_from_slaspec() {
+        let contents = r#"
+@include "foo.sinc"
+@include "foo.sinc"
+@include "bar.pspec"
+<external_name tool="gnu" name="not-a-file"/>
+"#;
+
+        let references = extract_sinc_includes(contents);
+
+        assert_eq!(references, vec!["foo.sinc"]);
+    }
+
+    #[test]
+    fn finds_missing_sinc_includes_in_whitelisted_slaspecs() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path();
+
+        fs::write(
+            directory.join("root.slaspec"),
+            "@include \"present.sinc\"\n@include \"missing.sinc\"\n@include \"other.pspec\"",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("skip.sinc"),
+            "@include \"nested-missing.sinc\"",
+        )
+        .unwrap();
+        fs::write(directory.join("present.sinc"), "").unwrap();
+
+        let missing = collect_missing_sinc_includes(directory).unwrap();
+
+        assert_eq!(missing, vec!["missing.sinc"]);
     }
 }
