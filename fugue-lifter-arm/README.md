@@ -16,6 +16,19 @@ cargo build --features=compiled,arm-be,arm-le --no-default-features
 The bundled pre-transpiled lifters can be regenerated with:
 
 ```sh
+./generate-lifters.sh
+```
+
+To refresh the vendored language definitions from the latest stable upstream
+release before regenerating lifters, run:
+
+```sh
+./generate-lifters.sh --sync
+```
+
+To regenerate only this crate's bundled outputs manually, use:
+
+```sh
 cargo run --bin lifter-packager \
     ./fugue-lifter-arm/data/processors \
     ARM:BE:32:v8 \

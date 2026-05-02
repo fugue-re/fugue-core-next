@@ -47,7 +47,10 @@ impl AddressSpaceId {
     }
 
     pub const fn new(index: usize) -> Self {
-        assert!(index <= u8::MAX as usize, "address space index out of range");
+        assert!(
+            index <= u8::MAX as usize,
+            "address space index out of range"
+        );
         Self(index as u8)
     }
 

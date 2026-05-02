@@ -59,16 +59,7 @@ impl ContextUpdate {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct ContextSet(ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>);
 

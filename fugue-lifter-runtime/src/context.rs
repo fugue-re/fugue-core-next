@@ -120,10 +120,7 @@ impl ContextPostAction {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-#[cfg_attr(
-    feature = "rkyv",
-    rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))
-)]
+#[cfg_attr(feature = "rkyv", rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash)))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextBitRange {
     word: usize,

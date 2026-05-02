@@ -107,8 +107,7 @@ impl<D: Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
     for ArchivedCodeBlockProperties
 {
     fn deserialize(&self, _: &mut D) -> Result<CodeBlockProperties, D::Error> {
-        Ok(CodeBlockProperties::from_bits(self.0.to_native())
-            .unwrap_or(CodeBlockProperties::NONE))
+        Ok(CodeBlockProperties::from_bits(self.0.to_native()).unwrap_or(CodeBlockProperties::NONE))
     }
 }
 
