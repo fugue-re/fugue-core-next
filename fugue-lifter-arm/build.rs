@@ -23,8 +23,14 @@ fn build_lifter(_arch: &str, output: &str) -> Result<(), Box<dyn std::error::Err
 fn build_lifter(arch: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::{BufWriter, Write};
+    use std::path::Path;
 
-    let lifter = fugue_lifter_codegen::build("data/processors", arch)?;
+    let mut options = fugue_lifter_codegen::BuildOptions::new();
+    if Path::new("data/patches").is_dir() {
+        options.add_patch("data/patches");
+    }
+
+    let lifter = fugue_lifter_codegen::build_with("data/processors", arch, options)?;
     let output = PathBuf::from_iter([env::var("OUT_DIR").expect("OUT_DIR").as_ref(), output]);
 
     let mut writer = BufWriter::new(File::create(&output)?);
@@ -36,6 +42,7 @@ fn build_lifter(arch: &str, output: &str) -> Result<(), Box<dyn std::error::Erro
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo::rerun-if-changed=data/generated");
     println!("cargo::rerun-if-changed=data/processors");
+    println!("cargo::rerun-if-changed=data/patches");
 
     #[cfg(feature = "arm-be")]
     build_lifter("ARM:BE:32:v8", "arm_be.rs")?;

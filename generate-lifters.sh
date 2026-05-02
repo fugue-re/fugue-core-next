@@ -9,6 +9,12 @@ usage: ./generate-lifters.sh [--sync] [--dir <path>] [--ref <git-ref>]
   --sync        refresh vendored language definitions before regenerating lifters
   --dir <path>  use an existing local Ghidra checkout for sync
   --ref <ref>   sync from a specific upstream ref instead of the latest stable release
+
+After --sync, any *.patch files under <arch>/data/patches/ are re-applied on
+the fly during regeneration. If upstream churn moved lines near a patched
+region, the build fails loudly and the patch must be re-diffed against the
+fresh sources. See fugue-lifter-arm/README.md for patch authoring rules
+(paths relative to data/processors/, no fuzz, filename-ordered application).
 EOF
 }
 

@@ -95,6 +95,15 @@ impl LifterPackagerError {
     }
 }
 
+fn sibling_patches_dir(specs: &Path) -> Option<PathBuf> {
+    let candidate = specs.parent()?.join("patches");
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 pub fn unpack_lifter(
     input: impl AsRef<Path>,
     output: impl AsRef<Path>,
@@ -134,7 +143,15 @@ pub fn pack_lifter(
         ));
     }
 
-    let lifter = fugue_lifter_codegen::build_with(specs, language, true)?;
+    let mut options = fugue_lifter_codegen::BuildOptions {
+        pretty: true,
+        ..Default::default()
+    };
+    if let Some(patches_dir) = sibling_patches_dir(specs) {
+        options.add_patch(patches_dir);
+    }
+
+    let lifter = fugue_lifter_codegen::build_with(specs, language, options)?;
     let output_file = File::create(output)
         .map_err(|source| LifterPackagerError::io("create file", output, source))?;
     let mut writer = GzEncoder::new(BufWriter::new(output_file), Default::default());

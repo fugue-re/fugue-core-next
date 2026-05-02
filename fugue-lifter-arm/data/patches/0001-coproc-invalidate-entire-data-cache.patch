@@ -1,0 +1,56 @@
+diff --git a/ARM/ARMinstructions.sinc b/ARM/ARMinstructions.sinc
+index 0fc0d9b..459f4ed 100644
+--- a/ARM/ARMinstructions.sinc
++++ b/ARM/ARMinstructions.sinc
+@@ -724,7 +724,7 @@ define pcodeop coproc_moveto_Wait_for_interrupt;
+ define pcodeop coproc_moveto_Invalidate_Entire_Instruction;
+ define pcodeop coproc_moveto_Invalidate_Instruction_Cache_by_MVA;
+ define pcodeop coproc_moveto_Flush_Prefetch_Buffer;
+-define pcodeop coproc_moveto_Invalidate_Entire_Data_cache;
++define pcodeop coproc_moveto_Invalidate_Entire_Data_Cache;
+ define pcodeop coproc_moveto_Invalidate_Entire_Data_by_MVA;
+ define pcodeop coproc_moveto_Invalidate_Entire_Data_by_Index;
+ define pcodeop coproc_moveto_Clean_Entire_Data_Cache;
+@@ -732,7 +732,6 @@ define pcodeop coproc_moveto_Clean_Data_Cache_by_MVA;
+ define pcodeop coproc_moveto_Clean_Data_Cache_by_Index;
+ define pcodeop coproc_moveto_Data_Synchronization;
+ define pcodeop coproc_moveto_Data_Memory_Barrier;
+-define pcodeop coproc_moveto_Invalidate_Entire_Data_Cache;
+ define pcodeop coproc_moveto_Invalidate_Data_Cache_by_MVA;
+ define pcodeop coproc_moveto_Invalidate_unified_TLB_unlocked;
+ define pcodeop coproc_moveto_Invalidate_unified_TLB_by_MVA;
+@@ -777,7 +776,7 @@ define pcodeop coproc_movefrom_Wait_for_interrupt;
+ define pcodeop coproc_movefrom_Invalidate_Entire_Instruction;
+ define pcodeop coproc_movefrom_Invalidate_Instruction_Cache_by_MVA;
+ define pcodeop coproc_movefrom_Flush_Prefetch_Buffer;
+-define pcodeop coproc_movefrom_Invalidate_Entire_Data_cache;
++define pcodeop coproc_movefrom_Invalidate_Entire_Data_Cache;
+ define pcodeop coproc_movefrom_Invalidate_Entire_Data_by_MVA;
+ define pcodeop coproc_movefrom_Invalidate_Entire_Data_by_Index;
+ define pcodeop coproc_movefrom_Clean_Entire_Data_Cache;
+@@ -785,7 +784,6 @@ define pcodeop coproc_movefrom_Clean_Data_Cache_by_MVA;
+ define pcodeop coproc_movefrom_Clean_Data_Cache_by_Index;
+ define pcodeop coproc_movefrom_Data_Synchronization;
+ define pcodeop coproc_movefrom_Data_Memory_Barrier;
+-define pcodeop coproc_movefrom_Invalidate_Entire_Data_Cache;
+ define pcodeop coproc_movefrom_Invalidate_Data_Cache_by_MVA;
+ define pcodeop coproc_movefrom_Invalidate_unified_TLB_unlocked;
+ define pcodeop coproc_movefrom_Invalidate_unified_TLB_by_MVA;
+@@ -3160,7 +3158,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+         mcrOperands
+ {
+   build COND;
+-  coproc_moveto_Invalidate_Entire_Data_cache(Rd);
++  coproc_moveto_Invalidate_Entire_Data_Cache(Rd);
+ }
+ 
+ 
+@@ -3845,7 +3843,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+         mcrOperands
+ {
+   build COND;
+-  Rd = coproc_movefrom_Invalidate_Entire_Data_cache();
++  Rd = coproc_movefrom_Invalidate_Entire_Data_Cache();
+ }
+ 
+ 
