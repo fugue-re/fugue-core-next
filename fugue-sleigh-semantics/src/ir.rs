@@ -1558,10 +1558,10 @@ mod test {
 
     #[test]
     fn test_features() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,
@@ -1596,10 +1596,10 @@ mod test {
 
     #[test]
     fn test_bit_range() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,
@@ -1624,10 +1624,10 @@ mod test {
 
     #[test]
     fn test_eh_prolog() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,
@@ -1655,10 +1655,10 @@ mod test {
 
     #[test]
     fn test_alloca_probe() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,
@@ -1676,10 +1676,10 @@ mod test {
 
     #[test]
     fn test_seh_prolog() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,
@@ -1705,10 +1705,10 @@ mod test {
 
     #[test]
     fn test_seh_prolog4() -> Result<(), Box<dyn std::error::Error>> {
-        use fugue_lifter::x86_64::LANGUAGE;
+        use fugue_lifter::x86_64::LANGUAGE_DEFAULT;
 
-        let mut builder = IRBuilder::new(LANGUAGE);
-        let mut context = LANGUAGE.builder();
+        let mut builder = IRBuilder::new(&LANGUAGE_DEFAULT);
+        let mut context = LANGUAGE_DEFAULT.builder();
 
         let ir = builder.translate(
             &mut context,

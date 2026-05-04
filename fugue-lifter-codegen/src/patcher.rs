@@ -1,9 +1,8 @@
 use std::ffi::OsStr;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
-use diffy::{ApplyError, Patch, ParsePatchError};
+use diffy::{ApplyError, ParsePatchError, Patch};
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -48,9 +47,7 @@ pub enum PatcherError {
         segment: usize,
         target: String,
     },
-    #[error(
-        "patch `{path}` (segment {segment}) failed to apply to `{target}`: {source}"
-    )]
+    #[error("patch `{path}` (segment {segment}) failed to apply to `{target}`: {source}")]
     Apply {
         path: PathBuf,
         segment: usize,
@@ -286,25 +283,27 @@ fn apply_patch_file(dst: &Path, file: &PatchFile) -> Result<(), PatcherError> {
 }
 
 fn split_into_segments(content: &str) -> impl Iterator<Item = &str> {
-    let markers: Vec<usize> = content
+    let markers = content
         .match_indices("\ndiff --git ")
         .map(|(idx, _)| idx + 1)
-        .collect();
+        .collect::<Vec<usize>>();
 
-    let starts: Vec<usize> = if content.starts_with("diff --git ") {
-        std::iter::once(0).chain(markers.iter().copied()).collect()
+    let starts = if content.starts_with("diff --git ") {
+        std::iter::once(0)
+            .chain(markers.iter().copied())
+            .collect::<Vec<usize>>()
     } else if markers.is_empty() {
         vec![0]
     } else {
         markers.clone()
     };
 
-    let ends: Vec<usize> = starts
+    let ends = starts
         .iter()
         .skip(1)
         .copied()
         .chain(std::iter::once(content.len()))
-        .collect();
+        .collect::<Vec<usize>>();
 
     starts
         .into_iter()
@@ -322,9 +321,11 @@ fn strip_diff_prefix(name: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     fn write(dir: &Path, rel: &str, content: &str) {
         let path = dir.join(rel);

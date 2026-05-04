@@ -3,7 +3,9 @@ use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 
+use fugue_arch::ArchitectureDef;
 use fugue_sleigh_language::{Language, LanguageDB};
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
@@ -37,6 +39,12 @@ pub enum CodegenError {
     LanguageDB(anyhow::Error),
     #[error("cannot apply language patches: {0}")]
     Patcher(#[from] PatcherError),
+    #[error("variant `{variant}` has .sla `{actual}`, expected `{expected}`")]
+    VariantSlaMismatch {
+        variant: String,
+        expected: PathBuf,
+        actual: PathBuf,
+    },
 }
 
 impl CodegenError {
@@ -53,12 +61,25 @@ impl CodegenError {
     {
         CodegenError::Format(anyhow::Error::msg(msg))
     }
+
+    fn variant_sla_mismatch(
+        variant: impl Into<String>,
+        expected: PathBuf,
+        actual: PathBuf,
+    ) -> Self {
+        CodegenError::VariantSlaMismatch {
+            variant: variant.into(),
+            expected,
+            actual,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildOptions {
     pub pretty: bool,
     pub patches: Vec<PathBuf>,
+    pub variants: Vec<String>,
 }
 
 impl BuildOptions {
@@ -103,10 +124,57 @@ impl BuildOptions {
         self.add_patches(dirs);
         self
     }
+
+    pub fn add_variant(&mut self, variant: impl Into<String>) -> &mut Self {
+        self.variants.push(variant.into());
+        self
+    }
+
+    pub fn add_variants<I, V>(&mut self, variants: I) -> &mut Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<String>,
+    {
+        self.variants.extend(variants.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn with_variant(mut self, variant: impl Into<String>) -> Self {
+        self.add_variant(variant);
+        self
+    }
+
+    pub fn with_variants<I, V>(mut self, variants: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<String>,
+    {
+        self.add_variants(variants);
+        self
+    }
 }
 
-pub fn from_language(language: &Language) -> Result<TokenStream, LifterGeneratorError> {
-    LifterGenerator::new(language).map(ToTokens::into_token_stream)
+pub fn from_language(
+    language: &Language,
+    primary: VariantData,
+    extras: Vec<VariantData>,
+) -> Result<TokenStream, LifterGeneratorError> {
+    LifterGenerator::new(language, primary, extras).map(ToTokens::into_token_stream)
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantData {
+    pub name: String,
+    pub context_defaults: Vec<(String, u32)>,
+}
+
+impl VariantData {
+    pub fn new(name: impl Into<String>, context_defaults: Vec<(String, u32)>) -> Self {
+        Self {
+            name: name.into(),
+            context_defaults,
+        }
+    }
 }
 
 pub fn build(root: impl AsRef<Path>, language: impl AsRef<str>) -> Result<String, CodegenError> {
@@ -161,16 +229,61 @@ pub fn build_with(
     let builder = LanguageDB::from_directory_with(effective_root, true)
         .map_err(|e| CodegenError::LanguageDB(e.into()))?;
 
-    let language = builder
+    let primary_def = builder
         .lookup_str(language_def)
         .ok()
         .flatten()
         .ok_or_else(|| CodegenError::Language(language_def.to_owned()))?;
 
-    let sla_file = language.language().sla_file();
+    let primary_arch = ArchitectureDef::from_str(language_def)
+        .map_err(|err| CodegenError::Language(format!("{language_def}: {err}")))?;
+
+    let primary_context_defaults = primary_def
+        .language()
+        .context_set()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect::<Vec<(String, u32)>>();
+    let primary_sla = primary_def.language().sla_file().to_path_buf();
+    let primary_variant = VariantData::new(primary_arch.variant(), primary_context_defaults);
+
+    let mut extra_variants = Vec::with_capacity(options.variants.len());
+    for variant in &options.variants {
+        let extra_id = format!(
+            "{}:{}:{}:{}",
+            primary_arch.processor(),
+            if primary_arch.endian().is_big() {
+                "BE"
+            } else {
+                "LE"
+            },
+            primary_arch.bits(),
+            variant
+        );
+        let extra_def = builder
+            .lookup_str(&extra_id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| CodegenError::Language(extra_id.clone()))?;
+        let extra_sla = extra_def.language().sla_file();
+        if extra_sla != primary_sla {
+            return Err(CodegenError::variant_sla_mismatch(
+                variant,
+                primary_sla.clone(),
+                extra_sla.to_path_buf(),
+            ));
+        }
+        let extra_context_defaults = extra_def
+            .language()
+            .context_set()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect::<Vec<(String, u32)>>();
+        extra_variants.push(VariantData::new(variant.clone(), extra_context_defaults));
+    }
+
+    let sla_file = primary_def.language().sla_file();
 
     let language = if sla_file.exists() {
-        language.build()
+        primary_def.build()
     } else {
         #[cfg(not(feature = "bundled-compiler"))]
         return Err(CodegenError::LanguageBuild(
@@ -184,14 +297,15 @@ pub fn build_with(
             let slac = SleighCompiler::new()?
                 .build_with(spec, slaf)?
                 .expect("compiled sla file name");
-            language.build_with_sla(slac)
+            primary_def.build_with_sla(slac)
         }
     };
 
     let language =
         language.map_err(|e| CodegenError::LanguageBuild(language_def.to_owned(), e.into()))?;
 
-    let tokens = from_language(&language).map_err(CodegenError::Generate)?;
+    let tokens = from_language(&language, primary_variant, extra_variants)
+        .map_err(CodegenError::Generate)?;
 
     if options.pretty {
         let mut child = Command::new("rustfmt")

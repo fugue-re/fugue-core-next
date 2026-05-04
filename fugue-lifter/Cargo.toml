@@ -29,6 +29,7 @@ compiled = [
 # Features for serialisation
 rkyv = ["fugue-lifter-runtime/rkyv"]
 serde = ["fugue-lifter-runtime/serde"]
+dynamic = ["fugue-lifter-runtime/dynamic"]
 
 default = ["arm", "aarch64", "bundled", "x86", "x86-64"]
 

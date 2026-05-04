@@ -5,8 +5,9 @@ use arrayvec::ArrayVec;
 use itertools::{Itertools, Position};
 
 use crate::calculate_mask;
-use crate::constructor::{Constructor, ConstructorResolver};
+use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
+use crate::data::LanguageData;
 use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageFormatter};
 use crate::operand::Operands;
@@ -40,6 +41,7 @@ pub struct PCodeBuilder<'a> {
 
 #[derive(Clone)]
 pub struct LiftingContext {
+    language: &'static Language,
     inputs: Vec<ParserInput>, // These inputs will always be used
     lifting_context: PCodeBuilderContext,
     parsing_context: ContextDatabase,
@@ -47,12 +49,27 @@ pub struct LiftingContext {
 
 impl LiftingContext {
     #[doc(hidden)]
-    pub fn new(ninputs: usize, context: ContextDatabase, unique_mask: u64) -> Self {
+    pub fn new(
+        language: &'static Language,
+        ninputs: usize,
+        context: ContextDatabase,
+        unique_mask: u64,
+    ) -> Self {
         Self {
+            language,
             inputs: vec![ParserInput::empty(); ninputs],
             lifting_context: PCodeBuilderContext::new(unique_mask),
             parsing_context: context,
         }
+    }
+
+    pub fn language(&self) -> &'static Language {
+        self.language
+    }
+
+    #[inline(always)]
+    pub fn data(&self) -> &'static LanguageData {
+        self.language.data()
     }
 
     #[doc(hidden)]
@@ -254,9 +271,9 @@ impl<'a> LiftingContextState<'a> {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn apply_commits<R: ConstructorResolver>(&mut self) {
+    pub unsafe fn apply_commits(&mut self, data: &'static LanguageData) {
         for commit in mem::take(&mut self.inputs.input.context.commits) {
-            commit.action.apply::<R>(self, &commit);
+            commit.action.apply(data, self, &commit);
         }
     }
 
@@ -298,14 +315,15 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn operands<R: ConstructorResolver>(
+    pub unsafe fn operands(
         &mut self,
+        data: &'static LanguageData,
         operands: &mut Operands,
     ) -> Option<()> {
         self.inputs.base_state();
 
         let ctor = &self.inputs.input.constructor();
-        ctor.operands::<R>(self, operands)?;
+        ctor.operands(data, self, operands)?;
 
         Some(())
     }
@@ -315,16 +333,17 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format<W: fmt::Write>(
         &mut self,
+        data: &'static LanguageData,
         mut writer: W,
     ) -> fmt::Result {
         self.inputs.input.base_state();
 
         let ctor = &self.inputs.input.constructor();
 
-        ctor.format_mnemonic::<R, _>(self, &mut writer)?;
-        ctor.format_body::<R, _>(self, &mut writer)?;
+        ctor.format_mnemonic(data, self, &mut writer)?;
+        ctor.format_body(data, self, &mut writer)?;
 
         Ok(())
     }
@@ -334,17 +353,16 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn emit<R: ConstructorResolver>(&mut self) -> Option<()> {
+    pub unsafe fn emit(&mut self, data: &'static LanguageData) -> Option<()> {
         self.inputs.input.base_state();
         self.issued.clear();
 
         if let Some(builder) = self.inputs.input.constructor().build_action {
-            construct_tpl::<R>(builder).build::<R>(self)?;
+            construct_tpl(data, builder).build(data, self)?;
         }
 
         self.resolve_relatives();
 
-        // reset
         self.context.inputs_count = 0;
         self.context.label_count = 0;
         self.context.labels.fill(INVALID_LABEL);
@@ -358,7 +376,7 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn emit_delay_slots<R: ConstructorResolver>(&mut self) -> Option<()> {
+    pub unsafe fn emit_delay_slots(&mut self, data: &'static LanguageData) -> Option<()> {
         let unique_offset = self.unique_offset;
 
         let delay_slot_bytes = self.delay_slot_length();
@@ -374,7 +392,7 @@ impl<'a> LiftingContextState<'a> {
                 nself.inputs.input.base_state();
 
                 if let Some(builder) = nself.inputs.input.constructor().build_action {
-                    construct_tpl::<R>(builder).build::<R>(&mut nself)?;
+                    construct_tpl(data, builder).build(data, &mut nself)?;
                 }
 
                 length

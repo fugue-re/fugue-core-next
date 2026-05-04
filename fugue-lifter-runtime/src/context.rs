@@ -6,13 +6,19 @@ use std::{array, mem};
 
 use itertools::Itertools;
 
-use crate::constructor::ConstructorResolver;
+use crate::data::LanguageData;
 use crate::input::{ContextCommit, FixedHandle};
 use crate::partmap::{BoundKind, PartMap};
 use crate::pattern::PatternExpression;
 use crate::pcode::{LiftingContextState, Varnode};
+use crate::symbol::Symbol;
 use crate::wrap_offset;
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ContextPreAction {
     pub num: usize,
     pub shift: u32,
@@ -25,21 +31,32 @@ impl ContextPreAction {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn apply<R: ConstructorResolver>(
+    pub unsafe fn apply(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
     ) -> Option<()> {
-        let value = (self.value.resolve::<R>(input)? as u32) << self.shift;
+        let value = (self.value.resolve(data, input)? as u32) << self.shift;
         input.input().set_context_word(self.num, value, self.mask);
         Some(())
     }
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum ContextPostActionHandle {
     Operand(u16),
     Symbol(u16),
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ContextPostAction {
     pub handle: ContextPostActionHandle,
     pub num: usize,
@@ -59,8 +76,9 @@ impl ContextPostAction {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn apply<R: ConstructorResolver>(
+    pub unsafe fn apply(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
         commit: &ContextCommit,
     ) -> Option<()> {
@@ -70,7 +88,7 @@ impl ContextPostAction {
             ..
         } = match self.handle {
             ContextPostActionHandle::Symbol(symbol) => {
-                R::SYMBOLS[symbol as usize].resolve_handle::<R>(input)?
+                Symbol::resolve_handle(&data.symbols[symbol as usize], data, input)?
             }
             ContextPostActionHandle::Operand(index) => unsafe {
                 input

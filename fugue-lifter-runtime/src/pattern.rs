@@ -1,22 +1,35 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::constructor::ConstructorResolver;
+use crate::data::LanguageData;
+use crate::entry::resolve_instruction;
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
 use crate::operand::Operands;
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
 
 #[derive(Debug, Copy, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum OperandOffset {
     Relative(u8),
     Operand(u8),
 }
 
 #[derive(Debug, Copy, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct PatternExpression(u16, u16);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum PatternOp {
     TokenField {
         big_endian: bool,
@@ -72,19 +85,22 @@ impl PatternExpression {
     }
 
     #[inline(always)]
-    fn operations<R: ConstructorResolver>(&self) -> &'static [PatternOp] {
-        &R::PATTERN_EXPRESSIONS[self.range()]
+    fn operations(&self, data: &'static LanguageData) -> &'static [PatternOp] {
+        &data.pattern_expressions[self.range()]
     }
 
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format<W: fmt::Write>(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> fmt::Result {
-        let value = self.resolve::<R>(state).expect("value previously resolved");
+        let value = self
+            .resolve(data, state)
+            .expect("value previously resolved");
         if value < 0 {
             write!(writer, "-{:#x}", -(value as i128))
         } else {
@@ -95,13 +111,14 @@ impl PatternExpression {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands<R: ConstructorResolver>(
+    pub unsafe fn operands(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) {
         let (value, range) = self
-            .resolve_with_range::<R>(state)
+            .resolve_with_range(data, state)
             .expect("value previously resolved");
         operands.push_with(value, range);
     }
@@ -109,30 +126,25 @@ impl PatternExpression {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn resolve<R: ConstructorResolver>(
+    pub unsafe fn resolve(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
     ) -> Option<i64> {
-        // XXX: this should be optimized by the compiler to avoid the range allocation since we
-        // only care about the value, but we may need to explicitly split this function if it
-        // doesn't optimize well
-        self.resolve_with_range::<R>(input).map(|(value, _)| value)
+        self.resolve_with_range(data, input).map(|(value, _)| value)
     }
 
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline(always)]
-    pub(crate) unsafe fn resolve_with_range<R: ConstructorResolver>(
+    pub(crate) unsafe fn resolve_with_range(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
     ) -> Option<(i64, Option<Range<u32>>)> {
         let mut stack = Vec::new();
-        let operations = self.operations::<R>();
-
-        // for xor(lhs, rhs), the operations will be [lhs, rhs, Xor]
-        //
-        // hence we will push lhs, push rhs, then pop lhs and rhs and compute lhs ^ rhs
+        let operations = self.operations(data);
 
         let mut range = None;
         let update_range = |c: &mut Option<Range<u32>>, new: Range<u32>| {
@@ -263,11 +275,9 @@ impl PatternExpression {
                     let mut point =
                         &input.inputs.input.context.constructors[input.inputs.input.point as usize];
 
-                    let ctor = &R::CONSTRUCTORS[*constructor as usize];
+                    let ctor = &data.constructors[*constructor as usize];
                     let ctor_id = ctor.id;
 
-                    // TODO: recheck this logic--the constructor IDs are different from the
-                    // original implementation, it should be fine...
                     while point.constructor.map(|ctor| ctor.id) != Some(ctor_id) {
                         if cur_depth <= 0 {
                             let old_point = input.inputs.input.point;
@@ -290,15 +300,12 @@ impl PatternExpression {
                                 cstate.length = 0;
                             }
 
-                            // compute the value in the modified context
-                            let (value, nrange) = value.resolve_with_range::<R>(input)?;
+                            let (value, nrange) = value.resolve_with_range(data, input)?;
 
-                            // update range
                             if let Some(nrange) = nrange {
                                 update_range(&mut range, nrange);
                             }
 
-                            // restore old state
                             {
                                 let cstate = &mut input.inputs.input.context.constructors
                                     [input.inputs.input.point as usize];
@@ -323,7 +330,6 @@ impl PatternExpression {
                         point = &input.inputs.input.context.constructors[point.parent as usize];
                     }
 
-                    // if we reach here, we've resolved the ctor in the current tree
                     let offset = match offset {
                         OperandOffset::Relative(offset) => point.offset + *offset,
                         OperandOffset::Operand(index) => {
@@ -334,7 +340,6 @@ impl PatternExpression {
                     };
                     let length = point.length;
 
-                    // preserve old and init new state
                     let old_point = input.inputs.input.point;
                     let old_depth = std::mem::take(&mut input.inputs.input.depth);
                     let old_breadcrumb =
@@ -353,15 +358,12 @@ impl PatternExpression {
                         cstate.length = length;
                     }
 
-                    // compute the value in the modified context
-                    let (value, nrange) = value.resolve_with_range::<R>(input)?;
+                    let (value, nrange) = value.resolve_with_range(data, input)?;
 
-                    // update range
                     if let Some(nrange) = nrange {
                         update_range(&mut range, nrange);
                     }
 
-                    // restore old state
                     {
                         let cstate = &mut input.inputs.input.context.constructors
                             [input.inputs.input.point as usize];
@@ -386,7 +388,7 @@ impl PatternExpression {
                     let value = input.next2_address().map_or_else(
                         || {
                             let mut ninput = input.next_input()?;
-                            R::resolve(&mut ninput)?;
+                            resolve_instruction(data, &mut ninput)?;
                             Some(ninput.next_address() as i64)
                         },
                         |v| Some(v as i64),

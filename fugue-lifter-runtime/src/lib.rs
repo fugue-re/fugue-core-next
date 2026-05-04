@@ -1,7 +1,9 @@
-pub extern crate phf;
-
 pub mod constructor;
 pub mod context;
+pub mod data;
+#[cfg(feature = "dynamic")]
+pub mod dynamic;
+pub mod entry;
 pub mod input;
 pub mod language;
 pub mod lifter;
@@ -13,8 +15,9 @@ pub mod resolve;
 pub mod symbol;
 pub mod template;
 
-pub use constructor::{Constructor, ConstructorResolver};
+pub use constructor::Constructor;
 pub use context::ContextDatabase;
+pub use data::{LanguageData, SpaceInfo, SpaceKind};
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId, LanguageVariant};
 pub use lifter::Lifter;

@@ -10,8 +10,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = "4.6.1"
-fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
 flate2 = "1.1"
+fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
+fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime", features = ["dynamic"] }
+fugue-sleighc = "0.3"
+rkyv = { version = "0.8", features = ["arrayvec-0_7"] }
 tempfile = "3"
 thiserror = "2"
 

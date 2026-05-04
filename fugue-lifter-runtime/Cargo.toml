@@ -4,17 +4,26 @@ version = "0.3.0"
 edition = "2021"
 
 [features]
+default = []
+dynamic = ["dep:flate2", "dep:fugue-sleigh-language", "dep:indexmap", "rkyv"]
 rkyv = ["dep:rkyv"]
 serde = ["dep:serde"]
-default = []
 
 [dependencies]
 arrayvec = "0.7"
-rkyv = { version = "0.8", features = ["arrayvec-0_7"], optional = true }
+flate2 = { version = "1.1", optional = true }
+fugue-sleigh-language = { version = "0.3", path = "../fugue-sleigh-language", optional = true }
+indexmap = { version = "2.12", optional = true }
 itertools = "0.14"
-phf = { version = "0.13", features = ["macros"] }
+rkyv = { version = "0.8", features = ["arrayvec-0_7"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2"
+
+[dev-dependencies]
+fugue-lifter-arm = { path = "../fugue-lifter-arm" }
+fugue-lifter-packager = { path = "../fugue-lifter-packager" }
+fugue-lifter-x86 = { path = "../fugue-lifter-x86" }
+tempfile = "3"
 
 [lints]
 workspace = true

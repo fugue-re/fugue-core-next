@@ -1,54 +1,21 @@
 use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
+use crate::data::LanguageData;
+use crate::entry::resolve_constructor;
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::operand::{Operand, OperandFilter, OperandHandleResolver, OperandResolver, Operands};
-use crate::pattern::PatternOp;
+use crate::operand::{Operand, OperandHandleResolver, OperandResolver, Operands};
 use crate::pcode::LiftingContextState;
-use crate::resolve::DecisionNode;
 use crate::symbol::Symbol;
-use crate::template::{handle_tpl, ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
-
-// pub type ContextActionSet = fn(&mut LiftingContextState<'_>) -> Option<()>;
-pub trait ConstructorResolver {
-    const ADDRESS_SIZE: usize;
-    const CONSTANT_SPACE: u8;
-    const DEFAULT_SPACE: u8;
-    const UNIQUE_SPACE: u8;
-
-    const CONSTRUCTORS: &'static [Constructor];
-    const DECISION_TREES: &'static [DecisionNode];
-    const OPERAND_FILTERS: &'static [OperandFilter];
-    const PATTERN_EXPRESSIONS: &'static [PatternOp];
-    const SYMBOLS: &'static [Symbol];
-
-    const CONST_TEMPLATES: &'static [ConstTpl];
-    const CONSTRUCT_TEMPLATES: &'static [ConstructTpl];
-    const HANDLE_TEMPLATES: &'static [HandleTpl];
-    const OP_TEMPLATES: &'static [OpTpl];
-    const VARNODE_TEMPLATES: &'static [VarnodeTpl];
-
-    fn resolve(input: &mut LiftingContextState) -> Option<&'static Constructor>;
-    fn resolve_constructor(
-        id: u16,
-        input: &mut LiftingContextState,
-    ) -> Option<&'static Constructor>;
-    fn resolve_upper_bound(space: u8) -> u64;
-    fn resolve_word_size(space: u8) -> usize;
-    fn resolve_location_offset(unique_offset: u64, space: u8, offset: u64, size: u16) -> u64;
-}
-
-pub type ConstructorResult = fn(&mut LiftingContextState<'_>) -> FixedHandle;
-
-pub type PCodeBuildAction = fn(&mut LiftingContextState<'_>) -> Option<()>;
+use crate::template::handle_tpl;
 
 pub struct Constructor {
     pub id: u16,
     pub context_pre_actions: &'static [ContextPreAction],
     pub context_post_actions: &'static [ContextPostAction],
     pub operands: &'static [Operand],
-    pub result: Option<u16>,       // HandleTpl
-    pub build_action: Option<u16>, // ConstructTpl
+    pub result: Option<u16>,
+    pub build_action: Option<u16>,
     pub print_pieces: &'static [PrintPiece],
     pub first_whitespace: Option<usize>,
     pub flow_through_index: Option<usize>,
@@ -60,10 +27,6 @@ pub enum PrintPiece {
     Operand(u16),
     Token(&'static str),
 }
-
-// print pieces:
-// - Symbol(operand index)
-// - Token
 
 impl Debug for Constructor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -84,12 +47,13 @@ impl Constructor {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn apply_context_actions<R: ConstructorResolver>(
+    pub unsafe fn apply_context_actions(
         &'static self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState,
     ) -> Option<()> {
         for action in self.context_pre_actions {
-            action.apply::<R>(state)?;
+            action.apply(data, state)?;
         }
 
         for action in self.context_post_actions {
@@ -109,13 +73,14 @@ impl Constructor {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn resolve_operands<R: ConstructorResolver>(
+    pub unsafe fn resolve_operands(
         &'static self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState,
     ) -> Option<()> {
         state.input().set_constructor(self);
 
-        self.apply_context_actions::<R>(state)?;
+        self.apply_context_actions(data, state)?;
 
         if self.operands.is_empty() {
             state
@@ -149,14 +114,14 @@ impl Constructor {
                 match opnd.resolver {
                     OperandResolver::None => (),
                     OperandResolver::Filter(filter) => {
-                        R::OPERAND_FILTERS[filter as usize].validate::<R>(state)?;
+                        data.operand_filters[filter as usize].validate(data, state)?;
                     }
                     OperandResolver::Constructor(id) => {
-                        let ctor = R::resolve_constructor(id, state)?;
+                        let ctor = resolve_constructor(data, id, state)?;
 
                         state.input().set_constructor(ctor);
 
-                        ctor.apply_context_actions::<R>(state)?;
+                        ctor.apply_context_actions(data, state)?;
 
                         if !ctor.operands.is_empty() {
                             state.input().allocate_operands(ctor.operands.len())?;
@@ -187,8 +152,9 @@ impl Constructor {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn resolve_handles<R: ConstructorResolver>(
+    pub unsafe fn resolve_handles(
         &'static self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState,
     ) -> Option<()> {
         state.input().base_state();
@@ -205,11 +171,11 @@ impl Constructor {
                         continue 'outer;
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        let handle = R::SYMBOLS[symbol as usize].resolve_handle::<R>(state)?;
+                        let handle = data.symbols[symbol as usize].resolve_handle(data, state)?;
                         state.input().set_parent_handle(handle);
                     }
                     OperandHandleResolver::Expression(ref expr) => {
-                        let offset = expr.resolve::<R>(state)? as u64;
+                        let offset = expr.resolve(data, state)? as u64;
 
                         if let Some(handle) = state.input().parent_handle_mut() {
                             handle.space = 0;
@@ -230,7 +196,7 @@ impl Constructor {
             }
 
             if let Some(tmpl) = ctor.result {
-                let handle = handle_tpl::<R>(tmpl).build::<R>(state)?;
+                let handle = handle_tpl(data, tmpl).build(data, state)?;
                 state.input().set_parent_handle(handle);
             }
 
@@ -243,8 +209,9 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format_mnemonic<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format_mnemonic<W: fmt::Write>(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> fmt::Result {
@@ -257,7 +224,7 @@ impl Constructor {
                 state
                     .input()
                     .constructor()
-                    .format_mnemonic::<R, _>(state, writer)?;
+                    .format_mnemonic(data, state, writer)?;
                 state.input().pop_operand();
                 return Ok(());
             }
@@ -276,14 +243,14 @@ impl Constructor {
                 {
                     OperandHandleResolver::None => {
                         state.input().push_operand(*index as usize);
-                        state.input().constructor().format::<R, _>(state, writer)?;
+                        state.input().constructor().format(data, state, writer)?;
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
+                        Symbol::format(&data.symbols[*symbol as usize], data, state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.format::<R, _>(state, writer)?;
+                        expr.format(data, state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -298,8 +265,9 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format_body<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format_body<W: fmt::Write>(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> Result<(), fmt::Error> {
@@ -312,7 +280,7 @@ impl Constructor {
                 state
                     .input()
                     .constructor()
-                    .format_body::<R, _>(state, writer)?;
+                    .format_body(data, state, writer)?;
                 state.input().pop_operand();
                 return Ok(());
             }
@@ -335,14 +303,14 @@ impl Constructor {
                 {
                     OperandHandleResolver::None => {
                         state.input().push_operand(*index as usize);
-                        state.input().constructor().format::<R, _>(state, writer)?;
+                        state.input().constructor().format(data, state, writer)?;
                         state.input().pop_operand();
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
+                        Symbol::format(&data.symbols[*symbol as usize], data, state, writer)?;
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.format::<R, _>(state, writer)?;
+                        expr.format(data, state, writer)?;
                     }
                 },
                 PrintPiece::Token(token) => {
@@ -357,8 +325,9 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format<W: fmt::Write>(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> Result<(), fmt::Error> {
@@ -368,13 +337,13 @@ impl Constructor {
                     state.input().push_operand(*index as usize);
                     match &self.operands[*index as usize].handle_resolver {
                         OperandHandleResolver::None => {
-                            state.input().constructor().format::<R, _>(state, writer)?;
+                            state.input().constructor().format(data, state, writer)?;
                         }
                         OperandHandleResolver::Symbol(symbol) => {
-                            R::SYMBOLS[*symbol as usize].format::<R, _>(state, writer)?;
+                            Symbol::format(&data.symbols[*symbol as usize], data, state, writer)?;
                         }
                         OperandHandleResolver::Expression(expr) => {
-                            expr.format::<R, _>(state, writer)?;
+                            expr.format(data, state, writer)?;
                         }
                     }
                     state.input().pop_operand();
@@ -387,8 +356,9 @@ impl Constructor {
         Ok(())
     }
 
-    pub(crate) unsafe fn operands<R: ConstructorResolver>(
+    pub(crate) unsafe fn operands(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) -> Option<()> {
@@ -398,7 +368,10 @@ impl Constructor {
                 OperandHandleResolver::None
             ) {
                 state.input().push_operand(index);
-                state.input().constructor().operands::<R>(state, operands)?;
+                state
+                    .input()
+                    .constructor()
+                    .operands(data, state, operands)?;
                 state.input().pop_operand();
                 return Some(());
             }
@@ -420,15 +393,15 @@ impl Constructor {
                         state
                             .input()
                             .constructor()
-                            .operands_inner::<R>(state, &mut inner)?;
+                            .operands_inner(data, state, &mut inner)?;
                         state.input().pop_operand();
                         operands.append(inner);
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        R::SYMBOLS[*symbol as usize].operands::<R>(state, operands);
+                        data.symbols[*symbol as usize].operands(data, state, operands);
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.operands::<R>(state, operands);
+                        expr.operands(data, state, operands);
                     }
                 }
             }
@@ -437,8 +410,9 @@ impl Constructor {
         Some(())
     }
 
-    pub(crate) unsafe fn operands_inner<R: ConstructorResolver>(
+    pub(crate) unsafe fn operands_inner(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) -> Option<()> {
@@ -451,14 +425,14 @@ impl Constructor {
                         state
                             .input()
                             .constructor()
-                            .operands_inner::<R>(state, &mut inner)?;
+                            .operands_inner(data, state, &mut inner)?;
                         operands.append(inner);
                     }
                     OperandHandleResolver::Symbol(symbol) => {
-                        R::SYMBOLS[*symbol as usize].operands::<R>(state, operands);
+                        data.symbols[*symbol as usize].operands(data, state, operands);
                     }
                     OperandHandleResolver::Expression(expr) => {
-                        expr.operands::<R>(state, operands);
+                        expr.operands(data, state, operands);
                     }
                 }
                 state.input().pop_operand();

@@ -16,7 +16,10 @@ impl LifterFactory {
         base.set_variable_default_by_bits(context::ADDRSIZE, 1);
         base.set_variable_default_by_bits(context::OPSIZE, 1);
 
-        Lifter::new(__impl::LANGUAGE, __impl::lifter_with(2, base))
+        Lifter::new(
+            &__impl::LANGUAGE,
+            __impl::lifter_with(&__impl::LANGUAGE, 2, base),
+        )
     }
 }
 
@@ -33,7 +36,7 @@ impl LiftingContextFactory {
         base.set_variable_default_by_bits(context::ADDRSIZE, 1);
         base.set_variable_default_by_bits(context::OPSIZE, 1);
 
-        __impl::lifter_with(2, base)
+        __impl::lifter_with(&__impl::LANGUAGE, 2, base)
     }
 }
 
@@ -41,5 +44,5 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", LANGUAGE, LiftingContextFactory::new_default);
+        LanguageVariant::new("default", &__impl::LANGUAGE, LiftingContextFactory::new_default);
 }

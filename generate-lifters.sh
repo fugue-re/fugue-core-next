@@ -116,14 +116,16 @@ run_step \
     cargo run --quiet --bin lifter-packager -- \
     ./fugue-lifter-arm/data/processors \
     ARM:BE:32:v8 \
-    ./fugue-lifter-arm/data/generated/arm_be.rs.gz
+    ./fugue-lifter-arm/data/generated/arm_be.rs.gz \
+    --variant v8T
 
 run_step \
     "Generating ARM little-endian lifter..." \
     cargo run --quiet --bin lifter-packager -- \
     ./fugue-lifter-arm/data/processors \
     ARM:LE:32:v8 \
-    ./fugue-lifter-arm/data/generated/arm_le.rs.gz
+    ./fugue-lifter-arm/data/generated/arm_le.rs.gz \
+    --variant v8T
 
 run_step \
     "Generating x86 lifter..." \
@@ -137,6 +139,7 @@ run_step \
     cargo run --quiet --bin lifter-packager -- \
     ./fugue-lifter-x86/data/processors \
     x86:LE:64:default \
-    ./fugue-lifter-x86/data/generated/x86_64.rs.gz
+    ./fugue-lifter-x86/data/generated/x86_64.rs.gz \
+    --variant compat32
 
 printf '%s\n' "Done"

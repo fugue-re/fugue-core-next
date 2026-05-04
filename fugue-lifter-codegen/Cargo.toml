@@ -10,8 +10,9 @@ default = ["bundled-compiler"]
 [dependencies]
 anyhow = "1"
 diffy = "0.5"
-fugue-sleighc = { version = "0.3", optional = true }
+fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-sleigh-language = { path = "../fugue-sleigh-language" }
+fugue-sleighc = { version = "0.3", optional = true }
 heck = "0.5"
 indexmap = "2.12"
 itertools = "0.14"
