@@ -64,8 +64,6 @@ yaxpeax-x86 = "2.0"
 zip = { version = "7", default-features = false, features = ["zstd"] }
 
 [dev-dependencies]
-fugue-lifter-packager = { version = "0.3", path = "../fugue-lifter-packager" }
-tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [lints]
