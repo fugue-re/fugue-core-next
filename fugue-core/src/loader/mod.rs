@@ -40,17 +40,23 @@ pub mod util;
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
+    #[error("cannot load object: address overflow using base address of {0}")]
+    AddressOverflow(Address),
     #[error("cannot load object: {0}")]
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
     Io(#[from] std::io::Error),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
-    #[error("cannot load object; unsupported architecture")]
+    #[error("cannot load object: unsupported architecture")]
     UnsupportedArch,
 }
 
 impl LoaderError {
+    pub fn address_overflow(address: impl Into<Address>) -> Self {
+        Self::AddressOverflow(address.into())
+    }
+
     pub fn format<E>(e: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,

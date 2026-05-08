@@ -353,6 +353,16 @@ impl RawAddress {
         self.0
     }
 
+    pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
+        let offset = offset.into();
+        self.0.checked_add(offset.0).map(Self)
+    }
+
+    pub fn checked_sub(&self, offset: impl Into<RawAddress>) -> Option<Self> {
+        let offset = offset.into();
+        self.0.checked_sub(offset.0).map(Self)
+    }
+
     pub fn align(&self, alignment: usize) -> RawAddress {
         let offset =
             (*self + alignment.wrapping_sub(1)).offset() & !(alignment as u64).wrapping_sub(1);
@@ -997,6 +1007,22 @@ impl Address {
 
     pub fn offset(&self) -> u64 {
         self.address.offset()
+    }
+
+    pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
+        let offset = offset.into();
+        self.address().checked_add(offset).map(|new_address| Self {
+            space: self.space,
+            address: new_address,
+        })
+    }
+
+    pub fn checked_sub(&self, offset: impl Into<RawAddress>) -> Option<Self> {
+        let offset = offset.into();
+        self.address().checked_sub(offset).map(|new_address| Self {
+            space: self.space,
+            address: new_address,
+        })
     }
 
     pub fn wrap(&self, language: &Language) -> Self {
