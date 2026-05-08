@@ -1,8 +1,7 @@
 use std::fmt;
 
-use crate::data::LanguageData;
-use crate::entry::resolve_instruction;
 use crate::input::FixedHandle;
+use crate::language::LanguageData;
 use crate::operand::{OperandValue, Operands};
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
@@ -269,7 +268,7 @@ impl Symbol {
                     next2_address
                 } else {
                     let mut ninput = input.next_input()?;
-                    resolve_instruction(data, &mut ninput)?;
+                    data.resolve_instruction(&mut ninput)?;
                     ninput.next_address()
                 },
                 ..Default::default()

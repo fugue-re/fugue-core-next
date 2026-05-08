@@ -6,8 +6,8 @@ use std::{array, mem};
 
 use itertools::Itertools;
 
-use crate::data::LanguageData;
 use crate::input::{ContextCommit, FixedHandle};
+use crate::language::LanguageData;
 use crate::partmap::{BoundKind, PartMap};
 use crate::pattern::PatternExpression;
 use crate::pcode::{LiftingContextState, Varnode};

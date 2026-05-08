@@ -1,5 +1,5 @@
 use crate::constructor::Constructor;
-use crate::data::LanguageData;
+use crate::language::LanguageData;
 use crate::pcode::LiftingContextState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

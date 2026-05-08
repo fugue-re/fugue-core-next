@@ -5,11 +5,11 @@ use crate::template::Op;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct ConstructTpl {
-    pub delay_slot: u8,
-    pub labels: u8,
-    pub result: Option<u16>,
-    pub operations: Box<[u16]>,
+pub(crate) struct ConstructTpl {
+    pub(crate) delay_slot: u8,
+    pub(crate) labels: u8,
+    pub(crate) result: Option<u16>,
+    pub(crate) operations: Box<[u16]>,
 }
 
 #[derive(Debug, Clone)]
@@ -17,8 +17,8 @@ pub struct ConstructTpl {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct OpTpl {
-    pub op: Op,
-    pub inputs: Box<[u16]>,
-    pub output: Option<u16>,
+pub(crate) struct OpTpl {
+    pub(crate) op: Op,
+    pub(crate) inputs: Box<[u16]>,
+    pub(crate) output: Option<u16>,
 }

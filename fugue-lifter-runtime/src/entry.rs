@@ -1,69 +1,5 @@
-use crate::constructor::Constructor;
-use crate::data::{LanguageData, SpaceKind};
 use crate::operand::Operands;
-use crate::pcode::{LiftingContext, LiftingContextState, PCodeOp};
-use crate::{calculate_mask, wrap_offset};
-
-#[inline(always)]
-pub(crate) fn resolve_upper_bound(data: &'static LanguageData, space: u8) -> u64 {
-    data.spaces[space as usize].upper_bound
-}
-
-#[inline(always)]
-pub(crate) fn resolve_word_size(data: &'static LanguageData, space: u8) -> usize {
-    data.spaces[space as usize].word_size
-}
-
-#[inline(always)]
-pub(crate) fn resolve_location_offset(
-    data: &'static LanguageData,
-    unique_offset: u64,
-    space: u8,
-    offset: u64,
-    size: u16,
-) -> u64 {
-    let info = &data.spaces[space as usize];
-    match info.kind {
-        SpaceKind::Constant => offset & calculate_mask(size as usize),
-        SpaceKind::Unique => offset | unique_offset,
-        SpaceKind::Default | SpaceKind::Other => wrap_offset(info.upper_bound, offset),
-    }
-}
-
-#[inline(always)]
-pub(crate) fn resolve_constructor(
-    data: &'static LanguageData,
-    id: u16,
-    state: &mut LiftingContextState,
-) -> Option<&'static Constructor> {
-    data.decision_trees[id as usize].resolve(data, state)
-}
-
-#[inline(always)]
-pub(crate) fn resolve_instruction(
-    data: &'static LanguageData,
-    state: &mut LiftingContextState,
-) -> Option<&'static Constructor> {
-    unsafe {
-        let ctor = data.decision_trees[data.root_dtree as usize].resolve(data, state)?;
-        ctor.resolve_operands(data, state)?;
-        Some(ctor)
-    }
-}
-
-#[inline(always)]
-pub(crate) fn resolve_state(
-    data: &'static LanguageData,
-    state: &mut LiftingContextState,
-) -> Option<&'static Constructor> {
-    unsafe {
-        let ctor = resolve_instruction(data, state)?;
-        ctor.resolve_handles(data, state)?;
-        state.inputs.input.base_state();
-        state.apply_commits(data);
-        Some(ctor)
-    }
-}
+use crate::pcode::{LiftingContext, PCodeOp};
 
 #[inline]
 pub fn resolve(
@@ -77,7 +13,7 @@ pub fn resolve(
         let mut nop_issued = Vec::with_capacity(0);
         let mut state = context.state_for(address, bytes, &mut nop_issued)?;
 
-        let ctor = resolve_instruction(data, &mut state)?;
+        let ctor = data.resolve_instruction(&mut state)?;
 
         let buffer_limit = bytes.len();
         let length = state.len();
@@ -112,7 +48,7 @@ pub fn operands(
         let mut nop_issued = Vec::with_capacity(0);
         let mut state = context.state_for(address, bytes, &mut nop_issued)?;
 
-        let ctor = resolve_instruction(data, &mut state)?;
+        let ctor = data.resolve_instruction(&mut state)?;
 
         let buffer_limit = bytes.len();
         let length = state.len();
@@ -158,7 +94,7 @@ pub fn disassemble_to<W: std::fmt::Write>(
             return Ok(None);
         };
 
-        let Some(ctor) = resolve_instruction(data, &mut state) else {
+        let Some(ctor) = data.resolve_instruction(&mut state) else {
             return Ok(None);
         };
 
@@ -195,7 +131,7 @@ pub fn lift(
         let mut state = context.state_for(address, bytes, issued)?;
         let buffer_limit = bytes.len();
 
-        resolve_state(data, &mut state)?;
+        data.resolve_state(&mut state)?;
 
         let length = state.len();
 
@@ -222,7 +158,7 @@ pub fn lift(
 
             dstate.inputs.initialise(address, bytes);
 
-            resolve_state(data, &mut dstate)?;
+            data.resolve_state(&mut dstate)?;
 
             if dstate.delay_slot_length() != 0 {
                 return None;

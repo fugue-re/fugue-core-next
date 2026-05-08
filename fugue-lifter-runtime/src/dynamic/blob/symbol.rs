@@ -5,7 +5,7 @@ use crate::pattern::PatternExpression;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub enum Symbol {
+pub(crate) enum Symbol {
     Epsilon,
     Value {
         pattern_value: PatternExpression,

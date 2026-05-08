@@ -1,6 +1,5 @@
-use crate::data::LanguageData;
-use crate::entry::{resolve_location_offset, resolve_upper_bound, resolve_word_size};
 use crate::input::{FixedHandle, INVALID_HANDLE};
+use crate::language::LanguageData;
 use crate::{pcode, wrap_offset, LiftingContextState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +192,7 @@ impl ConstTpl {
                 let value = self.value(data, input)?;
 
                 handle.offset_space = INVALID_HANDLE;
-                handle.offset_offset = wrap_offset(resolve_upper_bound(data, handle.space), value);
+                handle.offset_offset = wrap_offset(data.space_upper_bound(handle.space), value);
             }
         }
         Some(())
@@ -260,7 +259,7 @@ impl ConstTpl {
                     next2_address
                 } else {
                     let mut ninput = input.next_input()?;
-                    crate::entry::resolve_instruction(data, &mut ninput)?;
+                    data.resolve_instruction(&mut ninput)?;
                     ninput.next_address()
                 }
             }
@@ -580,8 +579,8 @@ impl HandleTpl {
             };
 
             if offset_space == 0 {
-                let hoffset = resolve_upper_bound(data, space);
-                let word_size = resolve_word_size(data, space) as u64;
+                let hoffset = data.space_upper_bound(space);
+                let word_size = data.space_word_size(space) as u64;
 
                 handle.offset_space = INVALID_HANDLE;
                 handle.offset_offset = wrap_offset(hoffset, handle.offset_offset * word_size);
@@ -656,8 +655,7 @@ impl VarnodeTpl {
     ) -> Option<pcode::Varnode> {
         let space = const_tpl(data, self.space).space_via(data, input);
         let size = const_tpl(data, self.size).value(data, input)? as u16;
-        let offset = resolve_location_offset(
-            data,
+        let offset = data.space_location_offset(
             input.unique_offset,
             space,
             const_tpl(data, self.offset).value(data, input)?,
@@ -685,7 +683,7 @@ impl VarnodeTpl {
         let space = handle.offset_space;
         let size = handle.offset_size;
         let offset =
-            resolve_location_offset(data, input.unique_offset, space, handle.offset_offset, size);
+            data.space_location_offset(input.unique_offset, space, handle.offset_offset, size);
 
         Some((
             handle.space,

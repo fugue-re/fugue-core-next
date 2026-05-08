@@ -5,8 +5,8 @@ use crate::pattern::PatternExpression;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct OperandFilter {
-    pub pattern: PatternExpression,
-    pub indices: Box<[u16]>,
-    pub limit: u16,
+pub(crate) struct OperandFilter {
+    pub(crate) pattern: PatternExpression,
+    pub(crate) indices: Box<[u16]>,
+    pub(crate) limit: u16,
 }

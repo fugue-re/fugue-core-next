@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::data::LanguageData;
+use crate::language::LanguageData;
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 

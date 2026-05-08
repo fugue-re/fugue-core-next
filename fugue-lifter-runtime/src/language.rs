@@ -4,12 +4,18 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
+use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
-use crate::data::LanguageData;
 use crate::lifter::LiftingContextFactory;
+use crate::operand::OperandFilter;
 use crate::operand::Operands;
+use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
-use crate::{entry, wrap_offset};
+use crate::resolve::DecisionNode;
+use crate::space::{AddressSpace, AddressSpaceKind};
+use crate::symbol::Symbol;
+use crate::template::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
+use crate::{calculate_mask, entry, wrap_offset, LiftingContextState};
 
 #[derive(Clone, Copy)]
 pub struct LanguageVariant {
@@ -154,6 +160,99 @@ pub enum LanguageParseError {
     ParseVariant,
     #[error("could not parse architecture definition: incorrect format")]
     ParseFormat,
+}
+
+pub struct LanguageData {
+    pub root_dtree: u16,
+
+    pub address_size: usize,
+    pub constant_space: u8,
+    pub default_space: u8,
+    pub unique_space: u8,
+
+    pub spaces: &'static [AddressSpace],
+
+    pub constructors: &'static [Constructor],
+    pub decision_trees: &'static [DecisionNode],
+    pub operand_filters: &'static [OperandFilter],
+    pub pattern_expressions: &'static [PatternOp],
+    pub symbols: &'static [Symbol],
+
+    pub const_templates: &'static [ConstTpl],
+    pub construct_templates: &'static [ConstructTpl],
+    pub handle_templates: &'static [HandleTpl],
+    pub op_templates: &'static [OpTpl],
+    pub varnode_templates: &'static [VarnodeTpl],
+}
+
+impl LanguageData {
+    #[inline(always)]
+    pub(crate) fn resolve_constructor(
+        &'static self,
+        id: u16,
+        state: &mut LiftingContextState,
+    ) -> Option<&'static Constructor> {
+        self.decision_trees[id as usize].resolve(self, state)
+    }
+
+    #[inline(always)]
+    pub(crate) fn resolve_instruction(
+        &'static self,
+        state: &mut LiftingContextState,
+    ) -> Option<&'static Constructor> {
+        unsafe {
+            let ctor = self.decision_trees[self.root_dtree as usize].resolve(self, state)?;
+            ctor.resolve_operands(self, state)?;
+            Some(ctor)
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn resolve_state(
+        &'static self,
+        state: &mut LiftingContextState,
+    ) -> Option<&'static Constructor> {
+        unsafe {
+            let ctor = self.resolve_instruction(state)?;
+            ctor.resolve_handles(self, state)?;
+            state.inputs.input.base_state();
+            state.apply_commits(self);
+            Some(ctor)
+        }
+    }
+
+    #[inline(always)]
+    pub fn space_upper_bound(&self, space: u8) -> u64 {
+        self.spaces[space as usize].upper_bound()
+    }
+
+    #[inline(always)]
+    pub fn space_word_size(&self, space: u8) -> usize {
+        self.spaces[space as usize].word_size()
+    }
+
+    #[inline(always)]
+    pub fn space_kind(&self, space: u8) -> AddressSpaceKind {
+        self.spaces[space as usize].kind()
+    }
+
+    #[inline(always)]
+    pub fn space_location_offset(
+        &self,
+        unique_offset: u64,
+        space: u8,
+        offset: u64,
+        size: u16,
+    ) -> u64 {
+        let info = &self.spaces[space as usize];
+        match info.kind() {
+            AddressSpaceKind::Constant => offset & calculate_mask(size as usize),
+            AddressSpaceKind::Unique => offset | unique_offset,
+            AddressSpaceKind::Default | AddressSpaceKind::Other => {
+                wrap_offset(info.upper_bound(), offset)
+            }
+        }
+    }
 }
 
 pub trait LanguageImpl {
@@ -575,9 +674,7 @@ mod load {
             install_blob(blob)
         }
 
-        pub fn from_file(
-            path: impl AsRef<Path>,
-        ) -> Result<&'static Language, LanguageLoadError> {
+        pub fn from_file(path: impl AsRef<Path>) -> Result<&'static Language, LanguageLoadError> {
             let path = path.as_ref();
             let file = File::open(path)
                 .map_err(|source| LanguageLoadError::io("open", path.to_path_buf(), source))?;

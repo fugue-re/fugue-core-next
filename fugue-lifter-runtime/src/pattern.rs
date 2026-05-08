@@ -1,9 +1,8 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::data::LanguageData;
-use crate::entry::resolve_instruction;
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
+use crate::language::LanguageData;
 use crate::operand::Operands;
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
@@ -388,7 +387,7 @@ impl PatternExpression {
                     let value = input.next2_address().map_or_else(
                         || {
                             let mut ninput = input.next_input()?;
-                            resolve_instruction(data, &mut ninput)?;
+                            data.resolve_instruction(&mut ninput)?;
                             Some(ninput.next_address() as i64)
                         },
                         |v| Some(v as i64),

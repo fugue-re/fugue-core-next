@@ -11,11 +11,11 @@ use indexmap::IndexMap;
 use thiserror::Error;
 
 use crate::context::ContextBitRange;
-use crate::data::SpaceKind;
 use crate::dynamic::blob;
 use crate::operand::Operand;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
+use crate::space::AddressSpaceKind;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 mod context;
@@ -251,13 +251,13 @@ impl<'a> Tables<'a> {
         let spaces = language
             .spaces()
             .iter()
-            .map(|spc| blob::space::SpaceInfo {
+            .map(|spc| blob::space::AddressSpace {
                 name: spc.name().into(),
                 word_size: spc.word_size(),
                 upper_bound: spc.highest_offset(),
                 kind: classify_space(spc, default_space_id),
             })
-            .collect::<Box<[blob::space::SpaceInfo]>>();
+            .collect::<Box<[blob::space::AddressSpace]>>();
 
         let space_names = language
             .spaces()
@@ -526,16 +526,16 @@ impl<'a> Tables<'a> {
 fn classify_space(
     space: &fugue_sleigh_language::spaces::AddressSpace,
     default_space_id: u8,
-) -> SpaceKind {
+) -> AddressSpaceKind {
     let id = space.id();
     if id.is_constant() {
-        SpaceKind::Constant
+        AddressSpaceKind::Constant
     } else if id.is_unique() {
-        SpaceKind::Unique
+        AddressSpaceKind::Unique
     } else if (space.index() as u8) == default_space_id {
-        SpaceKind::Default
+        AddressSpaceKind::Default
     } else {
-        SpaceKind::Other
+        AddressSpaceKind::Other
     }
 }
 

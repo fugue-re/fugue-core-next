@@ -1,9 +1,9 @@
 use crate::constructor::{Constructor, PrintPiece};
-use crate::data::{LanguageData, SpaceInfo};
 use crate::dynamic::blob;
-use crate::language::Language;
+use crate::language::{Language, LanguageData};
 use crate::operand::OperandFilter;
 use crate::resolve::{DecisionNode, DecisionPair, DisjointPattern, Pattern};
+use crate::space::AddressSpace;
 use crate::symbol::Symbol;
 use crate::template::{ConstructTpl, OpTpl};
 
@@ -48,9 +48,9 @@ pub(crate) fn install(blob: blob::language::Language) -> &'static Language {
     let processor = leak_str(processor);
     let variant = leak_str(variant);
 
-    let spaces = leak_slice_with(spaces, install_space_info);
-    let space_word_sizes = leak_slice_map(spaces, |spc| spc.word_size);
-    let space_upper_bounds = leak_slice_map(spaces, |spc| spc.upper_bound);
+    let spaces = leak_slice_with(spaces, install_address_space);
+    let space_word_sizes = leak_slice_map(spaces, |spc| spc.word_size());
+    let space_upper_bounds = leak_slice_map(spaces, |spc| spc.upper_bound());
 
     let constructors = leak_slice_with(constructors, install_constructor);
     let decision_trees = leak_slice_with(decision_trees, install_decision_node);
@@ -140,19 +140,14 @@ where
     Box::leak(mapped)
 }
 
-fn install_space_info(value: blob::space::SpaceInfo) -> SpaceInfo {
-    let blob::space::SpaceInfo {
+fn install_address_space(value: blob::space::AddressSpace) -> AddressSpace {
+    let blob::space::AddressSpace {
         name,
         word_size,
         upper_bound,
         kind,
     } = value;
-    SpaceInfo {
-        name: leak_str(name),
-        word_size,
-        upper_bound,
-        kind,
-    }
+    AddressSpace::new(leak_str(name), word_size, upper_bound, kind)
 }
 
 fn install_constructor(value: blob::constructor::Constructor) -> Constructor {

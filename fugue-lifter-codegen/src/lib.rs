@@ -1,15 +1,13 @@
 use std::borrow::Cow;
-use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use fugue_arch::ArchitectureDef;
-use fugue_sleigh_language::{Language, LanguageDB};
+use fugue_sleigh_language::LanguageDB;
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
-use proc_macro2::TokenStream;
 use quote::ToTokens;
 use thiserror::Error;
 
@@ -17,6 +15,7 @@ pub mod core;
 pub mod error;
 pub mod patcher;
 pub mod types;
+mod util;
 
 pub use self::core::LifterGenerator;
 pub use self::error::LifterGeneratorError;
@@ -154,21 +153,13 @@ impl BuildOptions {
     }
 }
 
-pub fn from_language(
-    language: &Language,
-    primary: VariantData,
-    extras: Vec<VariantData>,
-) -> Result<TokenStream, LifterGeneratorError> {
-    LifterGenerator::new(language, primary, extras).map(ToTokens::into_token_stream)
-}
-
 #[derive(Clone, Debug)]
-pub struct VariantData {
-    pub name: String,
-    pub context_defaults: Vec<(String, u32)>,
+pub struct LanguageVariant {
+    name: String,
+    context_defaults: Vec<(String, u32)>,
 }
 
-impl VariantData {
+impl LanguageVariant {
     pub fn new(name: impl Into<String>, context_defaults: Vec<(String, u32)>) -> Self {
         Self {
             name: name.into(),
@@ -181,35 +172,6 @@ pub fn build(root: impl AsRef<Path>, language: impl AsRef<str>) -> Result<String
     build_with(root, language, BuildOptions::new())
 }
 
-fn out_or_temp_dir() -> PathBuf {
-    if let Ok(out_dir) = env::var("OUT_DIR") {
-        PathBuf::from(out_dir)
-    } else {
-        env::temp_dir()
-    }
-}
-
-fn load_patch_set(dirs: &[PathBuf]) -> Result<PatchSet, PatcherError> {
-    let mut combined = PatchSet::new();
-    for dir in dirs {
-        let set = PatchSet::load_dir(dir)?;
-        combined.extend(set);
-    }
-    Ok(combined)
-}
-
-fn patched_root_dir(language_def: &str) -> PathBuf {
-    let mut sanitised = String::with_capacity(language_def.len());
-    for ch in language_def.chars() {
-        if ch.is_ascii_alphanumeric() {
-            sanitised.push(ch);
-        } else {
-            sanitised.push('_');
-        }
-    }
-    out_or_temp_dir().join(format!("patched-processors-{sanitised}"))
-}
-
 pub fn build_with(
     root: impl AsRef<Path>,
     language: impl AsRef<str>,
@@ -218,12 +180,12 @@ pub fn build_with(
     let root = root.as_ref();
     let language_def = language.as_ref();
 
-    let patches = load_patch_set(&options.patches)?;
+    let patches = PatchSet::load_all(&options.patches)?;
     let effective_root = if patches.is_empty() {
         Cow::Borrowed(root)
     } else {
-        let dst = patched_root_dir(language_def);
-        Cow::Owned(patcher::materialise(root, &dst, &patches)?)
+        let dst = util::patched_root_dir(language_def);
+        Cow::Owned(patches.materialise(root, &dst)?)
     };
 
     let builder = LanguageDB::from_directory_with(effective_root, true)
@@ -243,10 +205,12 @@ pub fn build_with(
         .context_set()
         .map(|(name, value)| (name.to_owned(), value))
         .collect::<Vec<(String, u32)>>();
+
     let primary_sla = primary_def.language().sla_file().to_path_buf();
-    let primary_variant = VariantData::new(primary_arch.variant(), primary_context_defaults);
+    let primary_variant = LanguageVariant::new(primary_arch.variant(), primary_context_defaults);
 
     let mut extra_variants = Vec::with_capacity(options.variants.len());
+
     for variant in &options.variants {
         let extra_id = format!(
             "{}:{}:{}:{}",
@@ -259,11 +223,13 @@ pub fn build_with(
             primary_arch.bits(),
             variant
         );
+
         let extra_def = builder
             .lookup_str(&extra_id)
             .ok()
             .flatten()
             .ok_or_else(|| CodegenError::Language(extra_id.clone()))?;
+
         let extra_sla = extra_def.language().sla_file();
         if extra_sla != primary_sla {
             return Err(CodegenError::variant_sla_mismatch(
@@ -277,7 +243,11 @@ pub fn build_with(
             .context_set()
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<Vec<(String, u32)>>();
-        extra_variants.push(VariantData::new(variant.clone(), extra_context_defaults));
+
+        extra_variants.push(LanguageVariant::new(
+            variant.clone(),
+            extra_context_defaults,
+        ));
     }
 
     let sla_file = primary_def.language().sla_file();
@@ -292,7 +262,7 @@ pub fn build_with(
         ));
         #[cfg(feature = "bundled-compiler")]
         {
-            let slaf = out_or_temp_dir().join(sla_file.file_name().expect("sla file name"));
+            let slaf = util::out_or_temp_dir().join(sla_file.file_name().expect("sla file name"));
             let spec = sla_file.with_extension("");
             let slac = SleighCompiler::new()?
                 .build_with(spec, slaf)?
@@ -304,7 +274,8 @@ pub fn build_with(
     let language =
         language.map_err(|e| CodegenError::LanguageBuild(language_def.to_owned(), e.into()))?;
 
-    let tokens = from_language(&language, primary_variant, extra_variants)
+    let tokens = LifterGenerator::new_with(&language, primary_variant, extra_variants)
+        .map(ToTokens::into_token_stream)
         .map_err(CodegenError::Generate)?;
 
     if options.pretty {

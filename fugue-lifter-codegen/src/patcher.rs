@@ -71,20 +71,138 @@ pub enum PatcherError {
     },
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct PatchSet {
-    files: Vec<PatchFile>,
-}
-
 #[derive(Debug, Clone)]
 struct PatchFile {
     path: PathBuf,
     content: String,
 }
 
+impl PatchFile {
+    fn apply(&self, dst: &Path) -> Result<(), PatcherError> {
+        for (segment_index, segment) in Self::split_into_segments(&self.content).enumerate() {
+            if segment.trim().is_empty() {
+                continue;
+            }
+            let segment_id = segment_index + 1;
+
+            let patch = Patch::from_str(segment).map_err(|source| PatcherError::Parse {
+                path: self.path.clone(),
+                segment: segment_id,
+                source,
+            })?;
+
+            let target_rel = patch
+                .modified()
+                .or_else(|| patch.original())
+                .map(Self::strip_diff_prefix)
+                .ok_or_else(|| PatcherError::MissingTarget {
+                    path: self.path.clone(),
+                    segment: segment_id,
+                })?;
+
+            let target_rel_path = Path::new(target_rel);
+            if target_rel_path.is_absolute()
+                || target_rel_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(PatcherError::EscapingTarget {
+                    path: self.path.clone(),
+                    segment: segment_id,
+                    target: target_rel.to_owned(),
+                });
+            }
+
+            let target_abs = dst.join(target_rel_path);
+            if !target_abs.is_file() {
+                return Err(PatcherError::UnknownTarget {
+                    path: self.path.clone(),
+                    segment: segment_id,
+                    target: target_rel.to_owned(),
+                });
+            }
+
+            let original = fs::read_to_string(&target_abs).map_err(|source| PatcherError::Io {
+                action: "read patch target",
+                path: target_abs.clone(),
+                source,
+            })?;
+
+            let updated =
+                diffy::apply(&original, &patch).map_err(|source| PatcherError::Apply {
+                    path: self.path.clone(),
+                    segment: segment_id,
+                    target: target_rel.to_owned(),
+                    source,
+                })?;
+
+            fs::write(&target_abs, updated).map_err(|source| PatcherError::Io {
+                action: "write patched file",
+                path: target_abs,
+                source,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn split_into_segments(content: &str) -> impl Iterator<Item = &str> {
+        let markers = content
+            .match_indices("\ndiff --git ")
+            .map(|(idx, _)| idx + 1)
+            .collect::<Vec<usize>>();
+
+        let starts = if content.starts_with("diff --git ") {
+            std::iter::once(0)
+                .chain(markers.iter().copied())
+                .collect::<Vec<usize>>()
+        } else if markers.is_empty() {
+            vec![0]
+        } else {
+            markers.clone()
+        };
+
+        let ends = starts
+            .iter()
+            .skip(1)
+            .copied()
+            .chain(std::iter::once(content.len()))
+            .collect::<Vec<usize>>();
+
+        starts
+            .into_iter()
+            .zip(ends)
+            .map(move |(start, end)| &content[start..end])
+    }
+
+    fn strip_diff_prefix(name: &str) -> &str {
+        let trimmed_tail = name.split('\t').next().unwrap_or(name).trim();
+        trimmed_tail
+            .strip_prefix("a/")
+            .or_else(|| trimmed_tail.strip_prefix("b/"))
+            .unwrap_or(trimmed_tail)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct PatchSet {
+    files: Vec<PatchFile>,
+}
+
 impl PatchSet {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn load_all(
+        dirs: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<Self, PatcherError> {
+        let mut combined = Self::new();
+        for dir in dirs {
+            let set = Self::load_dir(dir)?;
+            combined.extend(set);
+        }
+        Ok(combined)
     }
 
     pub fn load_dir(dir: impl AsRef<Path>) -> Result<Self, PatcherError> {
@@ -141,182 +259,82 @@ impl PatchSet {
     pub fn len(&self) -> usize {
         self.files.len()
     }
-}
 
-pub fn materialise(
-    src: impl AsRef<Path>,
-    dst: impl AsRef<Path>,
-    patches: &PatchSet,
-) -> Result<PathBuf, PatcherError> {
-    let src = src.as_ref();
-    let dst = dst.as_ref();
+    pub fn materialise(
+        &self,
+        src: impl AsRef<Path>,
+        dst: impl AsRef<Path>,
+    ) -> Result<PathBuf, PatcherError> {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
 
-    if dst.exists() {
-        fs::remove_dir_all(dst).map_err(|source| PatcherError::Io {
-            action: "remove existing destination",
-            path: dst.to_path_buf(),
-            source,
-        })?;
-    }
-    mirror_tree(src, dst)?;
-
-    for file in &patches.files {
-        apply_patch_file(dst, file)?;
-    }
-
-    Ok(dst.to_path_buf())
-}
-
-fn mirror_tree(src: &Path, dst: &Path) -> Result<(), PatcherError> {
-    let mirror_err = |source: io::Error| PatcherError::Mirror {
-        src: src.to_path_buf(),
-        dst: dst.to_path_buf(),
-        source,
-    };
-
-    fs::create_dir_all(dst).map_err(mirror_err)?;
-
-    for entry in WalkDir::new(src).follow_links(false) {
-        let entry = entry.map_err(|err| {
-            mirror_err(
-                err.into_io_error()
-                    .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "walkdir error")),
-            )
-        })?;
-        let from = entry.path();
-        let rel = from
-            .strip_prefix(src)
-            .expect("walkdir yields prefixed paths");
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-        let to = dst.join(rel);
-
-        let file_type = entry.file_type();
-        if file_type.is_dir() {
-            fs::create_dir_all(&to).map_err(|source| PatcherError::Io {
-                action: "create directory",
-                path: to.clone(),
+        if dst.exists() {
+            fs::remove_dir_all(dst).map_err(|source| PatcherError::Io {
+                action: "remove existing destination",
+                path: dst.to_path_buf(),
                 source,
             })?;
-        } else if file_type.is_file() {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|source| PatcherError::Io {
+        }
+
+        Self::mirror_tree(src, dst)?;
+
+        for file in &self.files {
+            file.apply(dst)?;
+        }
+
+        Ok(dst.to_path_buf())
+    }
+
+    fn mirror_tree(src: &Path, dst: &Path) -> Result<(), PatcherError> {
+        let mirror_err = |source: io::Error| PatcherError::Mirror {
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
+            source,
+        };
+
+        fs::create_dir_all(dst).map_err(mirror_err)?;
+
+        for entry in WalkDir::new(src).follow_links(false) {
+            let entry = entry.map_err(|err| {
+                mirror_err(
+                    err.into_io_error()
+                        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "walkdir error")),
+                )
+            })?;
+            let from = entry.path();
+            let rel = from
+                .strip_prefix(src)
+                .expect("walkdir yields prefixed paths");
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+            let to = dst.join(rel);
+
+            let file_type = entry.file_type();
+            if file_type.is_dir() {
+                fs::create_dir_all(&to).map_err(|source| PatcherError::Io {
                     action: "create directory",
-                    path: parent.to_path_buf(),
+                    path: to.clone(),
+                    source,
+                })?;
+            } else if file_type.is_file() {
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent).map_err(|source| PatcherError::Io {
+                        action: "create directory",
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                }
+                fs::copy(from, &to).map_err(|source| PatcherError::Io {
+                    action: "copy file",
+                    path: to.clone(),
                     source,
                 })?;
             }
-            fs::copy(from, &to).map_err(|source| PatcherError::Io {
-                action: "copy file",
-                path: to.clone(),
-                source,
-            })?;
         }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-fn apply_patch_file(dst: &Path, file: &PatchFile) -> Result<(), PatcherError> {
-    for (segment_index, segment) in split_into_segments(&file.content).enumerate() {
-        if segment.trim().is_empty() {
-            continue;
-        }
-        let segment_id = segment_index + 1;
-
-        let patch = Patch::from_str(segment).map_err(|source| PatcherError::Parse {
-            path: file.path.clone(),
-            segment: segment_id,
-            source,
-        })?;
-
-        let target_rel = patch
-            .modified()
-            .or_else(|| patch.original())
-            .ok_or_else(|| PatcherError::MissingTarget {
-                path: file.path.clone(),
-                segment: segment_id,
-            })?;
-        let target_rel = strip_diff_prefix(target_rel);
-        let target_rel_path = Path::new(target_rel);
-        if target_rel_path.is_absolute()
-            || target_rel_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(PatcherError::EscapingTarget {
-                path: file.path.clone(),
-                segment: segment_id,
-                target: target_rel.to_owned(),
-            });
-        }
-
-        let target_abs = dst.join(target_rel_path);
-        if !target_abs.is_file() {
-            return Err(PatcherError::UnknownTarget {
-                path: file.path.clone(),
-                segment: segment_id,
-                target: target_rel.to_owned(),
-            });
-        }
-
-        let original = fs::read_to_string(&target_abs).map_err(|source| PatcherError::Io {
-            action: "read patch target",
-            path: target_abs.clone(),
-            source,
-        })?;
-        let updated = diffy::apply(&original, &patch).map_err(|source| PatcherError::Apply {
-            path: file.path.clone(),
-            segment: segment_id,
-            target: target_rel.to_owned(),
-            source,
-        })?;
-        fs::write(&target_abs, updated).map_err(|source| PatcherError::Io {
-            action: "write patched file",
-            path: target_abs,
-            source,
-        })?;
-    }
-
-    Ok(())
-}
-
-fn split_into_segments(content: &str) -> impl Iterator<Item = &str> {
-    let markers = content
-        .match_indices("\ndiff --git ")
-        .map(|(idx, _)| idx + 1)
-        .collect::<Vec<usize>>();
-
-    let starts = if content.starts_with("diff --git ") {
-        std::iter::once(0)
-            .chain(markers.iter().copied())
-            .collect::<Vec<usize>>()
-    } else if markers.is_empty() {
-        vec![0]
-    } else {
-        markers.clone()
-    };
-
-    let ends = starts
-        .iter()
-        .skip(1)
-        .copied()
-        .chain(std::iter::once(content.len()))
-        .collect::<Vec<usize>>();
-
-    starts
-        .into_iter()
-        .zip(ends)
-        .map(move |(start, end)| &content[start..end])
-}
-
-fn strip_diff_prefix(name: &str) -> &str {
-    let trimmed_tail = name.split('\t').next().unwrap_or(name).trim();
-    trimmed_tail
-        .strip_prefix("a/")
-        .or_else(|| trimmed_tail.strip_prefix("b/"))
-        .unwrap_or(trimmed_tail)
 }
 
 #[cfg(test)]
@@ -344,7 +362,7 @@ mod tests {
 
         let dst_path = dst.path().join("out");
         let patches = PatchSet::new();
-        let result = materialise(src.path(), &dst_path, &patches).unwrap();
+        let result = patches.materialise(src.path(), &dst_path).unwrap();
         assert_eq!(result, dst_path);
         assert_eq!(
             fs::read_to_string(dst_path.join("a/foo.txt")).unwrap(),
@@ -385,7 +403,7 @@ mod tests {
         assert_eq!(patches.len(), 1);
 
         let dst_path = dst.path().join("out");
-        materialise(src.path(), &dst_path, &patches).unwrap();
+        patches.materialise(src.path(), &dst_path).unwrap();
         assert_eq!(
             fs::read_to_string(dst_path.join("ARM/ARMinstructions.sinc")).unwrap(),
             "alpha\nBETA\ngamma\n"
@@ -414,7 +432,9 @@ mod tests {
         );
 
         let patches = PatchSet::load_dir(patches_dir.path()).unwrap();
-        let err = materialise(src.path(), dst.path().join("out"), &patches).unwrap_err();
+        let err = patches
+            .materialise(src.path(), dst.path().join("out"))
+            .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("0001-bad.patch"), "{msg}");
         assert!(msg.contains("ARM/file.sinc"), "{msg}");
@@ -440,7 +460,7 @@ mod tests {
 
         let patches = PatchSet::load_dir(patches_dir.path()).unwrap();
         let dst_path = dst.path().join("out");
-        materialise(src.path(), &dst_path, &patches).unwrap();
+        patches.materialise(src.path(), &dst_path).unwrap();
         assert_eq!(fs::read_to_string(dst_path.join("f.txt")).unwrap(), "v2\n");
     }
 
@@ -458,7 +478,9 @@ mod tests {
         );
 
         let patches = PatchSet::load_dir(patches_dir.path()).unwrap();
-        let err = materialise(src.path(), dst.path().join("out"), &patches).unwrap_err();
+        let err = patches
+            .materialise(src.path(), dst.path().join("out"))
+            .unwrap_err();
         assert!(matches!(err, PatcherError::EscapingTarget { .. }));
     }
 
@@ -468,7 +490,7 @@ mod tests {
                         --- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-a\n+b\n\
                         diff --git a/bar b/bar\n\
                         --- a/bar\n+++ b/bar\n@@ -1 +1 @@\n-c\n+d\n";
-        let segments: Vec<_> = split_into_segments(combined).collect();
+        let segments = PatchFile::split_into_segments(combined).collect::<Vec<_>>();
         assert_eq!(segments.len(), 2);
         assert!(segments[0].starts_with("diff --git a/foo"));
         assert!(segments[1].starts_with("diff --git a/bar"));

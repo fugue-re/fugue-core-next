@@ -3,12 +3,12 @@
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct DecisionNode {
-    pub start_bit: u32,
-    pub size: u32,
-    pub context_decision: bool,
-    pub patterns: Box<[DecisionPair]>,
-    pub children: Box<[u16]>,
+pub(crate) struct DecisionNode {
+    pub(crate) start_bit: u32,
+    pub(crate) size: u32,
+    pub(crate) context_decision: bool,
+    pub(crate) patterns: Box<[DecisionPair]>,
+    pub(crate) children: Box<[u16]>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,9 +16,9 @@ pub struct DecisionNode {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct DecisionPair {
-    pub constructor: u16,
-    pub pattern: DisjointPattern,
+pub(crate) struct DecisionPair {
+    pub(crate) constructor: u16,
+    pub(crate) pattern: DisjointPattern,
 }
 
 #[derive(Debug, Clone)]
@@ -26,7 +26,7 @@ pub struct DecisionPair {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub enum DisjointPattern {
+pub(crate) enum DisjointPattern {
     Context(Pattern),
     Instruction(Pattern),
     Combine {
@@ -40,9 +40,9 @@ pub enum DisjointPattern {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct Pattern {
-    pub offset: usize,
-    pub non_zero_size: Option<usize>,
-    pub masks: Box<[u32]>,
-    pub values: Box<[u32]>,
+pub(crate) struct Pattern {
+    pub(crate) offset: usize,
+    pub(crate) non_zero_size: Option<usize>,
+    pub(crate) masks: Box<[u32]>,
+    pub(crate) values: Box<[u32]>,
 }

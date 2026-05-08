@@ -1,9 +1,8 @@
 use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
-use crate::data::LanguageData;
-use crate::entry::resolve_constructor;
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
+use crate::language::LanguageData;
 use crate::operand::{Operand, OperandHandleResolver, OperandResolver, Operands};
 use crate::pcode::LiftingContextState;
 use crate::symbol::Symbol;
@@ -117,7 +116,7 @@ impl Constructor {
                         data.operand_filters[filter as usize].validate(data, state)?;
                     }
                     OperandResolver::Constructor(id) => {
-                        let ctor = resolve_constructor(data, id, state)?;
+                        let ctor = data.resolve_constructor(id, state)?;
 
                         state.input().set_constructor(ctor);
 

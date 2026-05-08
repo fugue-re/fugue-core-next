@@ -15,14 +15,14 @@ use crate::types::context::ContextAdaptor;
 use crate::types::pattern::PatternExpressionAdaptor;
 use crate::types::symbol::SymbolAdaptor;
 use crate::types::template::TplAdaptor;
-use crate::{LifterGeneratorError, VariantData};
+use crate::{LanguageVariant, LifterGeneratorError};
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
     language: &'a Language,
     tables: Tables<'a>,
-    primary_variant: VariantData,
-    extra_variants: Vec<VariantData>,
+    primary_variant: LanguageVariant,
+    extra_variants: Vec<LanguageVariant>,
 }
 
 #[derive(Default)]
@@ -120,15 +120,22 @@ impl<'a> Tables<'a> {
 impl<'a> LifterGenerator<'a> {
     pub fn new(
         language: &'a Language,
-        primary_variant: VariantData,
-        extra_variants: Vec<VariantData>,
+        variant: LanguageVariant,
+    ) -> Result<Self, LifterGeneratorError> {
+        Self::new_with(language, variant, std::iter::empty())
+    }
+
+    pub fn new_with(
+        language: &'a Language,
+        primary_variant: LanguageVariant,
+        extra_variants: impl IntoIterator<Item = LanguageVariant>,
     ) -> Result<Self, LifterGeneratorError> {
         let mut slf = Self {
             context_variables: Vec::new(),
             language,
             tables: Tables::default(),
             primary_variant,
-            extra_variants,
+            extra_variants: extra_variants.into_iter().collect(),
         };
 
         slf.build()?;
@@ -836,17 +843,17 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let space_kinds = self.language.spaces().iter().enumerate().map(|(i, spc)| {
             let id = spc.id();
             if id.is_constant() {
-                quote! { fugue_lifter_runtime::data::SpaceKind::Constant }
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Constant }
             } else if id.is_unique() {
-                quote! { fugue_lifter_runtime::data::SpaceKind::Unique }
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Unique }
             } else if (i as u8) == default_space_id {
-                quote! { fugue_lifter_runtime::data::SpaceKind::Default }
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Default }
             } else {
-                quote! { fugue_lifter_runtime::data::SpaceKind::Other }
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Other }
             }
         });
 
-        let space_infos = self
+        let spaces = self
             .language
             .spaces()
             .iter()
@@ -856,12 +863,12 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 let word_size = spc.word_size();
                 let upper_bound = spc.highest_offset();
                 quote! {
-                    fugue_lifter_runtime::data::SpaceInfo {
-                        name: #name,
-                        word_size: #word_size,
-                        upper_bound: #upper_bound,
-                        kind: #kind,
-                    }
+                    fugue_lifter_runtime::space::AddressSpace::new(
+                        #name,
+                        #word_size,
+                        #upper_bound,
+                        #kind,
+                    )
                 }
             });
 
@@ -1009,20 +1016,19 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
 
-                    const DATA: &'static fugue_lifter_runtime::data::LanguageData = &LANGUAGE_DATA;
+                    const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                 }
                 pub static LANGUAGE: fugue_lifter_runtime::language::Language =
                     fugue_lifter_runtime::language::Language::new::<L>();
             }]
         } else {
             let mut blocks = Vec::with_capacity(1 + self.extra_variants.len());
-            for variant in std::iter::once(&self.primary_variant).chain(self.extra_variants.iter()) {
+            for variant in std::iter::once(&self.primary_variant).chain(self.extra_variants.iter())
+            {
                 let variant_name = variant.name.clone();
                 let upper = variant_name.to_ascii_uppercase();
-                let defaults_static = Ident::new(
-                    &format!("{upper}_CONTEXT_DEFAULTS"),
-                    Span::call_site(),
-                );
+                let defaults_static =
+                    Ident::new(&format!("{upper}_CONTEXT_DEFAULTS"), Span::call_site());
                 let language_static = Ident::new(&format!("LANGUAGE_{upper}"), Span::call_site());
                 let marker_struct = Ident::new(&format!("L{upper}"), Span::call_site());
                 let language_id_lit = format!(
@@ -1072,7 +1078,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
 
-                        const DATA: &'static fugue_lifter_runtime::data::LanguageData = &LANGUAGE_DATA;
+                        const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                     }
                     pub static #language_static: fugue_lifter_runtime::language::Language =
                         fugue_lifter_runtime::language::Language::new::<#marker_struct>();
@@ -1181,22 +1187,22 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 #(#varnode_tpls,)*
             ];
 
-            static SPACE_INFOS: [fugue_lifter_runtime::data::SpaceInfo; #n_spaces] = [
-                #(#space_infos,)*
+            static SPACES: [fugue_lifter_runtime::space::AddressSpace; #n_spaces] = [
+                #(#spaces,)*
             ];
 
-            pub static LANGUAGE_DATA: fugue_lifter_runtime::data::LanguageData =
-                fugue_lifter_runtime::data::LanguageData {
+            pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =
+                fugue_lifter_runtime::language::LanguageData {
                     root_dtree: #root_dtree,
                     address_size: ADDRESS_SIZE,
                     constant_space: CONSTANT_SPACE,
                     default_space: DEFAULT_SPACE,
                     unique_space: UNIQUE_SPACE,
-                    spaces: &SPACE_INFOS,
                     constructors: CONSTRUCTORS,
                     decision_trees: DECISION_TREES,
                     operand_filters: OPERAND_FILTERS,
                     pattern_expressions: PATTERN_EXPRESSIONS,
+                    spaces: &SPACES,
                     symbols: SYMBOLS,
                     const_templates: CONST_TEMPLATES,
                     construct_templates: CONSTRUCT_TEMPLATES,

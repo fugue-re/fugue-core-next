@@ -1,19 +1,19 @@
-pub mod blob;
-pub mod build;
-pub mod builder;
-pub mod install;
-pub mod registry;
-
-pub use builder::LanguageBuilder;
-
 use std::io;
 use std::path::PathBuf;
 
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
-pub use crate::data::LanguageData;
 use crate::language::LanguageParseError;
+
+pub mod blob;
+pub mod build;
+
+pub mod builder;
+pub use builder::LanguageBuilder;
+
+pub mod install;
+pub mod registry;
 
 #[derive(Debug, Error)]
 pub enum LanguageLoadError {
