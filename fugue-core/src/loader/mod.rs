@@ -30,8 +30,8 @@ pub use elf::Elf;
 pub mod object;
 pub use object::Object;
 
-// pub mod pe;
-// pub use pe::{Pe, Te};
+pub mod pe;
+pub use pe::Pe;
 
 pub mod shellcode;
 pub use shellcode::Shellcode;
@@ -700,6 +700,7 @@ where
 
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
+    Pe(pe::Pe<'a>),
     Object(object::Object<'a>),
 }
 
@@ -719,6 +720,10 @@ impl<'a> Loader<'a> {
             FileKind::Elf32 | FileKind::Elf64 => {
                 let elf = Elf::new_with(data, attributes)?;
                 Self::Elf(elf)
+            }
+            FileKind::Pe32 | FileKind::Pe64 => {
+                let pe = Pe::new_with(data, attributes)?;
+                Self::Pe(pe)
             }
             _ => {
                 let object = object::Object::new_with(data, attributes)?;
@@ -766,6 +771,7 @@ impl Loadable for Loader<'_> {
     fn architecture(&self) -> Arch {
         match self {
             Self::Elf(elf) => elf.architecture(),
+            Self::Pe(pe) => pe.architecture(),
             Self::Object(object) => object.architecture(),
         }
     }
@@ -773,6 +779,7 @@ impl Loadable for Loader<'_> {
     fn metadata(&self) -> &LoadableMetadata {
         match self {
             Self::Elf(elf) => elf.metadata(),
+            Self::Pe(pe) => pe.metadata(),
             Self::Object(object) => object.metadata(),
         }
     }
@@ -780,6 +787,7 @@ impl Loadable for Loader<'_> {
     fn symbols(&self) -> Option<&IndexedSymbolTable> {
         match self {
             Self::Elf(elf) => Some(elf.symbols()),
+            Self::Pe(pe) => Some(pe.symbols()),
             Self::Object(object) => object.symbols(),
         }
     }
@@ -787,6 +795,7 @@ impl Loadable for Loader<'_> {
     fn attributes(&self) -> &AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes(),
+            Self::Pe(pe) => pe.attributes(),
             Self::Object(object) => object.attributes(),
         }
     }
@@ -794,6 +803,7 @@ impl Loadable for Loader<'_> {
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes_mut(),
+            Self::Pe(pe) => pe.attributes_mut(),
             Self::Object(object) => object.attributes_mut(),
         }
     }
@@ -805,6 +815,9 @@ impl Loadable for Loader<'_> {
             Self::Elf(elf) => {
                 Box::new(elf.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
             }
+            Self::Pe(pe) => {
+                Box::new(pe.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
+            }
             Self::Object(object) => {
                 Box::new(object.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
             }
@@ -814,6 +827,7 @@ impl Loadable for Loader<'_> {
     fn segment_bounds(&self) -> LoadableSegmentBounds {
         match self {
             Self::Elf(elf) => elf.segment_bounds(),
+            Self::Pe(pe) => pe.segment_bounds(),
             Self::Object(object) => object.segment_bounds(),
         }
     }
@@ -824,6 +838,7 @@ impl Loadable for Loader<'_> {
     {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
+            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers<P>>,
             Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>,
         }
     }
