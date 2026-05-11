@@ -167,10 +167,13 @@ impl ExternSegment {
         }
     }
 
-    pub fn add_extern(&mut self) -> Address {
+    pub fn add_extern(&mut self) -> Option<Address> {
         let addr = self.address() + self.size();
+        if addr < self.address() {
+            return None;
+        }
         self.symbols += 1;
-        addr
+        Some(addr)
     }
 
     pub fn add_extern_at(&mut self, address: impl Into<Address>) -> Result<(), ExternSegmentError> {

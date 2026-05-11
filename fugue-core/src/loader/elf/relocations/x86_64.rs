@@ -4,7 +4,7 @@ use object::elf::{
     R_X86_64_RELATIVE64, R_X86_64_REX_GOTPCRELX,
 };
 use object::read::elf::FileHeader;
-use object::{ReadRef, Relocation};
+use object::{ReadRef, Relocation, RelocationKind};
 
 use super::ElfSegmentRelocator;
 use crate::loader::LoadableSegment;
@@ -20,9 +20,17 @@ where
         lsegm: &mut LoadableSegment<'data>,
         offset: u64,
         reloc: &Relocation,
-        reloc_type: u32,
         is_dynamic: bool,
     ) {
+        if reloc.kind() != RelocationKind::Unknown {
+            self.apply_generic_relocation(lsegm, offset, reloc, reloc.kind(), is_dynamic);
+            return;
+        }
+
+        let Some(reloc_type) = self.elf_relocation_type(reloc) else {
+            return;
+        };
+
         match reloc_type {
             R_X86_64_RELATIVE | R_X86_64_RELATIVE64 => {
                 let offset = offset as usize;

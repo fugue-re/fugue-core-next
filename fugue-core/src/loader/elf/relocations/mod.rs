@@ -1,7 +1,6 @@
 use object::read::elf::{ElfFile, ElfSection, FileHeader};
 use object::{
-    Architecture, Object, ObjectSection, ReadRef, Relocation, RelocationFlags, RelocationKind,
-    RelocationTarget,
+    Architecture, Object, ObjectSection, ReadRef, Relocation, RelocationFlags, RelocationTarget,
 };
 
 use crate::ir::{Address, IndexedSymbolTable, SymbolIndex};
@@ -38,10 +37,11 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         symbols: &'file IndexedSymbolTable,
         is_object: bool,
+        base: Address,
     ) -> Self {
         Self {
             elf,
-            base: Address::in_default_space(0u64),
+            base,
             symbols,
             is_object,
         }
@@ -73,29 +73,7 @@ where
                 rel.kind()
             );
 
-            match rel.kind() {
-                RelocationKind::Unknown => {
-                    let RelocationFlags::Elf { r_type } = rel.flags() else {
-                        // NOTE: we could probably panic here
-                        continue;
-                    };
-
-                    match self.elf.architecture() {
-                        Architecture::X86_64 => {
-                            self.apply_x86_64_relocation(lsegm, off, &rel, r_type, false);
-                        }
-                        arch => {
-                            tracing::warn!(
-                                "unsupported architecture {arch:?} for relocation {:?}",
-                                rel.kind()
-                            );
-                        }
-                    }
-                }
-                kind => {
-                    self.apply_generic_relocation(lsegm, off, &rel, kind, false);
-                }
-            }
+            self.apply_relocation(lsegm, off, &rel, false);
         }
 
         Ok(())
@@ -120,10 +98,19 @@ where
         );
 
         let origin = origin.into();
-        let origin_offset = origin.offset();
-        let origin_last_offset = origin_offset + lsegm.len() as u64 - 1;
+        let Some(origin_offset) = origin.offset().checked_sub(self.base.offset()) else {
+            tracing::warn!(
+                "dynamic relocation origin {origin} is below image base {}",
+                self.base
+            );
+            return Ok(());
+        };
+        let Some(origin_last_offset) =
+            origin_offset.checked_add(lsegm.len().saturating_sub(1) as u64)
+        else {
+            return Err(LoaderError::address_overflow(origin));
+        };
 
-        // NOTE: we account for a new base address when computing the relevant to dynamic relocations
         for (off, rel) in
             drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
         {
@@ -132,32 +119,45 @@ where
             // Compute offset in the segment
             let off = off - origin_offset;
 
-            match rel.kind() {
-                RelocationKind::Unknown => {
-                    let RelocationFlags::Elf { r_type } = rel.flags() else {
-                        // NOTE: we could probably panic here
-                        continue;
-                    };
-
-                    match self.elf.architecture() {
-                        Architecture::X86_64 => {
-                            self.apply_x86_64_relocation(lsegm, off, &rel, r_type, true);
-                        }
-                        arch => {
-                            tracing::warn!(
-                                "unsupported architecture {arch:?} for relocation {:?}",
-                                rel.kind()
-                            );
-                        }
-                    }
-                }
-                kind => {
-                    self.apply_generic_relocation(lsegm, off, &rel, kind, true);
-                }
-            }
+            self.apply_relocation(lsegm, off, &rel, true);
         }
 
         Ok(())
+    }
+
+    pub(crate) fn apply_relocation(
+        &self,
+        lsegm: &mut LoadableSegment<'data>,
+        offset: u64,
+        reloc: &Relocation,
+        is_dynamic: bool,
+    ) {
+        match self.elf.architecture() {
+            Architecture::Aarch64 => {
+                self.apply_aarch64_relocation(lsegm, offset, reloc, is_dynamic);
+            }
+            Architecture::Arm => {
+                self.apply_arm_relocation(lsegm, offset, reloc, is_dynamic);
+            }
+            Architecture::I386 => {
+                self.apply_x86_relocation(lsegm, offset, reloc, is_dynamic);
+            }
+            Architecture::X86_64 => {
+                self.apply_x86_64_relocation(lsegm, offset, reloc, is_dynamic);
+            }
+            arch => {
+                tracing::warn!("unsupported architecture {arch:?} for relocation {reloc:?}");
+            }
+        }
+    }
+
+    pub(crate) fn elf_relocation_type(&self, reloc: &Relocation) -> Option<u32> {
+        let RelocationFlags::Elf { r_type } = reloc.flags() else {
+            tracing::warn!("unsupported relocation flags {reloc:?}");
+            return None;
+        };
+
+        Some(r_type)
     }
 
     pub(crate) fn resolve_relocation_symbol(

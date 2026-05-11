@@ -113,7 +113,6 @@ impl<'a> Elf<'a> {
         let architecture = Arch::new(language);
 
         let attributes = attributes.into();
-
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
         let base = attributes
@@ -128,7 +127,7 @@ impl<'a> Elf<'a> {
             extern_segm,
         } = with_elf!(
             view,
-            elf | ElfSymbolData::from_elf(elf, &architecture, base)
+            elf | ElfSymbolData::from_elf(elf, &architecture, base)?
         );
 
         let metadata = LoadableMetadata::new(
@@ -187,6 +186,10 @@ impl<'a> Elf<'a> {
         )
     }
 
+    pub fn base_address(&self) -> Address {
+        self.base
+    }
+
     pub fn target_space(&self) -> AddressSpaceId {
         self.base.space()
     }
@@ -200,7 +203,11 @@ struct ElfSymbolData {
 }
 
 impl ElfSymbolData {
-    fn from_elf<'a>(elf: &'a impl Object<'a>, arch: &Arch, base_addr: Address) -> Self {
+    fn from_elf<'a>(
+        elf: &'a impl Object<'a>,
+        arch: &Arch,
+        base_addr: Address,
+    ) -> Result<Self, LoaderError> {
         let target_space = base_addr.space();
         // TODO:
         // - base address should be configurable.
@@ -235,19 +242,29 @@ impl ElfSymbolData {
 
                 if sect.size() == 0 {
                     section_map.push(None);
-                    base += 1; // assume byte alignment
+                    base = base
+                        .checked_add(1)
+                        .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
                     continue;
                 }
 
                 let aligned_start =
-                    (base + sect.align().wrapping_sub(1)) & !sect.align().wrapping_sub(1);
+                    base.wrapping_add(sect.align().wrapping_sub(1)) & !sect.align().wrapping_sub(1);
+
+                if aligned_start < base {
+                    tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
+                    section_map.push(None);
+                    continue;
+                }
 
                 section_map.push(Some(aligned_start));
 
-                base = aligned_start + sect.size();
+                base = aligned_start
+                    .checked_add(sect.size())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
             }
 
-            max_addr = Address::from(base);
+            max_addr = Address::in_space(base, target_space);
             base
         } else {
             for (addr, size) in elf
@@ -256,14 +273,29 @@ impl ElfSymbolData {
                 .chain(elf.segments().map(|segm| (segm.address(), segm.size())))
                 .filter(|(_, size)| *size != 0)
             {
-                max_addr = max_addr.max(Address::from(addr + size));
-                min_addr = min_addr.min(Address::from(addr));
+                let curr_min = base_addr
+                    .checked_add(addr)
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+
+                let curr_max = curr_min
+                    .checked_add(size)
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+
+                max_addr = max_addr.max(curr_max);
+                min_addr = min_addr.min(curr_min);
             }
-            max_addr.offset() + addr_size as u64
+            max_addr
+                .offset()
+                .checked_add(addr_size as u64)
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?
         };
 
-        let aligned_extern_base = (extern_base + addr_align.wrapping_sub(1) as u64)
+        let aligned_extern_base = extern_base.wrapping_add(addr_align.wrapping_sub(1) as u64)
             & !(addr_align as u64).wrapping_sub(1);
+
+        if aligned_extern_base < extern_base {
+            return Err(LoaderError::address_overflow(base_addr));
+        }
 
         let mut symbols = IndexedSymbolTable::new();
 
@@ -282,7 +314,14 @@ impl ElfSymbolData {
 
             let address = Address::new(
                 target_space,
-                symbol.address() + if is_object { section_start } else { 0 },
+                symbol
+                    .address()
+                    .checked_add(if is_object {
+                        section_start
+                    } else {
+                        base_addr.offset()
+                    })
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?,
             );
 
             tracing::trace!(
@@ -396,9 +435,13 @@ impl ElfSymbolData {
             }
         }) {
             let addr = if kind.is_extern() {
-                extern_segm.add_extern()
+                extern_segm
+                    .add_extern()
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?
             } else {
-                Address::new(target_space, sym.address())
+                base_addr
+                    .checked_add(sym.address())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?
             }; // FIXME: this needs to be mapped, see above.
             let sym = sym.name().ok();
 
@@ -415,12 +458,12 @@ impl ElfSymbolData {
             .unwrap_or(Address::new(target_space, max_addr));
         let bounds = Address::new(target_space, min_addr)..=max_addr;
 
-        Self {
+        Ok(Self {
             bounds,
             mapping_hints,
             symbols,
             extern_segm,
-        }
+        })
     }
 }
 
@@ -478,7 +521,7 @@ pub fn elf_segment_properties<'a>(segm: &impl ObjectSegment<'a>) -> SegmentPrope
 
 pub fn elf_section<'a>(
     sect: &impl ObjectSection<'a>,
-    space: impl Into<Option<AddressSpaceId>>,
+    base: impl Into<Address>,
 ) -> Option<LoadableSegment<'a>> {
     let SectionFlags::Elf { sh_flags } = sect.flags() else {
         return None;
@@ -488,7 +531,9 @@ pub fn elf_section<'a>(
         return None;
     }
 
-    let address = Address::in_space(sect.address(), space);
+    let base = base.into();
+    let space = base.space();
+    let address = Address::in_space(sect.address().checked_add(base.offset())?, space);
     let data = sect.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != sect.size() {
@@ -514,13 +559,15 @@ pub fn elf_section<'a>(
 
 pub fn elf_segment<'a>(
     segm: &impl ObjectSegment<'a>,
-    space: impl Into<Option<AddressSpaceId>>,
+    base: impl Into<Address>,
 ) -> Option<LoadableSegment<'a>> {
     if segm.size() == 0 {
         return None;
     }
 
-    let address = Address::in_space(segm.address(), space);
+    let base = base.into();
+    let space = base.space();
+    let address = Address::in_space(segm.address().checked_add(base.offset())?, space);
     let data = segm.data().unwrap_or_default();
 
     let bytes = if data.len() as u64 != segm.size() {
@@ -547,20 +594,20 @@ pub fn elf_segment<'a>(
 
 pub fn elf_sections<'a>(
     elf: &'a impl Object<'a>,
-    space: impl Into<Option<AddressSpaceId>> + Copy,
+    base: impl Into<Address>,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    let space = space.into();
+    let base = base.into();
     elf.sections()
-        .filter_map(move |sect| elf_section(&sect, space))
+        .filter_map(move |sect| elf_section(&sect, base))
 }
 
 pub fn elf_segments<'a>(
     elf: &'a impl Object<'a>,
-    space: impl Into<Option<AddressSpaceId>> + Copy,
+    base: impl Into<Address>,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    let space = space.into();
+    let base = base.into();
     elf.segments()
-        .filter_map(move |segm| elf_segment(&segm, space))
+        .filter_map(move |segm| elf_segment(&segm, base))
 }
 
 pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
@@ -602,7 +649,7 @@ where
         mapping_hints: &'file BTreeMap<Address, ContextHint>,
         symbols: &'file IndexedSymbolTable,
         externs: &'file ExternSegment,
-        space: AddressSpaceId,
+        base: Address,
     ) -> Self {
         let is_object = elf.kind() == ObjectKind::Relocatable;
         Self {
@@ -611,7 +658,7 @@ where
             segms: elf.segments(),
             covered: RangeSetBlaze::new(),
             segms_split: None,
-            current_base: Address::new(space, 0u64),
+            current_base: base,
             mapping_hints,
             symbols,
             extern_segm: Some(externs),
@@ -673,8 +720,6 @@ where
     }
 
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
-
         for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
                 continue;
@@ -704,6 +749,12 @@ where
                 self.current_base.space(),
                 self.current_base.offset().wrapping_add(alignment_mask) & !alignment_mask,
             );
+
+            if address < self.current_base {
+                tracing::debug!("section start {address:#x} overflow; skipping section");
+                continue;
+            }
+
             let last_address = address + size - 1usize;
 
             if last_address < address {
@@ -756,11 +807,10 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(
-                Address::new(self.current_base.space(), 0u64),
-                &mut lsegm,
-                &sect,
-            )?;
+            let relocator =
+                ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, address);
+
+            relocator.apply(address, &mut lsegm, &sect)?;
 
             return Ok(Some(lsegm));
         }
@@ -775,7 +825,8 @@ where
             return Ok(None);
         };
 
-        let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
 
         if let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
@@ -836,7 +887,8 @@ where
     pub(crate) fn next_linked_section(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
 
         for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -849,9 +901,15 @@ where
                 continue;
             }
 
-            let space = self.current_base.space();
-            let address = Address::new(space, sect.address());
-            let last_address = Address::new(space, sect.address() + size - 1);
+            let address = self
+                .current_base
+                .checked_add(sect.address())
+                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+
+            let last_address = self
+                .current_base
+                .checked_add(sect.address().wrapping_add(size).wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
 
             if last_address < address {
                 tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
@@ -912,7 +970,8 @@ where
     pub(crate) fn next_linked_segment(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator = ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object);
+        let relocator =
+            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
 
         for segm in self.segms.by_ref() {
             let size = segm.size();
@@ -922,8 +981,15 @@ where
             }
 
             let space = self.current_base.space();
-            let address = Address::new(space, segm.address());
-            let last_address = Address::new(space, segm.address() + size - 1);
+            let address = self
+                .current_base
+                .checked_add(segm.address())
+                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+
+            let last_address = self
+                .current_base
+                .checked_add(segm.address().wrapping_add(size).wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
 
             if last_address < address {
                 tracing::debug!("segment bounds {address}-{last_address} overflow; skipping");
@@ -1118,7 +1184,7 @@ impl Loadable for Elf<'_> {
                 &self.mapping_hints,
                 &self.symbols,
                 &self.extern_segm,
-                self.base.space()
+                self.base,
             ))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )
@@ -1141,10 +1207,14 @@ impl Loadable for Elf<'_> {
 #[cfg(test)]
 mod test {
     use fallible_iterator::FallibleIterator;
+    use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
+    use object::{Object, RelocationFlags, RelocationTarget};
 
-    use super::Elf;
+    use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
+    use crate::ir::{Address, SymbolIndex};
     use crate::loader::Loadable;
     use crate::types::BytesOrMapping;
+    use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
 
     #[test]
     fn test_elf_exe() -> Result<(), Box<dyn std::error::Error>> {
@@ -1238,5 +1308,141 @@ mod test {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn test_elf_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        let image_base = Address::in_default_space(0x4000_0000u64);
+
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+        let elf = Elf::new_with(BytesOrMapping::from_file("tests/ls.elf")?, attributes)?;
+        let relocation_address = image_base
+            .checked_add(0x21f30u64)
+            .expect("valid relocation");
+        let expected_value = image_base
+            .checked_add(0x6e10u64)
+            .expect("valid relocation value");
+
+        let mut relocated_value = None;
+        let mut segments = elf.segments();
+
+        while let Some(segm) = segments.next()? {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("address contained in segment");
+            relocated_value = segm.read_value::<u64>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value.offset()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_arm_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        let image_base = Address::in_default_space(0x5000_0000u64);
+
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+        let elf = Elf::new_with(BytesOrMapping::from_file("tests/libipmi.so")?, attributes)?;
+        let (relocation_offset, relocation_value) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    (r_type == R_ARM_RELATIVE).then_some((offset, reloc.addend()))
+                })
+            })()
+        )
+        .expect("R_ARM_RELATIVE relocation");
+
+        let relocation_address = image_base
+            .checked_add(relocation_offset)
+            .expect("ARM relocation address");
+        let expected_value = image_base.offset().wrapping_add_signed(relocation_value);
+
+        let mut relocated_value = None;
+        let mut segments = elf.segments();
+
+        while let Some(segm) = segments.next()? {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("ARM relocation offset");
+            relocated_value = segm.read_value::<u32>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_arm_jump_slot_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/libipmi.so")?)?;
+        let (relocation_offset, expected_value) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    if r_type != R_ARM_JUMP_SLOT {
+                        return None;
+                    }
+
+                    let RelocationTarget::Symbol(index) = reloc.target() else {
+                        return None;
+                    };
+
+                    elf.symbols()
+                        .get_by_index(SymbolIndex::new(ELF_DYNSYM_SELECTOR, index.0))
+                        .map(|(_, entry)| (offset, entry.address().offset()))
+                })
+            })()
+        )
+        .expect("R_ARM_JUMP_SLOT relocation");
+
+        let relocation_address = elf
+            .base_address()
+            .checked_add(relocation_offset)
+            .expect("ARM jump slot address");
+
+        let mut relocated_value = None;
+        let mut segments = elf.segments();
+
+        while let Some(segm) = segments.next()? {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("ARM jump slot offset");
+            relocated_value = segm.read_value::<u32>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
     }
 }
