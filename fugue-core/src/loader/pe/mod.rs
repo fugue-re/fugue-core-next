@@ -305,8 +305,7 @@ impl PeSymbolData {
                     import_table
                         .name(descriptor.name.get(LE))
                         .map_err(LoaderError::format)?,
-                )
-                .into_owned();
+                );
 
                 let mut lookup = descriptor.original_first_thunk.get(LE);
                 let address_table = descriptor.first_thunk.get(LE);
@@ -664,13 +663,13 @@ mod test {
     use super::Pe;
     use crate::attributes;
     use crate::ir::Address;
-    use crate::loader::Loadable;
+    use crate::loader::{Loadable, LoadableSegment};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
 
     fn load_segments(
         pe: &Pe<'_>,
-    ) -> Result<Vec<crate::loader::LoadableSegment<'static>>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<LoadableSegment<'static>>, Box<dyn std::error::Error>> {
         let mut segments = pe.segments();
         let mut loaded = Vec::new();
 
@@ -681,10 +680,7 @@ mod test {
         Ok(loaded)
     }
 
-    fn read_u64_at(
-        segments: &[crate::loader::LoadableSegment<'static>],
-        address: Address,
-    ) -> Option<u64> {
+    fn read_u64_at(segments: &[LoadableSegment<'static>], address: Address) -> Option<u64> {
         segments.iter().find_map(|segment| {
             let offset = segment.offset_of(address)?;
             segment.read_value::<u64>(offset)
