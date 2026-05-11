@@ -5,10 +5,11 @@ authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2024"
 
 [features]
-mdbx = ["libmdbx"]
-sqlite = ["r2d2", "r2d2_sqlite", "rusqlite"]
-rocksdb = ["dep:rocksdb"]
 default = ["sqlite"]
+dynamic = ["fugue-lifter/dynamic"]
+mdbx = ["libmdbx"]
+rocksdb = ["dep:rocksdb"]
+sqlite = ["r2d2", "r2d2_sqlite", "rusqlite"]
 
 [dependencies]
 anyhow = "1"

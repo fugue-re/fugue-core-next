@@ -15,12 +15,14 @@ use crate::types::context::ContextAdaptor;
 use crate::types::pattern::PatternExpressionAdaptor;
 use crate::types::symbol::SymbolAdaptor;
 use crate::types::template::TplAdaptor;
-use crate::LifterGeneratorError;
+use crate::{LanguageVariant, LifterGeneratorError};
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
     language: &'a Language,
     tables: Tables<'a>,
+    primary_variant: LanguageVariant,
+    extra_variants: Vec<LanguageVariant>,
 }
 
 #[derive(Default)]
@@ -116,11 +118,24 @@ impl<'a> Tables<'a> {
 }
 
 impl<'a> LifterGenerator<'a> {
-    pub fn new(language: &'a Language) -> Result<Self, LifterGeneratorError> {
+    pub fn new(
+        language: &'a Language,
+        variant: LanguageVariant,
+    ) -> Result<Self, LifterGeneratorError> {
+        Self::new_with(language, variant, std::iter::empty())
+    }
+
+    pub fn new_with(
+        language: &'a Language,
+        primary_variant: LanguageVariant,
+        extra_variants: impl IntoIterator<Item = LanguageVariant>,
+    ) -> Result<Self, LifterGeneratorError> {
         let mut slf = Self {
             context_variables: Vec::new(),
             language,
             tables: Tables::default(),
+            primary_variant,
+            extra_variants: extra_variants.into_iter().collect(),
         };
 
         slf.build()?;
@@ -796,7 +811,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let unique_space_size = self.language.unique_space_size();
 
         let mut userops = Vec::new();
-        let mut userop_to_ids = Vec::new();
         let mut userop_to_names = Vec::new();
 
         for (i, op) in self.language.user_ops().iter().enumerate() {
@@ -812,7 +826,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 pub const #upper_snake_name: u16 = #id;
             });
             userop_to_names.push(name);
-            userop_to_ids.push(quote! { #name => #id });
         }
 
         let n_userops = self.language.user_ops().len();
@@ -827,35 +840,41 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
         let n_spaces = self.language.spaces().len();
 
-        let space_cases = self.language.spaces().iter().enumerate().map(|(i, spc)| {
-            let i = i as u8;
-            if i == 0 {
-                // constant
-                quote! { #i => offset & fugue_lifter_runtime::calculate_mask(size as usize) }
-            } else if spc.id().is_unique() {
-                quote! { #i => offset | unique_offset }
+        let space_kinds = self.language.spaces().iter().enumerate().map(|(i, spc)| {
+            let id = spc.id();
+            if id.is_constant() {
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Constant }
+            } else if id.is_unique() {
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Unique }
+            } else if (i as u8) == default_space_id {
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Default }
             } else {
-                let highest = spc.highest_offset();
-                quote! { #i => fugue_lifter_runtime::wrap_offset(#highest, offset) }
+                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Other }
             }
         });
 
-        let space_match = quote! {
-            match space {
-                #(#space_cases,)*
-                _ => unreachable!("invalid space"),
-            }
-        };
+        let spaces = self
+            .language
+            .spaces()
+            .iter()
+            .zip(space_kinds)
+            .map(|(spc, kind)| {
+                let name = spc.name();
+                let word_size = spc.word_size();
+                let upper_bound = spc.highest_offset();
+                quote! {
+                    fugue_lifter_runtime::space::AddressSpace::new(
+                        #name,
+                        #word_size,
+                        #upper_bound,
+                        #kind,
+                    )
+                }
+            });
 
         let space_names = self.language.spaces().iter().map(|spc| {
             let name = spc.name();
             quote! { #name }
-        });
-
-        let space_ids = self.language.spaces().iter().enumerate().map(|(i, spc)| {
-            let name = spc.name();
-            let i = i as u8;
-            quote! { #name => #i }
         });
 
         let context_variable_consts = self.context_variables.iter().map(|(name, start, end)| {
@@ -869,15 +888,18 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
         });
 
-        let context_variable_names = self.context_variables.iter().map(|(name, _, _)| {
+        let mut context_variable_pairs_sorted = self.context_variables.iter().collect::<Vec<_>>();
+        context_variable_pairs_sorted.sort_by_key(|(name, _, _)| *name);
+        let context_variable_pairs = context_variable_pairs_sorted.iter().map(|(name, _, _)| {
             let upper_snake_name = Ident::new(
                 &heck::AsShoutySnakeCase(*name).to_string(),
                 Span::call_site(),
             );
             quote! {
-                #name => #upper_snake_name
+                (#name, #upper_snake_name)
             }
         });
+        let n_context_vars = self.context_variables.len();
 
         let context_variable_registrations =
             self.context_variables.iter().map(|(name, start, end)| {
@@ -889,8 +911,9 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let n_registers = self.language.registers().name_mapping().len();
 
         let mut registers = Vec::with_capacity(n_registers);
-        let mut register_names = Vec::with_capacity(n_registers);
         let mut register_ranges = Vec::with_capacity(n_registers);
+        let mut register_pairs_unsorted =
+            Vec::<(&str, u64, u16, Ident)>::with_capacity(n_registers);
 
         for ((off, sz), nm) in self.language.registers().iter() {
             let off = *off;
@@ -901,7 +924,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 Span::call_site(),
             );
 
-            // for register by known symbol/const
             let var = quote! {
                 pub const #upper_snake_name: fugue_lifter_runtime::pcode::Varnode =
                     fugue_lifter_runtime::pcode::Varnode::new(#register_space_id, #off, #sz);
@@ -909,25 +931,25 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
             let nm = nm.as_str();
 
-            // for name to varnode mapping
-            let name_to_varnode = quote! {
-                #nm => #upper_snake_name
-            };
-
-            // for range (off, sz) to name mapping
             let range_to_name = quote! {
                 (#off, #sz, #nm)
             };
 
             registers.push(var);
-            register_names.push(name_to_varnode);
             register_ranges.push(range_to_name);
+            register_pairs_unsorted.push((nm, off, sz, upper_snake_name));
         }
+
+        register_pairs_unsorted.sort_by_key(|(nm, _, _, _)| *nm);
+        let register_pairs = register_pairs_unsorted.iter().map(|(nm, _, _, ident)| {
+            quote! {
+                (#nm, #ident)
+            }
+        });
 
         let language_id = self.language.architecture().to_string();
         let processor = self.language.architecture().processor();
         let little_endian = self.language.architecture().endian().is_little();
-        let variant = self.language.architecture().variant();
 
         let constructors = &self.tables.ctors;
         let root_dtree = u16::try_from(self.tables.subtable_id_mapping[&(0, 0)])
@@ -942,6 +964,128 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let handle_tpls = self.tables.handle_tpls.values();
         let op_tpls = self.tables.op_tpls.values();
         let varnode_tpls = self.tables.varnode_tpls.values();
+
+        let arch = self.language.architecture();
+        let endian_label = if arch.endian().is_big() { "BE" } else { "LE" };
+        let arch_processor = arch.processor().to_owned();
+        let arch_bits = arch.bits();
+
+        let variant_blocks = if self.extra_variants.is_empty() {
+            let primary = &self.primary_variant;
+            let defaults_lit = primary
+                .context_defaults
+                .iter()
+                .map(|(name, value)| quote! { (#name, #value) });
+            let n_defaults = primary.context_defaults.len();
+            let primary_variant_str = primary.name.clone();
+            vec![quote! {
+                static CONTEXT_DEFAULTS: [(&'static str, u32); #n_defaults] = [
+                    #(#defaults_lit),*
+                ];
+
+                struct L;
+                impl fugue_lifter_runtime::language::LanguageImpl for L {
+                    const ID: &'static str = LANGUAGE_ID;
+
+                    const PROCESSOR: &'static str = #processor;
+                    const LITTLE_ENDIAN: bool = #little_endian;
+                    const VARIANT: &'static str = #primary_variant_str;
+
+                    const ADDRESS_ALIGNMENT: usize = ADDRESS_ALIGNMENT;
+                    const ADDRESS_BITS: u32 = ADDRESS_BITS;
+                    const ADDRESS_SIZE: usize = ADDRESS_SIZE;
+                    const ADDRESS_UPPER_BOUND: u64 = ADDRESS_UPPER_BOUND;
+
+                    const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
+                    const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
+
+                    const REGISTER_SPACE: u8 = REGISTER_SPACE;
+                    const REGISTER_SPACE_SIZE: usize = REGISTER_SPACE_SIZE;
+
+                    const UNIQUE_MASK: u64 = UNIQUE_MASK;
+                    const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
+                    const UNIQUE_SPACE_SIZE: usize = UNIQUE_SPACE_SIZE;
+
+                    const SPACE_WORD_SIZES: &'static [usize] = &SPACE_WORD_SIZE;
+                    const SPACE_UPPER_BOUNDS: &'static [u64] = &SPACE_UPPER_BOUND;
+
+                    const REGISTERS: &'static [(&'static str, fugue_lifter_runtime::pcode::Varnode)] = &register::REGISTERS_BY_NAME;
+                    const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
+                    const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
+                    const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
+                    const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                    const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
+
+                    const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
+                }
+                pub static LANGUAGE: fugue_lifter_runtime::language::Language =
+                    fugue_lifter_runtime::language::Language::new::<L>();
+            }]
+        } else {
+            let mut blocks = Vec::with_capacity(1 + self.extra_variants.len());
+            for variant in std::iter::once(&self.primary_variant).chain(self.extra_variants.iter())
+            {
+                let variant_name = variant.name.clone();
+                let upper = variant_name.to_ascii_uppercase();
+                let defaults_static =
+                    Ident::new(&format!("{upper}_CONTEXT_DEFAULTS"), Span::call_site());
+                let language_static = Ident::new(&format!("LANGUAGE_{upper}"), Span::call_site());
+                let marker_struct = Ident::new(&format!("L{upper}"), Span::call_site());
+                let language_id_lit = format!(
+                    "{}:{}:{}:{}",
+                    arch_processor, endian_label, arch_bits, variant_name
+                );
+                let defaults_lit = variant
+                    .context_defaults
+                    .iter()
+                    .map(|(name, value)| quote! { (#name, #value) });
+                let n_defaults = variant.context_defaults.len();
+                blocks.push(quote! {
+                    static #defaults_static: [(&'static str, u32); #n_defaults] = [
+                        #(#defaults_lit),*
+                    ];
+
+                    struct #marker_struct;
+                    impl fugue_lifter_runtime::language::LanguageImpl for #marker_struct {
+                        const ID: &'static str = #language_id_lit;
+
+                        const PROCESSOR: &'static str = #processor;
+                        const LITTLE_ENDIAN: bool = #little_endian;
+                        const VARIANT: &'static str = #variant_name;
+
+                        const ADDRESS_ALIGNMENT: usize = ADDRESS_ALIGNMENT;
+                        const ADDRESS_BITS: u32 = ADDRESS_BITS;
+                        const ADDRESS_SIZE: usize = ADDRESS_SIZE;
+                        const ADDRESS_UPPER_BOUND: u64 = ADDRESS_UPPER_BOUND;
+
+                        const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
+                        const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
+
+                        const REGISTER_SPACE: u8 = REGISTER_SPACE;
+                        const REGISTER_SPACE_SIZE: usize = REGISTER_SPACE_SIZE;
+
+                        const UNIQUE_MASK: u64 = UNIQUE_MASK;
+                        const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
+                        const UNIQUE_SPACE_SIZE: usize = UNIQUE_SPACE_SIZE;
+
+                        const SPACE_WORD_SIZES: &'static [usize] = &SPACE_WORD_SIZE;
+                        const SPACE_UPPER_BOUNDS: &'static [u64] = &SPACE_UPPER_BOUND;
+
+                        const REGISTERS: &'static [(&'static str, fugue_lifter_runtime::pcode::Varnode)] = &register::REGISTERS_BY_NAME;
+                        const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
+                        const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
+                        const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
+                        const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                        const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
+
+                        const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
+                    }
+                    pub static #language_static: fugue_lifter_runtime::language::Language =
+                        fugue_lifter_runtime::language::Language::new::<#marker_struct>();
+                });
+            }
+            blocks
+        };
 
         tokens.append_all(quote! {
             pub const LANGUAGE_ID: &'static str = #language_id;
@@ -970,106 +1114,37 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             ];
 
             pub mod context {
-                use fugue_lifter_runtime::phf;
-
                 #(#context_variable_consts)*
 
-                static CONTEXT_VARIABLES_TO_BITS: phf::Map<&'static str, fugue_lifter_runtime::context::ContextBitRange> = phf::phf_map! {
-                    #(#context_variable_names,)*
-                };
-
-                #[inline(always)]
-                pub fn context_variable_by_name(
-                    name: &str,
-                ) -> Option<fugue_lifter_runtime::context::ContextBitRange> {
-                    CONTEXT_VARIABLES_TO_BITS.get(name).copied()
-                }
+                pub const CONTEXT_VARIABLES: [(&'static str, fugue_lifter_runtime::context::ContextBitRange); #n_context_vars] = [
+                    #(#context_variable_pairs,)*
+                ];
             }
 
             pub mod space {
-                use fugue_lifter_runtime::phf;
-
                 pub const SPACES: [&'static str; #n_spaces] = [
                     #(#space_names,)*
                 ];
-
-                static SPACES_TO_ID: phf::Map<&'static str, u8> = phf::phf_map! {
-                    #(#space_ids,)*
-                };
-
-                #[inline(always)]
-                pub fn space_by_name(
-                    name: &str,
-                ) -> Option<u8> {
-                    SPACES_TO_ID.get(name).copied()
-                }
-
-                #[inline]
-                pub fn space_name(
-                    space: u8,
-                ) -> Option<&'static str> {
-                    SPACES.get(space as usize).copied()
-                }
             }
 
             pub mod register {
-                use fugue_lifter_runtime::phf;
-
                 #(#registers)*
 
                 pub const REGISTERS: [(u64, u16, &'static str); #n_registers] = [
                     #(#register_ranges),*
                 ];
 
-                static REGISTERS_TO_VARNODE: phf::Map<&'static str, fugue_lifter_runtime::pcode::Varnode> = phf::phf_map! {
-                    #(#register_names,)*
-                };
-
-                #[inline(always)]
-                pub fn register_by_name(
-                    name: &str,
-                ) -> Option<fugue_lifter_runtime::pcode::Varnode> {
-                    REGISTERS_TO_VARNODE.get(name).copied()
-                }
-
-                #[inline]
-                pub fn register_name(
-                    varnode: &fugue_lifter_runtime::pcode::Varnode,
-                ) -> Option<&'static str> {
-                    if varnode.space != #register_space_id {
-                        return None;
-                    }
-
-                    let key = (varnode.offset, varnode.size);
-
-                    REGISTERS.binary_search_by(|&(off, sz, _)| (off, sz).cmp(&key))
-                        .ok()
-                        .map(|pos| REGISTERS[pos].2)
-                }
+                pub const REGISTERS_BY_NAME: [(&'static str, fugue_lifter_runtime::pcode::Varnode); #n_registers] = [
+                    #(#register_pairs),*
+                ];
             }
 
             pub mod user_op {
-                use fugue_lifter_runtime::phf;
-
                 #(#userops)*
 
                 pub const USER_OPS: [&'static str; #n_userops] = [
                     #(#userop_to_names),*
                 ];
-
-                static USER_OPS_TO_IDS: phf::Map<&'static str, u16> = phf::phf_map! {
-                    #(#userop_to_ids,)*
-                };
-
-                #[inline(always)]
-                pub fn user_op_by_name(name: &str) -> Option<u16> {
-                    USER_OPS_TO_IDS.get(name).copied()
-                }
-
-                #[inline(always)]
-                pub fn user_op_by_id(id: u16) -> Option<&'static str> {
-                    USER_OPS.get(id as usize).copied()
-                }
             }
 
             static CONSTRUCTORS: &[fugue_lifter_runtime::Constructor] = &[
@@ -1112,283 +1187,37 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 #(#varnode_tpls,)*
             ];
 
-            struct Instruction;
+            static SPACES: [fugue_lifter_runtime::space::AddressSpace; #n_spaces] = [
+                #(#spaces,)*
+            ];
 
-            impl fugue_lifter_runtime::ConstructorResolver for Instruction {
-                const ADDRESS_SIZE: usize = ADDRESS_SIZE;
-                const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
-                const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
-                const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
-
-                const CONSTRUCTORS: &'static [fugue_lifter_runtime::Constructor] = CONSTRUCTORS;
-                const DECISION_TREES: &'static [fugue_lifter_runtime::resolve::DecisionNode] = DECISION_TREES;
-                const OPERAND_FILTERS: &'static [fugue_lifter_runtime::operand::OperandFilter] = OPERAND_FILTERS;
-                const PATTERN_EXPRESSIONS: &'static [fugue_lifter_runtime::pattern::PatternOp] = PATTERN_EXPRESSIONS;
-                const SYMBOLS: &'static [fugue_lifter_runtime::symbol::Symbol] = SYMBOLS;
-
-                const CONST_TEMPLATES: &'static [fugue_lifter_runtime::template::ConstTpl] = CONST_TEMPLATES;
-                const CONSTRUCT_TEMPLATES: &'static [fugue_lifter_runtime::template::ConstructTpl] = CONSTRUCT_TEMPLATES;
-                const HANDLE_TEMPLATES: &'static [fugue_lifter_runtime::template::HandleTpl] = HANDLE_TEMPLATES;
-                const OP_TEMPLATES: &'static [fugue_lifter_runtime::template::OpTpl] = OP_TEMPLATES;
-                const VARNODE_TEMPLATES: &'static [fugue_lifter_runtime::template::VarnodeTpl] = VARNODE_TEMPLATES;
-
-
-                #[inline(always)]
-                fn resolve(
-                    state: &mut fugue_lifter_runtime::LiftingContextState,
-                ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                    resolve_instruction(state)
-                }
-
-                #[inline(always)]
-                fn resolve_constructor(
-                    id: u16,
-                    state: &mut fugue_lifter_runtime::LiftingContextState,
-                ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                    let ctor = DECISION_TREES[id as usize].resolve::<Instruction>(state)?;
-                    Some(ctor)
-                }
-
-                #[inline(always)]
-                fn resolve_upper_bound(space: u8) -> u64 {
-                    SPACE_UPPER_BOUND[space as usize]
-                }
-
-                #[inline(always)]
-                fn resolve_word_size(space: u8) -> usize {
-                    SPACE_WORD_SIZE[space as usize]
-                }
-
-                #[inline(always)]
-                fn resolve_location_offset(
-                    unique_offset: u64,
-                    space: u8,
-                    offset: u64,
-                    size: u16,
-                ) -> u64 {
-                    #space_match
-                }
-            }
-
-            #[inline(always)]
-            pub fn resolve_instruction(
-                state: &mut fugue_lifter_runtime::LiftingContextState,
-            ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                unsafe {
-                    let ctor = DECISION_TREES[#root_dtree as usize].resolve::<Instruction>(state)?;
-                    ctor.resolve_operands::<Instruction>(state)?;
-                    Some(ctor)
-                }
-            }
-
-            #[inline(always)]
-            pub fn resolve_state(
-                state: &mut fugue_lifter_runtime::LiftingContextState,
-            ) -> Option<&'static fugue_lifter_runtime::Constructor> {
-                unsafe {
-                    let ctor = resolve_instruction(state)?;
-                    ctor.resolve_handles::<Instruction>(state)?;
-                    state.inputs.input.base_state();
-                    state.apply_commits::<Instruction>();
-                    Some(ctor)
-                }
-            }
-
-            #[inline]
-            pub fn resolve(
-                address: u64,
-                bytes: &[u8],
-                context: &mut fugue_lifter_runtime::LiftingContext,
-                apply_commits: bool,
-            ) -> Option<usize> {
-                unsafe {
-                    let mut nop_issued = Vec::with_capacity(0);
-                    let mut state = context.state_for(address, bytes, &mut nop_issued)?;
-
-                    let ctor = resolve_instruction(&mut state)?;
-
-                    let buffer_limit = bytes.len();
-                    let length = state.len();
-
-                    if length == 0 || length > buffer_limit {
-                        return None;
-                    }
-
-                    if apply_commits {
-                        ctor.resolve_handles::<Instruction>(&mut state)?;
-                    }
-
-                    state.inputs.input.base_state();
-
-                    if apply_commits {
-                        state.apply_commits::<Instruction>();
-                    }
-
-                    Some(length)
-                }
-            }
-
-            #[inline]
-            pub fn resolve_operands(
-                address: u64,
-                bytes: &[u8],
-                context: &mut fugue_lifter_runtime::LiftingContext,
-                operands: &mut fugue_lifter_runtime::operand::Operands,
-            ) -> Option<usize> {
-                unsafe {
-                    let mut nop_issued = Vec::with_capacity(0);
-                    let mut state = context.state_for(address, bytes, &mut nop_issued)?;
-
-                    let ctor = resolve_instruction(&mut state)?;
-
-                    let buffer_limit = bytes.len();
-                    let length = state.len();
-
-                    if length == 0 || length > buffer_limit {
-                        return None;
-                    }
-
-                    ctor.resolve_handles::<Instruction>(&mut state)?;
-
-                    state.inputs.input.base_state();
-
-                    state.apply_commits::<Instruction>();
-
-                    state.operands::<Instruction>(operands)?;
-
-                    Some(length)
-                }
-            }
-
-            #[inline]
-            pub(crate) fn disassemble_to_string(
-                address: u64,
-                bytes: &[u8],
-                context: &mut fugue_lifter_runtime::LiftingContext,
-                output: &mut String,
-            ) -> Option<usize> {
-                disassemble(address, bytes, context, output).unwrap()
-            }
-
-            #[inline]
-            pub fn disassemble<W: std::fmt::Write>(
-                address: u64,
-                bytes: &[u8],
-                context: &mut fugue_lifter_runtime::LiftingContext,
-                writer: &mut W,
-            ) -> Result<Option<usize>, std::fmt::Error> {
-                unsafe {
-                    let mut nop_issued = Vec::with_capacity(0);
-
-                    let Some(mut state) = context.state_for(address, bytes, &mut nop_issued) else {
-                        return Ok(None);
-                    };
-
-                    let Some(ctor) = resolve_instruction(&mut state) else {
-                        return Ok(None);
-                    };
-
-                    let buffer_limit = bytes.len();
-                    let length = state.len();
-
-                    if length == 0 || length > buffer_limit {
-                        return Ok(None);
-                    }
-
-                    if ctor.resolve_handles::<Instruction>(&mut state).is_none() {
-                        return Ok(None);
-                    }
-
-                    state.inputs.input.base_state();
-
-                    state.apply_commits::<Instruction>();
-
-                    state.format::<Instruction, _>(writer)?;
-
-                    Ok(Some(length))
-                }
-            }
-
-            #[inline]
-            pub fn lift(
-                address: u64,
-                bytes: &[u8],
-                context: &mut fugue_lifter_runtime::LiftingContext,
-                issued: &mut Vec<fugue_lifter_runtime::pcode::PCodeOp>,
-            ) -> Option<usize> {
-                unsafe {
-                    let mut state = context.state_for(address, bytes, issued)?;
-                    let buffer_limit = bytes.len();
-
-                    resolve_state(&mut state)?;
-
-                    let length = state.len();
-
-                    if length == 0 || length > buffer_limit {
-                        return None;
-                    }
-
-                    let delay_slot_bytes = state.delay_slot_length();
-
-                    if delay_slot_bytes == 0 {
-                        state.emit::<Instruction>()?;
-                        return Some(state.len());
-                    }
-
-                    let mut fall_offset = state.len();
-                    let mut delay_count = 0usize;
-                    let mut index = 0usize;
-
-                    loop {
-                        let address = address + fall_offset as u64;
-                        let bytes = bytes.get(fall_offset..)?;
-
-                        // NOTE: this does not ensure we have the context configured for lifting;
-                        // we therefore need to directly initialise the first input.
-                        let mut dstate = state.nth_delay_slot(index)?;
-
-                        dstate.inputs.initialise(address, bytes);
-
-                        resolve_state(&mut dstate)?;
-
-                        if dstate.delay_slot_length() != 0 {
-                            // nested delay slots
-                            return None;
-                        }
-
-                        let length = dstate.len();
-
-                        if length == 0 || length > (buffer_limit - fall_offset) {
-                            return None;
-                        }
-
-                        fall_offset += length;
-                        delay_count += length;
-
-                        if delay_count >= delay_slot_bytes {
-                            break;
-                        }
-
-                        index += 1;
-                    }
-
-                    state.emit::<Instruction>()?;
-
-                    Some(fall_offset)
-                }
-            }
-
-            #[inline]
-            pub fn lifter(ninputs: usize) -> fugue_lifter_runtime::LiftingContext {
-                lifter_with(ninputs, default_context())
-            }
+            pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =
+                fugue_lifter_runtime::language::LanguageData {
+                    root_dtree: #root_dtree,
+                    address_size: ADDRESS_SIZE,
+                    constant_space: CONSTANT_SPACE,
+                    default_space: DEFAULT_SPACE,
+                    unique_space: UNIQUE_SPACE,
+                    constructors: CONSTRUCTORS,
+                    decision_trees: DECISION_TREES,
+                    operand_filters: OPERAND_FILTERS,
+                    pattern_expressions: PATTERN_EXPRESSIONS,
+                    spaces: &SPACES,
+                    symbols: SYMBOLS,
+                    const_templates: CONST_TEMPLATES,
+                    construct_templates: CONSTRUCT_TEMPLATES,
+                    handle_templates: HANDLE_TEMPLATES,
+                    op_templates: OP_TEMPLATES,
+                    varnode_templates: VARNODE_TEMPLATES,
+                };
 
             #[inline]
             pub fn lifter_with(
+                language: &'static fugue_lifter_runtime::language::Language,
                 ninputs: usize,
                 context: fugue_lifter_runtime::ContextDatabase,
             ) -> fugue_lifter_runtime::LiftingContext {
-                fugue_lifter_runtime::LiftingContext::new(ninputs, context, UNIQUE_MASK)
+                fugue_lifter_runtime::LiftingContext::new(language, ninputs, context, UNIQUE_MASK)
             }
 
             #[inline]
@@ -1405,48 +1234,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 context
             }
 
-            struct L;
-            impl fugue_lifter_runtime::language::LanguageImpl for L {
-                const ID: &'static str = LANGUAGE_ID;
-
-                const PROCESSOR: &'static str = #processor;
-                const LITTLE_ENDIAN: bool = #little_endian;
-                const VARIANT: &'static str = #variant;
-
-                const ADDRESS_ALIGNMENT: usize = ADDRESS_ALIGNMENT;
-                const ADDRESS_BITS: u32 = ADDRESS_BITS;
-                const ADDRESS_SIZE: usize = ADDRESS_SIZE;
-                const ADDRESS_UPPER_BOUND: u64 = ADDRESS_UPPER_BOUND;
-
-                const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
-                const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
-
-                const REGISTER_SPACE: u8 = REGISTER_SPACE;
-                const REGISTER_SPACE_SIZE: usize = REGISTER_SPACE_SIZE;
-
-                const UNIQUE_MASK: u64 = UNIQUE_MASK;
-                const UNIQUE_SPACE: u8 = UNIQUE_SPACE;
-                const UNIQUE_SPACE_SIZE: usize = UNIQUE_SPACE_SIZE;
-
-                const SPACE_WORD_SIZES: &'static [usize] = &SPACE_WORD_SIZE;
-                const SPACE_UPPER_BOUNDS: &'static [u64] = &SPACE_UPPER_BOUND;
-                const SPACE_BY_NAME: fn(&str) -> Option<u8> = space::space_by_name;
-                const SPACE_NAME: fn(u8) -> Option<&'static str> = space::space_name;
-
-                const CONTEXT_VARIABLE_BY_NAME: fn(&str) -> Option<fugue_lifter_runtime::context::ContextBitRange> = context::context_variable_by_name;
-
-                const REGISTER_BY_NAME: fn(&str) -> Option<fugue_lifter_runtime::pcode::Varnode> = register::register_by_name;
-                const REGISTER_NAME: fn(&fugue_lifter_runtime::pcode::Varnode) -> Option<&'static str> = register::register_name;
-
-                const USER_OP_BY_NAME: fn(&str) -> Option<u16> = user_op::user_op_by_name;
-                const USER_OP_BY_ID: fn(u16) -> Option<&'static str> = user_op::user_op_by_id;
-
-                const RESOLVE: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, bool) -> Option<usize> = resolve;
-                const OPERANDS: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut fugue_lifter_runtime::operand::Operands) -> Option<usize> = resolve_operands;
-                const DISASSEMBLE: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut String) -> Option<usize> = disassemble_to_string;
-                const LIFT: fn(u64, &[u8], &mut fugue_lifter_runtime::pcode::LiftingContext, &mut Vec<fugue_lifter_runtime::pcode::PCodeOp>) -> Option<usize> = lift;
-            }
-            pub static LANGUAGE: &'static fugue_lifter_runtime::language::Language = &fugue_lifter_runtime::language::Language::new::<L>();
+            #(#variant_blocks)*
         });
     }
 }

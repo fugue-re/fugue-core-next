@@ -5,7 +5,7 @@ mod __impl {
     include!(concat!(env!("OUT_DIR"), "/x86_64.rs"));
 }
 
-pub use __impl::{context, register, space, user_op, LANGUAGE};
+pub use __impl::{context, register, space, user_op, LANGUAGE_COMPAT32, LANGUAGE_DEFAULT};
 
 pub struct LifterFactory;
 
@@ -18,7 +18,10 @@ impl LifterFactory {
         base.set_variable_default_by_bits(context::REXPREFIX, 0);
         base.set_variable_default_by_bits(context::LONG_MODE, 1);
 
-        Lifter::new(__impl::LANGUAGE, __impl::lifter_with(2, base))
+        Lifter::new(
+            &__impl::LANGUAGE_DEFAULT,
+            __impl::lifter_with(&__impl::LANGUAGE_DEFAULT, 2, base),
+        )
     }
 
     pub fn new_compat32() -> Lifter {
@@ -29,7 +32,10 @@ impl LifterFactory {
         base.set_variable_default_by_bits(context::REXPREFIX, 0);
         base.set_variable_default_by_bits(context::LONG_MODE, 0);
 
-        Lifter::new(__impl::LANGUAGE, __impl::lifter_with(2, base))
+        Lifter::new(
+            &__impl::LANGUAGE_COMPAT32,
+            __impl::lifter_with(&__impl::LANGUAGE_COMPAT32, 2, base),
+        )
     }
 }
 
@@ -48,7 +54,7 @@ impl LiftingContextFactory {
         base.set_variable_default_by_bits(context::REXPREFIX, 0);
         base.set_variable_default_by_bits(context::LONG_MODE, 1);
 
-        __impl::lifter_with(2, base)
+        __impl::lifter_with(&__impl::LANGUAGE_DEFAULT, 2, base)
     }
 
     pub fn new_compat32() -> LiftingContext {
@@ -59,7 +65,7 @@ impl LiftingContextFactory {
         base.set_variable_default_by_bits(context::REXPREFIX, 0);
         base.set_variable_default_by_bits(context::LONG_MODE, 0);
 
-        __impl::lifter_with(2, base)
+        __impl::lifter_with(&__impl::LANGUAGE_COMPAT32, 2, base)
     }
 }
 
@@ -67,7 +73,22 @@ pub mod variants {
     use super::*;
 
     pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", LANGUAGE, LiftingContextFactory::new_default);
+        LanguageVariant::new("default", &__impl::LANGUAGE_DEFAULT, LiftingContextFactory::new_default);
     pub const COMPAT32: LanguageVariant =
-        LanguageVariant::new("compat32", LANGUAGE, LiftingContextFactory::new_compat32);
+        LanguageVariant::new(
+            "compat32",
+            &__impl::LANGUAGE_COMPAT32,
+            LiftingContextFactory::new_compat32,
+        );
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn variant_tag_matches_factory() {
+        assert_eq!(LifterFactory::new_default().language().variant(), "default");
+        assert_eq!(LifterFactory::new_compat32().language().variant(), "compat32");
+    }
 }

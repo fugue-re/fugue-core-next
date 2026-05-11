@@ -1,8 +1,14 @@
 use std::ops::Range;
 
+use crate::language::LanguageData;
 use crate::pattern::PatternExpression;
-use crate::{ConstructorResolver, LiftingContextState};
+use crate::pcode::LiftingContextState;
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum OperandResolver {
     None,
     Constructor(u16),
@@ -20,11 +26,12 @@ impl OperandFilter {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
-    pub unsafe fn validate<R: ConstructorResolver>(
+    pub unsafe fn validate(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState,
     ) -> Option<()> {
-        let index = u16::try_from(self.pattern.resolve::<R>(input)?).ok()?;
+        let index = u16::try_from(self.pattern.resolve(data, input)?).ok()?;
         if index >= self.limit || self.indices.contains(&index) {
             None
         } else {
@@ -33,12 +40,23 @@ impl OperandFilter {
     }
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum OperandHandleResolver {
     None,
     Symbol(u16),
     Expression(PatternExpression),
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "rkyv", rkyv(resolver = OperandArchiveResolver))]
 pub struct Operand {
     pub resolver: OperandResolver,
     pub handle_resolver: OperandHandleResolver,
@@ -74,14 +92,15 @@ impl From<i64> for OperandValue {
 }
 
 impl OperandValue {
-    pub(crate) fn from_varnode<R: ConstructorResolver>(
+    pub(crate) fn from_varnode(
+        data: &'static LanguageData,
         name: &'static str,
         space: u8,
         offset: u64,
     ) -> Self {
-        if space == R::CONSTANT_SPACE {
+        if space == data.constant_space {
             Self::Value(offset as _)
-        } else if space == R::DEFAULT_SPACE {
+        } else if space == data.default_space {
             Self::Address(offset)
         } else {
             Self::Symbol(name)
@@ -95,9 +114,6 @@ impl OperandValue {
         }
     }
 
-    // A group is a collection of operands within an instruction or operand. For
-    // example, `MOV EAX, dword ptr [EBX + ECX]`, we may have two operands at
-    // the top-level, `EAX` and a group [EBX, ECX].
     pub fn group(&self) -> Option<&Operands> {
         match self {
             Self::Group(ops) => Some(ops),
@@ -105,8 +121,6 @@ impl OperandValue {
         }
     }
 
-    // A symbol may be a register, to check we need to match against the
-    // list of known registers for a language.
     pub fn symbol(&self) -> Option<&'static str> {
         match self {
             Self::Symbol(reg) => Some(reg),
@@ -114,8 +128,6 @@ impl OperandValue {
         }
     }
 
-    // A value may be an address, to check we need to infer it based on the
-    // analysed binary.
     pub fn value(&self) -> Option<i64> {
         match self {
             Self::Value(val) => Some(*val),
@@ -212,15 +224,29 @@ impl Operands {
         self.0.get(index)
     }
 
-    pub fn into_iter(self) -> impl ExactSizeIterator<Item = OperandData> {
-        self.0.into_iter()
-    }
-
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+impl IntoIterator for Operands {
+    type Item = OperandData;
+    type IntoIter = std::vec::IntoIter<OperandData>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Operands {
+    type Item = &'a OperandData;
+    type IntoIter = std::slice::Iter<'a, OperandData>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }

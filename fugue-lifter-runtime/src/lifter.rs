@@ -11,6 +11,10 @@ pub struct Lifter {
 
 impl Lifter {
     pub fn new(language: &'static Language, context: LiftingContext) -> Self {
+        debug_assert!(
+            std::ptr::eq(context.language(), language),
+            "lifter language and context language must match",
+        );
         Self { language, context }
     }
 

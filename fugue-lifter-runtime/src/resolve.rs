@@ -1,6 +1,6 @@
 use crate::constructor::Constructor;
+use crate::language::LanguageData;
 use crate::pcode::LiftingContextState;
-use crate::ConstructorResolver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionNode {
@@ -36,13 +36,13 @@ pub struct Pattern {
 }
 
 impl DecisionNode {
-    pub fn resolve<R: ConstructorResolver>(
+    pub fn resolve(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState,
     ) -> Option<&'static Constructor> {
         let mut curr = self;
 
-        // traverse down the tree until we hit a leaf
         while curr.size != 0 {
             let start_bit = curr.start_bit;
             let size = curr.size;
@@ -58,13 +58,12 @@ impl DecisionNode {
                 }
             };
 
-            curr = &R::DECISION_TREES[*curr.children.get(index as usize)? as usize];
+            curr = &data.decision_trees[*curr.children.get(index as usize)? as usize];
         }
 
-        // size is 0, we are at a leaf
         for pattern in curr.patterns.iter() {
             if pattern.matches(input) {
-                return Some(pattern.constructor::<R>());
+                return Some(pattern.constructor(data));
             }
         }
 
@@ -84,8 +83,8 @@ impl DecisionPair {
         }
     }
 
-    pub fn constructor<R: ConstructorResolver>(&self) -> &'static Constructor {
-        &R::CONSTRUCTORS[self.constructor as usize]
+    pub fn constructor(&self, data: &'static LanguageData) -> &'static Constructor {
+        &data.constructors[self.constructor as usize]
     }
 }
 

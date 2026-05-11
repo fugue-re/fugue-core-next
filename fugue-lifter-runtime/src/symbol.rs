@@ -1,7 +1,7 @@
 use std::fmt;
 
-use crate::constructor::ConstructorResolver;
 use crate::input::FixedHandle;
+use crate::language::LanguageData;
 use crate::operand::{OperandValue, Operands};
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
@@ -61,8 +61,9 @@ impl Symbol {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format<R: ConstructorResolver, W: fmt::Write>(
+    pub unsafe fn format<W: fmt::Write>(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> fmt::Result {
@@ -79,7 +80,7 @@ impl Symbol {
                 symbol_table,
                 ..
             } => {
-                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let index = pattern_value.resolve(data, state).expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
                     writer.write_str(name)?;
                 }
@@ -89,7 +90,7 @@ impl Symbol {
                 symbol_table,
                 ..
             } => {
-                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let index = pattern_value.resolve(data, state).expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied() {
                     writer.write_str(name)?;
                 }
@@ -98,7 +99,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let index = pattern_value.resolve(data, state).expect("resolved");
                 if let Some(value) = value_table.get(index as usize).copied().flatten() {
                     if value < 0 {
                         write!(writer, "-{:#x}", -(value as i128))?;
@@ -111,7 +112,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = pattern_value.resolve::<R>(state).expect("resolved");
+                let index = pattern_value.resolve(data, state).expect("resolved");
                 let value = *value_table.get(index as usize).expect("resolved");
                 if value < 0 {
                     write!(writer, "-{:#x}", -(value as i128))?;
@@ -136,8 +137,9 @@ impl Symbol {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands<R: ConstructorResolver>(
+    pub unsafe fn operands(
         &self,
+        data: &'static LanguageData,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) {
@@ -148,7 +150,7 @@ impl Symbol {
                 offset,
                 ..
             } => {
-                operands.push(OperandValue::from_varnode::<R>(name, *space, *offset));
+                operands.push(OperandValue::from_varnode(data, name, *space, *offset));
             }
             Self::Name {
                 pattern_value,
@@ -160,7 +162,7 @@ impl Symbol {
                 ..
             } => {
                 let (index, range) = pattern_value
-                    .resolve_with_range::<R>(state)
+                    .resolve_with_range(data, state)
                     .expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
                     operands.push_with(name, range);
@@ -172,7 +174,7 @@ impl Symbol {
                 ..
             } => {
                 let (index, range) = pattern_value
-                    .resolve_with_range::<R>(state)
+                    .resolve_with_range(data, state)
                     .expect("resolved");
                 if let Some(name) = symbol_table.get(index as usize).copied() {
                     operands.push_with(name, range);
@@ -183,7 +185,7 @@ impl Symbol {
                 value_table,
             } => {
                 let (index, range) = pattern_value
-                    .resolve_with_range::<R>(state)
+                    .resolve_with_range(data, state)
                     .expect("resolved");
                 if let Some(value) = value_table.get(index as usize).copied().flatten() {
                     operands.push_with(value, range);
@@ -194,7 +196,7 @@ impl Symbol {
                 value_table,
             } => {
                 let (index, range) = pattern_value
-                    .resolve_with_range::<R>(state)
+                    .resolve_with_range(data, state)
                     .expect("resolved");
                 let value = *value_table.get(index as usize).expect("resolved");
                 operands.push_with(value, range);
@@ -215,8 +217,9 @@ impl Symbol {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn resolve_handle<R: ConstructorResolver>(
+    pub unsafe fn resolve_handle(
         &self,
+        data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
     ) -> Option<FixedHandle> {
         Some(match self {
@@ -225,7 +228,7 @@ impl Symbol {
                 ..Default::default()
             },
             Symbol::Name { pattern_value, .. } | Symbol::Value { pattern_value } => {
-                let value = pattern_value.resolve::<R>(input)?;
+                let value = pattern_value.resolve(data, input)?;
                 FixedHandle {
                     space: 0,
                     offset_offset: value as u64,
@@ -265,7 +268,7 @@ impl Symbol {
                     next2_address
                 } else {
                     let mut ninput = input.next_input()?;
-                    R::resolve(&mut ninput)?;
+                    data.resolve_instruction(&mut ninput)?;
                     ninput.next_address()
                 },
                 ..Default::default()
@@ -275,24 +278,24 @@ impl Symbol {
                 varnode_table,
                 ..
             } => {
-                let index = pattern_value.resolve::<R>(input)? as usize;
-                let symbol = &R::SYMBOLS[varnode_table.get(index).copied()?? as usize];
-                symbol.resolve_handle::<R>(input)?
+                let index = pattern_value.resolve(data, input)? as usize;
+                let symbol = &data.symbols[varnode_table.get(index).copied()?? as usize];
+                symbol.resolve_handle(data, input)?
             }
             Symbol::VarnodeListFilled {
                 pattern_value,
                 varnode_table,
                 ..
             } => {
-                let index = pattern_value.resolve::<R>(input)? as usize;
-                let symbol = &R::SYMBOLS[*varnode_table.get(index)? as usize];
-                symbol.resolve_handle::<R>(input)?
+                let index = pattern_value.resolve(data, input)? as usize;
+                let symbol = &data.symbols[*varnode_table.get(index)? as usize];
+                symbol.resolve_handle(data, input)?
             }
             Symbol::ValueMap {
                 pattern_value,
                 value_table,
             } => {
-                let index = pattern_value.resolve::<R>(input)? as usize;
+                let index = pattern_value.resolve(data, input)? as usize;
                 let value = *value_table.get(index)?.as_ref()? as u64;
 
                 FixedHandle {
@@ -305,7 +308,7 @@ impl Symbol {
                 pattern_value,
                 value_table,
             } => {
-                let index = pattern_value.resolve::<R>(input)? as usize;
+                let index = pattern_value.resolve(data, input)? as usize;
                 let value = *value_table.get(index)? as u64;
 
                 FixedHandle {
