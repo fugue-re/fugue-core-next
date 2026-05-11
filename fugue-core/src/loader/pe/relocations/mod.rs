@@ -45,10 +45,7 @@ where
         }
     }
 
-    pub fn apply(
-        &self,
-        lsegm: &mut LoadableSegment<'data>,
-    ) -> Result<(), LoaderError> {
+    pub fn apply(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
         self.apply_base_relocations(lsegm)?;
         self.apply_import_slots(lsegm);
         Ok(())

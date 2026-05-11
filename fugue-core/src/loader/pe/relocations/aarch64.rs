@@ -1,10 +1,13 @@
+use object::ReadRef;
+use object::read::pe::ImageNtHeaders;
+
 use super::PeSegmentRelocator;
 use crate::loader::LoadableSegment;
 
 impl<'data, 'file, Pe, R> PeSegmentRelocator<'data, 'file, Pe, R>
 where
-    Pe: object::read::pe::ImageNtHeaders,
-    R: object::ReadRef<'data>,
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
     'file: 'data,
 {
     pub(crate) fn apply_aarch64_relocation(
