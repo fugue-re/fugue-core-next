@@ -65,10 +65,7 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
             quote! { ::fugue_core::storage::PERSISTENT },
         )
     } else {
-        (
-            quote! { None },
-            quote! { ::fugue_core::storage::TRANSIENT },
-        )
+        (quote! { None }, quote! { ::fugue_core::storage::TRANSIENT })
     };
 
     quote! {

@@ -30,7 +30,9 @@ use crate::loader::{
 };
 use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::attributes::{ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
+use crate::types::attributes::{
+    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
+};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -548,7 +550,8 @@ pub fn elf_sections<'a>(
     space: impl Into<Option<AddressSpaceId>> + Copy,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
     let space = space.into();
-    elf.sections().filter_map(move |sect| elf_section(&sect, space))
+    elf.sections()
+        .filter_map(move |sect| elf_section(&sect, space))
 }
 
 pub fn elf_segments<'a>(
@@ -556,7 +559,8 @@ pub fn elf_segments<'a>(
     space: impl Into<Option<AddressSpaceId>> + Copy,
 ) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
     let space = space.into();
-    elf.segments().filter_map(move |segm| elf_segment(&segm, space))
+    elf.segments()
+        .filter_map(move |segm| elf_segment(&segm, space))
 }
 
 pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
@@ -752,7 +756,11 @@ where
 
             self.covered.ranges_insert(vrange);
 
-            relocator.apply(Address::new(self.current_base.space(), 0u64), &mut lsegm, &sect)?;
+            relocator.apply(
+                Address::new(self.current_base.space(), 0u64),
+                &mut lsegm,
+                &sect,
+            )?;
 
             return Ok(Some(lsegm));
         }

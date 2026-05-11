@@ -12,7 +12,9 @@ use crate::loader::{
     LoadableSegmentBounds, LoaderError,
 };
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::attributes::{ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
+use crate::types::attributes::{
+    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
+};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 #[ouroboros::self_referencing]

@@ -724,7 +724,7 @@ define pcodeop coproc_moveto_Wait_for_interrupt;
 define pcodeop coproc_moveto_Invalidate_Entire_Instruction;
 define pcodeop coproc_moveto_Invalidate_Instruction_Cache_by_MVA;
 define pcodeop coproc_moveto_Flush_Prefetch_Buffer;
-define pcodeop coproc_moveto_Invalidate_Entire_Data_Cache;
+define pcodeop coproc_moveto_Invalidate_Entire_Data_cache;
 define pcodeop coproc_moveto_Invalidate_Entire_Data_by_MVA;
 define pcodeop coproc_moveto_Invalidate_Entire_Data_by_Index;
 define pcodeop coproc_moveto_Clean_Entire_Data_Cache;
@@ -732,6 +732,7 @@ define pcodeop coproc_moveto_Clean_Data_Cache_by_MVA;
 define pcodeop coproc_moveto_Clean_Data_Cache_by_Index;
 define pcodeop coproc_moveto_Data_Synchronization;
 define pcodeop coproc_moveto_Data_Memory_Barrier;
+define pcodeop coproc_moveto_Invalidate_Entire_Data_Cache;
 define pcodeop coproc_moveto_Invalidate_Data_Cache_by_MVA;
 define pcodeop coproc_moveto_Invalidate_unified_TLB_unlocked;
 define pcodeop coproc_moveto_Invalidate_unified_TLB_by_MVA;
@@ -776,7 +777,7 @@ define pcodeop coproc_movefrom_Wait_for_interrupt;
 define pcodeop coproc_movefrom_Invalidate_Entire_Instruction;
 define pcodeop coproc_movefrom_Invalidate_Instruction_Cache_by_MVA;
 define pcodeop coproc_movefrom_Flush_Prefetch_Buffer;
-define pcodeop coproc_movefrom_Invalidate_Entire_Data_Cache;
+define pcodeop coproc_movefrom_Invalidate_Entire_Data_cache;
 define pcodeop coproc_movefrom_Invalidate_Entire_Data_by_MVA;
 define pcodeop coproc_movefrom_Invalidate_Entire_Data_by_Index;
 define pcodeop coproc_movefrom_Clean_Entire_Data_Cache;
@@ -784,6 +785,7 @@ define pcodeop coproc_movefrom_Clean_Data_Cache_by_MVA;
 define pcodeop coproc_movefrom_Clean_Data_Cache_by_Index;
 define pcodeop coproc_movefrom_Data_Synchronization;
 define pcodeop coproc_movefrom_Data_Memory_Barrier;
+define pcodeop coproc_movefrom_Invalidate_Entire_Data_Cache;
 define pcodeop coproc_movefrom_Invalidate_Data_Cache_by_MVA;
 define pcodeop coproc_movefrom_Invalidate_unified_TLB_unlocked;
 define pcodeop coproc_movefrom_Invalidate_unified_TLB_by_MVA;
@@ -2315,7 +2317,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 :blx HAddr24			is $(AMODE) &  CALLoverride=0 & ARMcond=0 & cond=15 & c2527=5 & H24=0 & HAddr24
 {
   lr = inst_next;
-  SetThumbMode(1);
+  SetISAModeSwitch(1); # TMode done by HAddr24's globalset
   call HAddr24;
   # don't do causes decompiler trouble  TB = 0;
 } # Always changes to THUMB mode
@@ -2323,7 +2325,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 :blx HAddr24			is $(AMODE) &  CALLoverride=1 & ARMcond=0 & cond=15 & c2527=5 & H24=0 & HAddr24
 {
   lr = inst_next;
-  SetThumbMode(1);
+  SetISAModeSwitch(1); # TMode done by HAddr24's globalset
   goto HAddr24;
 } # Always changes to THUMB mode
 
@@ -2331,7 +2333,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 :blx HAddr24 			is $(AMODE) & ARMcond=0 & CALLoverride=0 & cond=15 & c2527=5 & H24=1 & HAddr24
 {
   lr = inst_next;
-  SetThumbMode(1);
+  SetISAModeSwitch(1); # TMode done by HAddr24's globalset
   call HAddr24;
   # don't do causes decompiler trouble  TB = 0;
 }   # Always changes to THUMB mode
@@ -2339,7 +2341,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 :blx HAddr24 			is $(AMODE) & ARMcond=0 & CALLoverride=1 & cond=15 & c2527=5 & H24=1 & HAddr24
 {
   lr = inst_next;
-  SetThumbMode(1);
+  SetISAModeSwitch(1); # TMode done by HAddr24's globalset
   goto HAddr24;
 }   # Always changes to THUMB mode
 
@@ -2563,12 +2565,28 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 @if defined(VERSION_6)
 
 # cpy is a pre-UAL synonym for mov
-:cpy^COND pc,rm 	is $(AMODE) & ARMcond=1 & COND & pc & c2027=0x1a & c1619=0 & c0411=0 & Rd=15 & rm
+:cpy^COND pc,rm 	is $(AMODE) & ARMcond=1 & LRset=0 & COND & pc & c2027=0x1a & c1619=0 & c0411=0 & Rd=15 & rm
 {
   build COND;
   build rm;
   BXWritePC(rm);
   goto [pc];
+}
+
+:cpy^COND pc,lr 		is $(AMODE) & ARMcond=1 & LRset=0 & COND & pc & c2527=0 & S20=0 & c2124=13 & c1619=0 & Rd=15 & sftimm=0 & c0406=0 & Rm=14 & lr
+{
+  build COND;
+  dest:4 = lr;
+  ALUWritePC(dest);
+  return [pc];
+}
+
+:cpy^COND pc,rm 	is $(AMODE) & ARMcond=1 & LRset=1 & COND & pc & c2027=0x1a & c1619=0 & c0411=0 & Rd=15 & rm
+{
+  build COND;
+  build rm;
+  BXWritePC(rm);
+  call [pc];
 }
 
 :cpy^COND lr,rm 	is $(AMODE) & ARMcond=1 & COND & c2027=0x1a & c1619=0 & c0411=0 & Rd=14 & lr & rm & Rm2=15
@@ -2850,9 +2868,10 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
 
 :ldrexd^COND Rd,Rd2,[Rn]  is $(AMODE) & ARMcond=1 & COND & c2027=0x1b & Rn & Rd & Rd2 & c0011=0xf9f
 {
-	build COND;
-  	Rd = *(Rn);
-  	Rd2 = *(Rn + 4);
+  build COND;
+  local addr:4 = Rn;
+  Rd = *(addr);
+  Rd2 = *(addr + 4);
 }
 
 :ldrexh^COND Rd,[Rn]  is $(AMODE) & ARMcond=1 & COND & c2027=0x1f & Rn & Rd & c0011=0xf9f
@@ -3141,7 +3160,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
         mcrOperands
 {
   build COND;
-  coproc_moveto_Invalidate_Entire_Data_Cache(Rd);
+  coproc_moveto_Invalidate_Entire_Data_cache(Rd);
 }
 
 
@@ -3571,14 +3590,6 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
   lr = rm;
 }
 
-:mov^COND pc,lr 		is $(AMODE) & pc & ARMcond=1 & COND & c2527=0 & S20=0 & c2124=13 & c1619=0 & Rd=15 & sftimm=0 & c0406=0 & Rm=14 & lr
-{
-  build COND;
-  dest:4 = lr;
-  ALUWritePC(dest);
-  return [pc];
-}
-
 @if defined(VERSION_6T2)
 
 :movw^COND Rd,"#"^val		is $(AMODE) & ARMcond=1 & COND & c2027=0x30 & c1619 & Rd & c0011 [ val = (c1619 << 12) | c0011; ]		{
@@ -3834,7 +3845,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
         mcrOperands
 {
   build COND;
-  Rd = coproc_movefrom_Invalidate_Entire_Data_Cache();
+  Rd = coproc_movefrom_Invalidate_Entire_Data_cache();
 }
 
 
@@ -4938,7 +4949,7 @@ macro BitReverse_arm(val) {
 
 @endif # VERSION_6K
 
-# Hopefully we never encounter this instruction since we can not change the effective endianess of the language
+# Hopefully we never encounter this instruction since we can not change the effective endianness of the language
 armEndianNess: "LE" is c0031=0xf1010000 { export 0:1; }
 armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
 

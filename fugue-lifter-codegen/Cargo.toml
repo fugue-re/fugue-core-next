@@ -9,6 +9,7 @@ default = ["bundled-compiler"]
 
 [dependencies]
 anyhow = "1"
+diffy = "0.5"
 fugue-sleighc = { version = "0.3", optional = true }
 fugue-sleigh-language = { path = "../fugue-sleigh-language" }
 heck = "0.5"
@@ -17,6 +18,10 @@ itertools = "0.14"
 proc-macro2 = "1"
 quote = "1"
 thiserror = "2"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

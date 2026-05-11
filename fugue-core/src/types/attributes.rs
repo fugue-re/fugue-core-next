@@ -118,9 +118,8 @@ impl Archive for AttributeMap {
     }
 }
 
-impl<
-    S: Fallible<Error: rkyv::rancor::Source> + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer,
-> Serialize<S> for AttributeMap
+impl<S: Fallible<Error: rkyv::rancor::Source> + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
+    Serialize<S> for AttributeMap
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         let entries = self

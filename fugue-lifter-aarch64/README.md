@@ -16,6 +16,19 @@ cargo build --features=compiled,aarch64-be,aarch64-le --no-default-features
 The bundled pre-transpiled lifters can be regenerated with:
 
 ```sh
+./generate-lifters.sh
+```
+
+To refresh the vendored language definitions from the latest stable upstream
+release before regenerating lifters, run:
+
+```sh
+./generate-lifters.sh --sync
+```
+
+To regenerate only this crate's bundled outputs manually, use:
+
+```sh
 cargo run --bin lifter-packager \
     ./fugue-lifter-aarch64/data/processors \
     AARCH64:BE:64:v8A \
@@ -26,4 +39,3 @@ cargo run --bin lifter-packager \
     AARCH64:LE:64:v8A \
     ./fugue-lifter-aarch64/data/generated/aarch64_le.rs.gz
 ```
-

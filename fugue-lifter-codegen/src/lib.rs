@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,10 +13,12 @@ use thiserror::Error;
 
 pub mod core;
 pub mod error;
+pub mod patcher;
 pub mod types;
 
 pub use self::core::LifterGenerator;
 pub use self::error::LifterGeneratorError;
+pub use self::patcher::{PatchSet, PatcherError};
 
 #[derive(Debug, Error)]
 pub enum CodegenError {
@@ -32,6 +35,8 @@ pub enum CodegenError {
     LanguageCompile(#[from] SleighCompilerError),
     #[error("cannot load/locate language database: {0}")]
     LanguageDB(anyhow::Error),
+    #[error("cannot apply language patches: {0}")]
+    Patcher(#[from] PatcherError),
 }
 
 impl CodegenError {
@@ -50,12 +55,62 @@ impl CodegenError {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BuildOptions {
+    pub pretty: bool,
+    pub patches: Vec<PathBuf>,
+}
+
+impl BuildOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_pretty(&mut self, pretty: bool) -> &mut Self {
+        self.pretty = pretty;
+        self
+    }
+
+    pub fn with_pretty(mut self, pretty: bool) -> Self {
+        self.set_pretty(pretty);
+        self
+    }
+
+    pub fn add_patch(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+        self.patches.push(dir.into());
+        self
+    }
+
+    pub fn add_patches<I, P>(&mut self, dirs: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.patches.extend(dirs.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn with_patch(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.add_patch(dir);
+        self
+    }
+
+    pub fn with_patches<I, P>(mut self, dirs: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.add_patches(dirs);
+        self
+    }
+}
+
 pub fn from_language(language: &Language) -> Result<TokenStream, LifterGeneratorError> {
     LifterGenerator::new(language).map(ToTokens::into_token_stream)
 }
 
 pub fn build(root: impl AsRef<Path>, language: impl AsRef<str>) -> Result<String, CodegenError> {
-    build_with(root, language, false)
+    build_with(root, language, BuildOptions::new())
 }
 
 fn out_or_temp_dir() -> PathBuf {
@@ -66,17 +121,48 @@ fn out_or_temp_dir() -> PathBuf {
     }
 }
 
+fn load_patch_set(dirs: &[PathBuf]) -> Result<PatchSet, PatcherError> {
+    let mut combined = PatchSet::new();
+    for dir in dirs {
+        let set = PatchSet::load_dir(dir)?;
+        combined.extend(set);
+    }
+    Ok(combined)
+}
+
+fn patched_root_dir(language_def: &str) -> PathBuf {
+    let mut sanitised = String::with_capacity(language_def.len());
+    for ch in language_def.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitised.push(ch);
+        } else {
+            sanitised.push('_');
+        }
+    }
+    out_or_temp_dir().join(format!("patched-processors-{sanitised}"))
+}
+
 pub fn build_with(
     root: impl AsRef<Path>,
     language: impl AsRef<str>,
-    pretty: bool,
+    options: BuildOptions,
 ) -> Result<String, CodegenError> {
-    let builder = LanguageDB::from_directory_with(root.as_ref(), true)
+    let root = root.as_ref();
+    let language_def = language.as_ref();
+
+    let patches = load_patch_set(&options.patches)?;
+    let effective_root = if patches.is_empty() {
+        Cow::Borrowed(root)
+    } else {
+        let dst = patched_root_dir(language_def);
+        Cow::Owned(patcher::materialise(root, &dst, &patches)?)
+    };
+
+    let builder = LanguageDB::from_directory_with(effective_root, true)
         .map_err(|e| CodegenError::LanguageDB(e.into()))?;
 
-    let language_def = language.as_ref();
     let language = builder
-        .lookup_str(&language_def)
+        .lookup_str(language_def)
         .ok()
         .flatten()
         .ok_or_else(|| CodegenError::Language(language_def.to_owned()))?;
@@ -107,7 +193,7 @@ pub fn build_with(
 
     let tokens = from_language(&language).map_err(CodegenError::Generate)?;
 
-    if pretty {
+    if options.pretty {
         let mut child = Command::new("rustfmt")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
