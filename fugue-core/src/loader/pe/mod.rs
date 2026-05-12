@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -249,7 +250,9 @@ impl PeSymbolData {
                     .wrapping_sub(preferred_base)
                     .wrapping_add(base.offset()),
             );
-            let last_address = address + sect.size() - 1usize;
+            let last_address = address
+                .checked_add(sect.size().wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(base))?;
             bounds = Some(match bounds {
                 Some((start, end)) => (start.min(address), end.max(last_address)),
                 None => (address, last_address),
@@ -258,14 +261,20 @@ impl PeSymbolData {
         }
 
         let (min_addr, max_addr) = bounds.unwrap_or((base, base));
-        let extern_base = align_up(
-            max_addr.offset().wrapping_add(addr_size as u64),
-            addr_align as u64,
-        );
+        let extern_base = max_addr
+            .offset()
+            .checked_add(addr_size as u64)
+            .ok_or_else(|| LoaderError::address_overflow(base))?;
+        let align_mask = (addr_align as u64).wrapping_sub(1);
+        let aligned_extern_base = extern_base.wrapping_add(align_mask) & !align_mask;
+
+        if aligned_extern_base < extern_base {
+            return Err(LoaderError::address_overflow(base));
+        }
 
         let mut symbols = IndexedSymbolTable::new();
         let mut extern_segm = ExternSegment::new(
-            Address::new(target_space, extern_base),
+            Address::new(target_space, aligned_extern_base),
             addr_align,
             arch.external_thunk_template(),
         );
@@ -330,9 +339,15 @@ impl PeSymbolData {
                         }
                     };
 
-                    let extern_address = *externs
-                        .entry(name.clone())
-                        .or_insert_with(|| extern_segm.add_extern());
+                    let extern_address = match externs.entry(name.clone()) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(entry) => {
+                            let addr = extern_segm
+                                .add_extern()
+                                .ok_or_else(|| LoaderError::address_overflow(base))?;
+                            *entry.insert(addr)
+                        }
+                    };
 
                     symbols.insert(
                         SymbolIndex::new(PE_IMPORT_SELECTOR, import_index),
@@ -341,17 +356,22 @@ impl PeSymbolData {
                         SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
                     );
 
-                    let slot = Address::new(
-                        target_space,
-                        base.offset()
-                            .wrapping_add(address_table as u64)
-                            .wrapping_add((thunk_index * thunk_size) as u64),
-                    );
+                    let thunk_offset = (thunk_index as u64)
+                        .checked_mul(thunk_size as u64)
+                        .ok_or_else(|| LoaderError::address_overflow(base))?;
+                    let slot_offset = (address_table as u64)
+                        .checked_add(thunk_offset)
+                        .ok_or_else(|| LoaderError::address_overflow(base))?;
+                    let slot = base
+                        .checked_add(slot_offset)
+                        .ok_or_else(|| LoaderError::address_overflow(base))?;
 
                     import_slots.insert(slot, extern_address);
 
                     import_index += 1;
-                    thunk_index = thunk_index.wrapping_add(1);
+                    thunk_index = thunk_index
+                        .checked_add(1)
+                        .ok_or_else(|| LoaderError::address_overflow(base))?;
                 }
             }
         }
@@ -366,11 +386,6 @@ impl PeSymbolData {
             import_slots,
         })
     }
-}
-
-fn align_up(value: u64, alignment: u64) -> u64 {
-    let mask = alignment.wrapping_sub(1);
-    value.wrapping_add(mask) & !mask
 }
 
 fn symbol_properties_for_address(
@@ -521,7 +536,15 @@ where
                     .wrapping_sub(self.preferred_base)
                     .wrapping_add(self.current_base.offset()),
             );
-            let last_address = address + sect.size() - 1usize;
+            let last_address = address
+                .checked_add(sect.size().wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+
+            if last_address < address {
+                tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
+                continue;
+            }
+
             let vrange = address.offset()..=last_address.offset();
 
             if !self
@@ -638,7 +661,11 @@ impl Loadable for Pe<'_> {
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
         let start = *self.bounds.start();
-        let end = *self.bounds.end() + 1usize;
+        let end = self
+            .bounds
+            .end()
+            .checked_add(1u64)
+            .unwrap_or(*self.bounds.end());
         LoadableSegmentBounds::new(start..end)
     }
 
@@ -663,7 +690,7 @@ mod test {
     use super::Pe;
     use crate::attributes;
     use crate::ir::Address;
-    use crate::loader::{Loadable, LoadableSegment};
+    use crate::loader::{Loadable, LoadableSegment, LoaderError};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
 
@@ -827,5 +854,19 @@ mod test {
         };
 
         assert!(err.to_string().contains("base relocation directory"));
+    }
+
+    #[test]
+    fn test_pe_image_base_near_max_overflow() {
+        let image_base = Address::from(u64::MAX - 0x1000);
+        let err = match Pe::new_with(
+            BytesOrMapping::from_file("tests/hello-pe.exe").expect("fixture"),
+            attributes![ATTRIBUTE_IMAGE_BASE => image_base],
+        ) {
+            Ok(_) => panic!("loading near u64::MAX should overflow"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, LoaderError::AddressOverflow(_)));
     }
 }
