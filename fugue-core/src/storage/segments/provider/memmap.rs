@@ -53,15 +53,13 @@ pub enum MemoryMappedSegmentStorageError {
 impl MemoryMappedSegmentStorageError {
     pub fn create_project<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         MemoryMappedSegmentStorageError::CreateProject(io::Error::other(e.into()))
     }
 
     pub fn create_project_mapping<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         MemoryMappedSegmentStorageError::CreateProjectMapping(io::Error::other(e.into()))
     }
 

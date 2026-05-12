@@ -27,8 +27,7 @@ pub enum FunctionRecoveryPatternMatcherError {
 impl FunctionRecoveryPatternMatcherError {
     pub fn io<E>(path: impl Into<PathBuf>, err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Io(path.into(), err.into())
     }
 }
@@ -140,8 +139,7 @@ impl FunctionRecoveryPatternMatcher {
         space_id: AddressSpaceId,
     ) -> Result<(), AnalysisError>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         let segments = project.segments();
         let gaps = state
             .gaps(project.functions(), project.blocks(), segments, space_id)

@@ -11,7 +11,6 @@ pub mod generic;
 
 pub mod aarch64;
 pub mod arm;
-
 pub mod x86;
 pub mod x86_64;
 
@@ -19,8 +18,7 @@ pub struct ElfSegmentRelocator<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
-    'file: 'data,
-{
+    'file: 'data, {
     elf: &'file ElfFile<'data, Elf, R>,
     base: Address,
     symbols: &'file IndexedSymbolTable,

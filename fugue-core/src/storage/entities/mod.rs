@@ -82,8 +82,7 @@ impl EntityStorageError {
 
     pub fn backing_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    {
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static, {
         Self::Backing(anyhow::Error::msg(msg))
     }
 
@@ -97,8 +96,7 @@ impl EntityStorageError {
 
     pub fn unsupported_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    {
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static, {
         Self::Unsupported(anyhow::Error::msg(msg))
     }
 }
@@ -155,8 +153,7 @@ impl<'a> EntityTransactionalReader<'a> {
     where
         K: EntityKey,
         E: Entity,
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
         let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
@@ -216,8 +213,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     where
         K: EntityKey,
         E: Entity,
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
         let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
@@ -483,8 +479,7 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
         let mapper = OutMapper::new(f);
         let t = self
             .erased_get_as(key, mapper)?
@@ -521,8 +516,7 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         f: F,
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-    {
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a, {
         let mapper = OutMapper2::new(f);
         let iter = self
             .erased_iter_prefix_as(prefix, mapper)?
@@ -627,8 +621,7 @@ pub struct OutMapper<'a> {
 impl<'a> OutMapper<'a> {
     fn new<E, F>(mut f: F) -> Self
     where
-        F: FnMut(&[u8]) -> Result<E, EntityStorageError> + 'a,
-    {
+        F: FnMut(&[u8]) -> Result<E, EntityStorageError> + 'a, {
         Self {
             f: Box::new(move |bytes| f(bytes).map(|v| unsafe { Out::new(v) })),
         }
@@ -646,8 +639,7 @@ pub struct OutMapper2<'a> {
 impl<'a> OutMapper2<'a> {
     fn new<E, F>(mut f: F) -> Self
     where
-        F: FnMut(&[u8], &[u8]) -> Result<E, EntityStorageError> + 'a,
-    {
+        F: FnMut(&[u8], &[u8]) -> Result<E, EntityStorageError> + 'a, {
         Self {
             f: Box::new(move |kbytes, ebytes| f(kbytes, ebytes).map(|v| unsafe { Out::new(v) })),
         }
@@ -906,8 +898,7 @@ where
 pub struct EntityTransactionalCacheWriter<'a, K, E>
 where
     K: EntityKey,
-    E: Entity,
-{
+    E: Entity, {
     inner: ManuallyDrop<EntityTransactionalWriter<'a>>,
     cache: Arc<Cache<K, Arc<E>>>,
     dropped: bool,
@@ -932,8 +923,7 @@ where
 
     pub fn get_as<F, T>(&self, key: &K, f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
         self.inner.get_as::<K, E, F, T>(key, f)
     }
 
@@ -1020,15 +1010,13 @@ where
 
     pub fn get_mut(&self, key: &K) -> Result<Option<EntityMut<'_, K, E>>, EntityStorageError>
     where
-        E: MutableEntity<K>,
-    {
+        E: MutableEntity<K>, {
         Ok(self.get(key)?.map(|e| EntityMut::new(e.0, self)))
     }
 
     pub fn persist(&self, mut entity: EntityMut<'_, K, E>) -> Result<(), EntityStorageError>
     where
-        E: MutableEntity<K>,
-    {
+        E: MutableEntity<K>, {
         unsafe { entity.persist() }
     }
 

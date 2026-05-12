@@ -230,8 +230,7 @@ impl PeSymbolData {
     ) -> Result<Self, LoaderError>
     where
         Pe: ImageNtHeaders,
-        R: ReadRef<'data>,
-    {
+        R: ReadRef<'data>, {
         let target_space = base.space();
         let addr_size = arch.language().address_size();
         let addr_align = arch.language().address_alignment().max(addr_size);
@@ -404,11 +403,12 @@ fn symbol_properties_for_address(
         })
 }
 
-pub fn pe_section_properties<'data, Pe, R>(sect: &PeSection<'data, '_, Pe, R>) -> SegmentProperties
+pub fn pe_section_properties<'data, Pe, R>(
+    sect: &PeSection<'data, '_, Pe, R>,
+) -> SegmentProperties
 where
     Pe: ImageNtHeaders,
-    R: ReadRef<'data>,
-{
+    R: ReadRef<'data>, {
     let SectionFlags::Coff { characteristics } = sect.flags() else {
         return SegmentProperties::empty();
     };
@@ -440,8 +440,7 @@ struct PeLoadableSegments<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
-    'file: 'data,
-{
+    'file: 'data, {
     pe: &'file PeFile<'data, Pe, R>,
     sects: PeSectionIterator<'data, 'file, Pe, R>,
     covered: RangeSetBlaze<u64>,
@@ -591,8 +590,8 @@ where
     R: ReadRef<'data>,
     'file: 'data,
 {
-    type Item = LoadableSegment<'data>;
     type Error = LoaderError;
+    type Item = LoadableSegment<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
         self.next_section()
@@ -614,8 +613,7 @@ impl LoadableFromFile for Pe<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, attributes)
     }
 }
@@ -671,8 +669,7 @@ impl Loadable for Pe<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         PeAnalysers::new(self)
     }
 }

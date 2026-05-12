@@ -17,8 +17,7 @@ pub struct PeSegmentRelocator<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
-    'file: 'data,
-{
+    'file: 'data, {
     pe: &'file PeFile<'data, Pe, R>,
     preferred_base: u64,
     current_base: Address,
@@ -47,7 +46,7 @@ where
 
     pub fn apply(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
         self.apply_base_relocations(lsegm)?;
-        self.apply_import_slots(lsegm);
+        self.apply_import_slots(lsegm)?;
         Ok(())
     }
 
@@ -85,7 +84,9 @@ where
         };
 
         let start = lsegm.address().offset();
-        let end = start + lsegm.len() as u64;
+        let end = start
+            .checked_add(lsegm.len() as u64)
+            .ok_or_else(|| LoaderError::address_overflow(lsegm.address()))?;
 
         while let Some(block) = blocks.next().map_err(LoaderError::format)? {
             for reloc in block {
@@ -97,16 +98,21 @@ where
                     continue;
                 }
 
-                self.apply_relocation(lsegm, (address - start) as usize, reloc.typ);
+                let Some(offset) = address.checked_sub(start) else {
+                    continue;
+                };
+                self.apply_relocation(lsegm, offset as usize, reloc.typ);
             }
         }
 
         Ok(())
     }
 
-    fn apply_import_slots(&self, lsegm: &mut LoadableSegment<'data>) {
+    fn apply_import_slots(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
         let start = lsegm.address();
-        let end = start + lsegm.len();
+        let end = start
+            .checked_add(lsegm.len() as u64)
+            .ok_or_else(|| LoaderError::address_overflow(start))?;
 
         for (slot, target) in self.import_slots.range(start..end) {
             let Some(offset) = lsegm.offset_of(*slot) else {
@@ -121,6 +127,8 @@ where
                 lsegm.write_value(offset, target.offset() as u32);
             }
         }
+
+        Ok(())
     }
 
     fn apply_relocation(&self, lsegm: &mut LoadableSegment<'data>, offset: usize, reloc_type: u16) {

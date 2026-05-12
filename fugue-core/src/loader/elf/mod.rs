@@ -614,8 +614,7 @@ pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
-    'file: 'data,
-{
+    'file: 'data, {
     // reference to the ELF
     pub(crate) elf: &'file ElfFile<'data, Elf, R>,
     // segments iterator
@@ -1098,8 +1097,8 @@ where
     R: ReadRef<'data>,
     'file: 'data,
 {
-    type Item = LoadableSegment<'data>;
     type Error = LoaderError;
+    type Item = LoadableSegment<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
         if self.is_object {
@@ -1127,8 +1126,7 @@ impl<'a> LoadableFromBytes<'a> for Elf<'a> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::new_with(data, attributes)
     }
 }
@@ -1139,8 +1137,7 @@ impl LoadableFromFile for Elf<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         let path = path.as_ref();
 
         let mut loaded = Self::new_with(BytesOrMapping::from_file(path)?, attributes)?;
@@ -1198,8 +1195,7 @@ impl Loadable for Elf<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         ElfAnalysers::new(self)
     }
 }

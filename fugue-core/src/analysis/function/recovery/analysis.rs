@@ -23,8 +23,7 @@ use crate::types::Confidence;
 
 pub struct FunctionRecovery<P = InMemoryProvider>
 where
-    P: ProjectStorageProvider,
-{
+    P: ProjectStorageProvider, {
     candidates: VecDeque<AddressWithContext>,
     builder: FunctionBuilder<P>,
     discovery_passes: AnalysisGroup<P, FunctionDiscoveryContext>,
@@ -263,8 +262,7 @@ impl FunctionStructuringContext {
         f: F,
     ) -> Result<(), FunctionRecoveryError>
     where
-        F: FnOnce(&mut PartialFunction) -> Result<(), FunctionRecoveryError>,
-    {
+        F: FnOnce(&mut PartialFunction) -> Result<(), FunctionRecoveryError>, {
         let address = address.into();
         let Some(function) = self.pending_functions.get_mut(&address) else {
             return Ok(());

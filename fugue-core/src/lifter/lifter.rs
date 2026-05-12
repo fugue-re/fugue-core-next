@@ -28,15 +28,13 @@ impl LifterError {
 
     pub fn disassembler<E>(error: E) -> Self
     where
-        E: std::error::Error + Debug + Display + Send + Sync + 'static,
-    {
+        E: std::error::Error + Debug + Display + Send + Sync + 'static, {
         Self::Lifter(anyhow::Error::new(error))
     }
 
     pub fn disassembler_with<M>(msg: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static,
-    {
+        M: Debug + Display + Send + Sync + 'static, {
         Self::Lifter(anyhow::Error::msg(msg))
     }
 }

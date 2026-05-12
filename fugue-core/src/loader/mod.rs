@@ -59,29 +59,25 @@ impl LoaderError {
 
     pub fn format<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Format(e.into())
     }
 
     pub fn format_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static,
-    {
+        M: Debug + Display + Send + Sync + 'static, {
         Self::Format(anyhow::Error::msg(m))
     }
 
     pub fn other<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Other(e.into())
     }
 
     pub fn other_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static,
-    {
+        M: Debug + Display + Send + Sync + 'static, {
         Self::Other(anyhow::Error::msg(m))
     }
 }
@@ -593,8 +589,7 @@ impl std::ops::Index<usize> for LoadableSegmentBounds {
 pub trait LoadableFromBytes<'a>: Loadable {
     fn from_bytes(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_bytes_with(data, AttributeMap::new())
     }
 
@@ -609,8 +604,7 @@ pub trait LoadableFromBytes<'a>: Loadable {
 pub trait LoadableFromFile: Loadable {
     fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, AttributeMap::new())
     }
 
@@ -643,16 +637,14 @@ pub trait Loadable {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         DefaultLoadableAnalysers
     }
 }
 
 pub trait LoadableAnalysers<P>
 where
-    P: ProjectStorageProvider,
-{
+    P: ProjectStorageProvider, {
     fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.function_recovery_with(FunctionRecoveryConfig::default())
     }
@@ -767,8 +759,7 @@ impl LoadableFromFile for Loader<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, attributes)
     }
 }
@@ -840,8 +831,7 @@ impl Loadable for Loader<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
             Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers<P>>,
