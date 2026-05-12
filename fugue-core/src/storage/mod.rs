@@ -82,43 +82,37 @@ pub enum StorageProviderError {
 impl StorageProviderError {
     pub fn create_project_already_exists<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CreateProject(io::Error::new(io::ErrorKind::AlreadyExists, e))
     }
 
     pub fn create_project_not_found<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CreateProject(io::Error::new(io::ErrorKind::NotFound, e))
     }
 
     pub fn create_project_invalid_input<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CreateProject(io::Error::new(io::ErrorKind::InvalidInput, e))
     }
 
     pub fn create_project<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CreateProject(io::Error::other(e))
     }
 
     pub fn cleanup_project_invalid_data<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CleanupProject(io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn cleanup_project<E>(e: E) -> Self
     where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    {
+        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
         Self::CleanupProject(io::Error::other(e))
     }
 
@@ -180,8 +174,7 @@ impl StorageContainer {
         attributes: &mut AttributeMap,
     ) -> Result<Self, StorageProviderError>
     where
-        P: StorageProvider,
-    {
+        P: StorageProvider, {
         P::from_loadable(loadable, attributes)
     }
 
@@ -190,8 +183,7 @@ impl StorageContainer {
         attributes: &mut AttributeMap,
     ) -> Result<Self, StorageProviderError>
     where
-        P: StorageProvider,
-    {
+        P: StorageProvider, {
         P::from_storage(path, attributes)
     }
 

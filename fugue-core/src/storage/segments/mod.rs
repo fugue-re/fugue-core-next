@@ -67,15 +67,13 @@ pub enum SegmentStorageError {
 impl SegmentStorageError {
     pub fn backing<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Backing(anyhow::Error::from(e))
     }
 
     pub fn backing_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    {
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static, {
         Self::Backing(anyhow::Error::msg(msg))
     }
 
@@ -156,8 +154,7 @@ impl SegmentStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
-        S: SegmentStorageProviderFromLoadable + 'static,
-    {
+        S: SegmentStorageProviderFromLoadable + 'static, {
         if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             && S::PERSISTENCE == PERSISTENT
         {
@@ -458,8 +455,7 @@ impl SegmentStorage {
         permissions: SegmentProperties,
     ) -> SegmentStorageProviderId
     where
-        S: SegmentStorageProviderDescriptor + 'static,
-    {
+        S: SegmentStorageProviderDescriptor + 'static, {
         let id = SegmentStorageProviderId::new(self.provider_ctr);
         self.provider_ctr += 1;
 

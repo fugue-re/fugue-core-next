@@ -207,8 +207,7 @@ pub trait Entity:
             rkyv::ser::allocator::ArenaHandle<'a>,
             rkyv::rancor::Error,
         >,
-    > + Clone
-{
+    > + Clone {
     const ID: EntityId;
 }
 

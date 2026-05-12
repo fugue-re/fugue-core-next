@@ -326,6 +326,8 @@ impl Debug for SymbolIndex {
 }
 
 impl SymbolIndex {
+    // Index mask is the upper bits used to determine the symbol index provenance.
+    const INDEX_MASK: u64 = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
     // Selector bits is the number of upper bits used to encode symbol index provenance;
     // for ELF we have two possibilities: the global symbol table, and the dynamic symbol
     // table.
@@ -334,8 +336,6 @@ impl SymbolIndex {
     const SELECTOR_MASK: u64 = (1u64 << Self::SELECTOR_BITS).wrapping_sub(1);
     // Selector bits shift is the number of bits to shift the selector bits to the upper bits.
     const SELECTOR_SHIFT: u32 = u64::BITS.wrapping_sub(Self::SELECTOR_BITS);
-    // Index mask is the upper bits used to determine the symbol index provenance.
-    const INDEX_MASK: u64 = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
 
     pub fn new(selector: SymbolTableSelector, index: usize) -> Self {
         let selector = selector.index() as u64;
@@ -896,11 +896,10 @@ impl IndexedSymbolTable {
 }
 
 impl SymbolTableT for IndexedSymbolTable {
-    type SymbolEntryRef<'a> = &'a SymbolEntry;
-    type SymbolEntryMut<'a> = &'a mut SymbolEntry;
-
     type SymbolEntryIter<'a> = BoxedSymbolEntryIter<'a>;
     type SymbolEntryIterMut<'a> = BoxedSymbolEntryIterMut<'a>;
+    type SymbolEntryMut<'a> = &'a mut SymbolEntry;
+    type SymbolEntryRef<'a> = &'a SymbolEntry;
     type SymbolIndexAndEntryIter<'a> = BoxedSymbolIndexAndEntryIter<'a>;
 
     fn get<'a>(&'a self, symbol: &str) -> Option<Self::SymbolEntryIter<'a>> {

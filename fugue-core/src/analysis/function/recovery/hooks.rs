@@ -32,8 +32,7 @@ impl FunctionRecoveryCommitContext {
 
 pub trait FunctionRecoveryCommitHook<P = InMemoryProvider>
 where
-    P: ProjectStorageProvider,
-{
+    P: ProjectStorageProvider, {
     fn should_commit(
         &self,
         project: &mut Project<P>,

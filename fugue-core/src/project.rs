@@ -25,8 +25,7 @@ pub type InMemoryProject = Project<InMemoryProvider>;
 
 pub struct Project<S = InMemoryProvider>
 where
-    S: ProjectStorageProvider,
-{
+    S: ProjectStorageProvider, {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
     pub(crate) symbols: <S::ProjectStorage as ProjectStorage>::SymbolTable,
@@ -51,8 +50,7 @@ where
 
 pub struct ProjectRef<'a, S>
 where
-    S: ProjectStorageProvider,
-{
+    S: ProjectStorageProvider, {
     pub arch: &'a Arch,
     pub language: &'static Language,
     pub symbols: &'a <S::ProjectStorage as ProjectStorage>::SymbolTable,
@@ -65,8 +63,7 @@ where
 
 pub struct ProjectMut<'a, S>
 where
-    S: ProjectStorageProvider,
-{
+    S: ProjectStorageProvider, {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
     pub symbols: &'a mut <S::ProjectStorage as ProjectStorage>::SymbolTable,
@@ -236,8 +233,7 @@ where
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        L: LoadableFromBytes<'a>,
-    {
+        L: LoadableFromBytes<'a>, {
         Self::try_from_bytes_with::<L>(bytes, attributes)
     }
 
@@ -253,8 +249,7 @@ where
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        L: LoadableFromBytes<'a>,
-    {
+        L: LoadableFromBytes<'a>, {
         let mut attributes = attributes.into();
 
         if let Some(path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
@@ -279,8 +274,7 @@ where
 
     pub fn try_from_file<L>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
-        L: LoadableFromFile,
-    {
+        L: LoadableFromFile, {
         Self::try_from_file_with::<L>(path, AttributeMap::default())
     }
 
@@ -297,8 +291,7 @@ where
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
-        L: LoadableFromFile,
-    {
+        L: LoadableFromFile, {
         let path = path.as_ref();
         let mut attributes = attributes.into();
 

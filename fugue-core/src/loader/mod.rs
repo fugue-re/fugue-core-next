@@ -30,8 +30,8 @@ pub use elf::Elf;
 pub mod object;
 pub use object::Object;
 
-// pub mod pe;
-// pub use pe::{Pe, Te};
+pub mod pe;
+pub use pe::Pe;
 
 pub mod shellcode;
 pub use shellcode::Shellcode;
@@ -59,29 +59,25 @@ impl LoaderError {
 
     pub fn format<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Format(e.into())
     }
 
     pub fn format_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static,
-    {
+        M: Debug + Display + Send + Sync + 'static, {
         Self::Format(anyhow::Error::msg(m))
     }
 
     pub fn other<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
-    {
+        E: std::error::Error + Send + Sync + 'static, {
         Self::Other(e.into())
     }
 
     pub fn other_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static,
-    {
+        M: Debug + Display + Send + Sync + 'static, {
         Self::Other(anyhow::Error::msg(m))
     }
 }
@@ -593,8 +589,7 @@ impl std::ops::Index<usize> for LoadableSegmentBounds {
 pub trait LoadableFromBytes<'a>: Loadable {
     fn from_bytes(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_bytes_with(data, AttributeMap::new())
     }
 
@@ -609,8 +604,7 @@ pub trait LoadableFromBytes<'a>: Loadable {
 pub trait LoadableFromFile: Loadable {
     fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, AttributeMap::new())
     }
 
@@ -643,16 +637,14 @@ pub trait Loadable {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         DefaultLoadableAnalysers
     }
 }
 
 pub trait LoadableAnalysers<P>
 where
-    P: ProjectStorageProvider,
-{
+    P: ProjectStorageProvider, {
     fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.function_recovery_with(FunctionRecoveryConfig::default())
     }
@@ -706,6 +698,7 @@ where
 
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
+    Pe(pe::Pe<'a>),
     Object(object::Object<'a>),
 }
 
@@ -725,6 +718,10 @@ impl<'a> Loader<'a> {
             FileKind::Elf32 | FileKind::Elf64 => {
                 let elf = Elf::new_with(data, attributes)?;
                 Self::Elf(elf)
+            }
+            FileKind::Pe32 | FileKind::Pe64 => {
+                let pe = Pe::new_with(data, attributes)?;
+                Self::Pe(pe)
             }
             _ => {
                 let object = object::Object::new_with(data, attributes)?;
@@ -762,8 +759,7 @@ impl LoadableFromFile for Loader<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, attributes)
     }
 }
@@ -772,6 +768,7 @@ impl Loadable for Loader<'_> {
     fn architecture(&self) -> Arch {
         match self {
             Self::Elf(elf) => elf.architecture(),
+            Self::Pe(pe) => pe.architecture(),
             Self::Object(object) => object.architecture(),
         }
     }
@@ -779,6 +776,7 @@ impl Loadable for Loader<'_> {
     fn metadata(&self) -> &LoadableMetadata {
         match self {
             Self::Elf(elf) => elf.metadata(),
+            Self::Pe(pe) => pe.metadata(),
             Self::Object(object) => object.metadata(),
         }
     }
@@ -786,6 +784,7 @@ impl Loadable for Loader<'_> {
     fn symbols(&self) -> Option<&IndexedSymbolTable> {
         match self {
             Self::Elf(elf) => Some(elf.symbols()),
+            Self::Pe(pe) => Some(pe.symbols()),
             Self::Object(object) => object.symbols(),
         }
     }
@@ -793,6 +792,7 @@ impl Loadable for Loader<'_> {
     fn attributes(&self) -> &AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes(),
+            Self::Pe(pe) => pe.attributes(),
             Self::Object(object) => object.attributes(),
         }
     }
@@ -800,6 +800,7 @@ impl Loadable for Loader<'_> {
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes_mut(),
+            Self::Pe(pe) => pe.attributes_mut(),
             Self::Object(object) => object.attributes_mut(),
         }
     }
@@ -811,6 +812,9 @@ impl Loadable for Loader<'_> {
             Self::Elf(elf) => {
                 Box::new(elf.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
             }
+            Self::Pe(pe) => {
+                Box::new(pe.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
+            }
             Self::Object(object) => {
                 Box::new(object.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
             }
@@ -820,16 +824,17 @@ impl Loadable for Loader<'_> {
     fn segment_bounds(&self) -> LoadableSegmentBounds {
         match self {
             Self::Elf(elf) => elf.segment_bounds(),
+            Self::Pe(pe) => pe.segment_bounds(),
             Self::Object(object) => object.segment_bounds(),
         }
     }
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider,
-    {
+        P: ProjectStorageProvider, {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
+            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers<P>>,
             Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>,
         }
     }

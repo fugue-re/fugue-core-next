@@ -538,8 +538,7 @@ impl PartialFunction {
     ) -> Result<FunctionId, FunctionRecoveryError>
     where
         FT: FunctionTable,
-        BT: CodeBlockTable,
-    {
+        BT: CodeBlockTable, {
         // first we create the code blocks
         let mut bids = Vec::with_capacity(self.blocks.len());
         for block in self.blocks.iter() {

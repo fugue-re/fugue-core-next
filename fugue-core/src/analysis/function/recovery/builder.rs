@@ -42,8 +42,7 @@ pub struct FunctionBuilderContext {
 
 pub struct FunctionBuilder<P>
 where
-    P: ProjectStorageProvider,
-{
+    P: ProjectStorageProvider, {
     // The configuration for the function recovery process.
     config: FunctionRecoveryConfig,
     // The context of the function being built.
@@ -446,8 +445,7 @@ impl FunctionBuilderContext {
         post_lifting_passes: &mut AnalysisGroup<S, PartialFunctionWithContext>,
     ) -> Result<PartialFunction, FunctionRecoveryError>
     where
-        S: ProjectStorageProvider,
-    {
+        S: ProjectStorageProvider, {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context

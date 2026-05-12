@@ -149,8 +149,7 @@ impl LoadableFromFile for Object<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         Self::from_file_with(path, attributes)
     }
 }

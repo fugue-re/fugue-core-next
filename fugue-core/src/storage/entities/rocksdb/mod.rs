@@ -70,8 +70,7 @@ impl EntityStorageProviderFromStorage for RocksDbEntityStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where
-        Self: Sized,
-    {
+        Self: Sized, {
         let project_path = path.as_ref();
         let db_path = project_path.join(PROJECT_ROCKSDB_DATA);
 
@@ -109,8 +108,7 @@ impl EntityStorageProvider for RocksDbEntityStorage {
 
     fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
         self.database
             .get_pinned(key)
             .map_err(EntityStorageError::backing)?
@@ -166,8 +164,7 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-        T: 'a,
-    {
+        T: 'a, {
         Ok(RocksDbEntityBytesAsIterator::new(self, prefix, f))
     }
 
@@ -263,8 +260,7 @@ where
         f: F,
     ) -> EntityBytesAsIterator<'a, T>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-    {
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a, {
         Box::new(Self {
             iter: storage.database.prefix_iterator(prefix),
             f: Box::new(f),

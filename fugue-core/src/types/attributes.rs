@@ -173,8 +173,7 @@ impl AttributeMap {
 
     pub fn get_attr<T>(&self, key: impl Borrow<str>) -> Option<T>
     where
-        T: serde::de::DeserializeOwned,
-    {
+        T: serde::de::DeserializeOwned, {
         self.0
             .get(key.borrow())
             .and_then(|val| serde_json::from_value(val.clone()).ok())
