@@ -153,13 +153,15 @@ pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'stat
 }
 
 pub trait SegmentStorageProviderFromLoadable:
-    SegmentStorageProviderFromSegmentRange + SegmentStorageProviderDescriptor {
+    SegmentStorageProviderFromSegmentRange + SegmentStorageProviderDescriptor
+{
     fn from_loadable(
         loader: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         let bounds = loader.segment_bounds();
         let range = bounds.first();
         Self::from_segment_range(range.start, range.end, attributes)

@@ -37,9 +37,11 @@ pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
 #[derive(Debug, Error)]
 pub enum MemoryMappedSegmentStorageError {
     #[error("failed to create project: {0}")]
-    CreateProject(std::io::Error),
-    #[error("failed to create project memory mapping: {0}")]
-    CreateProjectMapping(std::io::Error),
+    CreateProject(io::Error),
+    #[error("failed to create memory mapping: {0}")]
+    CreateMapping(io::Error),
+    #[error("failed to flush memory mapping: {0}")]
+    FlushMapping(io::Error),
     #[error("invalid address")]
     InvalidAddress,
     #[error("invalid size")]
@@ -51,18 +53,6 @@ pub enum MemoryMappedSegmentStorageError {
 }
 
 impl MemoryMappedSegmentStorageError {
-    pub fn create_project<E>(e: E) -> Self
-    where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
-        MemoryMappedSegmentStorageError::CreateProject(io::Error::other(e.into()))
-    }
-
-    pub fn create_project_mapping<E>(e: E) -> Self
-    where
-        E: Into<Box<dyn std::error::Error + Send + Sync>>, {
-        MemoryMappedSegmentStorageError::CreateProjectMapping(io::Error::other(e.into()))
-    }
-
     pub fn no_project_data(path: impl Into<PathBuf>) -> Self {
         MemoryMappedSegmentStorageError::NoProjectData(path.into())
     }
@@ -72,9 +62,8 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
     fn from(e: MemoryMappedSegmentStorageError) -> Self {
         match e {
             MemoryMappedSegmentStorageError::CreateProject(_)
-            | MemoryMappedSegmentStorageError::CreateProjectMapping(_) => {
-                SegmentStorageError::backing(e)
-            }
+            | MemoryMappedSegmentStorageError::CreateMapping(_)
+            | MemoryMappedSegmentStorageError::FlushMapping(_) => SegmentStorageError::backing(e),
             MemoryMappedSegmentStorageError::InvalidAddress => SegmentStorageError::InvalidAddress,
             MemoryMappedSegmentStorageError::InvalidSize => SegmentStorageError::InvalidSize,
             MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::InvalidAddress,
@@ -86,22 +75,19 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
 }
 
 impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTENCE> {
-    /// Create new flat storage with given size.
     pub fn with_size(
         project_path: impl AsRef<Path>,
         size: u64,
     ) -> Result<Self, SegmentStorageError> {
         let project = project_path.as_ref();
 
-        // Ensure the project directory exists
         fs::create_dir_all(project).map_err(MemoryMappedSegmentStorageError::CreateProject)?;
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
         tracing::trace!(
-            "creating memory-mapped storage at {} with size {} bytes",
+            "creating memory-mapped storage at {} with size {size} bytes",
             data_path.display(),
-            size,
         );
 
         let file = OpenOptions::new()
@@ -110,13 +96,13 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             .create(true)
             .truncate(true)
             .open(&data_path)
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
         file.set_len(size)
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
         let backing = unsafe { MmapMut::map_mut(&file) }
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
         Ok(Self {
             backing,
@@ -146,10 +132,10 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             .write(true)
             .create(false)
             .open(&data_path)
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
         let backing = unsafe { MmapMut::map_mut(&file) }
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
         Ok(Self {
             backing,
@@ -208,9 +194,8 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
 
             if existing.size() != size {
                 return Err(SegmentStorageError::backing_with(format!(
-                    "existing memory-mapped storage size ({}) does not match expected segment size ({})",
+                    "existing memory-mapped storage size ({}) does not match expected segment size ({size})",
                     existing.size(),
-                    size,
                 )));
             }
 
@@ -280,7 +265,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
     fn flush(&mut self) -> Result<(), SegmentStorageError> {
         self.backing
             .flush()
-            .map_err(MemoryMappedSegmentStorageError::CreateProjectMapping)?;
+            .map_err(MemoryMappedSegmentStorageError::FlushMapping)?;
         Ok(())
     }
 }
