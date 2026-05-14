@@ -136,7 +136,6 @@ impl<T> Id<T> {
         self.id == Self::INVALID.id
     }
 
-    // Use for EntityKey::decode implementations
     #[inline(always)]
     pub(crate) fn decode_as_key(buf: &[u8]) -> Option<Self> {
         if buf.len() == 4 {
@@ -149,7 +148,6 @@ impl<T> Id<T> {
         }
     }
 
-    // Use for EntityKey::encode implementations
     #[inline(always)]
     pub(crate) fn encode_as_key(&self, buf: &mut BytesMut) {
         buf.put_u32(self.id);
