@@ -1,5 +1,9 @@
+use std::fmt;
+
+use crate::language::LanguageData;
 use crate::operand::Operands;
 use crate::pcode::{LiftingContext, PCodeOp};
+use crate::LiftingContextState;
 
 #[inline]
 pub fn resolve(
@@ -80,12 +84,51 @@ pub fn disassemble(
 }
 
 #[inline]
-pub fn disassemble_to<W: std::fmt::Write>(
+pub fn disassemble_parts(
     address: u64,
     bytes: &[u8],
     context: &mut LiftingContext,
-    writer: &mut W,
-) -> Result<Option<usize>, std::fmt::Error> {
+    mnemonic: &mut String,
+    operands: &mut String,
+) -> Option<usize> {
+    disassemble_parts_to(address, bytes, context, mnemonic, operands).unwrap()
+}
+
+#[inline]
+pub fn disassemble_to(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    writer: impl fmt::Write,
+) -> Result<Option<usize>, fmt::Error> {
+    disassemble_aux(address, bytes, context, |data, state| unsafe {
+        state.format(data, writer)
+    })
+}
+
+#[inline]
+pub fn disassemble_parts_to(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    mnemonic: impl fmt::Write,
+    operands: impl fmt::Write,
+) -> Result<Option<usize>, fmt::Error> {
+    disassemble_aux(address, bytes, context, |data, state| unsafe {
+        state.format_parts(data, mnemonic, operands)
+    })
+}
+
+#[inline]
+pub fn disassemble_aux<F>(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    formatter: F,
+) -> Result<Option<usize>, fmt::Error>
+where
+    F: FnOnce(&'static LanguageData, &mut LiftingContextState<'_>) -> fmt::Result,
+{
     let data = context.language().data();
     unsafe {
         let mut nop_issued = Vec::with_capacity(0);
@@ -113,7 +156,7 @@ pub fn disassemble_to<W: std::fmt::Write>(
 
         state.apply_commits(data);
 
-        state.format(data, writer)?;
+        formatter(data, &mut state)?;
 
         Ok(Some(length))
     }

@@ -180,6 +180,17 @@ impl Lifter {
         self.0.disassemble(address.offset(), bytes, output)
     }
 
+    pub fn disassemble_parts(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        mnemonic: &mut String,
+        operands: &mut String,
+    ) -> Option<usize> {
+        let address = address.into();
+        self.0.disassemble_parts(address.offset(), bytes, mnemonic, operands)
+    }
+
     pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
         let address = address.into();
         let mut operations = Vec::new();

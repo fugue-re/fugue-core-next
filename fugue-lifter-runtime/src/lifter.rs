@@ -148,6 +148,17 @@ impl Lifter {
             .disassemble(address, bytes, &mut self.context, disassembly)
     }
 
+    pub fn disassemble_parts(
+        &mut self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        mnemonic: &mut String,
+        operands: &mut String,
+    ) -> Option<usize> {
+        self.language
+            .disassemble_parts(address, bytes, &mut self.context, mnemonic, operands)
+    }
+
     pub fn lift(
         &mut self,
         address: u64,
