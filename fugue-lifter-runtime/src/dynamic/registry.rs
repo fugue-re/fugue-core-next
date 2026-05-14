@@ -11,12 +11,7 @@ where
 {
     let mut guard = REGISTRY.lock().expect("registry mutex poisoned");
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(existing) = map.get(&id) {
-        return existing;
-    }
-    let language = install();
-    map.insert(id, language);
-    language
+    map.entry(id).or_insert_with(install)
 }
 
 pub fn lookup(id: &LanguageId) -> Option<&'static Language> {
