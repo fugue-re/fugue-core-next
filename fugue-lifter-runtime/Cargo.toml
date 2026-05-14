@@ -19,11 +19,5 @@ rkyv = { version = "0.8", features = ["arrayvec-0_7"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2"
 
-[dev-dependencies]
-fugue-lifter-arm = { path = "../fugue-lifter-arm" }
-fugue-lifter-packager = { path = "../fugue-lifter-packager" }
-fugue-lifter-x86 = { path = "../fugue-lifter-x86" }
-tempfile = "3"
-
 [lints]
 workspace = true

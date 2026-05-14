@@ -665,20 +665,19 @@ mod load {
 
     impl Language {
         pub fn from_bytes(bytes: &[u8]) -> Result<&'static Language, LanguageLoadError> {
-            let blob = rkyv::from_bytes::<LanguageBlob, RkyvError>(bytes)
-                .map_err(LanguageLoadError::Deserialise)?;
+            let blob = rkyv::from_bytes::<LanguageBlob, RkyvError>(bytes)?;
             install_blob(blob)
         }
 
         pub fn from_file(path: impl AsRef<Path>) -> Result<&'static Language, LanguageLoadError> {
             let path = path.as_ref();
             let file = File::open(path)
-                .map_err(|source| LanguageLoadError::io("open", path.to_path_buf(), source))?;
+                .map_err(|source| LanguageLoadError::io("open", path, source))?;
             let mut reader = GzDecoder::new(BufReader::new(file));
             let mut bytes = Vec::new();
             reader
                 .read_to_end(&mut bytes)
-                .map_err(|source| LanguageLoadError::io("read", path.to_path_buf(), source))?;
+                .map_err(|source| LanguageLoadError::io("read", path, source))?;
             Self::from_bytes(&bytes)
         }
 
@@ -699,7 +698,7 @@ mod load {
         let id_str = blob.id.as_ref();
         let language_id = id_str
             .parse::<LanguageId>()
-            .map_err(|err| LanguageLoadError::LanguageId(id_str.to_owned(), err))?;
+            .map_err(|err| LanguageLoadError::language_id(id_str, err))?;
         Ok(registry::intern_or_install(language_id, || {
             install::install(blob)
         }))

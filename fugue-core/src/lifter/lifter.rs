@@ -240,15 +240,16 @@ impl FromStr for Lifter {
     #[cfg(feature = "dynamic")]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use fugue_lifter::runtime::language::LanguageId;
+
         let id = s.parse::<LanguageId>().map_err(LifterBuilderError::from)?;
-        let builder = crate::arch::dynamic_loader::load(
+        crate::arch::dynamic_loader::load(
             id.processor(),
             id.is_big_endian(),
             id.bits(),
-            id.variant().unwrap_or("default"),
+            id.variant(),
         )
-        .map_err(|_| LifterBuilderError::Unsupported)?;
-        Ok(Self(builder.lifter(2)))
+        .map(Lifter::new)
+        .map_err(|_| LifterBuilderError::Unsupported)
     }
 }
 
@@ -266,9 +267,10 @@ mod test {
             use std::path::PathBuf;
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
-                .join("x86_64.flift");
-            let builder = crate::arch::dynamic_loader::load_from(path).unwrap();
-            Lifter::new(builder.language())
+                .join("x86_LE_64_default.flift");
+            crate::arch::dynamic_loader::load_from(path)
+                .map(Lifter::new)
+                .unwrap()
         }
     }
 

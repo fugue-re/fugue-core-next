@@ -1,7 +1,6 @@
 use crate::lifter::{LanguageId, LanguageVariant};
 use crate::loader::LoaderError;
 
-#[cfg(not(feature = "dynamic"))]
 use crate::arch;
 
 pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, LoaderError> {
@@ -14,74 +13,55 @@ pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, Load
         language.processor(),
         language.is_big_endian(),
         language.bits(),
-        language.variant().unwrap_or("default"),
+        language.variant(),
     )
 }
 
 #[cfg(feature = "dynamic")]
-pub(crate) fn resolve_variant(
+pub(crate) fn resolve_variant<'a>(
     processor: &str,
-    is_big: bool,
+    is_be: bool,
     bits: u32,
-    variant: &str,
+    variant: impl Into<Option<&'a str>>,
 ) -> Result<LanguageVariant, LoaderError> {
-    if !is_known_variant(processor, bits, variant) {
-        return Err(LoaderError::UnsupportedArch);
-    }
-    let builder = crate::arch::dynamic_loader::load(processor, is_big, bits, variant)
-        .map_err(LoaderError::other)?;
-    let language = builder.language();
+    let variant = variant.into();
+    let language =
+        arch::dynamic_loader::load(processor, is_be, bits, variant).map_err(LoaderError::other)?;
     Ok(LanguageVariant::new(language.variant(), language))
 }
 
-#[cfg(feature = "dynamic")]
-fn is_known_variant(processor: &str, bits: u32, variant: &str) -> bool {
-    matches!(
-        (processor, bits, variant),
-        ("ARM", 32, "v8" | "v8T")
-            | ("AARCH64", 64, "v8A")
-            | ("x86", 32, "default")
-            | ("x86", 64, "default" | "compat32"),
-    )
-}
-
 #[cfg(not(feature = "dynamic"))]
-pub(crate) fn resolve_variant(
+pub(crate) fn resolve_variant<'a>(
     processor: &str,
-    is_big: bool,
+    is_be: bool,
     bits: u32,
-    variant: &str,
+    variant: impl Into<Option<&'a str>>,
 ) -> Result<LanguageVariant, LoaderError> {
-    let is_le = !is_big;
-    let variant_opt = if variant == "default" {
-        None
-    } else {
-        Some(variant)
-    };
+    let variant = variant.into();
     match (processor, bits) {
-        ("ARM", 32) => parse_arm(is_le, variant_opt),
-        ("AARCH64", 64) => parse_aarch64(is_le, variant_opt),
-        ("x86", 32) => parse_x86(variant_opt),
-        ("x86", 64) => parse_x86_64(variant_opt),
+        ("ARM", 32) => parse_arm(is_be, variant),
+        ("AARCH64", 64) => parse_aarch64(is_be, variant),
+        ("x86", 32) => parse_x86(variant),
+        ("x86", 64) => parse_x86_64(variant),
         _ => Err(LoaderError::UnsupportedArch),
     }
 }
 
 #[cfg(not(feature = "dynamic"))]
-fn parse_arm(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+fn parse_arm(is_be: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
     let language = match variant {
         None | Some("v8") => {
-            if is_le {
-                arch::arm::le::variants::V8
-            } else {
+            if is_be {
                 arch::arm::be::variants::V8
+            } else {
+                arch::arm::le::variants::V8
             }
         }
         Some("v8T") => {
-            if is_le {
-                arch::arm::le::variants::V8T
-            } else {
+            if is_be {
                 arch::arm::be::variants::V8T
+            } else {
+                arch::arm::le::variants::V8T
             }
         }
         _ => return Err(LoaderError::UnsupportedArch),
@@ -91,13 +71,13 @@ fn parse_arm(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, Load
 }
 
 #[cfg(not(feature = "dynamic"))]
-fn parse_aarch64(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+fn parse_aarch64(is_be: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
     let language = match variant {
         None | Some("v8A") => {
-            if is_le {
-                arch::aarch64::le::variants::V8A
-            } else {
+            if is_be {
                 arch::aarch64::be::variants::V8A
+            } else {
+                arch::aarch64::le::variants::V8A
             }
         }
         _ => return Err(LoaderError::UnsupportedArch),
