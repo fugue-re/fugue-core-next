@@ -43,8 +43,8 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_thumb = object.entry() & 1 == 1;
 
     let language = match object.architecture() {
-        A::Arm if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
-        A::Arm if is_64 => arch::aarch64::be::variants::DEFAULT,
+        A::Aarch64 if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
+        A::Aarch64 if is_64 => arch::aarch64::be::variants::DEFAULT,
         A::Arm if is_le => {
             if is_thumb {
                 arch::arm::le::variants::DEFAULT_THUMB
