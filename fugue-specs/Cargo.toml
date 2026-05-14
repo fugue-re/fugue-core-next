@@ -15,7 +15,7 @@ default = []
 bitflags = { version = "2", features = ["serde"] }
 fugue-arch = { version = "0.3", path = "../fugue-arch" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
-fugue-lifter = { version = "0.3", path = "../fugue-lifter" }
+fugue-lifter = { version = "0.3", path = "../fugue-lifter", default-features = false }
 fugue-sleigh = { version = "0.3", path = "../fugue-sleigh" }
 ordered-float = { version = "5", features = ["serde"] }
 nom = "8"

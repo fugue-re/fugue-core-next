@@ -1,7 +1,4 @@
-use fugue_lifter::x86::register::{
-    AF, CF, DF, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, OF, PF, SF, ZF,
-};
-use fugue_lifter::x86::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+#[cfg(not(feature = "dynamic"))]
 pub use fugue_lifter::x86::*;
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
@@ -11,23 +8,58 @@ use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
-use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
+use crate::lifter::{
+    Disassembler, DisassemblerError, Language, LanguageVariant, Lifter, LiftingContext,
+};
 
-const FLAGS: &[Flag] = &[
-    Flag::a(AF),
-    Flag::c(CF),
-    Flag::new(DF),
-    Flag::v(OF),
-    Flag::p(PF),
-    Flag::n(SF),
-    Flag::z(ZF),
-];
-const GPRS: &[Varnode] = &[EAX, EBX, ECX, EDX, ESI, EDI, EBP, ESP];
 const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone)]
+struct Resolved {
+    flags: Vec<Flag>,
+    gprs: Vec<Varnode>,
+    frame_pointer: Option<Varnode>,
+    swi_op: Option<u16>,
+    invalid_instruction_op: Option<u16>,
+}
+
+impl Resolved {
+    fn for_language(language: &'static Language) -> Self {
+        let reg = |name| language.register_by_name(name);
+        let flag = |name, ctor: fn(Varnode) -> Flag| reg(name).map(ctor);
+
+        let flags = [
+            flag("AF", Flag::a),
+            flag("CF", Flag::c),
+            flag("DF", Flag::new),
+            flag("OF", Flag::v),
+            flag("PF", Flag::p),
+            flag("SF", Flag::n),
+            flag("ZF", Flag::z),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let gprs = ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP"]
+            .into_iter()
+            .filter_map(reg)
+            .collect();
+
+        Self {
+            flags,
+            gprs,
+            frame_pointer: reg("EBP"),
+            swi_op: language.user_op_by_name("swi"),
+            invalid_instruction_op: language.user_op_by_name("invalidInstructionException"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct X86 {
     language: LanguageVariant,
+    resolved: Resolved,
 }
 
 impl ArchT for X86 {
@@ -36,7 +68,7 @@ impl ArchT for X86 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language(), self.language.context()())
+        Lifter::new(self.language.language())
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -44,15 +76,15 @@ impl ArchT for X86 {
     }
 
     fn flags(&self) -> &[Flag] {
-        FLAGS
+        &self.resolved.flags
     }
 
     fn frame_pointer(&self) -> Option<Varnode> {
-        Some(EBP)
+        self.resolved.frame_pointer
     }
 
     fn gprs(&self) -> &[Varnode] {
-        GPRS
+        &self.resolved.gprs
     }
 
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
@@ -60,13 +92,15 @@ impl ArchT for X86 {
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        op == SWI && args.first().copied() == Some(Varnode::constant(0x3, 8)) // int3
-            || op == INVALID_INSTRUCTION_EXCEPTION // ud2
+        (self.resolved.swi_op == Some(op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.resolved.invalid_instruction_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        op == SWI && args.first().copied() == Some(Varnode::constant(0x3, 8)) // int3
-            || op == INVALID_INSTRUCTION_EXCEPTION // ud2
+        (self.resolved.swi_op == Some(op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.resolved.invalid_instruction_op == Some(op)
     }
 
     fn language_variant(&self) -> LanguageVariant {
@@ -77,7 +111,8 @@ impl ArchT for X86 {
 impl X86 {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
+        let resolved = Resolved::for_language(language.language());
+        Arch::from(Box::new(Self { language, resolved }) as Box<dyn ArchT>)
     }
 }
 

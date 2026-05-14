@@ -1,8 +1,6 @@
-use fugue_lifter::arm::context::T_MODE;
-use fugue_lifter::arm::register::{
-    LR, PC, R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP,
-};
+#[cfg(not(feature = "dynamic"))]
 pub use fugue_lifter::arm::*;
+use fugue_lifter::runtime::context::ContextBitRange;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
 
@@ -13,38 +11,61 @@ use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbo
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, DisassemblerError, LanguageVariant, Lifter,
+    ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageVariant, Lifter,
     LiftingContext,
 };
-
-const GPRS: &[Varnode] = &[
-    R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
-];
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
 static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone)]
+struct Resolved {
+    gprs: Vec<Varnode>,
+    t_mode: ContextBitRange,
+}
+
+impl Resolved {
+    fn for_language(language: &'static Language) -> Self {
+        let reg = |name| language.register_by_name(name);
+
+        let gprs = [
+            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
+            "lr", "pc",
+        ]
+        .into_iter()
+        .filter_map(reg)
+        .collect();
+
+        let t_mode = language
+            .context_variable_by_name("TMode")
+            .expect("ARM language must define TMode context variable");
+
+        Self { gprs, t_mode }
+    }
+}
+
+#[derive(Clone)]
 pub struct Arm {
     language: LanguageVariant,
     is_thumb: bool,
+    resolved: Resolved,
 }
 
 impl ArchT for Arm {
     fn dissassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb)
+        ArmDisassembler::new(self.is_thumb, self.resolved.t_mode)
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language(), self.language.context()())
+        Lifter::new(self.language.language())
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
         let alignment = if t_mode != 0 { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode)))
+        (naddr == addr).then_some((naddr, ContextSet::single(self.resolved.t_mode, t_mode)))
     }
 
     fn canonicalise_address_with(
@@ -52,11 +73,14 @@ impl ArchT for Arm {
         addr: Address,
         context: &LiftingContext,
     ) -> Option<(Address, ContextSet)> {
-        let t_mode =
-            addr.offset() & 1 == 1 || context.get_variable_by_bits(T_MODE, addr.offset()) == 1;
+        let t_mode = addr.offset() & 1 == 1
+            || context.get_variable_by_bits(self.resolved.t_mode, addr.offset()) == 1;
         let alignment = if t_mode { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((naddr, ContextSet::single(T_MODE, t_mode as u32)))
+        (naddr == addr).then_some((
+            naddr,
+            ContextSet::single(self.resolved.t_mode, t_mode as u32),
+        ))
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -65,27 +89,31 @@ impl ArchT for Arm {
             if self.language().is_big_endian() {
                 bytes.reverse();
             }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 1))
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.resolved.t_mode, 1))
         } else {
             let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
             if self.language().is_big_endian() {
                 bytes.reverse();
             }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(T_MODE, 0))
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.resolved.t_mode, 0))
         }
     }
 
     fn gprs(&self) -> &[Varnode] {
-        GPRS
+        &self.resolved.gprs
     }
 
     fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
         if symbol == &*MAPPING_SYMBOL_ARM {
-            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 0)));
+            return Some(
+                ContextHint::code().with_context(ContextSet::single(self.resolved.t_mode, 0)),
+            );
         }
 
         if symbol == &*MAPPING_SYMBOL_THUMB {
-            return Some(ContextHint::code().with_context(ContextSet::single(T_MODE, 1)));
+            return Some(
+                ContextHint::code().with_context(ContextSet::single(self.resolved.t_mode, 1)),
+            );
         }
 
         if symbol == &*MAPPING_SYMBOL_DATA {
@@ -104,23 +132,30 @@ impl Arm {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
-        Arch::from(Box::new(Self { language, is_thumb }) as Box<dyn ArchT>)
+        let resolved = Resolved::for_language(language.language());
+        Arch::from(Box::new(Self {
+            language,
+            is_thumb,
+            resolved,
+        }) as Box<dyn ArchT>)
     }
 }
 
 struct ArmDisassembler {
     decoder: InstDecoder,
+    t_mode: ContextBitRange,
 }
 
 impl ArmDisassembler {
     #[allow(clippy::new_ret_no_self)]
-    fn new(thumb: bool) -> Disassembler {
+    fn new(thumb: bool, t_mode: ContextBitRange) -> Disassembler {
         Disassembler::new(Self {
             decoder: if thumb {
                 InstDecoder::default_thumb()
             } else {
                 InstDecoder::default()
             },
+            t_mode,
         })
     }
 
@@ -156,7 +191,7 @@ impl DisassemblerT for ArmDisassembler {
         bytes: &[u8],
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let in_thumb = context.get_variable_by_bits(T_MODE, address.offset());
+        let in_thumb = context.get_variable_by_bits(self.t_mode, address.offset());
 
         self.decoder.set_thumb_mode(in_thumb == 1);
 
@@ -167,10 +202,8 @@ impl DisassemblerT for ArmDisassembler {
                 let properties = if self.should_lift(&insn) {
                     InsnProperties::NEEDS_LIFTING
                 } else {
-                    // NOTE: we propagate the T_MODE variable to the next instruction
-                    // mimicking the behaviour of the language spec.
                     let naddress = address + size;
-                    context.set_variable_by_bits(T_MODE, naddress.offset(), in_thumb);
+                    context.set_variable_by_bits(self.t_mode, naddress.offset(), in_thumb);
                     InsnProperties::FALL
                 };
 

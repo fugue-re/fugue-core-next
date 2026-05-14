@@ -142,4 +142,75 @@ run_step \
     ./fugue-lifter-x86/data/generated/x86_64.rs.gz \
     --variant compat32
 
+pack_blob() {
+    LABEL="$1"
+    SPECS="$2"
+    LANGUAGE="$3"
+    OUTPUT="$4"
+
+    mkdir -p "$(dirname "$OUTPUT")"
+    rm -f "$OUTPUT"
+
+    run_step \
+        "$LABEL" \
+        cargo run --quiet --bin lifter-packager -- pack-blob \
+        "$SPECS" \
+        "$LANGUAGE" \
+        "$OUTPUT"
+}
+
+pack_blob \
+    "Packing AArch64 big-endian blob..." \
+    ./fugue-lifter-aarch64/data/processors \
+    AARCH64:BE:64:v8A \
+    ./fugue-lifter-aarch64/data/blobs/AARCH64_BE_64_v8A.flift
+
+pack_blob \
+    "Packing AArch64 little-endian blob..." \
+    ./fugue-lifter-aarch64/data/processors \
+    AARCH64:LE:64:v8A \
+    ./fugue-lifter-aarch64/data/blobs/AARCH64_LE_64_v8A.flift
+
+pack_blob \
+    "Packing ARM big-endian v8 blob..." \
+    ./fugue-lifter-arm/data/processors \
+    ARM:BE:32:v8 \
+    ./fugue-lifter-arm/data/blobs/ARM_BE_32_v8.flift
+
+pack_blob \
+    "Packing ARM big-endian v8T blob..." \
+    ./fugue-lifter-arm/data/processors \
+    ARM:BE:32:v8T \
+    ./fugue-lifter-arm/data/blobs/ARM_BE_32_v8T.flift
+
+pack_blob \
+    "Packing ARM little-endian v8 blob..." \
+    ./fugue-lifter-arm/data/processors \
+    ARM:LE:32:v8 \
+    ./fugue-lifter-arm/data/blobs/ARM_LE_32_v8.flift
+
+pack_blob \
+    "Packing ARM little-endian v8T blob..." \
+    ./fugue-lifter-arm/data/processors \
+    ARM:LE:32:v8T \
+    ./fugue-lifter-arm/data/blobs/ARM_LE_32_v8T.flift
+
+pack_blob \
+    "Packing x86 blob..." \
+    ./fugue-lifter-x86/data/processors \
+    x86:LE:32:default \
+    ./fugue-lifter-x86/data/blobs/x86_LE_32_default.flift
+
+pack_blob \
+    "Packing x86-64 default blob..." \
+    ./fugue-lifter-x86/data/processors \
+    x86:LE:64:default \
+    ./fugue-lifter-x86/data/blobs/x86_LE_64_default.flift
+
+pack_blob \
+    "Packing x86-64 compat32 blob..." \
+    ./fugue-lifter-x86/data/processors \
+    x86:LE:64:compat32 \
+    ./fugue-lifter-x86/data/blobs/x86_LE_64_compat32.flift
+
 printf '%s\n' "Done"

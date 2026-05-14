@@ -6,7 +6,6 @@ use thiserror::Error;
 
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
-use crate::lifter::LiftingContextFactory;
 use crate::operand::OperandFilter;
 use crate::operand::Operands;
 use crate::pattern::PatternOp;
@@ -20,7 +19,6 @@ use crate::{calculate_mask, entry, wrap_offset, LiftingContextState};
 #[derive(Clone, Copy)]
 pub struct LanguageVariant {
     language: &'static Language,
-    context: LiftingContextFactory,
     variant: &'static str,
 }
 
@@ -54,17 +52,8 @@ impl Hash for LanguageVariant {
 }
 
 impl LanguageVariant {
-    #[doc(hidden)]
-    pub const fn new(
-        variant: &'static str,
-        language: &'static Language,
-        context: LiftingContextFactory,
-    ) -> Self {
-        Self {
-            language,
-            context,
-            variant,
-        }
+    pub const fn new(variant: &'static str, language: &'static Language) -> Self {
+        Self { language, variant }
     }
 
     pub fn language(&self) -> &'static Language {
@@ -73,10 +62,6 @@ impl LanguageVariant {
 
     pub fn variant(&self) -> &'static str {
         self.variant
-    }
-
-    pub fn context(&self) -> LiftingContextFactory {
-        self.context
     }
 }
 

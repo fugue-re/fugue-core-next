@@ -1,3 +1,6 @@
+#[cfg(all(feature = "dynamic", any(feature = "bundled", feature = "compiled")))]
+compile_error!("`dynamic` is mutually exclusive with `bundled` and `compiled`");
+
 #[cfg(any(feature = "aarch64-be", feature = "aarch64-le"))]
 pub use fugue_lifter_aarch64 as aarch64;
 #[cfg(any(feature = "arm-be", feature = "arm-le"))]

@@ -1,11 +1,13 @@
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
+#[cfg(not(feature = "dynamic"))]
+use fugue_lifter::LifterBuilder;
+use fugue_lifter::LifterBuilderError;
 use fugue_lifter::runtime::context::ContextBitRange;
 use fugue_lifter::runtime::language::Language;
 use fugue_lifter::runtime::operand::Operands;
 use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
-use fugue_lifter::{LifterBuilder, LifterBuilderError};
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
@@ -28,13 +30,15 @@ impl LifterError {
 
     pub fn disassembler<E>(error: E) -> Self
     where
-        E: std::error::Error + Debug + Display + Send + Sync + 'static, {
+        E: std::error::Error + Debug + Display + Send + Sync + 'static,
+    {
         Self::Lifter(anyhow::Error::new(error))
     }
 
     pub fn disassembler_with<M>(msg: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static, {
+        M: Debug + Display + Send + Sync + 'static,
+    {
         Self::Lifter(anyhow::Error::msg(msg))
     }
 }
@@ -43,8 +47,12 @@ impl LifterError {
 pub struct Lifter(fugue_lifter::Lifter);
 
 impl Lifter {
-    pub fn new(language: &'static Language, context: LiftingContext) -> Self {
-        Self(fugue_lifter::Lifter::new(language, context))
+    pub fn new(language: &'static Language) -> Self {
+        Self(fugue_lifter::Lifter::new(language))
+    }
+
+    pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
+        Self(fugue_lifter::Lifter::with_context(language, context))
     }
 
     pub fn language(&self) -> &'static Language {
@@ -188,7 +196,8 @@ impl Lifter {
         operands: &mut String,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.disassemble_parts(address.offset(), bytes, mnemonic, operands)
+        self.0
+            .disassemble_parts(address.offset(), bytes, mnemonic, operands)
     }
 
     pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
@@ -223,8 +232,23 @@ impl Lifter {
 impl FromStr for Lifter {
     type Err = LifterBuilderError;
 
+    #[cfg(not(feature = "dynamic"))]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         LifterBuilder::build_str(s).map(Self)
+    }
+
+    #[cfg(feature = "dynamic")]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use fugue_lifter::runtime::language::LanguageId;
+        let id = s.parse::<LanguageId>().map_err(LifterBuilderError::from)?;
+        let builder = crate::arch::dynamic_loader::load(
+            id.processor(),
+            id.is_big_endian(),
+            id.bits(),
+            id.variant().unwrap_or("default"),
+        )
+        .map_err(|_| LifterBuilderError::Unsupported)?;
+        Ok(Self(builder.lifter(2)))
     }
 }
 
@@ -232,9 +256,25 @@ impl FromStr for Lifter {
 mod test {
     use super::*;
 
+    fn x86_64_lifter() -> Lifter {
+        #[cfg(not(feature = "dynamic"))]
+        {
+            "x86:LE:64".parse::<Lifter>().unwrap()
+        }
+        #[cfg(feature = "dynamic")]
+        {
+            use std::path::PathBuf;
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("x86_64.flift");
+            let builder = crate::arch::dynamic_loader::load_from(path).unwrap();
+            Lifter::new(builder.language())
+        }
+    }
+
     #[test]
     fn test_basic_operands() {
-        let mut lifter = "x86:LE:64".parse::<Lifter>().unwrap();
+        let mut lifter = x86_64_lifter();
         let bytes = [0x48, 0x89, 0xd8]; // mov rax, rbx
 
         let operands = lifter.operands(0x1000, &bytes).unwrap();
@@ -249,7 +289,7 @@ mod test {
 
     #[test]
     fn test_grouped_operands() {
-        let mut lifter = "x86:LE:64".parse::<Lifter>().unwrap();
+        let mut lifter = x86_64_lifter();
 
         // mov rax, [0x1000]
         let bytes = [0x48, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00];
@@ -283,106 +323,5 @@ mod test {
 
         let op1_2 = op1.group().unwrap().get(2).unwrap();
         assert_eq!(op1_2.value(), Some(0x10));
-    }
-
-    #[cfg(all(test, feature = "dynamic"))]
-    mod dynamic {
-        use std::path::{Path, PathBuf};
-        use std::sync::OnceLock;
-
-        use fugue_lifter::runtime::dynamic::LanguageBuilder;
-        use fugue_lifter::runtime::language::LanguageId;
-        use fugue_lifter::runtime::pcode::LiftingContext;
-
-        use super::*;
-
-        fn x86_64_blob_path() -> &'static Path {
-            static BLOB: OnceLock<PathBuf> = OnceLock::new();
-            BLOB.get_or_init(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests")
-                    .join("x86_64.flift")
-            })
-        }
-
-        fn dynamic_x86_64_lifter() -> Lifter {
-            let builder = LanguageBuilder::from_file(x86_64_blob_path()).expect("load x86_64 blob");
-            let language = builder.language();
-            let context =
-                LiftingContext::new(language, 2, builder.context(), language.unique_mask());
-            Lifter::new(language, context)
-        }
-
-        fn assert_equivalent(label: &str, address: u64, bytes: &[u8]) {
-            let mut static_lifter = "x86:LE:64".parse::<Lifter>().unwrap();
-            let mut dynamic_lifter = dynamic_x86_64_lifter();
-
-            assert!(
-                !std::ptr::eq(static_lifter.language(), dynamic_lifter.language()),
-                "{label}: static and dynamic must be distinct &'static Language pointers"
-            );
-
-            let static_operands = static_lifter.operands(address, bytes).unwrap();
-            let dynamic_operands = dynamic_lifter.operands(address, bytes).unwrap();
-            assert_eq!(
-                static_operands, dynamic_operands,
-                "{label}: operands must match"
-            );
-
-            let mut static_disasm = String::new();
-            let mut dynamic_disasm = String::new();
-            let static_len = static_lifter
-                .disassemble(address, bytes, &mut static_disasm)
-                .expect("static disassemble");
-            let dynamic_len = dynamic_lifter
-                .disassemble(address, bytes, &mut dynamic_disasm)
-                .expect("dynamic disassemble");
-            assert_eq!(static_len, dynamic_len, "{label}: lengths must match");
-            assert_eq!(static_disasm, dynamic_disasm, "{label}: disasm must match");
-
-            let mut static_pcode = Vec::new();
-            let mut dynamic_pcode = Vec::new();
-            let static_lift_len = static_lifter
-                .lift_into(address, bytes, &mut static_pcode)
-                .expect("static lift");
-            let dynamic_lift_len = dynamic_lifter
-                .lift_into(address, bytes, &mut dynamic_pcode)
-                .expect("dynamic lift");
-            assert_eq!(
-                static_lift_len, dynamic_lift_len,
-                "{label}: lifted length must match"
-            );
-            assert_eq!(static_pcode, dynamic_pcode, "{label}: pcode must match");
-        }
-
-        #[test]
-        fn dynamic_matches_static_basic_operands() {
-            // mov rax, rbx
-            assert_equivalent("mov rax,rbx", 0x1000, &[0x48, 0x89, 0xd8]);
-        }
-
-        #[test]
-        fn dynamic_matches_static_grouped_operands() {
-            // mov rax, [0x1000]
-            assert_equivalent(
-                "mov rax,[0x1000]",
-                0x1000,
-                &[0x48, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00],
-            );
-            // mov rax, [ecx*4 + 0x10]
-            assert_equivalent(
-                "mov rax,[ecx*4+0x10]",
-                0x1000,
-                &[0x67, 0x48, 0x8b, 0x04, 0x8d, 0x10, 0x00, 0x00, 0x00],
-            );
-        }
-
-        #[test]
-        fn dynamic_lookup_returns_registered_pointer() {
-            let language = Language::from_file(x86_64_blob_path()).expect("load blob");
-            let parsed = "x86:LE:64:default".parse::<LanguageId>().unwrap();
-            let looked_up = Language::lookup(&parsed).expect("registry knows about loaded id");
-            assert!(std::ptr::eq(language, looked_up));
-        }
     }
 }

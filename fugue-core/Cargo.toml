@@ -5,7 +5,14 @@ authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2024"
 
 [features]
-default = ["sqlite"]
+default = ["sqlite", "static-lifters"]
+static-lifters = [
+  "fugue-lifter/arm",
+  "fugue-lifter/aarch64",
+  "fugue-lifter/x86",
+  "fugue-lifter/x86-64",
+  "fugue-lifter/bundled",
+]
 dynamic = ["fugue-lifter/dynamic"]
 mdbx = ["libmdbx"]
 rocksdb = ["dep:rocksdb"]
@@ -23,7 +30,7 @@ downcast-rs = "2"
 fallible-iterator = "0.3"
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
-fugue-lifter = { version = "0.3", path = "../fugue-lifter", features = ["rkyv"] }
+fugue-lifter = { version = "0.3", path = "../fugue-lifter", default-features = false, features = ["rkyv"] }
 fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["rkyv"] }
 hex-display = "0.3"
 indexmap = "2.12"

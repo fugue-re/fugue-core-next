@@ -19,6 +19,9 @@ pub mod arm;
 pub mod x86;
 pub mod x86_64;
 
+#[cfg(feature = "dynamic")]
+pub mod dynamic_loader;
+
 pub mod traits;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};

@@ -10,7 +10,17 @@ pub struct Lifter {
 }
 
 impl Lifter {
-    pub fn new(language: &'static Language, context: LiftingContext) -> Self {
+    pub fn new(language: &'static Language) -> Self {
+        let context = LiftingContext::new(
+            language,
+            2,
+            language.default_context(),
+            language.unique_mask(),
+        );
+        Self { language, context }
+    }
+
+    pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
         debug_assert!(
             std::ptr::eq(context.language(), language),
             "lifter language and context language must match",
@@ -171,4 +181,3 @@ impl Lifter {
 }
 
 pub type LifterFactory = fn() -> Lifter;
-pub type LiftingContextFactory = fn() -> LiftingContext;

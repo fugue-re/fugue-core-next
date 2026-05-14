@@ -4,9 +4,10 @@ use std::path::Path;
 use fallible_iterator::FallibleIterator;
 use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::arch::{self, Arch};
+use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::LanguageVariant;
+use crate::loader::util::resolve_variant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
@@ -38,33 +39,16 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
 
     let is_64 = object.is_64();
     let is_le = object.is_little_endian();
-
-    // FIXME: if we have no entry, then we need to check for other hints...
     let is_thumb = object.entry() & 1 == 1;
 
-    let language = match object.architecture() {
-        A::Aarch64 if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
-        A::Aarch64 if is_64 => arch::aarch64::be::variants::DEFAULT,
-        A::Arm if is_le => {
-            if is_thumb {
-                arch::arm::le::variants::DEFAULT_THUMB
-            } else {
-                arch::arm::le::variants::DEFAULT
-            }
-        }
-        A::Arm => {
-            if is_thumb {
-                arch::arm::be::variants::DEFAULT_THUMB
-            } else {
-                arch::arm::be::variants::DEFAULT
-            }
-        }
-        A::I386 => arch::x86::variants::DEFAULT,
-        A::X86_64 => arch::x86_64::variants::DEFAULT,
-        _ => return Err(LoaderError::UnsupportedArch),
-    };
-
-    Ok(language)
+    match (object.architecture(), is_64, is_le, is_thumb) {
+        (A::Aarch64, true, _, _) => resolve_variant("AARCH64", !is_le, 64, "v8A"),
+        (A::Arm, _, _, true) => resolve_variant("ARM", !is_le, 32, "v8T"),
+        (A::Arm, _, _, false) => resolve_variant("ARM", !is_le, 32, "v8"),
+        (A::I386, _, _, _) => resolve_variant("x86", false, 32, "default"),
+        (A::X86_64, _, _, _) => resolve_variant("x86", false, 64, "default"),
+        _ => Err(LoaderError::UnsupportedArch),
+    }
 }
 
 impl<'a> Object<'a> {

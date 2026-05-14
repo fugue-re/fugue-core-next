@@ -1,7 +1,4 @@
-use fugue_lifter::aarch64::register::{
-    X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
-    X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
-};
+#[cfg(not(feature = "dynamic"))]
 pub use fugue_lifter::aarch64::*;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
@@ -11,16 +8,36 @@ use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
-use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
+use crate::lifter::{
+    Disassembler, DisassemblerError, Language, LanguageVariant, Lifter, LiftingContext,
+};
 
-const GPRS: &[Varnode] = &[
-    X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X20,
-    X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
-];
+#[derive(Clone)]
+struct Resolved {
+    gprs: Vec<Varnode>,
+}
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl Resolved {
+    fn for_language(language: &'static Language) -> Self {
+        let reg = |name| language.register_by_name(name);
+
+        let gprs = [
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+            "x26", "x27", "x28", "x29", "x30",
+        ]
+        .into_iter()
+        .filter_map(reg)
+        .collect();
+
+        Self { gprs }
+    }
+}
+
+#[derive(Clone)]
 pub struct AArch64 {
     language: LanguageVariant,
+    resolved: Resolved,
 }
 
 impl ArchT for AArch64 {
@@ -29,11 +46,11 @@ impl ArchT for AArch64 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language(), self.language.context()())
+        Lifter::new(self.language.language())
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
-        ExternFunctionTemplate::new([0xc0, 0x03, 0x5f, 0xd6]) // RET
+        ExternFunctionTemplate::new([0xc0, 0x03, 0x5f, 0xd6])
     }
 
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
@@ -41,7 +58,7 @@ impl ArchT for AArch64 {
     }
 
     fn gprs(&self) -> &[Varnode] {
-        GPRS
+        &self.resolved.gprs
     }
 
     fn language_variant(&self) -> LanguageVariant {
@@ -52,7 +69,8 @@ impl ArchT for AArch64 {
 impl AArch64 {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
+        let resolved = Resolved::for_language(language.language());
+        Arch::from(Box::new(Self { language, resolved }) as Box<dyn ArchT>)
     }
 }
 

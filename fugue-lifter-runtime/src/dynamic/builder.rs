@@ -53,6 +53,6 @@ impl LanguageBuilder {
             context,
             self.language.unique_mask(),
         );
-        Lifter::new(self.language, lifting)
+        Lifter::with_context(self.language, lifting)
     }
 }
