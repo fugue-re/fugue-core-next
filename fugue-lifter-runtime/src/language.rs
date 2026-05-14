@@ -643,6 +643,17 @@ impl Language {
         entry::disassemble(address, bytes.as_ref(), context, disassembly)
     }
 
+    pub fn disassemble_parts(
+        &self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        context: &mut LiftingContext,
+        mnemonic: &mut String,
+        operands: &mut String,
+    ) -> Option<usize> {
+        entry::disassemble_parts(address, bytes.as_ref(), context, mnemonic, operands)
+    }
+
     pub fn lift(
         &self,
         address: u64,

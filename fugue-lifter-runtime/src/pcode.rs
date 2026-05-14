@@ -353,6 +353,27 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
+    pub unsafe fn format_parts<W1: fmt::Write, W2: fmt::Write>(
+        &mut self,
+        data: &'static LanguageData,
+        mut mnemonic: W1,
+        mut operands: W2,
+    ) -> fmt::Result {
+        self.inputs.input.base_state();
+
+        let ctor = &self.inputs.input.constructor();
+
+        ctor.format_mnemonic(data, self, &mut mnemonic)?;
+        ctor.format_body(data, self, &mut operands)?;
+
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    #[doc(hidden)]
+    #[inline]
     pub unsafe fn emit(&mut self, data: &'static LanguageData) -> Option<()> {
         self.inputs.input.base_state();
         self.issued.clear();
