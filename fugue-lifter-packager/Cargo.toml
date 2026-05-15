@@ -7,13 +7,17 @@ edition = "2021"
 name = "lifter-packager"
 path = "src/main.rs"
 
+[features]
+bundled-compiler = ["fugue-lifter-codegen", "fugue-sleighc"]
+default = []
+
 [dependencies]
 anyhow = "1"
 clap = "4.6.1"
 flate2 = "1.1"
-fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen" }
+fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen", optional = true }
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime", features = ["dynamic"] }
-fugue-sleighc = "0.3"
+fugue-sleighc = { version = "0.3", optional = true }
 rkyv = { version = "0.8", features = ["arrayvec-0_7"] }
 tempfile = "3"
 thiserror = "2"

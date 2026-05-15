@@ -16,7 +16,7 @@ fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
 
 [build-dependencies]
 fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen", default-features = false, optional = true }
-fugue-lifter-packager = { version = "0.3", path = "../fugue-lifter-packager", optional = true }
+fugue-lifter-packager = { version = "0.3", path = "../fugue-lifter-packager", default-features = false, optional = true }
 
 [lints]
 workspace = true
