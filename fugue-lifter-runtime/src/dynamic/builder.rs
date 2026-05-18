@@ -21,10 +21,7 @@ impl LanguageBuilder {
         Ok(Self { language })
     }
 
-    pub fn from_sleigh(
-        specs: impl AsRef<Path>,
-        id: &str,
-    ) -> Result<Self, LanguageLoadError> {
+    pub fn from_sleigh(specs: impl AsRef<Path>, id: &str) -> Result<Self, LanguageLoadError> {
         let language = Language::from_sleigh(specs, id)?;
         Ok(Self { language })
     }
@@ -47,12 +44,8 @@ impl LanguageBuilder {
 
     pub fn lifter(&self, ninputs: usize) -> Lifter {
         let context = self.context();
-        let lifting = LiftingContext::new(
-            self.language,
-            ninputs,
-            context,
-            self.language.unique_mask(),
-        );
+        let lifting =
+            LiftingContext::new(self.language, ninputs, context, self.language.unique_mask());
         Lifter::new(self.language, lifting)
     }
 }

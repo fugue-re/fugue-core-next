@@ -6,19 +6,26 @@ use thiserror::Error;
 
 use crate::language::LanguageParseError;
 
-pub mod blob;
-pub mod build;
+mod constructor;
+mod install;
+mod language;
+mod operand;
+mod resolve;
+mod space;
+mod symbol;
+mod tables;
+mod template;
 
-pub mod builder;
+mod builder;
+pub(crate) mod registry;
+
 pub use builder::LanguageBuilder;
-
-pub mod install;
-pub mod registry;
+pub use language::{BuildError, Language};
 
 #[derive(Debug, Error)]
 pub enum LanguageLoadError {
     #[error("sleigh build failed: {0}")]
-    Build(#[from] build::BuildError),
+    Build(#[from] BuildError),
     #[error("blob deserialise failed: {0}")]
     Deserialise(RkyvError),
     #[error("cannot {action} blob at `{path}`: {source}")]
