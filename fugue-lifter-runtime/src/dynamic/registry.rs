@@ -1,25 +1,38 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{OnceLock, RwLock};
 
 use crate::language::{Language, LanguageId};
 
-static REGISTRY: Mutex<Option<HashMap<LanguageId, &'static Language>>> = Mutex::new(None);
+static REGISTRY: OnceLock<RwLock<HashMap<LanguageId, &'static Language>>> = OnceLock::new();
+
+fn registry() -> &'static RwLock<HashMap<LanguageId, &'static Language>> {
+    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 pub(crate) fn intern_or_install<F>(id: LanguageId, install: F) -> &'static Language
 where
     F: FnOnce() -> &'static Language,
 {
-    let mut guard = REGISTRY.lock().expect("registry mutex poisoned");
-    let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(existing) = map.get(&id) {
+    if let Some(existing) = registry()
+        .read()
+        .expect("registry rwlock poisoned")
+        .get(&id)
+    {
         return existing;
     }
     let language = install();
-    map.insert(id, language);
+    registry()
+        .write()
+        .expect("registry rwlock poisoned")
+        .entry(id)
+        .or_insert(language);
     language
 }
 
-pub fn lookup(id: &LanguageId) -> Option<&'static Language> {
-    let guard = REGISTRY.lock().expect("registry mutex poisoned");
-    guard.as_ref().and_then(|m| m.get(id).copied())
+pub(crate) fn lookup(id: &LanguageId) -> Option<&'static Language> {
+    registry()
+        .read()
+        .expect("registry rwlock poisoned")
+        .get(id)
+        .copied()
 }
