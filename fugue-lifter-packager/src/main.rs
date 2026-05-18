@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::error::Error;
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -9,12 +10,17 @@ use fugue_lifter_packager::Packager;
 fn main() {
     let cmd = Command::new("lifter-packager")
         .arg_required_else_help(true)
-        .subcommand_negates_reqs(true)
-        .subcommand(SyncArgs::command())
-        .subcommand(UnpackBlobArgs::command());
+        .subcommand_required(true)
+        .subcommand(UnpackDynamicArgs::command())
+        .subcommand(UnpackStaticArgs::command());
 
-    #[cfg(feature = "bundled-compiler")]
-    let cmd = PackArgs::command(cmd.subcommand(PackBlobArgs::command()));
+    #[cfg(feature = "sync")]
+    let cmd = cmd.subcommand(SyncArgs::command());
+
+    #[cfg(feature = "build")]
+    let cmd = cmd
+        .subcommand(BuildDynamicArgs::command())
+        .subcommand(BuildStaticArgs::command());
 
     let matches = cmd.get_matches();
 
@@ -24,9 +30,10 @@ fn main() {
     }
 }
 
-fn run(matches: &ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
+fn run(matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
     let packager = Packager::new();
     match matches.subcommand() {
+        #[cfg(feature = "sync")]
         Some(("sync", sub)) => {
             let args = SyncArgs::from_matches(sub);
             match args.dir {
@@ -34,27 +41,30 @@ fn run(matches: &ArgMatches) -> Result<(), Box<dyn std::error::Error>> {
                 None => packager.sync_upstream(args.reference)?,
             }
         }
-        Some(("unpack-blob", sub)) => {
-            let args = UnpackBlobArgs::from_matches(sub);
-            packager.unpack_blob(args.input, args.output)?
+        Some(("unpack-dynamic", sub)) => {
+            let args = UnpackDynamicArgs::from_matches(sub);
+            packager.unpack_dynamic(args.input, args.output)?
         }
-        #[cfg(feature = "bundled-compiler")]
-        Some(("pack-blob", sub)) => {
-            let args = PackBlobArgs::from_matches(sub);
-            packager.pack_blob(args.specs, &args.language, args.output)?
+        Some(("unpack-static", sub)) => {
+            let args = UnpackStaticArgs::from_matches(sub);
+            packager.unpack_static(args.input, args.output)?
         }
-        #[cfg(feature = "bundled-compiler")]
-        _ => {
-            let args = PackArgs::from_matches(&matches);
-            packager.pack_lifter(
-                args.language_specs,
-                &args.language,
-                args.output_file,
+        #[cfg(feature = "build")]
+        Some(("build-dynamic", sub)) => {
+            let args = BuildDynamicArgs::from_matches(sub);
+            packager.build_dynamic(args.language_db, args.language, args.output)?
+        }
+        #[cfg(feature = "build")]
+        Some(("build-static", sub)) => {
+            let args = BuildStaticArgs::from_matches(sub);
+            packager.build_static(
+                args.language_db,
+                args.language,
+                args.output,
                 &args.variants,
             )?
         }
-        #[cfg(not(feature = "bundled-compiler"))]
-        _ => unreachable!("clap rejects empty invocations when `bundled-compiler` is disabled"),
+        _ => unreachable!("clap rejects unknown or empty invocations"),
     }
     Ok(())
 }
@@ -69,6 +79,16 @@ fn required_path(name: &'static str, help: &'static str) -> Arg {
         .value_hint(ValueHint::FilePath)
 }
 
+#[cfg(feature = "build")]
+fn required_language() -> Arg {
+    Arg::new("language")
+        .long("language")
+        .help("language identifier (e.g. x86:LE:64:default)")
+        .action(ArgAction::Set)
+        .required(true)
+        .value_name("id")
+}
+
 fn required<'a, T>(matches: &'a ArgMatches, name: &str) -> &'a T
 where
     T: Any + Clone + Send + Sync + 'static,
@@ -78,11 +98,13 @@ where
         .expect("clap guarantees required argument")
 }
 
+#[cfg(feature = "sync")]
 struct SyncArgs<'a> {
     dir: Option<&'a PathBuf>,
     reference: Option<&'a str>,
 }
 
+#[cfg(feature = "sync")]
 impl<'a> SyncArgs<'a> {
     fn command() -> Command {
         Command::new("sync")
@@ -115,16 +137,16 @@ impl<'a> SyncArgs<'a> {
     }
 }
 
-struct UnpackBlobArgs<'a> {
+struct UnpackDynamicArgs<'a> {
     input: &'a PathBuf,
     output: &'a PathBuf,
 }
 
-impl<'a> UnpackBlobArgs<'a> {
+impl<'a> UnpackDynamicArgs<'a> {
     fn command() -> Command {
-        Command::new("unpack-blob")
-            .about("decompress a packed blob to its raw bytes")
-            .arg(required_path("input", "packed blob"))
+        Command::new("unpack-dynamic")
+            .about("unpack a runtime loadable lifter package")
+            .arg(required_path("input", "packed dynamic language"))
             .arg(required_path("output", "output path for raw bytes"))
     }
 
@@ -136,87 +158,89 @@ impl<'a> UnpackBlobArgs<'a> {
     }
 }
 
-#[cfg(feature = "bundled-compiler")]
-struct PackBlobArgs<'a> {
-    specs: &'a PathBuf,
-    language: &'a str,
+struct UnpackStaticArgs<'a> {
+    input: &'a PathBuf,
     output: &'a PathBuf,
 }
 
-#[cfg(feature = "bundled-compiler")]
-impl<'a> PackBlobArgs<'a> {
+impl<'a> UnpackStaticArgs<'a> {
     fn command() -> Command {
-        Command::new("pack-blob")
-            .about("build a serialised dynamic language blob from sleigh sources")
-            .arg(
-                required_path("specs", "language definition directory")
-                    .value_hint(ValueHint::DirPath),
-            )
-            .arg(
-                Arg::new("language")
-                    .long("language")
-                    .help("language identifier (e.g. x86:LE:64:default)")
-                    .action(ArgAction::Set)
-                    .required(true)
-                    .value_name("id"),
-            )
-            .arg(required_path("output", "output blob path"))
+        Command::new("unpack-static")
+            .about("unpack a compilable lifter implementation")
+            .arg(required_path("input", "packed lifter source"))
+            .arg(required_path("output", "output path for raw source"))
     }
 
     fn from_matches(matches: &'a ArgMatches) -> Self {
         Self {
-            specs: required(matches, "specs"),
+            input: required(matches, "input"),
+            output: required(matches, "output"),
+        }
+    }
+}
+
+#[cfg(feature = "build")]
+struct BuildDynamicArgs<'a> {
+    language_db: &'a PathBuf,
+    language: &'a str,
+    output: &'a PathBuf,
+}
+
+#[cfg(feature = "build")]
+impl<'a> BuildDynamicArgs<'a> {
+    fn command() -> Command {
+        Command::new("build-dynamic")
+            .about("generate a runtime loadable lifter package")
+            .arg(
+                required_path("language-db", "language definition directory")
+                    .value_hint(ValueHint::DirPath),
+            )
+            .arg(required_language())
+            .arg(required_path("output", "output package path"))
+    }
+
+    fn from_matches(matches: &'a ArgMatches) -> Self {
+        Self {
+            language_db: required(matches, "language-db"),
             language: required::<String>(matches, "language").as_str(),
             output: required(matches, "output"),
         }
     }
 }
 
-#[cfg(feature = "bundled-compiler")]
-struct PackArgs<'a> {
-    language_specs: &'a PathBuf,
+#[cfg(feature = "build")]
+struct BuildStaticArgs<'a> {
+    language_db: &'a PathBuf,
     language: &'a str,
-    output_file: &'a PathBuf,
+    output: &'a PathBuf,
     variants: Vec<&'a str>,
 }
 
-#[cfg(feature = "bundled-compiler")]
-impl<'a> PackArgs<'a> {
-    fn command(cmd: Command) -> Command {
-        cmd.arg(
-            Arg::new("language-specs")
-                .value_name("language-specs")
-                .help("language definition directory")
-                .required(true)
-                .value_hint(ValueHint::DirPath),
-        )
-        .arg(
-            Arg::new("language")
-                .value_name("language")
-                .help("language identifier")
-                .required(true),
-        )
-        .arg(
-            Arg::new("output-file")
-                .value_name("output-file")
-                .help("compressed lifter output")
-                .required(true)
-                .value_hint(ValueHint::FilePath),
-        )
-        .arg(
-            Arg::new("variant")
-                .long("variant")
-                .help("additional variant to emit alongside the primary; repeatable")
-                .action(ArgAction::Append)
-                .value_name("name"),
-        )
+#[cfg(feature = "build")]
+impl<'a> BuildStaticArgs<'a> {
+    fn command() -> Command {
+        Command::new("build-static")
+            .about("generate a compilable lifter implementation")
+            .arg(
+                required_path("language-db", "language definition directory")
+                    .value_hint(ValueHint::DirPath),
+            )
+            .arg(required_language())
+            .arg(required_path("output", "output package path"))
+            .arg(
+                Arg::new("variant")
+                    .long("variant")
+                    .help("additional variant to emit alongside the primary; repeatable")
+                    .action(ArgAction::Append)
+                    .value_name("name"),
+            )
     }
 
     fn from_matches(matches: &'a ArgMatches) -> Self {
         Self {
-            language_specs: required(matches, "language-specs"),
+            language_db: required(matches, "language-db"),
             language: required::<String>(matches, "language").as_str(),
-            output_file: required(matches, "output-file"),
+            output: required(matches, "output"),
             variants: matches
                 .get_many::<String>("variant")
                 .map(|values| values.map(String::as_str).collect())

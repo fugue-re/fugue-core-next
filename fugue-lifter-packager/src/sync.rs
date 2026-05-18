@@ -1,8 +1,7 @@
 use std::ffi::OsStr;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::{fs, io};
 
 use tempfile::{Builder, TempDir};
 use thiserror::Error;
@@ -291,7 +290,7 @@ impl ReleaseTag {
 
             let replace = best
                 .as_ref()
-                .map_or(true, |(best_version, _)| version > *best_version);
+                .is_none_or(|(best_version, _)| version > *best_version);
             if replace {
                 best = Some((version, tag.to_owned()));
             }

@@ -40,7 +40,7 @@ impl UnpackError {
 }
 
 impl Packager {
-    pub fn unpack_blob(
+    pub fn unpack_dynamic(
         &self,
         input: impl AsRef<Path>,
         output: impl AsRef<Path>,
@@ -51,32 +51,32 @@ impl Packager {
                 path: output.to_path_buf(),
             });
         }
-        decompress(input.as_ref(), output)
+        self.decompress(input.as_ref(), output)
     }
 
-    pub fn unpack_lifter(
+    pub fn unpack_static(
         &self,
         input: impl AsRef<Path>,
         output: impl AsRef<Path>,
     ) -> Result<(), UnpackError> {
-        decompress(input.as_ref(), output.as_ref())
-    }
-}
-
-fn decompress(input: &Path, output: &Path) -> Result<(), UnpackError> {
-    if !input.exists() {
-        return Err(UnpackError::missing_path("input file", input));
+        self.decompress(input.as_ref(), output.as_ref())
     }
 
-    let input_file =
-        File::open(input).map_err(|source| UnpackError::io("read file", input, source))?;
-    let output_file =
-        File::create(output).map_err(|source| UnpackError::io("create file", output, source))?;
+    fn decompress(&self, input: &Path, output: &Path) -> Result<(), UnpackError> {
+        if !input.exists() {
+            return Err(UnpackError::missing_path("input file", input));
+        }
 
-    let mut deflated = GzDecoder::new(input_file);
-    let mut writer = BufWriter::new(output_file);
-    io::copy(&mut deflated, &mut writer)
-        .map_err(|source| UnpackError::io("write file", output, source))?;
+        let input_file =
+            File::open(input).map_err(|source| UnpackError::io("read file", input, source))?;
+        let output_file = File::create(output)
+            .map_err(|source| UnpackError::io("create file", output, source))?;
 
-    Ok(())
+        let mut deflated = GzDecoder::new(input_file);
+        let mut writer = BufWriter::new(output_file);
+        io::copy(&mut deflated, &mut writer)
+            .map_err(|source| UnpackError::io("write file", output, source))?;
+
+        Ok(())
+    }
 }

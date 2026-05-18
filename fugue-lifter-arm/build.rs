@@ -20,7 +20,7 @@ fn build_lifter(
     let input = Path::new("data/generated").join(format!("{output}.gz"));
     let output = PathBuf::from_iter([env::var("OUT_DIR").expect("OUT_DIR").as_ref(), output]);
 
-    Packager::new().unpack_lifter(input, output)?;
+    Packager::new().unpack_static(input, output)?;
 
     Ok(())
 }
