@@ -15,10 +15,12 @@ fn build_lifter(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
 
+    use fugue_lifter_packager::Packager;
+
     let input = Path::new("data/generated").join(format!("{output}.gz"));
     let output = PathBuf::from_iter([env::var("OUT_DIR").expect("OUT_DIR").as_ref(), output]);
 
-    fugue_lifter_packager::unpack_lifter(input, output)?;
+    Packager::new().unpack_static(input, output)?;
 
     Ok(())
 }

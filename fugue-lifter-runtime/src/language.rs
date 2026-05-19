@@ -6,8 +6,7 @@ use thiserror::Error;
 
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
-use crate::operand::OperandFilter;
-use crate::operand::Operands;
+use crate::operand::{OperandFilter, Operands};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::resolve::DecisionNode;
@@ -652,41 +651,25 @@ impl Language {
 
 #[cfg(feature = "dynamic")]
 mod load {
-    use std::fs::File;
-    use std::io::{BufReader, Read};
     use std::path::Path;
 
-    use flate2::read::GzDecoder;
-    use rkyv::rancor::Error as RkyvError;
-
     use super::{Language, LanguageId};
-    use crate::dynamic::blob::language::Language as LanguageBlob;
-    use crate::dynamic::{build, install, registry, LanguageLoadError};
+    use crate::dynamic::{registry, Language as OwnedLanguage, LanguageLoadError};
 
     impl Language {
-        pub fn from_bytes(bytes: &[u8]) -> Result<&'static Language, LanguageLoadError> {
-            let blob = rkyv::from_bytes::<LanguageBlob, RkyvError>(bytes)?;
-            install_blob(blob)
+        pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<&'static Language, LanguageLoadError> {
+            install(OwnedLanguage::from_bytes(bytes)?)
         }
 
         pub fn from_file(path: impl AsRef<Path>) -> Result<&'static Language, LanguageLoadError> {
-            let path = path.as_ref();
-            let file = File::open(path)
-                .map_err(|source| LanguageLoadError::io("open", path, source))?;
-            let mut reader = GzDecoder::new(BufReader::new(file));
-            let mut bytes = Vec::new();
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(|source| LanguageLoadError::io("read", path, source))?;
-            Self::from_bytes(&bytes)
+            install(OwnedLanguage::from_file(path)?)
         }
 
         pub fn from_sleigh(
             specs: impl AsRef<Path>,
-            id: &str,
+            id: impl AsRef<str>,
         ) -> Result<&'static Language, LanguageLoadError> {
-            let blob = build::build(specs, id)?;
-            install_blob(blob)
+            install(OwnedLanguage::build(specs, id)?)
         }
 
         pub fn lookup(id: &LanguageId) -> Option<&'static Language> {
@@ -694,14 +677,12 @@ mod load {
         }
     }
 
-    fn install_blob(blob: LanguageBlob) -> Result<&'static Language, LanguageLoadError> {
-        let id_str = blob.id.as_ref();
+    fn install(owned: OwnedLanguage) -> Result<&'static Language, LanguageLoadError> {
+        let id_str = owned.id.as_ref();
         let language_id = id_str
             .parse::<LanguageId>()
-            .map_err(|err| LanguageLoadError::language_id(id_str, err))?;
-        Ok(registry::intern_or_install(language_id, || {
-            install::install(blob)
-        }))
+            .map_err(|err| LanguageLoadError::LanguageId(id_str.to_owned(), err))?;
+        Ok(registry::intern_or_install(language_id, || owned.install()))
     }
 }
 
