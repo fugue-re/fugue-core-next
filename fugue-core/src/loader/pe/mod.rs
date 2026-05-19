@@ -17,7 +17,8 @@ use range_set_blaze::RangeSetBlaze;
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
+    Address, ExternSegment, IndexedSymbolTable, RawAddress, SegmentProperties, SymbolIndex,
+    SymbolProperties,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -108,7 +109,7 @@ impl<'a> Pe<'a> {
         let preferred_base = with_pe!(view, pe | pe.relative_address_base());
 
         let base = attributes
-            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
             .unwrap_or_else(|| Address::in_space(preferred_base, target_space));
 
@@ -230,7 +231,8 @@ impl PeSymbolData {
     ) -> Result<Self, LoaderError>
     where
         Pe: ImageNtHeaders,
-        R: ReadRef<'data>, {
+        R: ReadRef<'data>,
+    {
         let target_space = base.space();
         let addr_size = arch.language().address_size();
         let addr_align = arch.language().address_alignment().max(addr_size);
@@ -403,12 +405,11 @@ fn symbol_properties_for_address(
         })
 }
 
-pub fn pe_section_properties<'data, Pe, R>(
-    sect: &PeSection<'data, '_, Pe, R>,
-) -> SegmentProperties
+pub fn pe_section_properties<'data, Pe, R>(sect: &PeSection<'data, '_, Pe, R>) -> SegmentProperties
 where
     Pe: ImageNtHeaders,
-    R: ReadRef<'data>, {
+    R: ReadRef<'data>,
+{
     let SectionFlags::Coff { characteristics } = sect.flags() else {
         return SegmentProperties::empty();
     };
@@ -440,7 +441,8 @@ struct PeLoadableSegments<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
-    'file: 'data, {
+    'file: 'data,
+{
     pe: &'file PeFile<'data, Pe, R>,
     sects: PeSectionIterator<'data, 'file, Pe, R>,
     covered: RangeSetBlaze<u64>,
@@ -613,7 +615,8 @@ impl LoadableFromFile for Pe<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::from_file_with(path, attributes)
     }
 }
@@ -669,7 +672,8 @@ impl Loadable for Pe<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider, {
+        P: ProjectStorageProvider,
+    {
         PeAnalysers::new(self)
     }
 }
@@ -686,7 +690,7 @@ mod test {
 
     use super::Pe;
     use crate::attributes;
-    use crate::ir::Address;
+    use crate::ir::{Address, RawAddress};
     use crate::loader::{Loadable, LoadableSegment, LoaderError};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
@@ -801,11 +805,10 @@ mod test {
     fn test_pe_custom_image_base() -> Result<(), Box<dyn std::error::Error>> {
         let data = BytesOrMapping::from_file("tests/hello-pe.exe")?;
         let (preferred_base, slot_address, original_value) = first_dir64_relocation(&data)?;
-        let image_base = Address::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x1800_0000_0u64);
         let pe = Pe::new_with(data, attributes![ATTRIBUTE_IMAGE_BASE => image_base])?;
         let segments = load_segments(&pe)?;
-        let rebased_address = Address::new(
-            image_base.space(),
+        let rebased_address = Address::in_default_space(
             image_base
                 .offset()
                 .wrapping_add(slot_address.wrapping_sub(preferred_base)),
@@ -841,7 +844,7 @@ mod test {
 
     #[test]
     fn test_pe_custom_image_base_without_relocations() {
-        let image_base = Address::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x1800_0000_0u64);
         let err = match Pe::new_with(
             BytesOrMapping::from_file("tests/hello-pe-fixed.exe").expect("fixture"),
             attributes![ATTRIBUTE_IMAGE_BASE => image_base],
@@ -855,7 +858,7 @@ mod test {
 
     #[test]
     fn test_pe_image_base_near_max_overflow() {
-        let image_base = Address::from(u64::MAX - 0x1000);
+        let image_base = RawAddress::from(u64::MAX - 0x1000);
         let err = match Pe::new_with(
             BytesOrMapping::from_file("tests/hello-pe.exe").expect("fixture"),
             attributes![ATTRIBUTE_IMAGE_BASE => image_base],

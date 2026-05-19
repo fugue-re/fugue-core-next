@@ -5,7 +5,7 @@ use fallible_iterator::FallibleIterator;
 use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::{self, Arch};
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
@@ -97,7 +97,7 @@ impl<'a> Object<'a> {
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
         let base = attributes
-            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
             .unwrap_or_else(|| Address::in_space(0u64, target_space));
 
