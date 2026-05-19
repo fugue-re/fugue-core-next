@@ -20,13 +20,13 @@ static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
-struct Resolved {
+struct ArchData {
     gprs: Vec<Varnode>,
     t_mode: ContextBitRange,
 }
 
-impl Resolved {
-    fn for_language(language: &'static Language) -> Self {
+impl ArchData {
+    fn new(language: &'static Language) -> Self {
         let reg = |name| language.register_by_name(name);
 
         let gprs = [
@@ -49,12 +49,12 @@ impl Resolved {
 pub struct Arm {
     language: LanguageVariant,
     is_thumb: bool,
-    resolved: Resolved,
+    data: ArchData,
 }
 
 impl ArchT for Arm {
     fn dissassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb, self.resolved.t_mode)
+        ArmDisassembler::new(self.is_thumb, self.data.t_mode)
     }
 
     fn lifter(&self) -> Lifter {
@@ -65,7 +65,7 @@ impl ArchT for Arm {
         let t_mode = (addr.offset() & 1) as u32;
         let alignment = if t_mode != 0 { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((naddr, ContextSet::single(self.resolved.t_mode, t_mode)))
+        (naddr == addr).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
     }
 
     fn canonicalise_address_with(
@@ -74,12 +74,12 @@ impl ArchT for Arm {
         context: &LiftingContext,
     ) -> Option<(Address, ContextSet)> {
         let t_mode = addr.offset() & 1 == 1
-            || context.get_variable_by_bits(self.resolved.t_mode, addr.offset()) == 1;
+            || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1;
         let alignment = if t_mode { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
         (naddr == addr).then_some((
             naddr,
-            ContextSet::single(self.resolved.t_mode, t_mode as u32),
+            ContextSet::single(self.data.t_mode, t_mode as u32),
         ))
     }
 
@@ -89,30 +89,30 @@ impl ArchT for Arm {
             if self.language().is_big_endian() {
                 bytes.reverse();
             }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.resolved.t_mode, 1))
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.data.t_mode, 1))
         } else {
             let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
             if self.language().is_big_endian() {
                 bytes.reverse();
             }
-            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.resolved.t_mode, 0))
+            ExternFunctionTemplate::new_with(bytes, ContextSet::single(self.data.t_mode, 0))
         }
     }
 
     fn gprs(&self) -> &[Varnode] {
-        &self.resolved.gprs
+        &self.data.gprs
     }
 
     fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
         if symbol == &*MAPPING_SYMBOL_ARM {
             return Some(
-                ContextHint::code().with_context(ContextSet::single(self.resolved.t_mode, 0)),
+                ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 0)),
             );
         }
 
         if symbol == &*MAPPING_SYMBOL_THUMB {
             return Some(
-                ContextHint::code().with_context(ContextSet::single(self.resolved.t_mode, 1)),
+                ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 1)),
             );
         }
 
@@ -132,11 +132,11 @@ impl Arm {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
         let is_thumb = language.variant().ends_with("T");
-        let resolved = Resolved::for_language(language.language());
+        let data = ArchData::new(language.language());
         Arch::from(Box::new(Self {
             language,
             is_thumb,
-            resolved,
+            data,
         }) as Box<dyn ArchT>)
     }
 }

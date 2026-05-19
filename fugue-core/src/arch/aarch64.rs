@@ -13,12 +13,12 @@ use crate::lifter::{
 };
 
 #[derive(Clone)]
-struct Resolved {
+struct ArchData {
     gprs: Vec<Varnode>,
 }
 
-impl Resolved {
-    fn for_language(language: &'static Language) -> Self {
+impl ArchData {
+    fn new(language: &'static Language) -> Self {
         let reg = |name| language.register_by_name(name);
 
         let gprs = [
@@ -37,7 +37,7 @@ impl Resolved {
 #[derive(Clone)]
 pub struct AArch64 {
     language: LanguageVariant,
-    resolved: Resolved,
+    data: ArchData,
 }
 
 impl ArchT for AArch64 {
@@ -58,7 +58,7 @@ impl ArchT for AArch64 {
     }
 
     fn gprs(&self) -> &[Varnode] {
-        &self.resolved.gprs
+        &self.data.gprs
     }
 
     fn language_variant(&self) -> LanguageVariant {
@@ -69,8 +69,8 @@ impl ArchT for AArch64 {
 impl AArch64 {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        let resolved = Resolved::for_language(language.language());
-        Arch::from(Box::new(Self { language, resolved }) as Box<dyn ArchT>)
+        let data = ArchData::new(language.language());
+        Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 }
 

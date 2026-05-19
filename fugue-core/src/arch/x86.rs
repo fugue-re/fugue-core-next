@@ -15,7 +15,7 @@ use crate::lifter::{
 const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
 
 #[derive(Clone)]
-struct Resolved {
+struct ArchData {
     flags: Vec<Flag>,
     gprs: Vec<Varnode>,
     frame_pointer: Option<Varnode>,
@@ -23,8 +23,8 @@ struct Resolved {
     invalid_instruction_op: Option<u16>,
 }
 
-impl Resolved {
-    fn for_language(language: &'static Language) -> Self {
+impl ArchData {
+    fn new(language: &'static Language) -> Self {
         let reg = |name| language.register_by_name(name);
         let flag = |name, ctor: fn(Varnode) -> Flag| reg(name).map(ctor);
 
@@ -59,7 +59,7 @@ impl Resolved {
 #[derive(Clone)]
 pub struct X86 {
     language: LanguageVariant,
-    resolved: Resolved,
+    data: ArchData,
 }
 
 impl ArchT for X86 {
@@ -76,15 +76,15 @@ impl ArchT for X86 {
     }
 
     fn flags(&self) -> &[Flag] {
-        &self.resolved.flags
+        &self.data.flags
     }
 
     fn frame_pointer(&self) -> Option<Varnode> {
-        self.resolved.frame_pointer
+        self.data.frame_pointer
     }
 
     fn gprs(&self) -> &[Varnode] {
-        &self.resolved.gprs
+        &self.data.gprs
     }
 
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
@@ -92,15 +92,15 @@ impl ArchT for X86 {
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.resolved.swi_op == Some(op)
+        (self.data.swi_op == Some(op)
             && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.resolved.invalid_instruction_op == Some(op)
+            || self.data.invalid_instruction_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.resolved.swi_op == Some(op)
+        (self.data.swi_op == Some(op)
             && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.resolved.invalid_instruction_op == Some(op)
+            || self.data.invalid_instruction_op == Some(op)
     }
 
     fn language_variant(&self) -> LanguageVariant {
@@ -111,8 +111,8 @@ impl ArchT for X86 {
 impl X86 {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        let resolved = Resolved::for_language(language.language());
-        Arch::from(Box::new(Self { language, resolved }) as Box<dyn ArchT>)
+        let data = ArchData::new(language.language());
+        Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 }
 
