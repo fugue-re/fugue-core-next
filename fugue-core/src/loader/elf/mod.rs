@@ -20,7 +20,8 @@ use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 use crate::arch::Arch;
 use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, SegmentProperties, SymbolIndex, SymbolProperties,
+    Address, ExternSegment, IndexedSymbolTable, RawAddress, SegmentProperties, SymbolIndex,
+    SymbolProperties,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -116,7 +117,7 @@ impl<'a> Elf<'a> {
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
         let base = attributes
-            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
             .unwrap_or_else(|| Address::in_space(0u64, target_space));
 
@@ -614,7 +615,8 @@ pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
-    'file: 'data, {
+    'file: 'data,
+{
     // reference to the ELF
     pub(crate) elf: &'file ElfFile<'data, Elf, R>,
     // segments iterator
@@ -1126,7 +1128,8 @@ impl<'a> LoadableFromBytes<'a> for Elf<'a> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::new_with(data, attributes)
     }
 }
@@ -1137,7 +1140,8 @@ impl LoadableFromFile for Elf<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         let path = path.as_ref();
 
         let mut loaded = Self::new_with(BytesOrMapping::from_file(path)?, attributes)?;
@@ -1195,7 +1199,8 @@ impl Loadable for Elf<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider, {
+        P: ProjectStorageProvider,
+    {
         ElfAnalysers::new(self)
     }
 }
@@ -1207,7 +1212,7 @@ mod test {
     use object::{Object, RelocationFlags, RelocationTarget};
 
     use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
-    use crate::ir::{Address, SymbolIndex};
+    use crate::ir::{Address, RawAddress, SymbolIndex};
     use crate::loader::Loadable;
     use crate::types::BytesOrMapping;
     use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
@@ -1309,11 +1314,14 @@ mod test {
     #[test]
     fn test_elf_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let mut attributes = AttributeMap::new();
-        let image_base = Address::in_default_space(0x4000_0000u64);
+        let image_base = RawAddress::new(0x4000_0000u64);
 
         attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
 
         let elf = Elf::new_with(BytesOrMapping::from_file("tests/ls.elf")?, attributes)?;
+
+        let image_base = Address::in_default_space(image_base);
+
         let relocation_address = image_base
             .checked_add(0x21f30u64)
             .expect("valid relocation");
@@ -1344,7 +1352,7 @@ mod test {
     #[test]
     fn test_elf_arm_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let mut attributes = AttributeMap::new();
-        let image_base = Address::in_default_space(0x5000_0000u64);
+        let image_base = RawAddress::new(0x5000_0000u64);
 
         attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
 
@@ -1363,6 +1371,8 @@ mod test {
             })()
         )
         .expect("R_ARM_RELATIVE relocation");
+
+        let image_base = Address::in_default_space(image_base);
 
         let relocation_address = image_base
             .checked_add(relocation_offset)
