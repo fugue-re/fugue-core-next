@@ -10,6 +10,8 @@ use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
 use crate::ir::{Address, Insn};
+use crate::lifter::disassembler::DisassemblerError;
+use crate::lifter::traits::Disassembler;
 
 #[derive(Debug, Error)]
 pub enum LifterError {
@@ -28,13 +30,15 @@ impl LifterError {
 
     pub fn disassembler<E>(error: E) -> Self
     where
-        E: std::error::Error + Debug + Display + Send + Sync + 'static, {
+        E: std::error::Error + Debug + Display + Send + Sync + 'static,
+    {
         Self::Lifter(anyhow::Error::new(error))
     }
 
     pub fn disassembler_with<M>(msg: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static, {
+        M: Debug + Display + Send + Sync + 'static,
+    {
         Self::Lifter(anyhow::Error::msg(msg))
     }
 }
@@ -188,7 +192,8 @@ impl Lifter {
         operands: &mut String,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.disassemble_parts(address.offset(), bytes, mnemonic, operands)
+        self.0
+            .disassemble_parts(address.offset(), bytes, mnemonic, operands)
     }
 
     pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
@@ -225,6 +230,23 @@ impl FromStr for Lifter {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         LifterBuilder::build_str(s).map(Self)
+    }
+}
+
+impl Disassembler for Lifter {
+    fn disassemble(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        _context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        let mut output = Vec::new();
+
+        let Some(length) = self.0.lift(address.offset(), bytes, &mut output) else {
+            return Err(DisassemblerError::InvalidInstruction(address));
+        };
+
+        Ok(Insn::from_lifted(self.language(), address, length, output))
     }
 }
 

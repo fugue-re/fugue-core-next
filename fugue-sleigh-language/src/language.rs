@@ -288,13 +288,13 @@ impl Language {
             .unwrap_or(4);
 
         let maximum_delay = input
-            .try_read_signed_integer_with_id(&ATTRIB_MAXDELAY)?
+            .try_read_unsigned_integer_with_id(&ATTRIB_MAXDELAY)?
             .unwrap_or(0) as usize;
         let unique_mask = input
             .try_read_unsigned_integer_with_id(&ATTRIB_UNIQMASK)?
             .unwrap_or(0);
         let section_count = input
-            .try_read_signed_integer_with_id(&ATTRIB_NUMSECTIONS)?
+            .try_read_unsigned_integer_with_id(&ATTRIB_NUMSECTIONS)?
             .unwrap_or(0) as usize;
 
         let mut source_files = Map::new();
@@ -905,10 +905,13 @@ impl LanguageDB {
 #[cfg(test)]
 mod test {
     use std::fs::File;
+    use std::path::PathBuf;
 
     use fugue_arch::ArchitectureDef;
     use fugue_sleigh_marshal::sla::FormatDecoder;
     use fugue_sleigh_marshal::Decoder;
+    use fugue_sleighc::SleighCompiler;
+    use tempfile::TempDir;
     use tracing_subscriber::prelude::*;
 
     use super::{Language, Map};
@@ -920,9 +923,20 @@ mod test {
             .with(tracing_subscriber::filter::EnvFilter::from_default_env())
             .init();
 
-        let mut decoder = FormatDecoder::new();
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let spec = workspace.join("fugue-lifter-x86/data/processors/x86/x86.slaspec");
 
-        decoder.ingest_stream(File::open("/Users/slt/Downloads/ghidra_11.2.1_PUBLIC/Ghidra/Processors/x86/data/languages/x86.sla")?)?;
+        let scratch = TempDir::new()?;
+        let sla = scratch.path().join("x86.sla");
+        SleighCompiler::new()?
+            .build_with(spec.with_extension(""), &sla)?
+            .expect("compiled sla file name");
+
+        let mut decoder = FormatDecoder::new();
+        decoder.ingest_stream(File::open(&sla)?)?;
 
         let _ = Language::from_decoder(
             "EIP",

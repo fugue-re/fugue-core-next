@@ -11,6 +11,7 @@ members = [
   "fugue-lifter-aarch64",
   "fugue-lifter-arm",
   "fugue-lifter-codegen",
+  "fugue-lifter-mips",
   "fugue-lifter-packager",
   "fugue-lifter-runtime",
   "fugue-lifter-x86",

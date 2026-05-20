@@ -60,6 +60,11 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
             }
         }
         A::I386 => arch::x86::variants::DEFAULT,
+        A::Mips if !is_64 => if is_le {
+            arch::mips::le::variants::DEFAULT
+        } else {
+            arch::mips::be::variants::DEFAULT
+        },
         A::X86_64 => arch::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
