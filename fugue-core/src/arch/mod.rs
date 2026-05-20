@@ -154,7 +154,7 @@ impl Arch {
     }
 
     pub fn disassembler(&self) -> Disassembler {
-        self.0.dissassembler()
+        self.0.disassembler()
     }
 
     pub fn lifter(&self) -> Lifter {

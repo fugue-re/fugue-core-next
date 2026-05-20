@@ -21,9 +21,8 @@ pub struct Mips {
 }
 
 impl ArchT for Mips {
-    fn dissassembler(&self) -> Disassembler {
-        let lifter = Lifter::new(self.language.language(), self.language.context()());
-        Disassembler::new(lifter)
+    fn disassembler(&self) -> Disassembler {
+        Disassembler::new(self.lifter())
     }
 
     fn lifter(&self) -> Lifter {
