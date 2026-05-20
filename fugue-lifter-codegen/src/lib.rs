@@ -76,9 +76,9 @@ impl CodegenError {
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildOptions {
-    pub pretty: bool,
-    pub patches: Vec<PathBuf>,
-    pub variants: Vec<String>,
+    pretty: bool,
+    patches: Vec<PathBuf>,
+    variants: Vec<String>,
 }
 
 impl BuildOptions {

@@ -44,10 +44,8 @@ impl<'a> LanguageSpec<'a> {
     }
 
     pub(crate) fn build_static(&self, variants: &[&str]) -> Result<String, BuildError> {
-        let mut options = fugue_lifter_codegen::BuildOptions {
-            pretty: true,
-            ..Default::default()
-        };
+        let mut options = fugue_lifter_codegen::BuildOptions::new();
+
         if let Some(patches_dir) = self.patches_dir() {
             options.add_patch(patches_dir);
         }
