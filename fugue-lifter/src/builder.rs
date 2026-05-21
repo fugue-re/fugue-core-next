@@ -146,6 +146,14 @@ impl LifterBuilder {
             ("AARCH64", false, None | Some(64), None | Some("v8A")) => {
                 Ok(crate::aarch64::le::LifterFactory::new_v8a())
             }
+            #[cfg(feature = "mips-be")]
+            ("MIPS", true, None | Some(32), None | Some("default")) => {
+                Ok(crate::mips::be::LifterFactory::new_default())
+            }
+            #[cfg(feature = "mips-le")]
+            ("MIPS", false, None | Some(32), None | Some("default")) => {
+                Ok(crate::mips::le::LifterFactory::new_default())
+            }
             _ => Err(LifterBuilderError::Unsupported),
         }
     }

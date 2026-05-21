@@ -18,6 +18,7 @@ pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, Load
     let language = match language.processor() {
         "ARM" if bits == 32 => parse_arm(is_le, language.variant())?,
         "AARCH64" if bits == 64 => parse_aarch64(is_le, language.variant())?,
+        "MIPS" if bits == 32 => parse_mips(is_le, language.variant())?,
         "x86" if bits == 32 => parse_x86(language.variant())?,
         "x86" if bits == 64 => parse_x86_64(language.variant())?,
         _ => return Err(LoaderError::UnsupportedArch),
@@ -55,6 +56,21 @@ fn parse_aarch64(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, 
                 arch::aarch64::le::variants::V8A
             } else {
                 arch::aarch64::be::variants::V8A
+            }
+        }
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
+}
+
+fn parse_mips(is_le: bool, variant: Option<&str>) -> Result<LanguageVariant, LoaderError> {
+    let language = match variant {
+        None | Some("default") => {
+            if is_le {
+                arch::mips::le::variants::DEFAULT
+            } else {
+                arch::mips::be::variants::DEFAULT
             }
         }
         _ => return Err(LoaderError::UnsupportedArch),

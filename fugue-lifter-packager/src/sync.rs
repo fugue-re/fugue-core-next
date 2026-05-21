@@ -99,6 +99,10 @@ const SYNC_TARGETS: &[SyncTarget] = &[
         destination: "fugue-lifter-arm/data/processors/ARM",
     },
     SyncTarget {
+        source_processor: "MIPS",
+        destination: "fugue-lifter-mips/data/processors/MIPS",
+    },
+    SyncTarget {
         source_processor: "x86",
         destination: "fugue-lifter-x86/data/processors/x86",
     },

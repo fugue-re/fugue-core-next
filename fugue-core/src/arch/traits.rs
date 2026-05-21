@@ -89,7 +89,9 @@ impl Flag {
 
 #[clone_dyn]
 pub trait Arch: Send + Sync + 'static {
-    fn dissassembler(&self) -> Disassembler;
+    fn disassembler(&self) -> Disassembler {
+        Disassembler::new(self.lifter())
+    }
 
     fn lifter(&self) -> Lifter;
 

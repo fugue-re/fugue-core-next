@@ -11,6 +11,7 @@ pub mod generic;
 
 pub mod aarch64;
 pub mod arm;
+pub mod mips;
 pub mod x86;
 pub mod x86_64;
 
@@ -139,6 +140,9 @@ where
             }
             Architecture::I386 => {
                 self.apply_x86_relocation(lsegm, offset, reloc, is_dynamic);
+            }
+            Architecture::Mips => {
+                self.apply_mips_relocation(lsegm, offset, reloc, is_dynamic);
             }
             Architecture::X86_64 => {
                 self.apply_x86_64_relocation(lsegm, offset, reloc, is_dynamic);

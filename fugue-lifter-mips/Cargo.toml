@@ -1,0 +1,22 @@
+[package]
+name = "fugue-lifter-mips"
+version = "0.3.0"
+edition = "2024"
+build = "build.rs"
+
+[features]
+mips-be = []
+mips-le = []
+bundled = ["fugue-lifter-packager"]
+compiled = ["fugue-lifter-codegen", "fugue-lifter-codegen/bundled-compiler"]
+default = ["mips-be", "mips-le", "bundled"]
+
+[dependencies]
+fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
+
+[build-dependencies]
+fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen", default-features = false, optional = true }
+fugue-lifter-packager = { version = "0.3", path = "../fugue-lifter-packager", default-features = false, optional = true }
+
+[lints]
+workspace = true

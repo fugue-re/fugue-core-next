@@ -24,7 +24,7 @@ pub struct AArch64 {
 }
 
 impl ArchT for AArch64 {
-    fn dissassembler(&self) -> Disassembler {
+    fn disassembler(&self) -> Disassembler {
         AArch64Disassembler::new()
     }
 

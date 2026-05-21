@@ -11,6 +11,9 @@ arm = ["arm-be", "arm-le"]
 aarch64-be = ["fugue-lifter-aarch64/aarch64-be"]
 aarch64-le = ["fugue-lifter-aarch64/aarch64-le"]
 aarch64 = ["aarch64-be", "aarch64-le"]
+mips-be = ["fugue-lifter-mips/mips-be"]
+mips-le = ["fugue-lifter-mips/mips-le"]
+mips = ["mips-be", "mips-le"]
 x86 = ["fugue-lifter-x86/x86"]
 x86-64 = ["fugue-lifter-x86/x86-64"]
 
@@ -18,11 +21,13 @@ x86-64 = ["fugue-lifter-x86/x86-64"]
 bundled = [
   "fugue-lifter-arm?/bundled",
   "fugue-lifter-aarch64?/bundled",
+  "fugue-lifter-mips?/bundled",
   "fugue-lifter-x86?/bundled"
 ]
 compiled = [
   "fugue-lifter-arm?/compiled",
   "fugue-lifter-aarch64?/compiled",
+  "fugue-lifter-mips?/compiled",
   "fugue-lifter-x86?/compiled"
 ]
 
@@ -31,12 +36,13 @@ rkyv = ["fugue-lifter-runtime/rkyv"]
 serde = ["fugue-lifter-runtime/serde"]
 dynamic = ["fugue-lifter-runtime/dynamic"]
 
-default = ["arm", "aarch64", "bundled", "x86", "x86-64"]
+default = ["arm", "aarch64", "bundled", "mips", "x86", "x86-64"]
 
 [dependencies]
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-lifter-arm =  { version = "0.3", path = "../fugue-lifter-arm", default-features = false, optional = true }
 fugue-lifter-aarch64 =  { version = "0.3", path = "../fugue-lifter-aarch64", default-features = false, optional = true }
+fugue-lifter-mips =  { version = "0.3", path = "../fugue-lifter-mips", default-features = false, optional = true }
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
 fugue-lifter-x86 =  { version = "0.3", path = "../fugue-lifter-x86", default-features = false, optional = true }
 thiserror = "2"
