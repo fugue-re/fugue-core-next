@@ -9,7 +9,7 @@ use fugue_lifter::{LifterBuilder, LifterBuilderError};
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
-use crate::ir::{Address, Insn};
+use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
 use crate::lifter::traits::Disassembler;
 
@@ -240,13 +240,15 @@ impl Disassembler for Lifter {
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let mut output = Vec::new();
-
-        let Some(length) = self.0.lift(address.offset(), bytes, &mut output) else {
+        let Some(size) = self.resolve(address, bytes, true) else {
             return Err(DisassemblerError::InvalidInstruction(address));
         };
 
-        Ok(Insn::from_lifted(self.language(), address, length, output))
+        Ok(Insn::from_disassembly(
+            address,
+            size,
+            InsnProperties::NEEDS_LIFTING,
+        ))
     }
 }
 
