@@ -99,47 +99,61 @@ fi
 
 run_step \
     "Generating AArch64 big-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-aarch64/data/processors \
-    AARCH64:BE:64:v8A \
-    ./fugue-lifter-aarch64/data/generated/aarch64_be.rs.gz
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-aarch64/data/processors \
+    --language AARCH64:BE:64:v8A \
+    --output ./fugue-lifter-aarch64/data/generated/aarch64_be.rs.gz
 
 run_step \
     "Generating AArch64 little-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-aarch64/data/processors \
-    AARCH64:LE:64:v8A \
-    ./fugue-lifter-aarch64/data/generated/aarch64_le.rs.gz
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-aarch64/data/processors \
+    --language AARCH64:LE:64:v8A \
+    --output ./fugue-lifter-aarch64/data/generated/aarch64_le.rs.gz
 
 run_step \
     "Generating ARM big-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-arm/data/processors \
-    ARM:BE:32:v8 \
-    ./fugue-lifter-arm/data/generated/arm_be.rs.gz \
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-arm/data/processors \
+    --language ARM:BE:32:v8 \
+    --output ./fugue-lifter-arm/data/generated/arm_be.rs.gz \
     --variant v8T
 
 run_step \
     "Generating ARM little-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-arm/data/processors \
-    ARM:LE:32:v8 \
-    ./fugue-lifter-arm/data/generated/arm_le.rs.gz \
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-arm/data/processors \
+    --language ARM:LE:32:v8 \
+    --output ./fugue-lifter-arm/data/generated/arm_le.rs.gz \
     --variant v8T
 
 run_step \
+    "Generating MIPS big-endian lifter..." \
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:BE:32:default \
+    --output ./fugue-lifter-mips/data/generated/mips_be.rs.gz
+
+run_step \
+    "Generating MIPS little-endian lifter..." \
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:LE:32:default \
+    --output ./fugue-lifter-mips/data/generated/mips_le.rs.gz
+
+run_step \
     "Generating x86 lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-x86/data/processors \
-    x86:LE:32:default \
-    ./fugue-lifter-x86/data/generated/x86.rs.gz
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-x86/data/processors \
+    --language x86:LE:32:default \
+    --output ./fugue-lifter-x86/data/generated/x86.rs.gz
 
 run_step \
     "Generating x86-64 lifter..." \
-    cargo run --quiet --bin lifter-packager -- \
-    ./fugue-lifter-x86/data/processors \
-    x86:LE:64:default \
-    ./fugue-lifter-x86/data/generated/x86_64.rs.gz \
+    cargo run --quiet --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-x86/data/processors \
+    --language x86:LE:64:default \
+    --output ./fugue-lifter-x86/data/generated/x86_64.rs.gz \
     --variant compat32
 
 pack_blob() {

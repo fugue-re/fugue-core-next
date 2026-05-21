@@ -5,6 +5,8 @@ compile_error!("`dynamic` is mutually exclusive with `bundled` and `compiled`");
 pub use fugue_lifter_aarch64 as aarch64;
 #[cfg(any(feature = "arm-be", feature = "arm-le"))]
 pub use fugue_lifter_arm as arm;
+#[cfg(any(feature = "mips-be", feature = "mips-le"))]
+pub use fugue_lifter_mips as mips;
 #[cfg(feature = "x86")]
 pub use fugue_lifter_x86::x86;
 #[cfg(feature = "x86-64")]

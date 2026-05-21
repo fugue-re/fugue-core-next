@@ -16,6 +16,7 @@ use crate::storage::entities::{Entity, EntityId};
 
 pub mod aarch64;
 pub mod arm;
+pub mod mips;
 pub mod x86;
 pub mod x86_64;
 
@@ -141,6 +142,7 @@ impl Arch {
         match language.processor() {
             "ARM" => arm::Arm::new(variant),
             "AARCH64" => aarch64::AArch64::new(variant),
+            "MIPS" => mips::Mips::new(variant),
             "x86" => {
                 if language.address_bits() == 32 {
                     x86::X86::new(variant)
@@ -155,7 +157,7 @@ impl Arch {
     }
 
     pub fn disassembler(&self) -> Disassembler {
-        self.0.dissassembler()
+        self.0.disassembler()
     }
 
     pub fn lifter(&self) -> Lifter {

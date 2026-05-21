@@ -53,8 +53,8 @@ pub struct Arm {
 }
 
 impl ArchT for Arm {
-    fn dissassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb, self.data.t_mode)
+    fn disassembler(&self) -> Disassembler {
+        ArmDisassembler::new(self.is_thumb)
     }
 
     fn lifter(&self) -> Lifter {

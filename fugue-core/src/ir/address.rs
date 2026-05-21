@@ -345,6 +345,10 @@ impl SubAssign<u32> for RawAddress {
 impl RawAddress {
     pub const MAX: Self = Self(u64::MAX);
 
+    pub fn new(addr: impl Into<Self>) -> Self {
+        addr.into()
+    }
+
     pub const fn zero() -> Self {
         Self(0u64)
     }

@@ -4,8 +4,8 @@ use std::path::Path;
 use fallible_iterator::FallibleIterator;
 use object::{File, Object as ObjectT, ObjectSegment};
 
-use crate::arch::Arch;
-use crate::ir::{Address, SegmentProperties};
+use crate::arch::{self, Arch};
+use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::LanguageVariant;
 use crate::loader::util::resolve_variant;
 use crate::loader::{
@@ -41,14 +41,34 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_le = object.is_little_endian();
     let is_thumb = object.entry() & 1 == 1;
 
-    match (object.architecture(), is_64, is_le, is_thumb) {
-        (A::Aarch64, true, _, _) => resolve_variant("AARCH64", !is_le, 64, "v8A"),
-        (A::Arm, _, _, true) => resolve_variant("ARM", !is_le, 32, "v8T"),
-        (A::Arm, _, _, false) => resolve_variant("ARM", !is_le, 32, "v8"),
-        (A::I386, _, _, _) => resolve_variant("x86", false, 32, "default"),
-        (A::X86_64, _, _, _) => resolve_variant("x86", false, 64, "default"),
-        _ => Err(LoaderError::UnsupportedArch),
-    }
+    let language = match object.architecture() {
+        A::Aarch64 if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
+        A::Aarch64 if is_64 => arch::aarch64::be::variants::DEFAULT,
+        A::Arm if is_le => {
+            if is_thumb {
+                arch::arm::le::variants::DEFAULT_THUMB
+            } else {
+                arch::arm::le::variants::DEFAULT
+            }
+        }
+        A::Arm => {
+            if is_thumb {
+                arch::arm::be::variants::DEFAULT_THUMB
+            } else {
+                arch::arm::be::variants::DEFAULT
+            }
+        }
+        A::I386 => arch::x86::variants::DEFAULT,
+        A::Mips if !is_64 => if is_le {
+            arch::mips::le::variants::DEFAULT
+        } else {
+            arch::mips::be::variants::DEFAULT
+        },
+        A::X86_64 => arch::x86_64::variants::DEFAULT,
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+
+    Ok(language)
 }
 
 impl<'a> Object<'a> {
@@ -81,7 +101,7 @@ impl<'a> Object<'a> {
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
         let base = attributes
-            .get_attr::<Address>(ATTRIBUTE_IMAGE_BASE)
+            .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
             .unwrap_or_else(|| Address::in_space(0u64, target_space));
 

@@ -11,7 +11,9 @@ use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use thiserror::Error;
 
 use crate::il::pcode::PCodeOp;
-use crate::ir::{Address, Insn};
+use crate::ir::{Address, Insn, InsnProperties};
+use crate::lifter::disassembler::DisassemblerError;
+use crate::lifter::traits::Disassembler;
 
 #[derive(Debug, Error)]
 pub enum LifterError {
@@ -250,6 +252,25 @@ impl FromStr for Lifter {
         )
         .map(Lifter::new)
         .map_err(|_| LifterBuilderError::Unsupported)
+    }
+}
+
+impl Disassembler for Lifter {
+    fn disassemble(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        _context: &mut LiftingContext,
+    ) -> Result<Insn, DisassemblerError> {
+        let Some(size) = self.resolve(address, bytes, true) else {
+            return Err(DisassemblerError::InvalidInstruction(address));
+        };
+
+        Ok(Insn::from_disassembly(
+            address,
+            size,
+            InsnProperties::NEEDS_LIFTING,
+        ))
     }
 }
 

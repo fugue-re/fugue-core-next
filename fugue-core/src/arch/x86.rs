@@ -63,7 +63,7 @@ pub struct X86 {
 }
 
 impl ArchT for X86 {
-    fn dissassembler(&self) -> Disassembler {
+    fn disassembler(&self) -> Disassembler {
         X86Disassembler::new()
     }
 

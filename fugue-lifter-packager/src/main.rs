@@ -77,6 +77,7 @@ fn required_path(name: &'static str, help: &'static str) -> Arg {
         .required(true)
         .value_name("path")
         .value_hint(ValueHint::FilePath)
+        .value_parser(clap::value_parser!(PathBuf))
 }
 
 #[cfg(feature = "build")]
