@@ -74,6 +74,14 @@ impl AArch64 {
     }
 }
 
+#[cfg(not(feature = "dynamic"))]
+pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
+    match variant {
+        None | Some("v8A") => Some(if is_le { le::variants::V8A } else { be::variants::V8A }),
+        _ => None,
+    }
+}
+
 struct AArch64Disassembler {
     decoder: InstDecoder,
 }

@@ -54,7 +54,7 @@ pub struct Arm {
 
 impl ArchT for Arm {
     fn disassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb)
+        ArmDisassembler::new(self.is_thumb, self.data.t_mode)
     }
 
     fn lifter(&self) -> Lifter {
@@ -138,6 +138,15 @@ impl Arm {
             is_thumb,
             data,
         }) as Box<dyn ArchT>)
+    }
+}
+
+#[cfg(not(feature = "dynamic"))]
+pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
+    match variant {
+        None | Some("v8") => Some(if is_le { le::variants::V8 } else { be::variants::V8 }),
+        Some("v8T") => Some(if is_le { le::variants::V8T } else { be::variants::V8T }),
+        _ => None,
     }
 }
 

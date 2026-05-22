@@ -244,9 +244,9 @@ impl FromStr for Lifter {
         use fugue_lifter::runtime::language::LanguageId;
 
         let id = s.parse::<LanguageId>().map_err(LifterBuilderError::from)?;
-        crate::arch::dynamic_loader::load(
+        crate::arch::dynamic::load(
             id.processor(),
-            id.is_big_endian(),
+            id.is_little_endian(),
             id.bits(),
             id.variant(),
         )
@@ -289,7 +289,7 @@ mod test {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
                 .join("x86_LE_64_default.flift");
-            crate::arch::dynamic_loader::load_from(path)
+            crate::arch::dynamic::load_from(path)
                 .map(Lifter::new)
                 .unwrap()
         }

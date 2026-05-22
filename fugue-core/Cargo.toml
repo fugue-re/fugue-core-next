@@ -9,6 +9,7 @@ default = ["sqlite", "static-lifters"]
 static-lifters = [
   "fugue-lifter/arm",
   "fugue-lifter/aarch64",
+  "fugue-lifter/mips",
   "fugue-lifter/x86",
   "fugue-lifter/x86-64",
   "fugue-lifter/bundled",

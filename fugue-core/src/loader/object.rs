@@ -7,7 +7,6 @@ use object::{File, Object as ObjectT, ObjectSegment};
 use crate::arch::{self, Arch};
 use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::LanguageVariant;
-use crate::loader::util::resolve_variant;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
@@ -34,6 +33,7 @@ pub struct Object<'a> {
     base: Address,
 }
 
+#[cfg(not(feature = "dynamic"))]
 pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
     use object::Architecture as A;
 
@@ -42,33 +42,40 @@ pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant,
     let is_thumb = object.entry() & 1 == 1;
 
     let language = match object.architecture() {
-        A::Aarch64 if is_64 && is_le => arch::aarch64::le::variants::DEFAULT,
-        A::Aarch64 if is_64 => arch::aarch64::be::variants::DEFAULT,
-        A::Arm if is_le => {
-            if is_thumb {
-                arch::arm::le::variants::DEFAULT_THUMB
-            } else {
-                arch::arm::le::variants::DEFAULT
-            }
-        }
-        A::Arm => {
-            if is_thumb {
-                arch::arm::be::variants::DEFAULT_THUMB
-            } else {
-                arch::arm::be::variants::DEFAULT
-            }
-        }
+        A::Aarch64 if is_64 && is_le => arch::aarch64::le::variants::V8A,
+        A::Aarch64 if is_64 => arch::aarch64::be::variants::V8A,
+        A::Arm if is_le && is_thumb => arch::arm::le::variants::V8T,
+        A::Arm if is_le => arch::arm::le::variants::V8,
+        A::Arm if is_thumb => arch::arm::be::variants::V8T,
+        A::Arm => arch::arm::be::variants::V8,
         A::I386 => arch::x86::variants::DEFAULT,
-        A::Mips if !is_64 => if is_le {
-            arch::mips::le::variants::DEFAULT
-        } else {
-            arch::mips::be::variants::DEFAULT
-        },
+        A::Mips if !is_64 && is_le => arch::mips::le::variants::DEFAULT,
+        A::Mips if !is_64 => arch::mips::be::variants::DEFAULT,
         A::X86_64 => arch::x86_64::variants::DEFAULT,
         _ => return Err(LoaderError::UnsupportedArch),
     };
-
     Ok(language)
+}
+
+#[cfg(feature = "dynamic")]
+pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
+    use object::Architecture as A;
+
+    let is_64 = object.is_64();
+    let is_le = object.is_little_endian();
+    let is_thumb = object.entry() & 1 == 1;
+
+    let (processor, bits, variant) = match object.architecture() {
+        A::Aarch64 if is_64 => ("AARCH64", 64, "v8A"),
+        A::Arm if is_thumb => ("ARM", 32, "v8T"),
+        A::Arm => ("ARM", 32, "v8"),
+        A::I386 => ("x86", 32, "default"),
+        A::Mips if !is_64 => ("MIPS", 32, "default"),
+        A::X86_64 => ("x86", 64, "default"),
+        _ => return Err(LoaderError::UnsupportedArch),
+    };
+    let lang = arch::dynamic::load(processor, is_le, bits, Some(variant))?;
+    Ok(LanguageVariant::new(lang.variant(), lang))
 }
 
 impl<'a> Object<'a> {

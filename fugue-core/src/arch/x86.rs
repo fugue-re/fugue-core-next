@@ -116,6 +116,14 @@ impl X86 {
     }
 }
 
+#[cfg(not(feature = "dynamic"))]
+pub fn parse_language(variant: Option<&str>) -> Option<LanguageVariant> {
+    match variant {
+        None | Some("default") => Some(variants::DEFAULT),
+        _ => None,
+    }
+}
+
 struct X86Disassembler {
     decoder: InstDecoder,
 }

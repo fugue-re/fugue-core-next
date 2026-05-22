@@ -1,23 +1,38 @@
-use fugue_lifter::mips::register::{
-    A0, A1, A2, A3, AT, GP, K0, K1, PC, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, SP, T0, T1, T2, T3,
-    T4, T5, T6, T7, T8, T9, V0, V1, ZERO,
-};
+#[cfg(not(feature = "dynamic"))]
 pub use fugue_lifter::mips::*;
 
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::ExternFunctionTemplate;
-use crate::lifter::{Disassembler, LanguageVariant, Lifter};
+use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter};
 
-const GPRS: &[Varnode] = &[
-    ZERO, AT, V0, V1, A0, A1, A2, A3, T0, T1, T2, T3, T4, T5, T6, T7, S0, S1, S2, S3, S4, S5, S6,
-    S7, T8, T9, K0, K1, GP, SP, S8, RA, PC,
-];
+#[derive(Clone)]
+struct ArchData {
+    gprs: Vec<Varnode>,
+}
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl ArchData {
+    fn new(language: &'static Language) -> Self {
+        let reg = |name| language.register_by_name(name);
+
+        let gprs = [
+            "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5",
+            "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
+            "gp", "sp", "s8", "ra", "pc",
+        ]
+        .into_iter()
+        .filter_map(reg)
+        .collect();
+
+        Self { gprs }
+    }
+}
+
+#[derive(Clone)]
 pub struct Mips {
     language: LanguageVariant,
+    data: ArchData,
 }
 
 impl ArchT for Mips {
@@ -26,7 +41,7 @@ impl ArchT for Mips {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language(), self.language.context()())
+        Lifter::new(self.language.language())
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -38,7 +53,7 @@ impl ArchT for Mips {
     }
 
     fn gprs(&self) -> &[Varnode] {
-        GPRS
+        &self.data.gprs
     }
 
     fn language_variant(&self) -> LanguageVariant {
@@ -49,6 +64,17 @@ impl ArchT for Mips {
 impl Mips {
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
+        let data = ArchData::new(language.language());
+        Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
+    }
+}
+
+#[cfg(not(feature = "dynamic"))]
+pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
+    match variant {
+        None | Some("default") => {
+            Some(if is_le { le::variants::DEFAULT } else { be::variants::DEFAULT })
+        }
+        _ => None,
     }
 }

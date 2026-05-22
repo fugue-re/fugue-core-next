@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
-use crate::arch::Arch;
+use crate::arch::{Arch, LanguageError};
 use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
@@ -36,8 +36,6 @@ pub use pe::Pe;
 pub mod shellcode;
 pub use shellcode::Shellcode;
 
-pub mod util;
-
 #[derive(Debug, Error)]
 pub enum LoaderError {
     #[error("cannot load object: address overflow using base address of {0}")]
@@ -46,6 +44,8 @@ pub enum LoaderError {
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
     Io(#[from] std::io::Error),
+    #[error("cannot resolve language: {0}")]
+    Language(#[from] LanguageError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
     #[error("cannot load object: unsupported architecture")]

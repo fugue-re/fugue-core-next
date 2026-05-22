@@ -210,6 +210,18 @@ pack_blob \
     ./fugue-lifter-arm/data/generated/ARM_LE_32_v8T.flift
 
 pack_blob \
+    "Packing MIPS big-endian lifter..." \
+    ./fugue-lifter-mips/data/processors \
+    MIPS:BE:32:default \
+    ./fugue-lifter-mips/data/generated/MIPS_BE_32_default.flift
+
+pack_blob \
+    "Packing MIPS little-endian lifter..." \
+    ./fugue-lifter-mips/data/processors \
+    MIPS:LE:32:default \
+    ./fugue-lifter-mips/data/generated/MIPS_LE_32_default.flift
+
+pack_blob \
     "Packing x86 lifter..." \
     ./fugue-lifter-x86/data/processors \
     x86:LE:32:default \
