@@ -1,4 +1,4 @@
-#[cfg(not(feature = "dynamic"))]
+#[cfg(feature = "static-lifters")]
 pub use fugue_lifter::aarch64::*;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
@@ -9,7 +9,8 @@ use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageVariant, Lifter, LiftingContext,
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageVariant, Lifter,
+    LiftingContext,
 };
 
 #[derive(Clone)]
@@ -72,13 +73,25 @@ impl AArch64 {
         let data = ArchData::new(language.language());
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
-}
 
-#[cfg(not(feature = "dynamic"))]
-pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
-    match variant {
-        None | Some("v8A") => Some(if is_le { le::variants::V8A } else { be::variants::V8A }),
-        _ => None,
+    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
+        Self::resolve_variant(is_le, None)
+    }
+
+    pub fn resolve_variant<'a>(
+        is_le: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<LanguageVariant, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("v8A") => {
+                return Ok(if is_le { le::variants::V8A } else { be::variants::V8A });
+            }
+            _ => {}
+        }
+        let lang = crate::lifter::dynamic::load("AARCH64", is_le, 64, variant)?;
+        Ok(LanguageVariant::new(lang.variant(), lang))
     }
 }
 

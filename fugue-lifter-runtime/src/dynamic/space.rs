@@ -3,11 +3,7 @@ use fugue_sleigh_language::spaces::AddressSpace as SleighAddressSpace;
 use crate::dynamic::install::Install;
 use crate::space::AddressSpaceKind;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct AddressSpace {
     pub(crate) name: Box<str>,
     pub(crate) word_size: usize,

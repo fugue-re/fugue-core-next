@@ -4,11 +4,7 @@ use crate::dynamic::install::Install;
 use crate::dynamic::tables::Tables;
 use crate::pattern::PatternExpression;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct OperandFilter {
     pub(crate) pattern: PatternExpression,
     pub(crate) indices: Box<[u16]>,
@@ -91,4 +87,3 @@ impl Install for OperandFilter {
         }
     }
 }
-

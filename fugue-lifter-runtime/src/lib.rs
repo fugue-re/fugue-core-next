@@ -1,6 +1,5 @@
 pub mod constructor;
 pub mod context;
-#[cfg(feature = "dynamic")]
 pub mod dynamic;
 pub mod entry;
 pub mod input;

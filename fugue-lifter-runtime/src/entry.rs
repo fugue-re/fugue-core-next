@@ -1,9 +1,9 @@
 use std::fmt;
 
+use crate::LiftingContextState;
 use crate::language::LanguageData;
 use crate::operand::Operands;
 use crate::pcode::{LiftingContext, PCodeOp};
-use crate::LiftingContextState;
 
 #[inline]
 pub fn resolve(

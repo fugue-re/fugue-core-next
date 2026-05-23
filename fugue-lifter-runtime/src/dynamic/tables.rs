@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
+use fugue_sleigh_language::Language as SleighLanguage;
 use fugue_sleigh_language::construct::{
     self as sleigh_construct, ConstTpl as SleighConstTpl, ConstructTpl as SleighConstructTpl,
     HandleKind as SleighHandleKind, HandleTpl as SleighHandleTpl, OpTpl as SleighOpTpl,
@@ -8,11 +9,10 @@ use fugue_sleigh_language::construct::{
 };
 use fugue_sleigh_language::opcode::Opcode;
 use fugue_sleigh_language::pattern::PatternExpression as SleighPatternExpression;
+use fugue_sleigh_language::symbol::Symbol as SleighSymbol;
 use fugue_sleigh_language::symbol::sub_table::{
     Constructor as SleighConstructor, Context as SleighContext, DecisionNode as SleighDecisionNode,
 };
-use fugue_sleigh_language::symbol::Symbol as SleighSymbol;
-use fugue_sleigh_language::Language as SleighLanguage;
 use indexmap::IndexMap;
 
 use crate::context::{ContextPostAction, ContextPostActionHandle, ContextPreAction};
@@ -418,11 +418,7 @@ impl<'a> Tables<'a> {
 
         for oid in 0..ctor.operand_count() {
             let operand_sym_id = ctor.operand(oid);
-            let operand = self
-                .language
-                .symbol_table()
-                .symbol(operand_sym_id)
-                .unwrap();
+            let operand = self.language.symbol_table().symbol(operand_sym_id).unwrap();
 
             let offset_base = operand.offset_base();
             let offset_rela = operand.relative_offset();

@@ -1,11 +1,11 @@
-#[cfg(not(feature = "dynamic"))]
+#[cfg(feature = "static-lifters")]
 pub use fugue_lifter::mips::*;
 
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::ExternFunctionTemplate;
-use crate::lifter::{Disassembler, Language, LanguageVariant, Lifter};
+use crate::lifter::{Disassembler, Language, LanguageError, LanguageVariant, Lifter};
 
 #[derive(Clone)]
 struct ArchData {
@@ -67,14 +67,28 @@ impl Mips {
         let data = ArchData::new(language.language());
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
-}
 
-#[cfg(not(feature = "dynamic"))]
-pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
-    match variant {
-        None | Some("default") => {
-            Some(if is_le { le::variants::DEFAULT } else { be::variants::DEFAULT })
+    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
+        Self::resolve_variant(is_le, None)
+    }
+
+    pub fn resolve_variant<'a>(
+        is_le: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<LanguageVariant, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("default") => {
+                return Ok(if is_le {
+                    le::variants::DEFAULT
+                } else {
+                    be::variants::DEFAULT
+                });
+            }
+            _ => {}
         }
-        _ => None,
+        let lang = crate::lifter::dynamic::load("MIPS", is_le, 32, variant)?;
+        Ok(LanguageVariant::new(lang.variant(), lang))
     }
 }

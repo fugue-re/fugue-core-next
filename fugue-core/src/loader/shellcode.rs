@@ -5,8 +5,9 @@ use std::path::Path;
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
-use crate::arch::{Arch, parse_language};
+use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
+use crate::lifter::resolve_language;
 use crate::loader::{
     Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
@@ -53,7 +54,7 @@ impl<'a> Shellcode<'a> {
         bytes: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let language = parse_language(language)?;
+        let language = resolve_language(language)?;
 
         let bytes = bytes.into();
         if bytes.is_empty() {

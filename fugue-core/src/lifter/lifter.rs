@@ -1,8 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
-#[cfg(not(feature = "dynamic"))]
-use fugue_lifter::LifterBuilder;
 use fugue_lifter::LifterBuilderError;
 use fugue_lifter::runtime::context::ContextBitRange;
 use fugue_lifter::runtime::language::Language;
@@ -13,6 +11,7 @@ use thiserror::Error;
 use crate::il::pcode::PCodeOp;
 use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
+use crate::lifter::resolve_language;
 use crate::lifter::traits::Disassembler;
 
 #[derive(Debug, Error)]
@@ -234,24 +233,10 @@ impl Lifter {
 impl FromStr for Lifter {
     type Err = LifterBuilderError;
 
-    #[cfg(not(feature = "dynamic"))]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        LifterBuilder::build_str(s).map(Self)
-    }
-
-    #[cfg(feature = "dynamic")]
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use fugue_lifter::runtime::language::LanguageId;
-
-        let id = s.parse::<LanguageId>().map_err(LifterBuilderError::from)?;
-        crate::arch::dynamic::load(
-            id.processor(),
-            id.is_little_endian(),
-            id.bits(),
-            id.variant(),
-        )
-        .map(Lifter::new)
-        .map_err(|_| LifterBuilderError::Unsupported)
+        resolve_language(s)
+            .map(|v| Lifter::new(v.language()))
+            .map_err(|_| LifterBuilderError::Unsupported)
     }
 }
 
@@ -279,17 +264,17 @@ mod test {
     use super::*;
 
     fn x86_64_lifter() -> Lifter {
-        #[cfg(not(feature = "dynamic"))]
+        #[cfg(feature = "static-lifters")]
         {
             "x86:LE:64".parse::<Lifter>().unwrap()
         }
-        #[cfg(feature = "dynamic")]
+        #[cfg(not(feature = "static-lifters"))]
         {
             use std::path::PathBuf;
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
                 .join("x86_LE_64_default.flift");
-            crate::arch::dynamic::load_from(path)
+            crate::lifter::dynamic::load_from(path)
                 .map(Lifter::new)
                 .unwrap()
         }

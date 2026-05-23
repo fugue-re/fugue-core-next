@@ -1,4 +1,4 @@
-#[cfg(not(feature = "dynamic"))]
+#[cfg(feature = "static-lifters")]
 pub use fugue_lifter::arm::*;
 use fugue_lifter::runtime::context::ContextBitRange;
 use yaxpeax_arch::*;
@@ -11,8 +11,8 @@ use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbo
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageVariant, Lifter,
-    LiftingContext,
+    ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError,
+    LanguageVariant, Lifter, LiftingContext,
 };
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
@@ -139,14 +139,28 @@ impl Arm {
             data,
         }) as Box<dyn ArchT>)
     }
-}
 
-#[cfg(not(feature = "dynamic"))]
-pub fn parse_language(is_le: bool, variant: Option<&str>) -> Option<LanguageVariant> {
-    match variant {
-        None | Some("v8") => Some(if is_le { le::variants::V8 } else { be::variants::V8 }),
-        Some("v8T") => Some(if is_le { le::variants::V8T } else { be::variants::V8T }),
-        _ => None,
+    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
+        Self::resolve_variant(is_le, None)
+    }
+
+    pub fn resolve_variant<'a>(
+        is_le: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<LanguageVariant, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("v8") => {
+                return Ok(if is_le { le::variants::V8 } else { be::variants::V8 });
+            }
+            Some("v8T") => {
+                return Ok(if is_le { le::variants::V8T } else { be::variants::V8T });
+            }
+            _ => {}
+        }
+        let lang = crate::lifter::dynamic::load("ARM", is_le, 32, variant)?;
+        Ok(LanguageVariant::new(lang.variant(), lang))
     }
 }
 

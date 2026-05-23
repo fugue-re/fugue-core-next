@@ -5,13 +5,16 @@ use fugue_core::analysis::core::FunctionRecoveryConfig;
 use fugue_core::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
-use fugue_core::arch::arm::context::T_MODE;
+use fugue_core::arch::aarch64::AArch64;
+use fugue_core::arch::arm::Arm;
+use fugue_core::arch::x86::X86;
+use fugue_core::arch::x86_64::X86_64;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
     Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, RawAddress,
     SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
-use fugue_core::lifter::{ContextSet, LanguageVariant};
+use fugue_core::lifter::{ContextBitRange, ContextSet, LanguageVariant};
 use fugue_core::loader::{
     Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
@@ -128,44 +131,28 @@ fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
     let processor = database.processor();
     let is_32 = database.meta().is_32bit_exactly();
     let is_64 = database.meta().is_64bit();
-    let is_be = database.meta().is_be();
+    let is_le = !database.meta().is_be();
 
     if processor.family().is_arm() && is_64 {
-        return Ok(if is_be {
-            fugue_core::arch::aarch64::be::variants::DEFAULT
-        } else {
-            fugue_core::arch::aarch64::le::variants::DEFAULT
-        });
+        return Ok(AArch64::resolve_default_variant(is_le)?);
     }
 
     if processor.family().is_arm() && is_32 {
         let is_thumb =
             matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
-        return Ok(if is_be {
-            if is_thumb {
-                fugue_core::arch::arm::be::variants::DEFAULT_THUMB
-            } else {
-                fugue_core::arch::arm::be::variants::DEFAULT
-            }
+        return Ok(if is_thumb {
+            Arm::resolve_variant(is_le, "v8T")?
         } else {
-            if is_thumb {
-                fugue_core::arch::arm::le::variants::DEFAULT_THUMB
-            } else {
-                fugue_core::arch::arm::le::variants::DEFAULT
-            }
+            Arm::resolve_default_variant(is_le)?
         });
     }
 
     if processor.family().is_386() {
         return Ok(if is_32 {
-            fugue_core::arch::x86::variants::DEFAULT
+            X86::resolve_default_variant()?
         } else {
-            fugue_core::arch::x86_64::variants::DEFAULT
+            X86_64::resolve_default_variant()?
         });
-    }
-
-    if processor.family().is_386() && is_64 {
-        return Ok(fugue_core::arch::x86_64::variants::DEFAULT);
     }
 
     Err(LoaderError::UnsupportedArch)
@@ -392,14 +379,22 @@ where
 
 pub struct IDAFunctionDiscovery {
     database: Rc<IDB>,
-    mark_thumb: bool,
+    t_mode: Option<ContextBitRange>,
 }
 
 impl IDAFunctionDiscovery {
     pub fn new(database: &IDABinary, mark_thumb: bool) -> Self {
+        let t_mode = mark_thumb
+            .then(|| {
+                database
+                    .architecture
+                    .language()
+                    .context_variable_by_name("TMode")
+            })
+            .flatten();
         Self {
             database: database.database.clone(),
-            mark_thumb,
+            t_mode,
         }
     }
 }
@@ -434,14 +429,12 @@ where
                 continue;
             }
 
-            if self.mark_thumb {
-                let context = if self.database.processor().is_thumb_at(f.start_address()) {
-                    ContextSet::single(T_MODE, 1)
-                } else {
-                    ContextSet::single(T_MODE, 0)
-                };
-
-                state.add_candidate(AddressWithContext::new(addr, context));
+            if let Some(t_mode) = self.t_mode {
+                let value = u32::from(self.database.processor().is_thumb_at(f.start_address()));
+                state.add_candidate(AddressWithContext::new(
+                    addr,
+                    ContextSet::single(t_mode, value),
+                ));
             } else {
                 state.add_candidate(addr);
             }

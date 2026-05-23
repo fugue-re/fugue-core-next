@@ -6,11 +6,7 @@ use fugue_sleigh_language::symbol::sub_table::{
 use crate::dynamic::install::Install;
 use crate::dynamic::tables::Tables;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct DecisionNode {
     pub(crate) start_bit: u32,
     pub(crate) size: u32,
@@ -40,11 +36,7 @@ impl Install for DecisionNode {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct DecisionPair {
     pub(crate) constructor: u16,
     pub(crate) pattern: DisjointPattern,
@@ -82,11 +74,7 @@ impl Install for DecisionPair {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) enum DisjointPattern {
     Context(Pattern),
     Instruction(Pattern),
@@ -134,11 +122,7 @@ impl Install for DisjointPattern {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct Pattern {
     pub(crate) offset: usize,
     pub(crate) non_zero_size: Option<usize>,

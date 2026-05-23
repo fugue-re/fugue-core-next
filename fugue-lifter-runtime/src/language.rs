@@ -1,11 +1,13 @@
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
+use std::path::Path;
 use std::str::FromStr;
 
 use thiserror::Error;
 
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
+use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
 use crate::operand::{OperandFilter, Operands};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
@@ -13,7 +15,7 @@ use crate::resolve::DecisionNode;
 use crate::space::{AddressSpace, AddressSpaceKind};
 use crate::symbol::Symbol;
 use crate::template::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
-use crate::{calculate_mask, entry, wrap_offset, LiftingContextState};
+use crate::{LiftingContextState, calculate_mask, entry, wrap_offset};
 
 #[derive(Clone, Copy)]
 pub struct LanguageVariant {
@@ -647,42 +649,24 @@ impl Language {
     ) -> Option<usize> {
         entry::lift(address, bytes.as_ref(), context, operations)
     }
-}
 
-#[cfg(feature = "dynamic")]
-mod load {
-    use std::path::Path;
-
-    use super::{Language, LanguageId};
-    use crate::dynamic::{registry, Language as OwnedLanguage, LanguageLoadError};
-
-    impl Language {
-        pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<&'static Language, LanguageLoadError> {
-            install(OwnedLanguage::from_bytes(bytes)?)
-        }
-
-        pub fn from_file(path: impl AsRef<Path>) -> Result<&'static Language, LanguageLoadError> {
-            install(OwnedLanguage::from_file(path)?)
-        }
-
-        pub fn from_sleigh(
-            specs: impl AsRef<Path>,
-            id: impl AsRef<str>,
-        ) -> Result<&'static Language, LanguageLoadError> {
-            install(OwnedLanguage::build(specs, id)?)
-        }
-
-        pub fn lookup(id: &LanguageId) -> Option<&'static Language> {
-            registry::lookup(id)
-        }
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<&'static Language, LanguageLoadError> {
+        DynamicLanguage::from_bytes(bytes)?.get_or_install()
     }
 
-    fn install(owned: OwnedLanguage) -> Result<&'static Language, LanguageLoadError> {
-        let id_str = owned.id.as_ref();
-        let language_id = id_str
-            .parse::<LanguageId>()
-            .map_err(|err| LanguageLoadError::LanguageId(id_str.to_owned(), err))?;
-        Ok(registry::intern_or_install(language_id, || owned.install()))
+    pub fn from_file(path: impl AsRef<Path>) -> Result<&'static Language, LanguageLoadError> {
+        DynamicLanguage::from_file(path)?.get_or_install()
+    }
+
+    pub fn from_sleigh(
+        specs: impl AsRef<Path>,
+        id: impl AsRef<str>,
+    ) -> Result<&'static Language, LanguageLoadError> {
+        DynamicLanguage::build(specs, id)?.get_or_install()
+    }
+
+    pub fn lookup(id: &LanguageId) -> Option<&'static Language> {
+        registry::lookup(id)
     }
 }
 

@@ -14,11 +14,7 @@ use crate::pcode::{LiftingContextState, Varnode};
 use crate::symbol::Symbol;
 use crate::wrap_offset;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ContextPreAction {
     pub num: usize,
     pub shift: u32,
@@ -36,27 +32,21 @@ impl ContextPreAction {
         data: &'static LanguageData,
         input: &mut LiftingContextState<'_>,
     ) -> Option<()> {
-        let value = (self.value.resolve(data, input)? as u32) << self.shift;
-        input.input().set_context_word(self.num, value, self.mask);
-        Some(())
+        unsafe {
+            let value = (self.value.resolve(data, input)? as u32) << self.shift;
+            input.input().set_context_word(self.num, value, self.mask);
+            Some(())
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum ContextPostActionHandle {
     Operand(u16),
     Symbol(u16),
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ContextPostAction {
     pub handle: ContextPostActionHandle,
     pub num: usize,
@@ -82,37 +72,27 @@ impl ContextPostAction {
         input: &mut LiftingContextState<'_>,
         commit: &ContextCommit,
     ) -> Option<()> {
-        let FixedHandle {
-            space,
-            offset_offset: mut offset,
-            ..
-        } = match self.handle {
-            ContextPostActionHandle::Symbol(symbol) => {
-                Symbol::resolve_handle(&data.symbols[symbol as usize], data, input)?
-            }
-            ContextPostActionHandle::Operand(index) => unsafe {
-                input
+        unsafe {
+            let FixedHandle {
+                space,
+                offset_offset: mut offset,
+                ..
+            } = match self.handle {
+                ContextPostActionHandle::Symbol(symbol) => {
+                    Symbol::resolve_handle(&data.symbols[symbol as usize], data, input)?
+                }
+                ContextPostActionHandle::Operand(index) => input
                     .input()
                     .unchecked_operand_via(commit.point as usize, index as usize)
                     .handle
-                    .unwrap_or_default()
-            },
-        };
+                    .unwrap_or_default(),
+            };
 
-        if space == 0 {
-            offset *= self.word_size
-        }
+            if space == 0 {
+                offset *= self.word_size
+            }
 
-        if self.flow {
-            input.inputs.context.set_context_change_point(
-                offset,
-                self.num,
-                self.mask,
-                commit.value,
-            );
-        } else {
-            let noffset = wrap_offset(self.highest, offset.wrapping_add(1u64));
-            if noffset < offset {
+            if self.flow {
                 input.inputs.context.set_context_change_point(
                     offset,
                     self.num,
@@ -120,25 +100,43 @@ impl ContextPostAction {
                     commit.value,
                 );
             } else {
-                input.inputs.context.set_context_region(
-                    offset,
-                    Some(noffset),
-                    self.num,
-                    self.mask,
-                    commit.value,
-                );
+                let noffset = wrap_offset(self.highest, offset.wrapping_add(1u64));
+                if noffset < offset {
+                    input.inputs.context.set_context_change_point(
+                        offset,
+                        self.num,
+                        self.mask,
+                        commit.value,
+                    );
+                } else {
+                    input.inputs.context.set_context_region(
+                        offset,
+                        Some(noffset),
+                        self.num,
+                        self.mask,
+                        commit.value,
+                    );
+                }
             }
+            Some(())
         }
-        Some(())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
-#[cfg_attr(feature = "rkyv", rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash)))]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextBitRange {
     word: usize,
@@ -218,11 +216,7 @@ impl ContextBitRange {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackedContext {
     location: Varnode,
@@ -239,11 +233,7 @@ impl TrackedContext {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(transparent)]
 pub struct TrackedSet(Vec<TrackedContext>);
@@ -268,11 +258,7 @@ impl DerefMut for TrackedSet {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FreeArray {
     values: Vec<u32>,
@@ -299,11 +285,7 @@ impl Default for FreeArray {
 pub const CONTEXT_CACHE_BITS: usize = 8;
 pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCacheEntry {
     address: u64,
@@ -337,11 +319,7 @@ impl ContextCacheEntry {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCache {
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
@@ -404,17 +382,13 @@ impl ContextCache {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextDatabase {
     size: usize,
     variables: Map<String, ContextBitRange>,
     database: PartMap<u64, FreeArray>,
-    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
+    #[rkyv(with = rkyv::with::Skip)]
     database_cache: Rc<RefCell<ContextCache>>,
     trackbase: PartMap<u64, TrackedSet>,
     address_limit: u64,

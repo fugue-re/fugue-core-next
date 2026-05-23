@@ -2,18 +2,14 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 
-use fugue_lifter::runtime::language::LanguageParseError;
-#[cfg(feature = "dynamic")]
-use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
-use thiserror::Error;
 
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, Language, LanguageId, LanguageVariant, Lifter,
-    LiftingContext,
+    ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
+    resolve_language,
 };
 use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
@@ -24,46 +20,9 @@ pub mod mips;
 pub mod x86;
 pub mod x86_64;
 
-#[cfg(feature = "dynamic")]
-pub mod dynamic;
-
 pub mod traits;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};
-
-#[derive(Debug, Error)]
-pub enum LanguageError {
-    #[cfg(feature = "dynamic")]
-    #[error(transparent)]
-    Load(#[from] LanguageLoadError),
-    #[error(transparent)]
-    Parse(#[from] LanguageParseError),
-    #[error("unsupported architecture")]
-    Unsupported,
-}
-
-#[cfg(feature = "dynamic")]
-pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, LanguageError> {
-    let id = language.as_ref().parse::<LanguageId>()?;
-    let lang = dynamic::load(id.processor(), id.is_little_endian(), id.bits(), id.variant())?;
-    Ok(LanguageVariant::new(lang.variant(), lang))
-}
-
-#[cfg(not(feature = "dynamic"))]
-pub fn parse_language(language: impl AsRef<str>) -> Result<LanguageVariant, LanguageError> {
-    let id = language.as_ref().parse::<LanguageId>()?;
-    let is_le = id.is_little_endian();
-    let variant = id.variant();
-    match (id.processor(), id.bits()) {
-        ("ARM", 32) => arm::parse_language(is_le, variant),
-        ("AARCH64", 64) => aarch64::parse_language(is_le, variant),
-        ("MIPS", 32) => mips::parse_language(is_le, variant),
-        ("x86", 32) => x86::parse_language(variant),
-        ("x86", 64) => x86_64::parse_language(variant),
-        _ => None,
-    }
-    .ok_or(LanguageError::Unsupported)
-}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -165,7 +124,7 @@ where
     fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
         let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
         Ok(Arch::new(
-            parse_language(variant_str).expect("invalid language variant"),
+            resolve_language(&variant_str).expect("invalid language variant"),
         ))
     }
 }

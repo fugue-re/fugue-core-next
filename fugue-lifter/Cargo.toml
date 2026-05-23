@@ -1,10 +1,9 @@
 [package]
 name = "fugue-lifter"
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
 
 [features]
-# Features for different architectures
 arm-be = ["fugue-lifter-arm/arm-be"]
 arm-le = ["fugue-lifter-arm/arm-le"]
 arm = ["arm-be", "arm-le"]
@@ -17,7 +16,6 @@ mips = ["mips-be", "mips-le"]
 x86 = ["fugue-lifter-x86/x86"]
 x86-64 = ["fugue-lifter-x86/x86-64"]
 
-# Features for lifter compilation
 bundled = [
   "fugue-lifter-arm?/bundled",
   "fugue-lifter-aarch64?/bundled",
@@ -31,10 +29,7 @@ compiled = [
   "fugue-lifter-x86?/compiled"
 ]
 
-# Features for serialisation
-rkyv = ["fugue-lifter-runtime/rkyv"]
 serde = ["fugue-lifter-runtime/serde"]
-dynamic = ["fugue-lifter-runtime/dynamic"]
 
 default = ["arm", "aarch64", "bundled", "mips", "x86", "x86-64"]
 

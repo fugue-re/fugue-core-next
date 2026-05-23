@@ -13,10 +13,10 @@ use thiserror::Error;
 
 use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
-use crate::arch::{Arch, LanguageError};
+use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
-use crate::lifter::ContextHint;
+use crate::lifter::{ContextHint, LanguageError};
 use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::{AttributeMap, BytesOrMapping};

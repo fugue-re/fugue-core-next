@@ -2,14 +2,20 @@ use std::fmt::Display;
 
 use arrayvec::ArrayVec;
 pub use fugue_lifter::runtime::operand;
+use fugue_lifter::runtime::dynamic::LanguageLoadError;
+use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
 use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
+use thiserror::Error;
 
+use crate::arch;
 use crate::ir::Address;
 
 pub mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
+
+pub mod dynamic;
 
 pub mod lifter;
 pub use lifter::{Lifter, LifterError};
@@ -17,6 +23,30 @@ pub use lifter::{Lifter, LifterError};
 pub mod traits;
 
 pub const MAX_CONTEXT_UPDATES: usize = 2;
+
+#[derive(Debug, Error)]
+pub enum LanguageError {
+    #[error(transparent)]
+    Load(#[from] LanguageLoadError),
+    #[error(transparent)]
+    Parse(#[from] LanguageParseError),
+    #[error("unsupported architecture")]
+    Unsupported,
+}
+
+pub fn resolve_language(s: impl AsRef<str>) -> Result<LanguageVariant, LanguageError> {
+    let id = s.as_ref().parse::<LanguageId>()?;
+    let is_le = id.is_little_endian();
+    let variant = id.variant();
+    match (id.processor(), id.bits()) {
+        ("ARM", 32) => arch::arm::Arm::resolve_variant(is_le, variant),
+        ("AARCH64", 64) => arch::aarch64::AArch64::resolve_variant(is_le, variant),
+        ("MIPS", 32) => arch::mips::Mips::resolve_variant(is_le, variant),
+        ("x86", 32) => arch::x86::X86::resolve_variant(variant),
+        ("x86", 64) => arch::x86_64::X86_64::resolve_variant(variant),
+        _ => Err(LanguageError::Unsupported),
+    }
+}
 
 #[derive(
     Debug,

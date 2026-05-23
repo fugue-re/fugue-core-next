@@ -18,13 +18,13 @@ mod template;
 
 pub(crate) mod registry;
 
-pub use language::{BuildError, Language};
+pub use language::{Language, LanguageBuildError};
 
 #[derive(Debug, Error)]
 pub enum LanguageLoadError {
-    #[error("sleigh build failed: {0}")]
-    Build(#[from] BuildError),
-    #[error("blob deserialise failed: {0}")]
+    #[error("language build failed: {0}")]
+    Build(#[from] LanguageBuildError),
+    #[error("language deserialise failed: {0}")]
     Deserialise(RkyvError),
     #[error("cannot {action} blob at `{path}`: {source}")]
     Io {
@@ -33,7 +33,7 @@ pub enum LanguageLoadError {
         #[source]
         source: io::Error,
     },
-    #[error("malformed language id `{0}`: {1}")]
+    #[error("invalid language identifier `{0}`: {1}")]
     LanguageId(String, LanguageParseError),
 }
 

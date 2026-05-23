@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use fugue_lifter::runtime::Language;
 
-use crate::arch::LanguageError;
+use crate::lifter::LanguageError;
 
 const ENV_VAR: &str = "FUGUE_LIFTERS_DIR";
 const HOME_SUBDIR: &str = ".fugue/lifters";
