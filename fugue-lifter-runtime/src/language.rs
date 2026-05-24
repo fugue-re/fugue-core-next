@@ -17,80 +17,6 @@ use crate::symbol::Symbol;
 use crate::template::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 use crate::{LiftingContextState, calculate_mask, entry, wrap_offset};
 
-#[derive(Clone, Copy)]
-pub struct LanguageVariant {
-    language: &'static Language,
-    variant: &'static str,
-}
-
-impl PartialEq for LanguageVariant {
-    fn eq(&self, other: &Self) -> bool {
-        self.language == other.language && self.variant == other.variant
-    }
-}
-
-impl Eq for LanguageVariant {}
-
-impl PartialOrd for LanguageVariant {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for LanguageVariant {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.language
-            .cmp(other.language)
-            .then_with(|| self.variant.cmp(other.variant))
-    }
-}
-
-impl Hash for LanguageVariant {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.language.hash(state);
-        self.variant.hash(state);
-    }
-}
-
-impl LanguageVariant {
-    pub const fn new(variant: &'static str, language: &'static Language) -> Self {
-        Self { language, variant }
-    }
-
-    pub fn language(&self) -> &'static Language {
-        self.language
-    }
-
-    pub fn variant(&self) -> &'static str {
-        self.variant
-    }
-}
-
-impl Debug for LanguageVariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LanguageVariant")
-            .field("variant", &self.variant)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Display for LanguageVariant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}:{}",
-            self.language.processor(),
-            if self.language.is_big_endian() {
-                "BE"
-            } else {
-                "LE"
-            },
-            self.language.address_bits(),
-            self.variant
-        )
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LanguageId {
     processor: String,
@@ -100,6 +26,24 @@ pub struct LanguageId {
 }
 
 impl LanguageId {
+    pub fn new(processor: impl Into<String>, is_big: bool, bits: u32) -> Self {
+        Self::new_with(processor, is_big, bits, None::<String>)
+    }
+
+    pub fn new_with(
+        processor: impl Into<String>,
+        is_big: bool,
+        bits: u32,
+        variant: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            processor: processor.into(),
+            is_big,
+            bits,
+            variant: variant.map(Into::into),
+        }
+    }
+
     pub fn processor(&self) -> &str {
         &self.processor
     }
@@ -663,6 +607,14 @@ impl Language {
         id: impl AsRef<str>,
     ) -> Result<&'static Language, LanguageLoadError> {
         DynamicLanguage::build(specs, id)?.get_or_install()
+    }
+
+    pub fn from_sleigh_with_sla(
+        specs: impl AsRef<Path>,
+        id: impl AsRef<str>,
+        sla: impl AsRef<Path>,
+    ) -> Result<&'static Language, LanguageLoadError> {
+        DynamicLanguage::build_with_sla(specs, id, sla)?.get_or_install()
     }
 
     pub fn lookup(id: &LanguageId) -> Option<&'static Language> {

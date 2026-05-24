@@ -66,13 +66,15 @@ pub enum FunctionRecoveryError {
 impl FunctionRecoveryError {
     pub fn block_creation<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         FunctionRecoveryError::BlockCreation(err.into())
     }
 
     pub fn function_creation<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
 

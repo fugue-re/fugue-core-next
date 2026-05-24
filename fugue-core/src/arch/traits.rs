@@ -5,9 +5,7 @@ use clone_dyn::clone_dyn;
 
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
-use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
-};
+use crate::lifter::{ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext};
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,10 +94,10 @@ pub trait Arch: Send + Sync + 'static {
     fn lifter(&self) -> Lifter;
 
     fn endian(&self) -> Endian {
-        if self.language().is_little_endian() {
-            Endian::Little
-        } else {
+        if self.language().is_big_endian() {
             Endian::Big
+        } else {
+            Endian::Little
         }
     }
 
@@ -165,9 +163,5 @@ pub trait Arch: Send + Sync + 'static {
         None
     }
 
-    fn language(&self) -> &'static Language {
-        self.language_variant().language()
-    }
-
-    fn language_variant(&self) -> LanguageVariant;
+    fn language(&self) -> &'static Language;
 }

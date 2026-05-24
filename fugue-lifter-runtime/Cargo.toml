@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde-big-array"]
 
 [dependencies]
 arrayvec = "0.7"
@@ -15,6 +15,7 @@ indexmap = "2"
 itertools = "0.14"
 rkyv = { version = "0.8", features = ["arrayvec-0_7"] }
 serde = { version = "1", features = ["derive"], optional = true }
+serde-big-array = { version = "0.5", optional = true }
 thiserror = "2"
 
 [lints]

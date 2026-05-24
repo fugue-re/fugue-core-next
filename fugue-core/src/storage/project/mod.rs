@@ -25,7 +25,8 @@ pub trait PersistableProjectEntity {
 }
 
 pub trait FundamentalProjectEntity:
-    ProjectEntityFromStorage + PersistableProjectEntity + 'static {
+    ProjectEntityFromStorage + PersistableProjectEntity + 'static
+{
 }
 
 impl<T> FundamentalProjectEntity for T where
@@ -116,7 +117,8 @@ impl ProjectStorageProvider for DefaultTransientProjectStorageProvider {
 pub struct DefaultPersistentProjectStorageProvider<E, S>
 where
     E: EntityStorageProviderFromStorage,
-    S: SegmentStorageProviderFromStorage, {
+    S: SegmentStorageProviderFromStorage,
+{
     _marker: PhantomData<(E, S)>,
 }
 

@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{Language, LanguageVariant, Lifter};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
@@ -25,11 +25,11 @@ impl LifterFactory {
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant = V8;
-    pub const DEFAULT_THUMB: LanguageVariant = V8T;
+    pub const DEFAULT: &Language = V8;
+    pub const DEFAULT_THUMB: &Language = V8T;
 
-    pub const V8: LanguageVariant = LanguageVariant::new("v8", &__impl::LANGUAGE_V8);
-    pub const V8T: LanguageVariant = LanguageVariant::new("v8T", &__impl::LANGUAGE_V8T);
+    pub const V8: &Language = &__impl::LANGUAGE_V8;
+    pub const V8T: &Language = &__impl::LANGUAGE_V8T;
 }
 
 #[cfg(test)]
@@ -45,7 +45,7 @@ mod test {
     #[test]
     fn variant_language_matches_factory() {
         let v = variants::V8;
-        assert!(std::ptr::eq(v.language(), &__impl::LANGUAGE_V8));
+        assert!(std::ptr::eq(v, &__impl::LANGUAGE_V8));
         assert_eq!(v.variant(), "v8");
     }
 }

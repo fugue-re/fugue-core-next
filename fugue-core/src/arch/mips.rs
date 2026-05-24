@@ -5,7 +5,7 @@ use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::ExternFunctionTemplate;
-use crate::lifter::{Disassembler, Language, LanguageError, LanguageVariant, Lifter};
+use crate::lifter::{Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter};
 
 #[derive(Clone)]
 struct ArchData {
@@ -31,7 +31,7 @@ impl ArchData {
 
 #[derive(Clone)]
 pub struct Mips {
-    language: LanguageVariant,
+    language: &'static Language,
     data: ArchData,
 }
 
@@ -41,7 +41,7 @@ impl ArchT for Mips {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language())
+        Lifter::new(self.language)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -56,39 +56,60 @@ impl ArchT for Mips {
         &self.data.gprs
     }
 
-    fn language_variant(&self) -> LanguageVariant {
+    fn language(&self) -> &'static Language {
         self.language
     }
 }
 
 impl Mips {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(language: LanguageVariant) -> Arch {
-        let data = ArchData::new(language.language());
+    pub(crate) fn new(language: &'static Language) -> Arch {
+        let data = ArchData::new(language);
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
-        Self::resolve_variant(is_le, None)
+    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(is_be, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_le: bool,
+        is_be: bool,
         variant: impl Into<Option<&'a str>>,
-    ) -> Result<LanguageVariant, LanguageError> {
+    ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => {
-                return Ok(if is_le {
-                    le::variants::DEFAULT
-                } else {
+                return Ok(if is_be {
                     be::variants::DEFAULT
+                } else {
+                    le::variants::DEFAULT
                 });
             }
             _ => {}
         }
-        let lang = crate::lifter::dynamic::load("MIPS", is_le, 32, variant)?;
-        Ok(LanguageVariant::new(lang.variant(), lang))
+        let loader = LanguageLoader::from_env()?;
+        Self::resolve_variant_with(&loader, is_be, variant)
+    }
+
+    pub fn resolve_variant_with<'a>(
+        loader: &LanguageLoader,
+        is_be: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("default") => {
+                return Ok(if is_be {
+                    be::variants::DEFAULT
+                } else {
+                    le::variants::DEFAULT
+                });
+            }
+            _ => {}
+        }
+        let lid = LanguageId::new_with("MIPS", is_be, 32, variant);
+        Ok(loader.load(&lid)?)
     }
 }

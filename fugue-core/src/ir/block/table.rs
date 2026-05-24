@@ -42,13 +42,15 @@ pub enum IndexedCodeBlockTableError {
 impl IndexedCodeBlockTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         Self::Other(anyhow::Error::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static, {
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
         Self::Other(anyhow::Error::msg(msg))
     }
 }
@@ -62,7 +64,8 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
 
     fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
     where
-        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>, {
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
+    {
         let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
             (true, free_id)
         } else {

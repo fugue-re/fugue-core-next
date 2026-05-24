@@ -80,7 +80,8 @@ impl EntityStorageProvider for InMemoryEntityStorage {
 
     fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
         let (prefix, key) =
             Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
@@ -173,7 +174,8 @@ impl EntityStorageProvider for InMemoryEntityStorage {
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-        T: 'a, {
+        T: 'a,
+    {
         if prefix.len() != ENTITY_PREFIX_SIZE {
             return Err(EntityStorageError::InvalidKeySize);
         }

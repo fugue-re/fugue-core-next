@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use flate2::write::GzEncoder;
 use fugue_lifter_codegen::CodegenError;
-use fugue_lifter_runtime::dynamic::BuildError as RuntimeBuildError;
+use fugue_lifter_runtime::dynamic::LanguageBuildError as DynamicBuildError;
 use fugue_sleighc::SleighCompilerError;
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
@@ -15,7 +15,7 @@ use crate::Packager;
 #[derive(Debug, Error)]
 pub enum BuildError {
     #[error("cannot build dynamic language: {0}")]
-    Dynamic(#[from] RuntimeBuildError),
+    Dynamic(#[from] DynamicBuildError),
     #[error("{kind} `{path}` cannot be read")]
     InvalidPath { kind: &'static str, path: PathBuf },
     #[error("cannot {action} `{path}`")]

@@ -13,11 +13,7 @@ pub(crate) fn get_or_install<F>(id: LanguageId, install: F) -> &'static Language
 where
     F: FnOnce() -> &'static Language,
 {
-    if let Some(existing) = registry()
-        .read()
-        .expect("registry lock poisoned")
-        .get(&id)
-    {
+    if let Some(existing) = registry().read().expect("registry lock poisoned").get(&id) {
         return existing;
     }
     let language = install();

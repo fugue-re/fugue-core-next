@@ -309,7 +309,8 @@ impl EntityStorageProviderFromStorage for SqliteEntityStorage<PERSISTENT> {
         _attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         let project_path = path.as_ref();
         let db_path = project_path.join(PROJECT_SQLITE_DATA);
 
@@ -330,7 +331,8 @@ impl EntityStorageProviderFromStorage for SqliteEntityStorage<TRANSIENT> {
         _attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Err(EntityStorageError::unsupported_with(
             "transient sqlite entity storage cannot be loaded from existing storage",
         ))
@@ -359,7 +361,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
 
     fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
         let (prefix, key_rest) =
             extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
@@ -465,7 +468,8 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-        T: 'a, {
+        T: 'a,
+    {
         if prefix.len() != ENTITY_PREFIX_SIZE {
             return Err(EntityStorageError::InvalidKeySize);
         }
@@ -645,7 +649,8 @@ impl<'a, T: 'a> SqliteEntityBytesAsIterator<'a, T> {
         f: F,
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a, {
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+    {
         let conn = pool.get().map_err(EntityStorageError::backing)?;
         let query = build_select_all_query(&prefix);
 

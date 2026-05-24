@@ -57,12 +57,7 @@ fn run(matches: &ArgMatches) -> Result<(), Box<dyn Error>> {
         #[cfg(feature = "build")]
         Some(("build-static", sub)) => {
             let args = BuildStaticArgs::from_matches(sub);
-            packager.build_static(
-                args.language_db,
-                args.language,
-                args.output,
-                &args.variants,
-            )?
+            packager.build_static(args.language_db, args.language, args.output, &args.variants)?
         }
         _ => unreachable!("clap rejects unknown or empty invocations"),
     }

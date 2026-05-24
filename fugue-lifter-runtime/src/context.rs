@@ -322,6 +322,7 @@ impl ContextCacheEntry {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCache {
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
     shift: u32,
 }

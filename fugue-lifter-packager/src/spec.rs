@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use fugue_lifter_runtime::dynamic::{BuildError as RuntimeBuildError, Language as DynamicLanguage};
+use fugue_lifter_runtime::dynamic::{
+    Language as DynamicLanguage, LanguageBuildError as DynamicBuildError,
+};
 use fugue_sleighc::SleighCompiler;
 
 use crate::build::BuildError;
@@ -24,9 +26,9 @@ impl<'a> LanguageSpec<'a> {
     pub(crate) fn build_dynamic(&self) -> Result<DynamicLanguage, BuildError> {
         match DynamicLanguage::build(self.path, self.language) {
             Ok(language) => Ok(language),
-            Err(RuntimeBuildError::SleighSlaMissing { path, .. }) => {
+            Err(DynamicBuildError::SleighSlaMissing { path, .. }) => {
                 let scratch = tempfile::tempdir()
-                    .map_err(|source| BuildError::io("create scratch dir", &path, source))?;
+                    .map_err(|source| BuildError::io("create scratch directory", &path, source))?;
                 let scratch_sla = scratch.path().join(
                     path.file_name()
                         .expect("missing sla path has a file name component"),

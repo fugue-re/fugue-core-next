@@ -19,7 +19,7 @@ bitflags! {
         const PERM_ALL      = Self::PERM_READ.bits() | Self::PERM_WRITE.bits() | Self::PERM_EXECUTE.bits();
 
         const UNINITIALISED = 0b0001_0000;
-        const LITTLE_ENDIAN = 0b0010_0000;
+        const BIG_ENDIAN    = 0b0010_0000;
 
         const EXTERNAL      = 0b0100_0000;
     }
@@ -84,8 +84,8 @@ impl SegmentProperties {
         self.contains(Self::UNINITIALISED)
     }
 
-    pub fn is_little_endian(&self) -> bool {
-        self.contains(Self::LITTLE_ENDIAN)
+    pub fn is_big_endian(&self) -> bool {
+        self.contains(Self::BIG_ENDIAN)
     }
 
     pub fn is_external(&self) -> bool {

@@ -9,7 +9,7 @@ use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageError, LanguageVariant, Lifter,
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
     LiftingContext,
 };
 
@@ -37,7 +37,7 @@ impl ArchData {
 
 #[derive(Clone)]
 pub struct AArch64 {
-    language: LanguageVariant,
+    language: &'static Language,
     data: ArchData,
 }
 
@@ -47,7 +47,7 @@ impl ArchT for AArch64 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language())
+        Lifter::new(self.language)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -62,36 +62,61 @@ impl ArchT for AArch64 {
         &self.data.gprs
     }
 
-    fn language_variant(&self) -> LanguageVariant {
+    fn language(&self) -> &'static Language {
         self.language
     }
 }
 
 impl AArch64 {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(language: LanguageVariant) -> Arch {
-        let data = ArchData::new(language.language());
+    pub(crate) fn new(language: &'static Language) -> Arch {
+        let data = ArchData::new(language);
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
-        Self::resolve_variant(is_le, None)
+    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(is_be, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_le: bool,
+        is_be: bool,
         variant: impl Into<Option<&'a str>>,
-    ) -> Result<LanguageVariant, LanguageError> {
+    ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8A") => {
-                return Ok(if is_le { le::variants::V8A } else { be::variants::V8A });
+                return Ok(if is_be {
+                    be::variants::V8A
+                } else {
+                    le::variants::V8A
+                });
             }
             _ => {}
         }
-        let lang = crate::lifter::dynamic::load("AARCH64", is_le, 64, variant)?;
-        Ok(LanguageVariant::new(lang.variant(), lang))
+        let loader = LanguageLoader::from_env()?;
+        Self::resolve_variant_with(&loader, is_be, variant)
+    }
+
+    pub fn resolve_variant_with<'a>(
+        loader: &LanguageLoader,
+        is_be: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("v8A") => {
+                return Ok(if is_be {
+                    be::variants::V8A
+                } else {
+                    le::variants::V8A
+                });
+            }
+            _ => {}
+        }
+        let lid = LanguageId::new_with("AARCH64", is_be, 64, variant);
+        Ok(loader.load(&lid)?)
     }
 }
 

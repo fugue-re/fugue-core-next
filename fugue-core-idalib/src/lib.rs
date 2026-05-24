@@ -14,7 +14,7 @@ use fugue_core::ir::{
     Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, RawAddress,
     SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
-use fugue_core::lifter::{ContextBitRange, ContextSet, LanguageVariant};
+use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
     Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
@@ -127,23 +127,23 @@ fn ida_symbols(
     Ok((symbols, externs.map(|(symbols, _)| symbols)))
 }
 
-fn ida_language(database: &IDB) -> Result<LanguageVariant, LoaderError> {
+fn ida_language(database: &IDB) -> Result<&'static Language, LoaderError> {
     let processor = database.processor();
     let is_32 = database.meta().is_32bit_exactly();
     let is_64 = database.meta().is_64bit();
-    let is_le = !database.meta().is_be();
+    let is_be = database.meta().is_be();
 
     if processor.family().is_arm() && is_64 {
-        return Ok(AArch64::resolve_default_variant(is_le)?);
+        return Ok(AArch64::resolve_default_variant(is_be)?);
     }
 
     if processor.family().is_arm() && is_32 {
         let is_thumb =
             matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
         return Ok(if is_thumb {
-            Arm::resolve_variant(is_le, "v8T")?
+            Arm::resolve_variant(is_be, "v8T")?
         } else {
-            Arm::resolve_default_variant(is_le)?
+            Arm::resolve_default_variant(is_be)?
         });
     }
 

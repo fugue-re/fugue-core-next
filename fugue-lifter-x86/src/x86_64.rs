@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{LanguageVariant, Lifter};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
@@ -22,10 +22,8 @@ impl LifterFactory {
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", &__impl::LANGUAGE_DEFAULT);
-    pub const COMPAT32: LanguageVariant =
-        LanguageVariant::new("compat32", &__impl::LANGUAGE_COMPAT32);
+    pub const DEFAULT: &Language = &__impl::LANGUAGE_DEFAULT;
+    pub const COMPAT32: &Language = &__impl::LANGUAGE_COMPAT32;
 }
 
 #[cfg(test)]
@@ -35,6 +33,9 @@ mod test {
     #[test]
     fn variant_tag_matches_factory() {
         assert_eq!(LifterFactory::new_default().language().variant(), "default");
-        assert_eq!(LifterFactory::new_compat32().language().variant(), "compat32");
+        assert_eq!(
+            LifterFactory::new_compat32().language().variant(),
+            "compat32"
+        );
     }
 }

@@ -1,10 +1,10 @@
-use fugue_lifter_runtime::{Language, LanguageVariant, Lifter};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
     include!(concat!(env!("OUT_DIR"), "/mips_be.rs"));
 }
-pub use __impl::{context, register, space, user_op, LANGUAGE};
+pub use __impl::{LANGUAGE, context, register, space, user_op};
 
 pub struct LifterFactory;
 
@@ -21,5 +21,5 @@ impl LifterFactory {
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant = LanguageVariant::new("default", &__impl::LANGUAGE);
+    pub const DEFAULT: &Language = &__impl::LANGUAGE;
 }

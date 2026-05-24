@@ -235,7 +235,7 @@ impl FromStr for Lifter {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         resolve_language(s)
-            .map(|v| Lifter::new(v.language()))
+            .map(Lifter::new)
             .map_err(|_| LifterBuilderError::Unsupported)
     }
 }
@@ -271,12 +271,16 @@ mod test {
         #[cfg(not(feature = "static-lifters"))]
         {
             use std::path::PathBuf;
+
+            use fugue_sleigh_language::LanguageDB;
+
+            use crate::lifter::LanguageLoader;
+
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
                 .join("x86_LE_64_default.flift");
-            crate::lifter::dynamic::load_from(path)
-                .map(Lifter::new)
-                .unwrap()
+            let loader = LanguageLoader::from(LanguageDB::default());
+            loader.load_from(path).map(Lifter::new).unwrap()
         }
     }
 

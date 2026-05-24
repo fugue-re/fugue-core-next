@@ -1,10 +1,12 @@
 use std::fmt::Display;
+use std::path::PathBuf;
 
 use arrayvec::ArrayVec;
-pub use fugue_lifter::runtime::operand;
 use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
-pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LanguageVariant, LiftingContext};
+pub use fugue_lifter::runtime::operand;
+pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LiftingContext};
+use fugue_sleigh_language::LanguageError as SleighLanguageError;
 use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 use thiserror::Error;
@@ -16,6 +18,7 @@ pub mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
 pub mod dynamic;
+pub use dynamic::LanguageLoader;
 
 pub mod lifter;
 pub use lifter::{Lifter, LifterError};
@@ -26,24 +29,51 @@ pub const MAX_CONTEXT_UPDATES: usize = 2;
 
 #[derive(Debug, Error)]
 pub enum LanguageError {
+    #[error("ambiguous `.sla` `{}`: multiple variants match and none is `default`", path.display())]
+    AmbiguousSla { path: PathBuf },
+    #[error(transparent)]
+    Database(#[from] SleighLanguageError),
+    #[error("environment variable `{0}` is not set")]
+    Environment(&'static str),
     #[error(transparent)]
     Load(#[from] LanguageLoadError),
     #[error(transparent)]
     Parse(#[from] LanguageParseError),
+    #[error("unsupported file extension for `{}`", path.display())]
+    UnsupportedExtension { path: PathBuf },
     #[error("unsupported architecture")]
     Unsupported,
 }
 
-pub fn resolve_language(s: impl AsRef<str>) -> Result<LanguageVariant, LanguageError> {
+impl LanguageError {
+    pub fn ambiguous_sla(path: impl Into<PathBuf>) -> Self {
+        Self::AmbiguousSla { path: path.into() }
+    }
+
+    pub fn unsupported_extension(path: impl Into<PathBuf>) -> Self {
+        Self::UnsupportedExtension { path: path.into() }
+    }
+}
+
+pub fn resolve_language(s: impl AsRef<str>) -> Result<&'static Language, LanguageError> {
+    let lid = s.as_ref().parse::<LanguageId>()?;
+    let loader = LanguageLoader::from_env()?;
+    Ok(loader.load(&lid)?)
+}
+
+pub fn resolve_language_with(
+    loader: &LanguageLoader,
+    s: impl AsRef<str>,
+) -> Result<&'static Language, LanguageError> {
     let id = s.as_ref().parse::<LanguageId>()?;
-    let is_le = id.is_little_endian();
+    let is_be = id.is_big_endian();
     let variant = id.variant();
     match (id.processor(), id.bits()) {
-        ("ARM", 32) => arch::arm::Arm::resolve_variant(is_le, variant),
-        ("AARCH64", 64) => arch::aarch64::AArch64::resolve_variant(is_le, variant),
-        ("MIPS", 32) => arch::mips::Mips::resolve_variant(is_le, variant),
-        ("x86", 32) => arch::x86::X86::resolve_variant(variant),
-        ("x86", 64) => arch::x86_64::X86_64::resolve_variant(variant),
+        ("ARM", 32) => arch::arm::Arm::resolve_variant_with(loader, is_be, variant),
+        ("AARCH64", 64) => arch::aarch64::AArch64::resolve_variant_with(loader, is_be, variant),
+        ("MIPS", 32) => arch::mips::Mips::resolve_variant_with(loader, is_be, variant),
+        ("x86", 32) => arch::x86::X86::resolve_variant_with(loader, variant),
+        ("x86", 64) => arch::x86_64::X86_64::resolve_variant_with(loader, variant),
         _ => Err(LanguageError::Unsupported),
     }
 }

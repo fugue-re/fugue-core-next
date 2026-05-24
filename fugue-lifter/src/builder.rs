@@ -191,10 +191,12 @@ mod test {
         let _ = "x86:LE:32:default".parse::<LifterBuilder>()?.build()?;
 
         assert!("x86:LE".parse::<LifterBuilder>().is_err());
-        assert!("x86:BE:32:default"
-            .parse::<LifterBuilder>()?
-            .build()
-            .is_err());
+        assert!(
+            "x86:BE:32:default"
+                .parse::<LifterBuilder>()?
+                .build()
+                .is_err()
+        );
 
         let _ = "x86:LE:64:default".parse::<LifterBuilder>()?.build()?;
 

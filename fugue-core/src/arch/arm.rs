@@ -11,8 +11,8 @@ use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbo
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError,
-    LanguageVariant, Lifter, LiftingContext,
+    ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
+    LanguageLoader, Lifter, LiftingContext,
 };
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
@@ -47,7 +47,7 @@ impl ArchData {
 
 #[derive(Clone)]
 pub struct Arm {
-    language: LanguageVariant,
+    language: &'static Language,
     is_thumb: bool,
     data: ArchData,
 }
@@ -58,7 +58,7 @@ impl ArchT for Arm {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language())
+        Lifter::new(self.language)
     }
 
     fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
@@ -77,10 +77,7 @@ impl ArchT for Arm {
             || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1;
         let alignment = if t_mode { 2 } else { 4 };
         let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((
-            naddr,
-            ContextSet::single(self.data.t_mode, t_mode as u32),
-        ))
+        (naddr == addr).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode as u32)))
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -105,15 +102,11 @@ impl ArchT for Arm {
 
     fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
         if symbol == &*MAPPING_SYMBOL_ARM {
-            return Some(
-                ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 0)),
-            );
+            return Some(ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 0)));
         }
 
         if symbol == &*MAPPING_SYMBOL_THUMB {
-            return Some(
-                ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 1)),
-            );
+            return Some(ContextHint::code().with_context(ContextSet::single(self.data.t_mode, 1)));
         }
 
         if symbol == &*MAPPING_SYMBOL_DATA {
@@ -123,16 +116,16 @@ impl ArchT for Arm {
         None
     }
 
-    fn language_variant(&self) -> LanguageVariant {
+    fn language(&self) -> &'static Language {
         self.language
     }
 }
 
 impl Arm {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(language: LanguageVariant) -> Arch {
+    pub(crate) fn new(language: &'static Language) -> Arch {
         let is_thumb = language.variant().ends_with("T");
-        let data = ArchData::new(language.language());
+        let data = ArchData::new(language);
         Arch::from(Box::new(Self {
             language,
             is_thumb,
@@ -140,27 +133,63 @@ impl Arm {
         }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_le: bool) -> Result<LanguageVariant, LanguageError> {
-        Self::resolve_variant(is_le, None)
+    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(is_be, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_le: bool,
+        is_be: bool,
         variant: impl Into<Option<&'a str>>,
-    ) -> Result<LanguageVariant, LanguageError> {
+    ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8") => {
-                return Ok(if is_le { le::variants::V8 } else { be::variants::V8 });
+                return Ok(if is_be {
+                    be::variants::V8
+                } else {
+                    le::variants::V8
+                });
             }
             Some("v8T") => {
-                return Ok(if is_le { le::variants::V8T } else { be::variants::V8T });
+                return Ok(if is_be {
+                    be::variants::V8T
+                } else {
+                    le::variants::V8T
+                });
             }
             _ => {}
         }
-        let lang = crate::lifter::dynamic::load("ARM", is_le, 32, variant)?;
-        Ok(LanguageVariant::new(lang.variant(), lang))
+        let loader = LanguageLoader::from_env()?;
+        Self::resolve_variant_with(&loader, is_be, variant)
+    }
+
+    pub fn resolve_variant_with<'a>(
+        loader: &LanguageLoader,
+        is_be: bool,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("v8") => {
+                return Ok(if is_be {
+                    be::variants::V8
+                } else {
+                    le::variants::V8
+                });
+            }
+            Some("v8T") => {
+                return Ok(if is_be {
+                    be::variants::V8T
+                } else {
+                    le::variants::V8T
+                });
+            }
+            _ => {}
+        }
+        let lid = LanguageId::new_with("ARM", is_be, 32, variant);
+        Ok(loader.load(&lid)?)
     }
 }
 

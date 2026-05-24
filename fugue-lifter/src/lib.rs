@@ -14,7 +14,7 @@ pub use builder::{LifterBuilder, LifterBuilderError};
 pub use fugue_lifter_runtime as runtime;
 pub use fugue_lifter_runtime::dynamic::{self, LanguageLoadError};
 pub use runtime::context::ContextBitRange;
-pub use runtime::language::{Language, LanguageId, LanguageVariant};
+pub use runtime::language::{Language, LanguageId};
 pub use runtime::lifter::Lifter;
 pub use runtime::pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,

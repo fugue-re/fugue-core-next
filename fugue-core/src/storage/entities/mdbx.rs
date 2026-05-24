@@ -130,7 +130,8 @@ impl EntityStorageProviderFromStorage for MdbxEntityStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, EntityStorageError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         let project_path = path.as_ref();
         let db_path = project_path.join(PROJECT_MDBX_DATA);
 
@@ -168,7 +169,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
 
     fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
         let txn = self.database.begin_ro_txn()?;
         let tbl = txn.open_table(None)?;
         let val = txn.get::<Cow<[u8]>>(&tbl, key)?;
@@ -216,7 +218,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-        T: 'a, {
+        T: 'a,
+    {
         MdbxEntityBytesAsIterator::new(self, prefix, f)
     }
 
@@ -364,7 +367,8 @@ where
         f: F,
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a, {
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+    {
         let txn = database.database.begin_ro_txn()?;
 
         let inner =

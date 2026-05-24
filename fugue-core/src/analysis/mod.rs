@@ -36,13 +36,15 @@ impl AnalysisError {
 
     pub fn pass_failed<E>(name: impl Into<String>, error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         AnalysisError::PassFailed(name.into(), error.into())
     }
 
     pub fn pass_configuration_failed<E>(name: impl Into<String>, error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         AnalysisError::PassConfigurationFailed(name.into(), error.into())
     }
 }
@@ -53,7 +55,8 @@ pub type BoxedAnalysisPass<P = InMemoryProvider, S = NoState> =
 
 pub struct AnalysisManager<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     passes: IndexMap<String, Box<dyn AnalysisPass<P, S> + 'static>>,
 }
 
@@ -84,7 +87,8 @@ where
 
     pub fn get_pass<T>(&self, name: impl Borrow<str>) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.get_boxed_pass(name)
             .and_then(|pass| pass.as_ref().downcast_ref::<T>())
     }
@@ -95,7 +99,8 @@ where
 
     pub fn get_pass_mut<T>(&mut self, name: impl Borrow<str>) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.get_boxed_pass_mut(name)
             .and_then(|pass| pass.as_mut().downcast_mut::<T>())
     }
@@ -179,7 +184,8 @@ impl AnalysisManager {
 
 pub trait AnalysisPass<P = InMemoryProvider, S = NoState>: Downcast
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     fn analyse(&mut self, #[allow(unused)] project: &mut Project<P>) -> Result<(), AnalysisError> {
         unimplemented!(
             "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
@@ -222,7 +228,8 @@ where
 
 pub trait AnalysisCondition<P, S>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     fn evaluate(&mut self, state: &mut S) -> bool;
 }
 
@@ -252,7 +259,8 @@ where
 
 pub struct AnalysisGroup<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     passes: IndexMap<String, Box<dyn AnalysisPass<P, S> + 'static>>,
 }
 
@@ -312,7 +320,8 @@ where
 
     pub fn get_pass<T>(&self, name: impl Borrow<str>) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.get_boxed_pass(name)
             .and_then(|pass| pass.as_ref().downcast_ref::<T>())
     }
@@ -326,7 +335,8 @@ where
 
     pub fn get_pass_mut<T>(&mut self, name: impl Borrow<str>) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.get_boxed_pass_mut(name)
             .and_then(|pass| pass.as_mut().downcast_mut::<T>())
     }
@@ -416,7 +426,8 @@ where
 
 pub struct IteratedAnalysis<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     pass: Box<dyn AnalysisPass<P, S> + 'static>,
     condition: Box<dyn AnalysisCondition<P, S> + 'static>,
 }
@@ -446,13 +457,15 @@ where
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
@@ -492,7 +505,8 @@ where
 
 pub struct ConditionalAnalysis<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     pass: Box<dyn AnalysisPass<P, S> + 'static>,
     condition: Box<dyn AnalysisCondition<P, S> + 'static>,
 }
@@ -522,13 +536,15 @@ where
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
@@ -568,7 +584,8 @@ where
 
 pub struct StatefulAnalysis<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     pass: Box<dyn AnalysisPass<P, S> + 'static>,
     state: S,
 }
@@ -595,13 +612,15 @@ where
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
@@ -629,7 +648,8 @@ where
 
 pub struct OneShotAnalysis<P = InMemoryProvider, S = NoState>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     pass: Box<dyn AnalysisPass<P, S> + 'static>,
     executed: bool,
 }
@@ -656,13 +676,15 @@ where
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>, {
+        T: AnalysisPass<P, S>,
+    {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
@@ -700,31 +722,36 @@ where
 pub trait AnalysisPassExt<P, S>
 where
     P: ProjectStorageProvider,
-    S: 'static, {
+    S: 'static,
+{
     fn conditional(
         self,
         condition: impl AnalysisCondition<P, S> + 'static,
     ) -> ConditionalAnalysis<P, S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static, {
+        Self: AnalysisPass<P, S> + Sized + 'static,
+    {
         ConditionalAnalysis::new(self, condition)
     }
 
     fn iterated(self, condition: impl AnalysisCondition<P, S> + 'static) -> IteratedAnalysis<P, S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static, {
+        Self: AnalysisPass<P, S> + Sized + 'static,
+    {
         IteratedAnalysis::new(self, condition)
     }
 
     fn with_state(self, state: S) -> StatefulAnalysis<P, S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static, {
+        Self: AnalysisPass<P, S> + Sized + 'static,
+    {
         StatefulAnalysis::new(self, state)
     }
 
     fn one_shot(self) -> OneShotAnalysis<P, S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static, {
+        Self: AnalysisPass<P, S> + Sized + 'static,
+    {
         OneShotAnalysis::new(self)
     }
 }

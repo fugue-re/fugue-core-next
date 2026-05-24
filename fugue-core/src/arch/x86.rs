@@ -9,7 +9,7 @@ use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageError, LanguageVariant, Lifter,
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
     LiftingContext,
 };
 
@@ -59,7 +59,7 @@ impl ArchData {
 
 #[derive(Clone)]
 pub struct X86 {
-    language: LanguageVariant,
+    language: &'static Language,
     data: ArchData,
 }
 
@@ -69,7 +69,7 @@ impl ArchT for X86 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language())
+        Lifter::new(self.language)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -93,44 +93,56 @@ impl ArchT for X86 {
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op)
-            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
             || self.data.invalid_instruction_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op)
-            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
             || self.data.invalid_instruction_op == Some(op)
     }
 
-    fn language_variant(&self) -> LanguageVariant {
+    fn language(&self) -> &'static Language {
         self.language
     }
 }
 
 impl X86 {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(language: LanguageVariant) -> Arch {
-        let data = ArchData::new(language.language());
+    pub(crate) fn new(language: &'static Language) -> Arch {
+        let data = ArchData::new(language);
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant() -> Result<LanguageVariant, LanguageError> {
+    pub fn resolve_default_variant() -> Result<&'static Language, LanguageError> {
         Self::resolve_variant(None)
     }
 
     pub fn resolve_variant<'a>(
         variant: impl Into<Option<&'a str>>,
-    ) -> Result<LanguageVariant, LanguageError> {
+    ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => return Ok(variants::DEFAULT),
             _ => {}
         }
-        let lang = crate::lifter::dynamic::load("x86", true, 32, variant)?;
-        Ok(LanguageVariant::new(lang.variant(), lang))
+        let loader = LanguageLoader::from_env()?;
+        Self::resolve_variant_with(&loader, variant)
+    }
+
+    pub fn resolve_variant_with<'a>(
+        loader: &LanguageLoader,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("default") => return Ok(variants::DEFAULT),
+            _ => {}
+        }
+        let lid = LanguageId::new_with("x86", false, 32, variant);
+        Ok(loader.load(&lid)?)
     }
 }
 

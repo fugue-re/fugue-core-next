@@ -6,7 +6,7 @@ use object::{File, Object as ObjectT, ObjectSegment};
 
 use crate::arch::{self, Arch};
 use crate::ir::{Address, RawAddress, SegmentProperties};
-use crate::lifter::LanguageVariant;
+use crate::lifter::Language;
 use crate::loader::{
     Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoadableSegment,
     LoadableSegmentBounds, LoaderError,
@@ -33,23 +33,23 @@ pub struct Object<'a> {
     base: Address,
 }
 
-pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<LanguageVariant, LoaderError> {
+pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<&'static Language, LoaderError> {
     use object::Architecture as A;
 
     let is_64 = object.is_64();
-    let is_le = object.is_little_endian();
+    let is_be = !object.is_little_endian();
     let is_thumb = object.entry() & 1 == 1;
 
-    let variant = match object.architecture() {
-        A::Aarch64 if is_64 => arch::aarch64::AArch64::resolve_default_variant(is_le),
-        A::Arm if is_thumb => arch::arm::Arm::resolve_variant(is_le, "v8T"),
-        A::Arm => arch::arm::Arm::resolve_default_variant(is_le),
+    let language = match object.architecture() {
+        A::Aarch64 if is_64 => arch::aarch64::AArch64::resolve_default_variant(is_be),
+        A::Arm if is_thumb => arch::arm::Arm::resolve_variant(is_be, "v8T"),
+        A::Arm => arch::arm::Arm::resolve_default_variant(is_be),
         A::I386 => arch::x86::X86::resolve_default_variant(),
-        A::Mips if !is_64 => arch::mips::Mips::resolve_default_variant(is_le),
+        A::Mips if !is_64 => arch::mips::Mips::resolve_default_variant(is_be),
         A::X86_64 => arch::x86_64::X86_64::resolve_default_variant(),
         _ => return Err(LoaderError::UnsupportedArch),
     }?;
-    Ok(variant)
+    Ok(language)
 }
 
 impl<'a> Object<'a> {
@@ -134,7 +134,8 @@ impl LoadableFromFile for Object<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::from_file_with(path, attributes)
     }
 }

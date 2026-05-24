@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{Language, LanguageVariant, Lifter};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
@@ -21,6 +21,6 @@ impl LifterFactory {
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant = V8A;
-    pub const V8A: LanguageVariant = LanguageVariant::new("v8A", &__impl::LANGUAGE);
+    pub const DEFAULT: &Language = V8A;
+    pub const V8A: &Language = &__impl::LANGUAGE;
 }
