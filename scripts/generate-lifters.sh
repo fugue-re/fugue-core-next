@@ -4,25 +4,25 @@ set -eu
 
 usage() {
     cat <<'EOF'
-usage: ./generate-lifters.sh [--sync] [--dir <path>] [--ref <git-ref>]
+usage: ./generate-lifters.sh [--sync [--dir <path> | --ref <ref>]]
+                             [--dynamic <out-file-or-dir>]
 
-  --sync        refresh vendored language definitions before regenerating lifters
-  --dir <path>  use an existing local Ghidra checkout for sync
-  --ref <ref>   sync from a specific upstream ref instead of the latest stable release
-
-After --sync, any *.patch files under <arch>/data/patches/ are re-applied on
-the fly during regeneration. If upstream churn moved lines near a patched
-region, the build fails loudly and the patch must be re-diffed against the
-fresh sources. See fugue-lifter-arm/README.md for patch authoring rules
-(paths relative to data/processors/, no fuzz, filename-ordered application).
+  --sync             refresh vendored language definitions before regenerating lifters
+  --dir <path>       use an existing local Ghidra checkout for sync
+  --ref <ref>        sync from a specific upstream ref instead of the latest stable release
+  --dynamic <out>    after regenerating the static lifters, also build runtime-loadable
+                     .flift packages, merge each crate's data/processors/<ARCH>/ tree
+                     with the freshly built .flift files for that arch, and write the
+                     result to <out>. The output format is selected from <out>'s extension:
+                       *.tar.gz | *.tgz   gzip-compressed tar archive
+                       *.zip              zip archive
+                       (anything else)    directory (must be empty or absent)
 EOF
 }
 
-run_step() {
-    STEP_NAME="$1"
+run_silent() {
+    LABEL="$1"
     shift
-
-    printf '%s\n' "$STEP_NAME"
 
     OUTPUT_FILE="$(mktemp)"
     if "$@" >"$OUTPUT_FILE" 2>&1; then
@@ -30,17 +30,76 @@ run_step() {
         return 0
     fi
 
-    printf 'error: %s failed\n' "$STEP_NAME" >&2
+    printf 'error: %s failed\n' "$LABEL" >&2
     cat "$OUTPUT_FILE" >&2
     rm -f "$OUTPUT_FILE"
     exit 1
 }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+foreach_target() {
+    "$1" AARCH64:BE:64:v8A   ""        aarch64_be
+    "$1" AARCH64:LE:64:v8A   ""        aarch64_le
+    "$1" ARM:BE:32:v8        v8T       arm_be
+    "$1" ARM:LE:32:v8        v8T       arm_le
+    "$1" MIPS:BE:32:default  ""        mips_be
+    "$1" MIPS:LE:32:default  ""        mips_le
+    "$1" x86:LE:32:default   ""        x86
+    "$1" x86:LE:64:default   compat32  x86_64
+}
+
+build_static() {
+    LANGUAGE="$1"
+    VARIANTS="$2"
+    STATIC_OUT="$3"
+
+    CRATE=$(printf '%s' "$LANGUAGE" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')
+    SPECS="./fugue-lifter-${CRATE}/data/processors"
+    OUTPUT="./fugue-lifter-${CRATE}/data/generated/${STATIC_OUT}.rs.gz"
+
+    mkdir -p "$(dirname "$OUTPUT")"
+    rm -f "$OUTPUT"
+
+    set -- cargo run --quiet --bin lifter-packager -- build-static \
+        --language-db "$SPECS" \
+        --language "$LANGUAGE" \
+        --output "$OUTPUT"
+    for V in $VARIANTS; do
+        set -- "$@" --variant "$V"
+    done
+
+    run_silent "$LANGUAGE (static)" "$@"
+}
+
+build_dynamic() {
+    LANGUAGE="$1"
+    VARIANTS="$2"
+
+    ARCH_DIR=$(printf '%s' "$LANGUAGE" | cut -d: -f1)
+    CRATE=$(printf '%s' "$ARCH_DIR" | tr '[:upper:]' '[:lower:]')
+    SPECS="./fugue-lifter-${CRATE}/data/processors"
+    PREFIX=$(printf '%s' "$LANGUAGE" | cut -d: -f1-3)
+    PRIMARY_SUFFIX=$(printf '%s' "$LANGUAGE" | cut -d: -f4)
+
+    [ -d "$STAGE/$ARCH_DIR" ] || cp -R "${SPECS}/${ARCH_DIR}" "$STAGE/"
+
+    for SUFFIX in "$PRIMARY_SUFFIX" $VARIANTS; do
+        LANG="${PREFIX}:${SUFFIX}"
+        OUTPUT="$STAGE/$ARCH_DIR/$(printf '%s' "$LANG" | tr ':' '_').flift"
+        run_silent "$LANG (dynamic)" \
+            cargo run --quiet --bin lifter-packager -- build-dynamic \
+            --language-db "$SPECS" \
+            --language "$LANG" \
+            --output "$OUTPUT"
+    done
+}
+
+INVOCATION_PWD="$PWD"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 SYNC=false
 SYNC_DIR=""
 SYNC_REF=""
+DYNAMIC=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -64,6 +123,14 @@ while [ "$#" -gt 0 ]; do
             SYNC_REF="$2"
             shift 2
             ;;
+        --dynamic)
+            if [ "$#" -lt 2 ]; then
+                usage >&2
+                exit 1
+            fi
+            DYNAMIC="$2"
+            shift 2
+            ;;
         *)
             usage >&2
             exit 1
@@ -81,162 +148,66 @@ if [ -n "$SYNC_DIR" ] && [ -n "$SYNC_REF" ]; then
     exit 1
 fi
 
+if [ -n "$DYNAMIC" ]; then
+    case "$DYNAMIC" in
+        /*) ;;
+        *)  DYNAMIC="$INVOCATION_PWD/$DYNAMIC" ;;
+    esac
+fi
+
 cd "$SCRIPT_DIR"
 
 if [ "$SYNC" = true ]; then
+    printf "Synchronising language definitions...\n"
+
     set -- cargo run --quiet --bin lifter-packager -- sync
+    [ -n "$SYNC_DIR" ] && set -- "$@" --dir "$SYNC_DIR"
+    [ -n "$SYNC_REF" ] && set -- "$@" --ref "$SYNC_REF"
 
-    if [ -n "$SYNC_DIR" ]; then
-        set -- "$@" --dir "$SYNC_DIR"
-    fi
-
-    if [ -n "$SYNC_REF" ]; then
-        set -- "$@" --ref "$SYNC_REF"
-    fi
-
-    run_step "Synchronising language definitions..." "$@"
+    run_silent "sync" "$@"
 fi
 
-run_step \
-    "Generating AArch64 big-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-aarch64/data/processors \
-    --language AARCH64:BE:64:v8A \
-    --output ./fugue-lifter-aarch64/data/generated/aarch64_be.rs.gz
+printf "Generating lifters...\n"
+foreach_target build_static
 
-run_step \
-    "Generating AArch64 little-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-aarch64/data/processors \
-    --language AARCH64:LE:64:v8A \
-    --output ./fugue-lifter-aarch64/data/generated/aarch64_le.rs.gz
+if [ -n "$DYNAMIC" ]; then
+    case "$DYNAMIC" in
+        *.tar.gz|*.tgz) FORMAT=tar ;;
+        *.zip)          FORMAT=zip ;;
+        *)              FORMAT=dir ;;
+    esac
 
-run_step \
-    "Generating ARM big-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-arm/data/processors \
-    --language ARM:BE:32:v8 \
-    --output ./fugue-lifter-arm/data/generated/arm_be.rs.gz \
-    --variant v8T
+    if [ "$FORMAT" = dir ] && [ -e "$DYNAMIC" ]; then
+        if [ ! -d "$DYNAMIC" ] || [ -n "$(ls -A "$DYNAMIC" 2>/dev/null)" ]; then
+            printf 'error: %s exists and is not an empty directory\n' "$DYNAMIC" >&2
+            exit 1
+        fi
+    fi
 
-run_step \
-    "Generating ARM little-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-arm/data/processors \
-    --language ARM:LE:32:v8 \
-    --output ./fugue-lifter-arm/data/generated/arm_le.rs.gz \
-    --variant v8T
+    STAGE="$(mktemp -d)"
+    trap 'rm -rf "$STAGE"' EXIT INT HUP TERM
 
-run_step \
-    "Generating MIPS big-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-mips/data/processors \
-    --language MIPS:BE:32:default \
-    --output ./fugue-lifter-mips/data/generated/mips_be.rs.gz
+    foreach_target build_dynamic
 
-run_step \
-    "Generating MIPS little-endian lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-mips/data/processors \
-    --language MIPS:LE:32:default \
-    --output ./fugue-lifter-mips/data/generated/mips_le.rs.gz
-
-run_step \
-    "Generating x86 lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-x86/data/processors \
-    --language x86:LE:32:default \
-    --output ./fugue-lifter-x86/data/generated/x86.rs.gz
-
-run_step \
-    "Generating x86-64 lifter..." \
-    cargo run --quiet --bin lifter-packager -- build-static \
-    --language-db ./fugue-lifter-x86/data/processors \
-    --language x86:LE:64:default \
-    --output ./fugue-lifter-x86/data/generated/x86_64.rs.gz \
-    --variant compat32
-
-pack_blob() {
-    LABEL="$1"
-    SPECS="$2"
-    LANGUAGE="$3"
-    OUTPUT="$4"
-
-    mkdir -p "$(dirname "$OUTPUT")"
-    rm -f "$OUTPUT"
-
-    run_step \
-        "$LABEL" \
-        cargo run --quiet --bin lifter-packager -- pack-blob \
-        --specs "$SPECS" \
-        --language "$LANGUAGE" \
-        --output "$OUTPUT"
-}
-
-pack_blob \
-    "Packing AArch64 big-endian lifter..." \
-    ./fugue-lifter-aarch64/data/processors \
-    AARCH64:BE:64:v8A \
-    ./fugue-lifter-aarch64/data/generated/AARCH64_BE_64_v8A.flift
-
-pack_blob \
-    "Packing AArch64 little-endian lifter..." \
-    ./fugue-lifter-aarch64/data/processors \
-    AARCH64:LE:64:v8A \
-    ./fugue-lifter-aarch64/data/generated/AARCH64_LE_64_v8A.flift
-
-pack_blob \
-    "Packing ARM big-endian v8 lifter..." \
-    ./fugue-lifter-arm/data/processors \
-    ARM:BE:32:v8 \
-    ./fugue-lifter-arm/data/generated/ARM_BE_32_v8.flift
-
-pack_blob \
-    "Packing ARM big-endian v8T lifter..." \
-    ./fugue-lifter-arm/data/processors \
-    ARM:BE:32:v8T \
-    ./fugue-lifter-arm/data/generated/ARM_BE_32_v8T.flift
-
-pack_blob \
-    "Packing ARM little-endian v8 lifter..." \
-    ./fugue-lifter-arm/data/processors \
-    ARM:LE:32:v8 \
-    ./fugue-lifter-arm/data/generated/ARM_LE_32_v8.flift
-
-pack_blob \
-    "Packing ARM little-endian v8T lifter..." \
-    ./fugue-lifter-arm/data/processors \
-    ARM:LE:32:v8T \
-    ./fugue-lifter-arm/data/generated/ARM_LE_32_v8T.flift
-
-pack_blob \
-    "Packing MIPS big-endian lifter..." \
-    ./fugue-lifter-mips/data/processors \
-    MIPS:BE:32:default \
-    ./fugue-lifter-mips/data/generated/MIPS_BE_32_default.flift
-
-pack_blob \
-    "Packing MIPS little-endian lifter..." \
-    ./fugue-lifter-mips/data/processors \
-    MIPS:LE:32:default \
-    ./fugue-lifter-mips/data/generated/MIPS_LE_32_default.flift
-
-pack_blob \
-    "Packing x86 lifter..." \
-    ./fugue-lifter-x86/data/processors \
-    x86:LE:32:default \
-    ./fugue-lifter-x86/data/generated/x86_LE_32_default.flift
-
-pack_blob \
-    "Packing x86-64 default lifter..." \
-    ./fugue-lifter-x86/data/processors \
-    x86:LE:64:default \
-    ./fugue-lifter-x86/data/generated/x86_LE_64_default.flift
-
-pack_blob \
-    "Packing x86-64 compat32 lifter..." \
-    ./fugue-lifter-x86/data/processors \
-    x86:LE:64:compat32 \
-    ./fugue-lifter-x86/data/generated/x86_LE_64_compat32.flift
+    printf "Writing language specification bundle to %s...\n" "$DYNAMIC"
+    case "$FORMAT" in
+        dir)
+            mkdir -p "$DYNAMIC"
+            for d in "$STAGE"/*; do
+                [ -d "$d" ] && mv "$d" "$DYNAMIC/"
+            done
+            ;;
+        tar)
+            mkdir -p "$(dirname "$DYNAMIC")"
+            rm -f "$DYNAMIC"
+            ( cd "$STAGE" && tar -czf "$DYNAMIC" -- * )
+            ;;
+        zip)
+            mkdir -p "$(dirname "$DYNAMIC")"
+            rm -f "$DYNAMIC"
+            ( cd "$STAGE" && zip -qr "$DYNAMIC" -- * )
+            ;;
+    esac
+fi
 
 printf '%s\n' "Done"
