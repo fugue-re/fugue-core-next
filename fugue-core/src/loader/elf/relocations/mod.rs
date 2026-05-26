@@ -19,7 +19,8 @@ pub struct ElfSegmentRelocator<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
-    'file: 'data, {
+    'file: 'data,
+{
     elf: &'file ElfFile<'data, Elf, R>,
     base: Address,
     symbols: &'file IndexedSymbolTable,

@@ -1,8 +1,4 @@
-use fugue_lifter::x86_64::register::{
-    AF, CF, DF, OF, PF, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI,
-    RSP, SF, ZF,
-};
-use fugue_lifter::x86_64::user_op::{INVALID_INSTRUCTION_EXCEPTION, SWI};
+#[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86_64::*;
 use yaxpeax_arch::*;
 use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
@@ -12,24 +8,60 @@ use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler as DisassemblerT;
-use crate::lifter::{Disassembler, DisassemblerError, LanguageVariant, Lifter, LiftingContext};
+use crate::lifter::{
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
+    LiftingContext,
+};
 
-const FLAGS: &[Flag] = &[
-    Flag::a(AF),
-    Flag::c(CF),
-    Flag::new(DF),
-    Flag::v(OF),
-    Flag::p(PF),
-    Flag::n(SF),
-    Flag::z(ZF),
-];
-const GPRS: &[Varnode] = &[
-    RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, R8, R9, R10, R11, R12, R13, R14, R15,
-];
+#[derive(Clone)]
+struct ArchData {
+    flags: Vec<Flag>,
+    gprs: Vec<Varnode>,
+    frame_pointer: Option<Varnode>,
+    swi_op: Option<u16>,
+    invalid_instruction_op: Option<u16>,
+}
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl ArchData {
+    fn new(language: &'static Language) -> Self {
+        let reg = |name| language.register_by_name(name);
+        let flag = |name, ctor: fn(Varnode) -> Flag| reg(name).map(ctor);
+
+        let flags = [
+            flag("AF", Flag::a),
+            flag("CF", Flag::c),
+            flag("DF", Flag::new),
+            flag("OF", Flag::v),
+            flag("PF", Flag::p),
+            flag("SF", Flag::n),
+            flag("ZF", Flag::z),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let gprs = [
+            "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11",
+            "R12", "R13", "R14", "R15",
+        ]
+        .into_iter()
+        .filter_map(reg)
+        .collect();
+
+        Self {
+            flags,
+            gprs,
+            frame_pointer: reg("RBP"),
+            swi_op: language.user_op_by_name("swi"),
+            invalid_instruction_op: language.user_op_by_name("invalidInstructionException"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct X86_64 {
-    language: LanguageVariant,
+    language: &'static Language,
+    data: ArchData,
 }
 
 impl ArchT for X86_64 {
@@ -38,7 +70,7 @@ impl ArchT for X86_64 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language.language(), self.language.context()())
+        Lifter::new(self.language)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -46,15 +78,15 @@ impl ArchT for X86_64 {
     }
 
     fn flags(&self) -> &[Flag] {
-        FLAGS
+        &self.data.flags
     }
 
     fn frame_pointer(&self) -> Option<Varnode> {
-        Some(RBP)
+        self.data.frame_pointer
     }
 
     fn gprs(&self) -> &[Varnode] {
-        GPRS
+        &self.data.gprs
     }
 
     fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
@@ -63,24 +95,58 @@ impl ArchT for X86_64 {
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        op == SWI && args.first().copied() == Some(Varnode::constant(0x3, 8)) // int3
-            || op == INVALID_INSTRUCTION_EXCEPTION // ud2
+        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_instruction_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        op == SWI && args.first().copied() == Some(Varnode::constant(0x3, 8)) // int3
-            || op == INVALID_INSTRUCTION_EXCEPTION // ud2
+        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_instruction_op == Some(op)
     }
 
-    fn language_variant(&self) -> LanguageVariant {
+    fn language(&self) -> &'static Language {
         self.language
     }
 }
 
 impl X86_64 {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new(language: LanguageVariant) -> Arch {
-        Arch::from(Box::new(Self { language }) as Box<dyn ArchT>)
+    pub(crate) fn new(language: &'static Language) -> Arch {
+        let data = ArchData::new(language);
+        Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
+    }
+
+    pub fn resolve_default_variant() -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(None)
+    }
+
+    pub fn resolve_variant<'a>(
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("default") => return Ok(variants::DEFAULT),
+            Some("compat32") => return Ok(variants::COMPAT32),
+            _ => {}
+        }
+        let loader = LanguageLoader::from_env()?;
+        Self::resolve_variant_with(&loader, variant)
+    }
+
+    pub fn resolve_variant_with<'a>(
+        loader: &LanguageLoader,
+        variant: impl Into<Option<&'a str>>,
+    ) -> Result<&'static Language, LanguageError> {
+        let variant = variant.into();
+        #[cfg(feature = "static-lifters")]
+        match variant {
+            None | Some("default") => return Ok(variants::DEFAULT),
+            Some("compat32") => return Ok(variants::COMPAT32),
+            _ => {}
+        }
+        let lid = LanguageId::new_with("x86", false, 64, variant);
+        Ok(loader.load(&lid)?)
     }
 }
 

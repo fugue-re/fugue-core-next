@@ -22,7 +22,7 @@ sync = ["dep:tempfile"]
 clap = "4"
 flate2 = "1"
 fugue-lifter-codegen = { version = "0.3", path = "../fugue-lifter-codegen", optional = true }
-fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime", features = ["dynamic"], optional = true }
+fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime", optional = true }
 fugue-sleighc = { version = "0.3", optional = true }
 rkyv = { version = "0.8", features = ["arrayvec-0_7"], optional = true }
 tempfile = { version = "3", optional = true }

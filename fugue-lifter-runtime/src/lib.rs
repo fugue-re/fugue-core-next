@@ -1,6 +1,5 @@
 pub mod constructor;
 pub mod context;
-#[cfg(feature = "dynamic")]
 pub mod dynamic;
 pub mod entry;
 pub mod input;
@@ -18,7 +17,7 @@ pub mod template;
 pub use constructor::Constructor;
 pub use context::ContextDatabase;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
-pub use language::{Language, LanguageId, LanguageVariant};
+pub use language::{Language, LanguageId};
 pub use lifter::Lifter;
 pub use operand::{Operand, OperandData, OperandHandleResolver, OperandResolver, Operands};
 pub use pcode::{

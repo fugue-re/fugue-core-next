@@ -7,7 +7,7 @@ use itertools::{Itertools, Position};
 use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
-use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
+use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
 use crate::template::construct_tpl;
@@ -253,7 +253,7 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn constructor(&self) -> &'static Constructor {
-        self.inputs.input.constructor()
+        unsafe { self.inputs.input.constructor() }
     }
 
     #[inline]
@@ -271,8 +271,10 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn apply_commits(&mut self, data: &'static LanguageData) {
-        for commit in mem::take(&mut self.inputs.input.context.commits) {
-            commit.action.apply(data, self, &commit);
+        unsafe {
+            for commit in mem::take(&mut self.inputs.input.context.commits) {
+                commit.action.apply(data, self, &commit);
+            }
         }
     }
 
@@ -319,12 +321,14 @@ impl<'a> LiftingContextState<'a> {
         data: &'static LanguageData,
         operands: &mut Operands,
     ) -> Option<()> {
-        self.inputs.base_state();
+        unsafe {
+            self.inputs.base_state();
 
-        let ctor = &self.inputs.input.constructor();
-        ctor.operands(data, self, operands)?;
+            let ctor = &self.inputs.input.constructor();
+            ctor.operands(data, self, operands)?;
 
-        Some(())
+            Some(())
+        }
     }
 
     /// # Safety
@@ -337,14 +341,16 @@ impl<'a> LiftingContextState<'a> {
         data: &'static LanguageData,
         mut writer: W,
     ) -> fmt::Result {
-        self.inputs.input.base_state();
+        unsafe {
+            self.inputs.input.base_state();
 
-        let ctor = &self.inputs.input.constructor();
+            let ctor = &self.inputs.input.constructor();
 
-        ctor.format_mnemonic(data, self, &mut writer)?;
-        ctor.format_body(data, self, &mut writer)?;
+            ctor.format_mnemonic(data, self, &mut writer)?;
+            ctor.format_body(data, self, &mut writer)?;
 
-        Ok(())
+            Ok(())
+        }
     }
 
     /// # Safety
@@ -358,14 +364,16 @@ impl<'a> LiftingContextState<'a> {
         mut mnemonic: W1,
         mut operands: W2,
     ) -> fmt::Result {
-        self.inputs.input.base_state();
+        unsafe {
+            self.inputs.input.base_state();
 
-        let ctor = &self.inputs.input.constructor();
+            let ctor = &self.inputs.input.constructor();
 
-        ctor.format_mnemonic(data, self, &mut mnemonic)?;
-        ctor.format_body(data, self, &mut operands)?;
+            ctor.format_mnemonic(data, self, &mut mnemonic)?;
+            ctor.format_body(data, self, &mut operands)?;
 
-        Ok(())
+            Ok(())
+        }
     }
 
     /// # Safety
@@ -374,21 +382,23 @@ impl<'a> LiftingContextState<'a> {
     #[doc(hidden)]
     #[inline]
     pub unsafe fn emit(&mut self, data: &'static LanguageData) -> Option<()> {
-        self.inputs.input.base_state();
-        self.issued.clear();
+        unsafe {
+            self.inputs.input.base_state();
+            self.issued.clear();
 
-        if let Some(builder) = self.inputs.input.constructor().build_action {
-            construct_tpl(data, builder).build(data, self)?;
+            if let Some(builder) = self.inputs.input.constructor().build_action {
+                construct_tpl(data, builder).build(data, self)?;
+            }
+
+            self.resolve_relatives();
+
+            self.context.inputs_count = 0;
+            self.context.label_count = 0;
+            self.context.labels.fill(INVALID_LABEL);
+            self.context.label_refs.clear();
+
+            Some(())
         }
-
-        self.resolve_relatives();
-
-        self.context.inputs_count = 0;
-        self.context.label_count = 0;
-        self.context.labels.fill(INVALID_LABEL);
-        self.context.label_refs.clear();
-
-        Some(())
     }
 
     /// # Safety
@@ -397,39 +407,41 @@ impl<'a> LiftingContextState<'a> {
     #[doc(hidden)]
     #[inline]
     pub unsafe fn emit_delay_slots(&mut self, data: &'static LanguageData) -> Option<()> {
-        let unique_offset = self.unique_offset;
+        unsafe {
+            let unique_offset = self.unique_offset;
 
-        let delay_slot_bytes = self.delay_slot_length();
+            let delay_slot_bytes = self.delay_slot_length();
 
-        let mut bytes = 0usize;
-        let mut index = 0usize;
+            let mut bytes = 0usize;
+            let mut index = 0usize;
 
-        loop {
-            let length = {
-                let mut nself = self.nth_delay_slot(index)?;
-                let length = nself.len();
+            loop {
+                let length = {
+                    let mut nself = self.nth_delay_slot(index)?;
+                    let length = nself.len();
 
-                nself.inputs.input.base_state();
+                    nself.inputs.input.base_state();
 
-                if let Some(builder) = nself.inputs.input.constructor().build_action {
-                    construct_tpl(data, builder).build(data, &mut nself)?;
+                    if let Some(builder) = nself.inputs.input.constructor().build_action {
+                        construct_tpl(data, builder).build(data, &mut nself)?;
+                    }
+
+                    length
+                };
+
+                bytes += length;
+
+                if bytes >= delay_slot_bytes {
+                    break;
                 }
 
-                length
-            };
-
-            bytes += length;
-
-            if bytes >= delay_slot_bytes {
-                break;
+                index += 1;
             }
 
-            index += 1;
+            self.unique_offset = unique_offset;
+
+            Some(())
         }
-
-        self.unique_offset = unique_offset;
-
-        Some(())
     }
 
     #[inline]
@@ -450,20 +462,22 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_constructor(&self, index: usize) -> Option<&'static Constructor> {
-        let opnds = self
-            .inputs
-            .input
-            .context
-            .constructors
-            .get_unchecked(self.inputs.input.point as usize)
-            .operands as usize;
+        unsafe {
+            let opnds = self
+                .inputs
+                .input
+                .context
+                .constructors
+                .get_unchecked(self.inputs.input.point as usize)
+                .operands as usize;
 
-        self.inputs
-            .input
-            .context
-            .constructors
-            .get(opnds + index)?
-            .constructor
+            self.inputs
+                .input
+                .context
+                .constructors
+                .get(opnds + index)?
+                .constructor
+        }
     }
 
     /// # Safety
@@ -472,22 +486,24 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_handle(&self, index: usize) -> &FixedHandle {
-        let opnds = self
-            .inputs
-            .input
-            .context
-            .constructors
-            .get_unchecked(self.inputs.input.point as usize)
-            .operands as usize;
+        unsafe {
+            let opnds = self
+                .inputs
+                .input
+                .context
+                .constructors
+                .get_unchecked(self.inputs.input.point as usize)
+                .operands as usize;
 
-        self.inputs
-            .input
-            .context
-            .constructors
-            .get_unchecked(opnds + index)
-            .handle
-            .as_ref()
-            .unwrap_unchecked()
+            self.inputs
+                .input
+                .context
+                .constructors
+                .get_unchecked(opnds + index)
+                .handle
+                .as_ref()
+                .unwrap_unchecked()
+        }
     }
 
     /// # Safety
@@ -496,22 +512,24 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     #[doc(hidden)]
     pub unsafe fn operand_handle_mut(&mut self, index: usize) -> &mut FixedHandle {
-        let opnds = self
-            .inputs
-            .input
-            .context
-            .constructors
-            .get_unchecked(self.inputs.input.point as usize)
-            .operands as usize;
+        unsafe {
+            let opnds = self
+                .inputs
+                .input
+                .context
+                .constructors
+                .get_unchecked(self.inputs.input.point as usize)
+                .operands as usize;
 
-        self.inputs
-            .input
-            .context
-            .constructors
-            .get_unchecked_mut(opnds + index)
-            .handle
-            .as_mut()
-            .unwrap_unchecked()
+            self.inputs
+                .input
+                .context
+                .constructors
+                .get_unchecked_mut(opnds + index)
+                .handle
+                .as_mut()
+                .unwrap_unchecked()
+        }
     }
 
     /// # Safety
@@ -520,20 +538,22 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     #[doc(hidden)]
     pub unsafe fn push_input(&mut self, vnd: Varnode) {
-        if self.context.inputs_count < 2 {
-            self.context
-                .inputs
-                .set_input_unchecked(self.context.inputs_count as _, vnd);
-        } else if self.context.inputs_count & 1 == 0 {
-            self.context.inputs_spill.push_unchecked(Inputs::one(vnd));
-        } else {
-            let last_posn = self.context.inputs_spill.len() - 1;
-            self.context
-                .inputs_spill
-                .get_unchecked_mut(last_posn)
-                .set_input(1, vnd);
+        unsafe {
+            if self.context.inputs_count < 2 {
+                self.context
+                    .inputs
+                    .set_input_unchecked(self.context.inputs_count as _, vnd);
+            } else if self.context.inputs_count & 1 == 0 {
+                self.context.inputs_spill.push_unchecked(Inputs::one(vnd));
+            } else {
+                let last_posn = self.context.inputs_spill.len() - 1;
+                self.context
+                    .inputs_spill
+                    .get_unchecked_mut(last_posn)
+                    .set_input(1, vnd);
+            }
+            self.context.inputs_count += 1;
         }
-        self.context.inputs_count += 1;
     }
 
     #[inline]
@@ -655,10 +675,18 @@ impl PCodeBuilderContext {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Varnode {
@@ -711,11 +739,7 @@ impl Varnode {
 
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
-        if self.is_invalid() {
-            None
-        } else {
-            Some(self)
-        }
+        if self.is_invalid() { None } else { Some(self) }
     }
 }
 
@@ -764,10 +788,18 @@ impl<'a> Display for LanguageFormatter<'a, Varnode> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(transparent)]
@@ -800,7 +832,9 @@ impl Inputs {
     /// Called from generated code which ensures validity of arguments and state.
     #[inline]
     pub unsafe fn set_input_unchecked(&mut self, index: usize, vnd: Varnode) {
-        *self.0.get_unchecked_mut(index) = vnd;
+        unsafe {
+            *self.0.get_unchecked_mut(index) = vnd;
+        }
     }
 
     #[inline]
@@ -827,10 +861,18 @@ impl Inputs {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Op {
@@ -989,10 +1031,18 @@ impl Display for Op {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PCodeOp {

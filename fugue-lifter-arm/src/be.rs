@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{Language, LanguageVariant, Lifter, LiftingContext};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
@@ -10,27 +10,11 @@ pub struct LifterFactory;
 
 impl LifterFactory {
     pub fn new_v8() -> Lifter {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::T_MODE, 0);
-        base.set_variable_default_by_bits(context::L_RSET, 0);
-
-        Lifter::new(
-            &__impl::LANGUAGE_V8,
-            __impl::lifter_with(&__impl::LANGUAGE_V8, 2, base),
-        )
+        Lifter::new(&__impl::LANGUAGE_V8)
     }
 
     pub fn new_v8t() -> Lifter {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::T_MODE, 1);
-        base.set_variable_default_by_bits(context::L_RSET, 0);
-
-        Lifter::new(
-            &__impl::LANGUAGE_V8T,
-            __impl::lifter_with(&__impl::LANGUAGE_V8T, 2, base),
-        )
+        Lifter::new(&__impl::LANGUAGE_V8T)
     }
 
     pub fn language(&self) -> &'static Language {
@@ -38,42 +22,14 @@ impl LifterFactory {
     }
 }
 
-pub struct LiftingContextFactory;
-
-impl LiftingContextFactory {
-    pub fn new() -> LiftingContext {
-        Self::new_v8()
-    }
-
-    pub fn new_v8() -> LiftingContext {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::T_MODE, 0);
-        base.set_variable_default_by_bits(context::L_RSET, 0);
-
-        __impl::lifter_with(&__impl::LANGUAGE_V8, 2, base)
-    }
-
-    pub fn new_v8t() -> LiftingContext {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::T_MODE, 1);
-        base.set_variable_default_by_bits(context::L_RSET, 0);
-
-        __impl::lifter_with(&__impl::LANGUAGE_V8T, 2, base)
-    }
-}
-
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant = V8;
-    pub const DEFAULT_THUMB: LanguageVariant = V8T;
+    pub const DEFAULT: &Language = V8;
+    pub const DEFAULT_THUMB: &Language = V8T;
 
-    pub const V8: LanguageVariant =
-        LanguageVariant::new("v8", &__impl::LANGUAGE_V8, LiftingContextFactory::new_v8);
-    pub const V8T: LanguageVariant =
-        LanguageVariant::new("v8T", &__impl::LANGUAGE_V8T, LiftingContextFactory::new_v8t);
+    pub const V8: &Language = &__impl::LANGUAGE_V8;
+    pub const V8T: &Language = &__impl::LANGUAGE_V8T;
 }
 
 #[cfg(test)]

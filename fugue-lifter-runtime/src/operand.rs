@@ -4,11 +4,7 @@ use crate::language::LanguageData;
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum OperandResolver {
     None,
     Constructor(u16),
@@ -31,32 +27,26 @@ impl OperandFilter {
         data: &'static LanguageData,
         input: &mut LiftingContextState,
     ) -> Option<()> {
-        let index = u16::try_from(self.pattern.resolve(data, input)?).ok()?;
-        if index >= self.limit || self.indices.contains(&index) {
-            None
-        } else {
-            Some(())
+        unsafe {
+            let index = u16::try_from(self.pattern.resolve(data, input)?).ok()?;
+            if index >= self.limit || self.indices.contains(&index) {
+                None
+            } else {
+                Some(())
+            }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum OperandHandleResolver {
     None,
     Symbol(u16),
     Expression(PatternExpression),
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
-#[cfg_attr(feature = "rkyv", rkyv(resolver = OperandArchiveResolver))]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(resolver = OperandArchiveResolver)]
 pub struct Operand {
     pub resolver: OperandResolver,
     pub handle_resolver: OperandHandleResolver,

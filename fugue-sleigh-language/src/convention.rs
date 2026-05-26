@@ -8,6 +8,11 @@ use crate::register::RegisterNames;
 use crate::spaces::{AddressSpace, AddressSpaces};
 use crate::varnode::VarnodeData;
 
+pub use crate::compiler::{
+    DatatypeFilter, DatatypeKind, PrototypeRule, PrototypeRuleAction, PrototypeRuleCondition,
+    RuleStorage,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum PrototypeOperand {
     Register {
@@ -117,6 +122,8 @@ pub struct Prototype {
     stack_shift: u64,
     inputs: Vec<PrototypeEntry>,
     outputs: Vec<PrototypeEntry>,
+    input_rules: Vec<PrototypeRule>,
+    output_rules: Vec<PrototypeRule>,
     unaffected: Vec<PrototypeOperand>,
     killed_by_call: Vec<PrototypeOperand>,
     likely_trashed: Vec<PrototypeOperand>,
@@ -141,6 +148,8 @@ impl Prototype {
                 .iter()
                 .map(|output| PrototypeEntry::from_spec(output, registers))
                 .collect::<Result<_, _>>()?,
+            input_rules: spec.input_rules.clone(),
+            output_rules: spec.output_rules.clone(),
             unaffected: spec
                 .unaffected
                 .iter()
@@ -177,6 +186,14 @@ impl Prototype {
 
     pub fn outputs(&self) -> &[PrototypeEntry] {
         &self.outputs
+    }
+
+    pub fn input_rules(&self) -> &[PrototypeRule] {
+        &self.input_rules
+    }
+
+    pub fn output_rules(&self) -> &[PrototypeRule] {
+        &self.output_rules
     }
 
     pub fn unaffected(&self) -> &[PrototypeOperand] {
@@ -260,7 +277,7 @@ pub struct Convention {
     name: String,
     data_organisation: Option<compiler::DataOrganisation>,
     stack_pointer: StackPointer,
-    return_address: ReturnAddress,
+    return_address: Option<ReturnAddress>,
     default_prototype: Prototype,
     additional_prototypes: Vec<Prototype>,
     call_fixups: Vec<CallFixup>,
@@ -276,7 +293,11 @@ impl Convention {
             name: spec.name.clone(),
             data_organisation: spec.data_organisation.clone(),
             stack_pointer: StackPointer::from_spec(&spec.stack_pointer, registers, spaces)?,
-            return_address: ReturnAddress::from_spec(&spec.return_address, registers)?,
+            return_address: spec
+                .return_address
+                .as_ref()
+                .map(|ra| ReturnAddress::from_spec(ra, registers))
+                .transpose()?,
             default_prototype: Prototype::from_spec(&spec.default_prototype, registers)?,
             additional_prototypes: spec
                 .additional_prototypes
@@ -295,8 +316,8 @@ impl Convention {
         &self.stack_pointer
     }
 
-    pub fn return_address(&self) -> &ReturnAddress {
-        &self.return_address
+    pub fn return_address(&self) -> Option<&ReturnAddress> {
+        self.return_address.as_ref()
     }
 
     pub fn default_prototype(&self) -> &Prototype {

@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
-use std::collections::btree_map::{Range, RangeMut};
 use std::collections::BTreeMap as Map;
+use std::collections::btree_map::{Range, RangeMut};
 use std::ops::Bound::Excluded;
 use std::ops::RangeBounds;
 
@@ -34,11 +34,7 @@ impl<'a, K, V> BoundKind<'a, K, V> {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PartMap<K: Ord, V> {
     mapping: Map<K, V>,

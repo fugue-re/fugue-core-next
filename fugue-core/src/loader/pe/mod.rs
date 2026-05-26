@@ -414,7 +414,7 @@ where
         return SegmentProperties::empty();
     };
 
-    let mut props = SegmentProperties::LITTLE_ENDIAN;
+    let mut props = SegmentProperties::empty();
 
     if characteristics & IMAGE_SCN_MEM_READ != 0 {
         props.insert(SegmentProperties::PERM_READ);
@@ -515,8 +515,7 @@ where
             address,
             properties: SegmentProperties::EXTERNAL
                 | SegmentProperties::PERM_READ
-                | SegmentProperties::PERM_EXECUTE
-                | SegmentProperties::LITTLE_ENDIAN,
+                | SegmentProperties::PERM_EXECUTE,
             bytes: Cow::Owned(bytes),
             function_hints: Cow::Owned(externs.iter().collect::<BTreeSet<_>>()),
             ..Default::default()

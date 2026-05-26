@@ -9,21 +9,17 @@ fn registry() -> &'static RwLock<HashMap<LanguageId, &'static Language>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-pub(crate) fn intern_or_install<F>(id: LanguageId, install: F) -> &'static Language
+pub(crate) fn get_or_install<F>(id: LanguageId, install: F) -> &'static Language
 where
     F: FnOnce() -> &'static Language,
 {
-    if let Some(existing) = registry()
-        .read()
-        .expect("registry rwlock poisoned")
-        .get(&id)
-    {
+    if let Some(existing) = registry().read().expect("registry lock poisoned").get(&id) {
         return existing;
     }
     let language = install();
     registry()
         .write()
-        .expect("registry rwlock poisoned")
+        .expect("registry lock poisoned")
         .entry(id)
         .or_insert(language);
     language
@@ -32,7 +28,7 @@ where
 pub(crate) fn lookup(id: &LanguageId) -> Option<&'static Language> {
     registry()
         .read()
-        .expect("registry rwlock poisoned")
+        .expect("registry lock poisoned")
         .get(id)
         .copied()
 }

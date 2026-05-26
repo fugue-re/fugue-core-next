@@ -406,7 +406,7 @@ impl LanguageSpec {
     pub fn matches_arch(&self, arch: &ArchitectureDef) -> bool {
         (arch.processor() == self.processor())
             && (arch.endian() == self.endian())
-            && (self.bits().is_none() || arch.bits() as u32 == self.bits().unwrap())
+            && (self.bits().is_none() || arch.bits() == self.bits().unwrap())
             && (self.variant().is_none() || arch.variant() == self.variant().unwrap())
     }
 

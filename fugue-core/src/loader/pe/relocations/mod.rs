@@ -17,7 +17,8 @@ pub struct PeSegmentRelocator<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
-    'file: 'data, {
+    'file: 'data,
+{
     pe: &'file PeFile<'data, Pe, R>,
     preferred_base: u64,
     current_base: Address,

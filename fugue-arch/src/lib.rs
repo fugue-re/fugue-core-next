@@ -10,7 +10,7 @@ use thiserror::Error;
 pub struct ArchitectureDef {
     processor: String,
     endian: Endian,
-    bits: usize,
+    bits: u32,
     variant: String,
 }
 
@@ -44,7 +44,7 @@ impl FromStr for ArchitectureDef {
             _ => return Err(ArchDefParseError::ParseEndian),
         };
         let bits = parts[2]
-            .parse::<usize>()
+            .parse::<u32>()
             .map_err(|_| ArchDefParseError::ParseBits)?;
 
         Ok(ArchitectureDef::new(
@@ -70,7 +70,7 @@ impl fmt::Display for ArchitectureDef {
 }
 
 impl ArchitectureDef {
-    pub fn new<P, V>(processor: P, endian: Endian, bits: usize, variant: V) -> Self
+    pub fn new<P, V>(processor: P, endian: Endian, bits: u32, variant: V) -> Self
     where
         P: Into<String>,
         V: Into<String>,
@@ -95,7 +95,7 @@ impl ArchitectureDef {
         self.endian
     }
 
-    pub fn bits(&self) -> usize {
+    pub fn bits(&self) -> u32 {
         self.bits
     }
 

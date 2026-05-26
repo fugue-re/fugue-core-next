@@ -61,6 +61,21 @@ impl CodegenError {
         CodegenError::Format(anyhow::Error::msg(msg))
     }
 
+    fn language_build<E>(name: impl Into<String>, err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        CodegenError::LanguageBuild(name.into(), anyhow::Error::new(err))
+    }
+
+    #[cfg(not(feature = "bundled-compiler"))]
+    fn language_build_with<M>(name: impl Into<String>, msg: M) -> Self
+    where
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
+        CodegenError::LanguageBuild(name.into(), anyhow::Error::msg(msg))
+    }
+
     fn variant_sla_mismatch(
         variant: impl Into<String>,
         expected: PathBuf,
@@ -76,9 +91,9 @@ impl CodegenError {
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildOptions {
-    pub pretty: bool,
-    pub patches: Vec<PathBuf>,
-    pub variants: Vec<String>,
+    pretty: bool,
+    patches: Vec<PathBuf>,
+    variants: Vec<String>,
 }
 
 impl BuildOptions {
@@ -197,8 +212,7 @@ pub fn build_with(
         .flatten()
         .ok_or_else(|| CodegenError::Language(language_def.to_owned()))?;
 
-    let primary_arch = ArchitectureDef::from_str(language_def)
-        .map_err(|err| CodegenError::Language(format!("{language_def}: {err}")))?;
+    let primary_arch = ArchitectureDef::from_str(language_def).unwrap();
 
     let primary_context_defaults = primary_def
         .language()
@@ -206,7 +220,7 @@ pub fn build_with(
         .map(|(name, value)| (name.to_owned(), value))
         .collect::<Vec<(String, u32)>>();
 
-    let primary_sla = primary_def.language().sla_file().to_path_buf();
+    let primary_sla = primary_def.language().sla_file();
     let primary_variant = LanguageVariant::new(primary_arch.variant(), primary_context_defaults);
 
     let mut extra_variants = Vec::with_capacity(options.variants.len());
@@ -234,7 +248,7 @@ pub fn build_with(
         if extra_sla != primary_sla {
             return Err(CodegenError::variant_sla_mismatch(
                 variant,
-                primary_sla.clone(),
+                primary_sla.to_owned(),
                 extra_sla.to_path_buf(),
             ));
         }
@@ -256,9 +270,9 @@ pub fn build_with(
         primary_def.build()
     } else {
         #[cfg(not(feature = "bundled-compiler"))]
-        return Err(CodegenError::LanguageBuild(
-            language_def.to_owned(),
-            anyhow::msg!("no compiler available"),
+        return Err(CodegenError::language_build_with(
+            language_def,
+            "no compiler available",
         ));
         #[cfg(feature = "bundled-compiler")]
         {
@@ -271,8 +285,7 @@ pub fn build_with(
         }
     };
 
-    let language =
-        language.map_err(|e| CodegenError::LanguageBuild(language_def.to_owned(), e.into()))?;
+    let language = language.map_err(|e| CodegenError::language_build(language_def, e))?;
 
     let tokens = LifterGenerator::new_with(&language, primary_variant, extra_variants)
         .map(ToTokens::into_token_stream)

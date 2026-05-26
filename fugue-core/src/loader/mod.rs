@@ -16,7 +16,7 @@ use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::symbol::IndexedSymbolTable;
 use crate::ir::{Address, SegmentProperties};
-use crate::lifter::ContextHint;
+use crate::lifter::{ContextHint, LanguageError};
 use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::{AttributeMap, BytesOrMapping};
@@ -36,8 +36,6 @@ pub use pe::Pe;
 pub mod shellcode;
 pub use shellcode::Shellcode;
 
-pub mod util;
-
 #[derive(Debug, Error)]
 pub enum LoaderError {
     #[error("cannot load object: address overflow using base address of {0}")]
@@ -46,6 +44,8 @@ pub enum LoaderError {
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
     Io(#[from] std::io::Error),
+    #[error("cannot resolve language: {0}")]
+    Language(#[from] LanguageError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
     #[error("cannot load object: unsupported architecture")]
@@ -59,25 +59,29 @@ impl LoaderError {
 
     pub fn format<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         Self::Format(e.into())
     }
 
     pub fn format_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static, {
+        M: Debug + Display + Send + Sync + 'static,
+    {
         Self::Format(anyhow::Error::msg(m))
     }
 
     pub fn other<E>(e: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         Self::Other(e.into())
     }
 
     pub fn other_with<M>(m: M) -> Self
     where
-        M: Debug + Display + Send + Sync + 'static, {
+        M: Debug + Display + Send + Sync + 'static,
+    {
         Self::Other(anyhow::Error::msg(m))
     }
 }
@@ -340,10 +344,10 @@ impl<'a> LoadableSegment<'a> {
 
     pub fn read_value<T: ByteCast>(&self, offset: usize) -> Option<T> {
         let range = self.view_bytes_at(offset, T::SIZEOF)?;
-        Some(if self.properties.is_little_endian() {
-            T::from_bytes::<LE>(range)
-        } else {
+        Some(if self.properties.is_big_endian() {
             T::from_bytes::<BE>(range)
+        } else {
+            T::from_bytes::<LE>(range)
         })
     }
 
@@ -352,24 +356,24 @@ impl<'a> LoadableSegment<'a> {
         offset: usize,
         f: impl FnOnce(T) -> T,
     ) -> Option<()> {
-        let is_le = self.properties.is_little_endian();
+        let is_be = self.properties.is_big_endian();
         let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
-        if is_le {
-            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range);
-        } else {
+        if is_be {
             f(T::from_bytes::<BE>(range)).into_bytes::<BE>(range);
+        } else {
+            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range);
         }
         Some(())
     }
 
     pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
-        let is_le = self.properties.is_little_endian();
+        let is_be = self.properties.is_big_endian();
         let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
 
-        if is_le {
-            value.into_bytes::<LE>(range);
-        } else {
+        if is_be {
             value.into_bytes::<BE>(range);
+        } else {
+            value.into_bytes::<LE>(range);
         }
         Some(())
     }
@@ -589,7 +593,8 @@ impl std::ops::Index<usize> for LoadableSegmentBounds {
 pub trait LoadableFromBytes<'a>: Loadable {
     fn from_bytes(data: impl Into<BytesOrMapping<'a>>) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::from_bytes_with(data, AttributeMap::new())
     }
 
@@ -604,7 +609,8 @@ pub trait LoadableFromBytes<'a>: Loadable {
 pub trait LoadableFromFile: Loadable {
     fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::from_file_with(path, AttributeMap::new())
     }
 
@@ -637,14 +643,16 @@ pub trait Loadable {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider, {
+        P: ProjectStorageProvider,
+    {
         DefaultLoadableAnalysers
     }
 }
 
 pub trait LoadableAnalysers<P>
 where
-    P: ProjectStorageProvider, {
+    P: ProjectStorageProvider,
+{
     fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
         self.function_recovery_with(FunctionRecoveryConfig::default())
     }
@@ -759,7 +767,8 @@ impl LoadableFromFile for Loader<'_> {
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
-        Self: Sized, {
+        Self: Sized,
+    {
         Self::from_file_with(path, attributes)
     }
 }
@@ -831,7 +840,8 @@ impl Loadable for Loader<'_> {
 
     fn analysers<P>(&self) -> impl LoadableAnalysers<P>
     where
-        P: ProjectStorageProvider, {
+        P: ProjectStorageProvider,
+    {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
             Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers<P>>,

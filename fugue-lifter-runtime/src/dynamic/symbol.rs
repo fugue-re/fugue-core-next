@@ -1,15 +1,11 @@
-use fugue_sleigh_language::symbol::Symbol as SleighSymbol;
 use fugue_sleigh_language::Language as SleighLanguage;
+use fugue_sleigh_language::symbol::Symbol as SleighSymbol;
 
 use crate::dynamic::install::Install;
 use crate::dynamic::tables::Tables;
 use crate::pattern::PatternExpression;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) enum Symbol {
     Epsilon,
     Value {

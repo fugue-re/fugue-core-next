@@ -1,4 +1,4 @@
-use fugue_lifter_runtime::{LanguageVariant, Lifter, LiftingContext};
+use fugue_lifter_runtime::{Language, Lifter};
 
 mod __impl {
     #![allow(unused)]
@@ -11,75 +11,19 @@ pub struct LifterFactory;
 
 impl LifterFactory {
     pub fn new_default() -> Lifter {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::ADDRSIZE, 2);
-        base.set_variable_default_by_bits(context::OPSIZE, 1);
-        base.set_variable_default_by_bits(context::REXPREFIX, 0);
-        base.set_variable_default_by_bits(context::LONG_MODE, 1);
-
-        Lifter::new(
-            &__impl::LANGUAGE_DEFAULT,
-            __impl::lifter_with(&__impl::LANGUAGE_DEFAULT, 2, base),
-        )
+        Lifter::new(&__impl::LANGUAGE_DEFAULT)
     }
 
     pub fn new_compat32() -> Lifter {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::ADDRSIZE, 1);
-        base.set_variable_default_by_bits(context::OPSIZE, 1);
-        base.set_variable_default_by_bits(context::REXPREFIX, 0);
-        base.set_variable_default_by_bits(context::LONG_MODE, 0);
-
-        Lifter::new(
-            &__impl::LANGUAGE_COMPAT32,
-            __impl::lifter_with(&__impl::LANGUAGE_COMPAT32, 2, base),
-        )
-    }
-}
-
-pub struct LiftingContextFactory;
-
-impl LiftingContextFactory {
-    pub fn new() -> LiftingContext {
-        Self::new_default()
-    }
-
-    pub fn new_default() -> LiftingContext {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::ADDRSIZE, 2);
-        base.set_variable_default_by_bits(context::OPSIZE, 1);
-        base.set_variable_default_by_bits(context::REXPREFIX, 0);
-        base.set_variable_default_by_bits(context::LONG_MODE, 1);
-
-        __impl::lifter_with(&__impl::LANGUAGE_DEFAULT, 2, base)
-    }
-
-    pub fn new_compat32() -> LiftingContext {
-        let mut base = __impl::default_context();
-
-        base.set_variable_default_by_bits(context::ADDRSIZE, 1);
-        base.set_variable_default_by_bits(context::OPSIZE, 1);
-        base.set_variable_default_by_bits(context::REXPREFIX, 0);
-        base.set_variable_default_by_bits(context::LONG_MODE, 0);
-
-        __impl::lifter_with(&__impl::LANGUAGE_COMPAT32, 2, base)
+        Lifter::new(&__impl::LANGUAGE_COMPAT32)
     }
 }
 
 pub mod variants {
     use super::*;
 
-    pub const DEFAULT: LanguageVariant =
-        LanguageVariant::new("default", &__impl::LANGUAGE_DEFAULT, LiftingContextFactory::new_default);
-    pub const COMPAT32: LanguageVariant =
-        LanguageVariant::new(
-            "compat32",
-            &__impl::LANGUAGE_COMPAT32,
-            LiftingContextFactory::new_compat32,
-        );
+    pub const DEFAULT: &Language = &__impl::LANGUAGE_DEFAULT;
+    pub const COMPAT32: &Language = &__impl::LANGUAGE_COMPAT32;
 }
 
 #[cfg(test)]
@@ -89,6 +33,9 @@ mod test {
     #[test]
     fn variant_tag_matches_factory() {
         assert_eq!(LifterFactory::new_default().language().variant(), "default");
-        assert_eq!(LifterFactory::new_compat32().language().variant(), "compat32");
+        assert_eq!(
+            LifterFactory::new_compat32().language().variant(),
+            "compat32"
+        );
     }
 }

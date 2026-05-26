@@ -58,13 +58,15 @@ pub enum IndexedFunctionTableError {
 impl IndexedFunctionTableError {
     pub fn custom<E>(error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static, {
+        E: std::error::Error + Send + Sync + 'static,
+    {
         Self::Custom(anyhow::Error::new(error))
     }
 
     pub fn custom_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static, {
+        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+    {
         Self::Custom(anyhow::Error::msg(msg))
     }
 }
@@ -78,7 +80,8 @@ impl FunctionTableT for IndexedFunctionTable {
 
     fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
     where
-        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>, {
+        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>,
+    {
         if let Some(existing) = self.get_by_address_mut(addr) {
             let nf = f(existing.id(), addr)?;
 

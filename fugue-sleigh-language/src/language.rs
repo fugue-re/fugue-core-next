@@ -691,7 +691,7 @@ impl LanguageDB {
         &'a self,
         processor: P,
         endian: Endian,
-        bits: usize,
+        bits: u32,
     ) -> Option<LanguageDefBuilder<'a>> {
         self.db
             .get(&ArchitectureDef::new(processor, endian, bits, "default"))
@@ -713,7 +713,7 @@ impl LanguageDB {
         &'a self,
         processor: P,
         endian: Endian,
-        bits: usize,
+        bits: u32,
         variant: V,
     ) -> Option<LanguageDefBuilder<'a>> {
         self.db

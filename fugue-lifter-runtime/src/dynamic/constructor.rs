@@ -5,11 +5,7 @@ use crate::dynamic::install::Install;
 use crate::dynamic::tables::Tables;
 use crate::operand::Operand;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct Constructor {
     pub(crate) id: u16,
     pub(crate) context_pre_actions: Box<[ContextPreAction]>,
@@ -102,11 +98,7 @@ impl Install for Constructor {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) enum PrintPiece {
     Operand(u16),
     Token(Box<str>),
@@ -122,4 +114,3 @@ impl Install for PrintPiece {
         }
     }
 }
-

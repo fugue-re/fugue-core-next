@@ -7,6 +7,7 @@ use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageErro
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
+use crate::LanguageId;
 use crate::context::ContextBitRange;
 use crate::dynamic::constructor::Constructor;
 use crate::dynamic::install::Install;
@@ -16,13 +17,13 @@ use crate::dynamic::space::AddressSpace;
 use crate::dynamic::symbol::Symbol;
 use crate::dynamic::tables::Tables;
 use crate::dynamic::template::{ConstructTpl, OpTpl};
-use crate::dynamic::LanguageLoadError;
+use crate::dynamic::{LanguageLoadError, registry};
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 #[derive(Debug, Error)]
-pub enum BuildError {
+pub enum LanguageBuildError {
     #[error("cannot locate language `{0}` in language database")]
     Language(String),
     #[error("cannot build language `{language}`: {source}")]
@@ -37,15 +38,11 @@ pub enum BuildError {
         #[source]
         source: LanguageError,
     },
-    #[error("missing compiled .sla for `{language}`: expected `{path}` (build it offline before invoking the dynamic loader)")]
+    #[error("missing compiled .sla for `{language}`: expected `{path}`")]
     SleighSlaMissing { language: String, path: PathBuf },
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
-)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Language {
     pub(crate) id: Box<str>,
     pub(crate) processor: Box<str>,
@@ -91,7 +88,7 @@ pub struct Language {
 }
 
 impl Language {
-    pub fn build(specs: impl AsRef<Path>, id: impl AsRef<str>) -> Result<Self, BuildError> {
+    pub fn build(specs: impl AsRef<Path>, id: impl AsRef<str>) -> Result<Self, LanguageBuildError> {
         Self::build_inner(specs.as_ref(), id.as_ref(), None)
     }
 
@@ -99,7 +96,7 @@ impl Language {
         specs: impl AsRef<Path>,
         id: impl AsRef<str>,
         sla: impl AsRef<Path>,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, LanguageBuildError> {
         Self::build_inner(specs.as_ref(), id.as_ref(), Some(sla.as_ref()))
     }
 
@@ -121,6 +118,16 @@ impl Language {
 
     pub fn to_bytes(&self) -> Result<impl AsRef<[u8]>, RkyvError> {
         rkyv::to_bytes::<RkyvError>(self).map(|aligned| aligned.into_vec().into_boxed_slice())
+    }
+
+    pub(crate) fn get_or_install(
+        self,
+    ) -> Result<&'static crate::language::Language, LanguageLoadError> {
+        let id_str = &*self.id;
+        let language_id = id_str
+            .parse::<LanguageId>()
+            .map_err(|err| LanguageLoadError::LanguageId(id_str.to_owned(), err))?;
+        Ok(registry::get_or_install(language_id, || self.install()))
     }
 
     pub fn install(self) -> &'static crate::language::Language {
@@ -336,9 +343,9 @@ impl Language {
         specs: &Path,
         language_def: &str,
         sla_override: Option<&Path>,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, LanguageBuildError> {
         let database = LanguageDB::from_directory_with(specs, true).map_err(|source| {
-            BuildError::LanguageDB {
+            LanguageBuildError::LanguageDB {
                 path: specs.to_path_buf(),
                 source,
             }
@@ -348,14 +355,14 @@ impl Language {
             .lookup_str(language_def)
             .ok()
             .flatten()
-            .ok_or_else(|| BuildError::Language(language_def.to_owned()))?;
+            .ok_or_else(|| LanguageBuildError::Language(language_def.to_owned()))?;
 
         let sleigh = match sla_override {
             Some(path) => definition.build_with_sla(path),
             None => {
                 let sla_file = definition.language().sla_file();
                 if !sla_file.exists() {
-                    return Err(BuildError::SleighSlaMissing {
+                    return Err(LanguageBuildError::SleighSlaMissing {
                         language: language_def.to_owned(),
                         path: sla_file.to_path_buf(),
                     });
@@ -363,7 +370,7 @@ impl Language {
                 definition.build()
             }
         }
-        .map_err(|source| BuildError::LanguageBuild {
+        .map_err(|source| LanguageBuildError::LanguageBuild {
             language: language_def.to_owned(),
             source,
         })?;
@@ -379,7 +386,7 @@ impl Language {
 mod test {
     use std::path::Path;
 
-    use super::{BuildError, Language};
+    use super::{Language, LanguageBuildError};
 
     fn specs_for(arch: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -398,7 +405,7 @@ mod test {
                 assert!(!blob.spaces.is_empty());
                 assert!((blob.root_dtree as usize) < blob.decision_trees.len());
             }
-            Err(BuildError::SleighSlaMissing { .. }) => {}
+            Err(LanguageBuildError::SleighSlaMissing { .. }) => {}
             Err(other) => panic!("unexpected build error for {language}: {other}"),
         }
     }

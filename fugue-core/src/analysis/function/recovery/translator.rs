@@ -12,7 +12,8 @@ pub struct Translator {
 impl Translator {
     pub fn new<P>(project: &Project<P>) -> Self
     where
-        P: ProjectStorageProvider, {
+        P: ProjectStorageProvider,
+    {
         let disassembler = project.arch().disassembler();
         let lifter = project.arch().lifter();
 

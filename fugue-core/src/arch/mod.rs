@@ -8,9 +8,8 @@ use rkyv::{Archive, Place, Serialize};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, Language, LanguageVariant, Lifter, LiftingContext,
+    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, resolve_language,
 };
-use crate::loader::util::parse_language;
 use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
@@ -74,9 +73,9 @@ impl From<Box<dyn ArchT>> for Arch {
     }
 }
 
-impl From<LanguageVariant> for Arch {
-    fn from(variant: LanguageVariant) -> Self {
-        Self::new(variant)
+impl From<&'static Language> for Arch {
+    fn from(language: &'static Language) -> Self {
+        Self::new(language)
     }
 }
 
@@ -101,10 +100,7 @@ impl Archive for Arch {
 
     fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
         let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<String>>() };
-        self.0
-            .language_variant()
-            .to_string()
-            .resolve(resolver, out_inner);
+        self.0.language().to_string().resolve(resolver, out_inner);
     }
 }
 
@@ -113,7 +109,7 @@ where
     S::Error: rkyv::rancor::Source,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0.language_variant().to_string().serialize(serializer)
+        self.0.language().to_string().serialize(serializer)
     }
 }
 
@@ -124,7 +120,7 @@ where
     fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
         let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
         Ok(Arch::new(
-            parse_language(variant_str).expect("invalid language variant"),
+            resolve_language(&variant_str).expect("invalid language variant"),
         ))
     }
 }
@@ -134,21 +130,20 @@ impl Entity for Arch {
 }
 
 impl Arch {
-    pub fn new(variant: LanguageVariant) -> Self {
-        let language = variant.language();
+    pub fn new(language: &'static Language) -> Self {
         match language.processor() {
-            "ARM" => arm::Arm::new(variant),
-            "AARCH64" => aarch64::AArch64::new(variant),
-            "MIPS" => mips::Mips::new(variant),
+            "ARM" => arm::Arm::new(language),
+            "AARCH64" => aarch64::AArch64::new(language),
+            "MIPS" => mips::Mips::new(language),
             "x86" => {
                 if language.address_bits() == 32 {
-                    x86::X86::new(variant)
+                    x86::X86::new(language)
                 } else {
-                    x86_64::X86_64::new(variant)
+                    x86_64::X86_64::new(language)
                 }
             }
             _ => {
-                unreachable!("unsupported language: {variant}");
+                unreachable!("unsupported language: {language}");
             }
         }
     }
@@ -219,9 +214,5 @@ impl Arch {
 
     pub fn language(&self) -> &'static Language {
         self.0.language()
-    }
-
-    pub fn language_variant(&self) -> LanguageVariant {
-        self.0.language_variant()
     }
 }

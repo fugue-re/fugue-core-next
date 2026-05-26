@@ -44,7 +44,8 @@ impl EntityStorageProvider for DummyEntityStorage {
 
     fn get_as<F, T>(&self, _key: &[u8], _f: F) -> Result<Option<T>, EntityStorageError>
     where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>, {
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
         Err(DummyEntityStorageError("get_as").into())
     }
 
@@ -78,7 +79,8 @@ impl EntityStorageProvider for DummyEntityStorage {
     ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-        T: 'a, {
+        T: 'a,
+    {
         Err(DummyEntityStorageError("iter_prefix_as").into())
     }
 
