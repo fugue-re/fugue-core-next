@@ -76,15 +76,14 @@ impl LanguageLoader {
             Some("flift") => Ok(Language::from_file(path)?),
             Some("sla") => {
                 let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-                let mut matches = self
+                let matches = self
                     .db
                     .iter()
                     .filter(|b| {
                         b.language()
                             .sla_file()
                             .canonicalize()
-                            .map(|p| p == canonical)
-                            .unwrap_or(false)
+                            .map_or(false, |p| p == canonical)
                     })
                     .collect::<Vec<_>>();
 
@@ -92,19 +91,14 @@ impl LanguageLoader {
                     return Err(LanguageError::Unsupported);
                 }
 
-                let builder = if let Some(idx) = matches
+                let builder = matches
                     .iter()
-                    .position(|b| b.language().architecture().variant() == "default")
-                {
-                    matches.swap_remove(idx)
-                } else if matches.len() == 1 {
-                    matches.swap_remove(0)
-                } else {
-                    return Err(LanguageError::ambiguous_sla(canonical));
-                };
+                    .find(|b| b.language().architecture().variant() == "default")
+                    .or_else(|| (matches.len() == 1).then(|| &matches[0]))
+                    .ok_or_else(|| LanguageError::ambiguous_sla(canonical))?;
 
                 let arch = builder.language().architecture();
-                let variant = (arch.variant() != "default").then(|| arch.variant().to_owned());
+                let variant = (arch.variant() != "default").then(|| arch.variant());
                 let lid = LanguageId::new_with(
                     arch.processor(),
                     arch.endian().is_big(),
