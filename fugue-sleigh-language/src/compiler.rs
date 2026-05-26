@@ -6,25 +6,25 @@ use std::path::Path;
 use ahash::AHashMap as Map;
 use ustr::UstrSet;
 
-use crate::deserialise::{DeserialiseError, XmlExt};
+use crate::deserialise::{parse_int_radix, DeserialiseError, XmlExt};
 use crate::language::LanguageError;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DataOrganisation {
-    pub absolute_max_alignment: u64,
-    pub machine_alignment: u64,
-    pub default_alignment: u64,
-    pub default_pointer_alignment: u64,
-    pub pointer_size: usize,
-    pub wchar_size: usize,
-    pub short_size: usize,
-    pub integer_size: usize,
-    pub long_size: usize,
-    pub long_long_size: usize,
-    pub float_size: usize,
-    pub double_size: usize,
-    pub long_double_size: usize,
-    pub size_alignment_map: Map<usize, u64>,
+    pub(crate) absolute_max_alignment: u64,
+    pub(crate) machine_alignment: u64,
+    pub(crate) default_alignment: u64,
+    pub(crate) default_pointer_alignment: u64,
+    pub(crate) pointer_size: usize,
+    pub(crate) wchar_size: usize,
+    pub(crate) short_size: usize,
+    pub(crate) integer_size: usize,
+    pub(crate) long_size: usize,
+    pub(crate) long_long_size: usize,
+    pub(crate) float_size: usize,
+    pub(crate) double_size: usize,
+    pub(crate) long_double_size: usize,
+    pub(crate) size_alignment_map: Map<usize, u64>,
 }
 
 impl Default for DataOrganisation {
@@ -115,6 +115,65 @@ impl DataOrganisation {
         }
 
         Ok(data)
+    }
+
+    pub fn absolute_max_alignment(&self) -> u64 {
+        self.absolute_max_alignment
+    }
+
+    pub fn machine_alignment(&self) -> u64 {
+        self.machine_alignment
+    }
+
+    pub fn default_alignment(&self) -> u64 {
+        self.default_alignment
+    }
+
+    pub fn default_pointer_alignment(&self) -> u64 {
+        self.default_pointer_alignment
+    }
+
+    pub fn pointer_size(&self) -> usize {
+        self.pointer_size
+    }
+
+    pub fn wchar_size(&self) -> usize {
+        self.wchar_size
+    }
+
+    pub fn short_size(&self) -> usize {
+        self.short_size
+    }
+
+    pub fn integer_size(&self) -> usize {
+        self.integer_size
+    }
+
+    pub fn long_size(&self) -> usize {
+        self.long_size
+    }
+
+    pub fn long_long_size(&self) -> usize {
+        self.long_long_size
+    }
+
+    pub fn float_size(&self) -> usize {
+        self.float_size
+    }
+
+    pub fn double_size(&self) -> usize {
+        self.double_size
+    }
+
+    pub fn long_double_size(&self) -> usize {
+        self.long_double_size
+    }
+
+    pub fn size_alignment(&self, size: usize) -> u64 {
+        self.size_alignment_map
+            .get(&size)
+            .cloned()
+            .unwrap_or(self.default_alignment)
     }
 }
 
@@ -262,6 +321,275 @@ impl PrototypeEntry {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum DatatypeKind {
+    Struct,
+    Union,
+    Float,
+    Any,
+    HomogeneousFloatAggregate,
+}
+
+impl DatatypeKind {
+    pub fn from_name(name: &str) -> Result<Self, DeserialiseError> {
+        match name {
+            "struct" => Ok(Self::Struct),
+            "union" => Ok(Self::Union),
+            "float" => Ok(Self::Float),
+            "any" => Ok(Self::Any),
+            "homogeneous-float-aggregate" => Ok(Self::HomogeneousFloatAggregate),
+            _ => Err(DeserialiseError::Invariant(
+                "unknown datatype name in prototype rule",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RuleStorage {
+    General,
+    Float,
+}
+
+impl RuleStorage {
+    pub fn from_attr_opt(
+        node: xml::Node,
+        name: &'static str,
+    ) -> Result<Option<Self>, DeserialiseError> {
+        match node.attribute(name) {
+            Some("general") => Ok(Some(Self::General)),
+            Some("float") => Ok(Some(Self::Float)),
+            Some(_) => Err(DeserialiseError::Invariant(
+                "unknown storage class in prototype rule",
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub fn from_attr(node: xml::Node, name: &'static str) -> Result<Self, DeserialiseError> {
+        Self::from_attr_opt(node, name)?.ok_or(DeserialiseError::AttributeExpected(name))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct DatatypeFilter {
+    pub(crate) kind: DatatypeKind,
+    pub(crate) min_size: Option<usize>,
+    pub(crate) max_size: Option<usize>,
+    pub(crate) sizes: Vec<usize>,
+    pub(crate) max_primitives: Option<usize>,
+}
+
+impl DatatypeFilter {
+    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
+        if input.tag_name().name() != "datatype" {
+            return Err(DeserialiseError::TagUnexpected(
+                input.tag_name().name().to_owned(),
+            ));
+        }
+
+        let kind = DatatypeKind::from_name(&input.attribute_string("name")?)?;
+
+        let min_size = input.attribute("minsize").map(parse_int_radix).transpose()?;
+        let max_size = input.attribute("maxsize").map(parse_int_radix).transpose()?;
+        let max_primitives = input
+            .attribute("maxprimitives")
+            .map(parse_int_radix)
+            .transpose()?;
+
+        let sizes = match input.attribute("sizes") {
+            Some(s) => s
+                .split(',')
+                .map(|part| parse_int_radix(part.trim()))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            kind,
+            min_size,
+            max_size,
+            sizes,
+            max_primitives,
+        })
+    }
+
+    pub fn kind(&self) -> DatatypeKind {
+        self.kind
+    }
+
+    pub fn min_size(&self) -> Option<usize> {
+        self.min_size
+    }
+
+    pub fn max_size(&self) -> Option<usize> {
+        self.max_size
+    }
+
+    pub fn sizes(&self) -> &[usize] {
+        &self.sizes
+    }
+
+    pub fn max_primitives(&self) -> Option<usize> {
+        self.max_primitives
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PrototypeRuleCondition {
+    Datatype(DatatypeFilter),
+    Varargs { first: usize },
+    Position { index: usize },
+    DatatypeAt { index: usize, datatype: DatatypeFilter },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PrototypeRuleAction {
+    Consume {
+        storage: RuleStorage,
+    },
+    ConsumeExtra {
+        storage: RuleStorage,
+    },
+    Join {
+        align: bool,
+        backfill: bool,
+        stack_spill: bool,
+        reverse_justify: bool,
+        storage: Option<RuleStorage>,
+    },
+    JoinPerPrimitive {
+        storage: Option<RuleStorage>,
+    },
+    JoinDualClass {
+        stack_spill: bool,
+        fill_alternate: bool,
+        reverse_justify: bool,
+    },
+    GotoStack,
+    ConvertToPtr,
+    HiddenReturn {
+        void_lock: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PrototypeRule {
+    pub(crate) killed_by_call: bool,
+    pub(crate) conditions: Vec<PrototypeRuleCondition>,
+    pub(crate) actions: Vec<PrototypeRuleAction>,
+}
+
+impl PrototypeRule {
+    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
+        Self::from_xml_with(input, false)
+    }
+
+    pub fn from_xml_with(
+        input: xml::Node,
+        killed_by_call: bool,
+    ) -> Result<Self, DeserialiseError> {
+        if input.tag_name().name() != "rule" {
+            return Err(DeserialiseError::TagUnexpected(
+                input.tag_name().name().to_owned(),
+            ));
+        }
+
+        let mut conditions = Vec::new();
+        let mut actions = Vec::new();
+
+        for child in input.children().filter(xml::Node::is_element) {
+            match child.tag_name().name() {
+                "datatype" => {
+                    conditions
+                        .push(PrototypeRuleCondition::Datatype(DatatypeFilter::from_xml(child)?));
+                }
+                "varargs" => {
+                    let first = child.attribute_int_opt("first", 0usize)?;
+                    conditions.push(PrototypeRuleCondition::Varargs { first });
+                }
+                "position" => {
+                    let index = child.attribute_int("index")?;
+                    conditions.push(PrototypeRuleCondition::Position { index });
+                }
+                "datatype_at" => {
+                    let index = child.attribute_int("index")?;
+                    let inner = child
+                        .children()
+                        .filter(xml::Node::is_element)
+                        .find(|n| n.tag_name().name() == "datatype")
+                        .ok_or(DeserialiseError::Invariant(
+                            "datatype_at missing nested datatype",
+                        ))?;
+                    let datatype = DatatypeFilter::from_xml(inner)?;
+                    conditions.push(PrototypeRuleCondition::DatatypeAt { index, datatype });
+                }
+                "consume" => {
+                    let storage = RuleStorage::from_attr(child, "storage")?;
+                    actions.push(PrototypeRuleAction::Consume { storage });
+                }
+                "consume_extra" => {
+                    let storage = RuleStorage::from_attr(child, "storage")?;
+                    actions.push(PrototypeRuleAction::ConsumeExtra { storage });
+                }
+                "join" => {
+                    actions.push(PrototypeRuleAction::Join {
+                        align: child.attribute_bool_opt("align", false)?,
+                        backfill: child.attribute_bool_opt("backfill", false)?,
+                        stack_spill: child.attribute_bool_opt("stackspill", false)?,
+                        reverse_justify: child.attribute_bool_opt("reversejustify", false)?,
+                        storage: RuleStorage::from_attr_opt(child, "storage")?,
+                    });
+                }
+                "join_per_primitive" => {
+                    actions.push(PrototypeRuleAction::JoinPerPrimitive {
+                        storage: RuleStorage::from_attr_opt(child, "storage")?,
+                    });
+                }
+                "join_dual_class" => {
+                    actions.push(PrototypeRuleAction::JoinDualClass {
+                        stack_spill: child.attribute_bool_opt("stackspill", false)?,
+                        fill_alternate: child.attribute_bool_opt("fillalternate", false)?,
+                        reverse_justify: child.attribute_bool_opt("reversejustify", false)?,
+                    });
+                }
+                "goto_stack" => {
+                    actions.push(PrototypeRuleAction::GotoStack);
+                }
+                "convert_to_ptr" => {
+                    actions.push(PrototypeRuleAction::ConvertToPtr);
+                }
+                "hidden_return" => {
+                    actions.push(PrototypeRuleAction::HiddenReturn {
+                        void_lock: child.attribute_bool_opt("voidlock", false)?,
+                    });
+                }
+                tag => {
+                    return Err(DeserialiseError::TagUnexpected(tag.to_owned()));
+                }
+            }
+        }
+
+        Ok(Self {
+            killed_by_call,
+            conditions,
+            actions,
+        })
+    }
+
+    pub fn killed_by_call(&self) -> bool {
+        self.killed_by_call
+    }
+
+    pub fn conditions(&self) -> &[PrototypeRuleCondition] {
+        &self.conditions
+    }
+
+    pub fn actions(&self) -> &[PrototypeRuleAction] {
+        &self.actions
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Prototype {
     pub(crate) name: String,
@@ -269,6 +597,8 @@ pub struct Prototype {
     pub(crate) stack_shift: u64,
     pub(crate) inputs: Vec<PrototypeEntry>,
     pub(crate) outputs: Vec<PrototypeEntry>,
+    pub(crate) input_rules: Vec<PrototypeRule>,
+    pub(crate) output_rules: Vec<PrototypeRule>,
     pub(crate) unaffected: Vec<PrototypeOperand>,
     pub(crate) killed_by_call: Vec<PrototypeOperand>,
     pub(crate) likely_trashed: Vec<PrototypeOperand>,
@@ -292,6 +622,8 @@ impl Prototype {
 
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
+        let mut input_rules = Vec::new();
+        let mut output_rules = Vec::new();
         let mut unaffected = Vec::new();
         let mut killed_by_call = Vec::new();
         let mut likely_trashed = Vec::new();
@@ -299,21 +631,25 @@ impl Prototype {
         for child in input.children().filter(xml::Node::is_element) {
             match child.tag_name().name() {
                 "input" => {
-                    let mut values = child
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .map(|v| PrototypeEntry::from_xml(v, false))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    inputs.append(&mut values);
+                    for c in child.children().filter(xml::Node::is_element) {
+                        match c.tag_name().name() {
+                            "pentry" => inputs.push(PrototypeEntry::from_xml(c, false)?),
+                            "rule" => input_rules.push(PrototypeRule::from_xml(c)?),
+                            _ => (),
+                        }
+                    }
                 }
                 "output" => {
-                    let killed = child.attribute_bool("killedbycall").unwrap_or(false);
-                    let mut values = child
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .map(|v| PrototypeEntry::from_xml(v, killed))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    outputs.append(&mut values);
+                    let killed = child.attribute_bool("killedbycall").unwrap_or_default();
+                    for c in child.children().filter(xml::Node::is_element) {
+                        match c.tag_name().name() {
+                            "pentry" => outputs.push(PrototypeEntry::from_xml(c, killed)?),
+                            "rule" => {
+                                output_rules.push(PrototypeRule::from_xml_with(c, killed)?)
+                            }
+                            _ => (),
+                        }
+                    }
                 }
                 "unaffected" => {
                     let mut values = child
@@ -349,6 +685,8 @@ impl Prototype {
             stack_shift,
             inputs,
             outputs,
+            input_rules,
+            output_rules,
             unaffected,
             killed_by_call,
             likely_trashed,
@@ -361,7 +699,7 @@ pub struct CompilerSpec {
     pub(crate) name: String,
     pub(crate) data_organisation: Option<DataOrganisation>,
     pub(crate) stack_pointer: StackPointer,
-    pub(crate) return_address: ReturnAddress,
+    pub(crate) return_address: Option<ReturnAddress>,
     pub(crate) default_prototype: Prototype,
     pub(crate) additional_prototypes: Vec<Prototype>,
     pub(crate) call_fixups: Vec<CallFixup>,
@@ -421,17 +759,11 @@ impl CompilerSpec {
             ));
         }
 
-        if return_address.is_none() {
-            return Err(DeserialiseError::Invariant(
-                "compiler specification does not define return address",
-            ));
-        }
-
         Ok(Self {
             name: name.into(),
             data_organisation,
             stack_pointer: stack_pointer.unwrap(),
-            return_address: return_address.unwrap(),
+            return_address,
             default_prototype: default_prototype.unwrap(),
             additional_prototypes,
             call_fixups,

@@ -84,7 +84,7 @@ build_dynamic() {
 
     for SUFFIX in "$PRIMARY_SUFFIX" $VARIANTS; do
         LANG="${PREFIX}:${SUFFIX}"
-        OUTPUT="$STAGE/$ARCH_DIR/$(printf '%s' "$LANG" | tr ':' '_').flift"
+        OUTPUT="$STAGE/$ARCH_DIR/$(printf '%s' "$LANG" | tr ':' '-').flift"
         run_silent "$LANG (dynamic)" \
             cargo run --quiet --bin lifter-packager -- build-dynamic \
             --language-db "$SPECS" \

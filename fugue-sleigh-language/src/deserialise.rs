@@ -76,10 +76,16 @@ pub trait XmlExt {
     ) -> Result<T, DeserialiseError>;
 
     fn attribute_bool(&self, name: &'static str) -> Result<bool, DeserialiseError>;
+
+    fn attribute_bool_opt(
+        &self,
+        name: &'static str,
+        default: bool,
+    ) -> Result<bool, DeserialiseError>;
 }
 
 #[inline(always)]
-fn parse_int_radix<T: FromStrRadix>(s: &str) -> Result<T, DeserialiseError> {
+pub(crate) fn parse_int_radix<T: FromStrRadix>(s: &str) -> Result<T, DeserialiseError> {
     let b = s.as_bytes();
     if b.len() > 2 && b[0] == b'0' && (b[1] == b'X' || b[1] == b'x') {
         T::from_str_base(&s[2..], 16)
@@ -245,5 +251,16 @@ impl XmlExt for xml::Node<'_, '_> {
             .ok_or(DeserialiseError::AttributeExpected(name))?
             .parse::<bool>()
             .map_err(DeserialiseError::ParseBool)
+    }
+
+    fn attribute_bool_opt(
+        &self,
+        name: &'static str,
+        default: bool,
+    ) -> Result<bool, DeserialiseError> {
+        match self.attribute(name) {
+            Some(s) => s.parse::<bool>().map_err(DeserialiseError::ParseBool),
+            None => Ok(default),
+        }
     }
 }

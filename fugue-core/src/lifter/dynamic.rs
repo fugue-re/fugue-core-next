@@ -7,16 +7,22 @@ use fugue_sleigh_language::LanguageDB;
 
 use crate::lifter::{LanguageError, LanguageId};
 
-const ENV_VAR: &str = "FUGUE_LIFTER_DIR";
+const ENV_VAR: &str = "FUGUE_LANGUAGE_DIR";
 
 pub struct LanguageLoader {
     db: LanguageDB,
 }
 
+impl From<LanguageDB> for LanguageLoader {
+    fn from(db: LanguageDB) -> Self {
+        Self { db }
+    }
+}
+
 impl LanguageLoader {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, LanguageError> {
         Ok(Self {
-            db: LanguageDB::from_directory(root)?,
+            db: LanguageDB::from_directory_with(root, true)?,
         })
     }
 
@@ -109,11 +115,5 @@ impl LanguageLoader {
             }
             _ => Err(LanguageError::unsupported_extension(path)),
         }
-    }
-}
-
-impl From<LanguageDB> for LanguageLoader {
-    fn from(db: LanguageDB) -> Self {
-        Self { db }
     }
 }
