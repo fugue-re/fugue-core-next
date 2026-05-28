@@ -278,7 +278,7 @@ mod test {
 
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests")
-                .join("x86-LE-64-default.flift");
+                .join("x86_64.flift");
             let loader = LanguageLoader::from(LanguageDB::default());
             loader.load_from(path).map(Lifter::new).unwrap()
         }

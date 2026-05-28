@@ -91,6 +91,7 @@ pub struct Elf<'a> {
     architecture: Arch,
     metadata: LoadableMetadata,
     base: Address,
+    preferred_base: u64,
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
     symbols: IndexedSymbolTable,
@@ -116,10 +117,28 @@ impl<'a> Elf<'a> {
         let attributes = attributes.into();
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
+        let preferred_base = with_elf!(
+            view,
+            elf | elf
+                .segments()
+                .filter(|segm| segm.size() != 0)
+                .map(|segm| segm.address())
+                .min()
+                .unwrap_or(0)
+        );
+
         let base = attributes
             .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
-            .unwrap_or_else(|| Address::in_space(0u64, target_space));
+            .unwrap_or_else(|| Address::in_space(preferred_base, target_space));
+
+        if base.offset() != preferred_base
+            && with_elf!(view, elf | elf.kind()) == ObjectKind::Executable
+        {
+            return Err(LoaderError::format_with(
+                "cannot rebase a non-relocatable ELF executable",
+            ));
+        }
 
         let ElfSymbolData {
             bounds,
@@ -128,7 +147,7 @@ impl<'a> Elf<'a> {
             extern_segm,
         } = with_elf!(
             view,
-            elf | ElfSymbolData::from_elf(elf, &architecture, base)?
+            elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base)?
         );
 
         let metadata = LoadableMetadata::new(
@@ -141,6 +160,7 @@ impl<'a> Elf<'a> {
             architecture,
             metadata,
             base,
+            preferred_base,
             bounds,
             mapping_hints,
             symbols,
@@ -157,7 +177,11 @@ impl<'a> Elf<'a> {
 
     pub fn entry(&self) -> Option<Address> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
-        (addr != 0).then_some(Address::new(self.base.space(), self.base.offset() + addr))
+        (addr != 0).then_some(Address::new(
+            self.base.space(),
+            addr.wrapping_sub(self.preferred_base)
+                .wrapping_add(self.base.offset()),
+        ))
     }
 
     pub fn convention(&self) -> Option<&'a str> {
@@ -208,6 +232,7 @@ impl ElfSymbolData {
         elf: &'a impl Object<'a>,
         arch: &Arch,
         base_addr: Address,
+        preferred_base: u64,
     ) -> Result<Self, LoaderError> {
         let target_space = base_addr.space();
         // TODO:
@@ -272,10 +297,10 @@ impl ElfSymbolData {
                 .sections()
                 .map(|sect| (sect.address(), sect.size()))
                 .chain(elf.segments().map(|segm| (segm.address(), segm.size())))
-                .filter(|(_, size)| *size != 0)
+                .filter(|(addr, size)| *size != 0 && *addr >= preferred_base)
             {
                 let curr_min = base_addr
-                    .checked_add(addr)
+                    .checked_add(addr - preferred_base)
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
 
                 let curr_max = curr_min
@@ -315,14 +340,17 @@ impl ElfSymbolData {
 
             let address = Address::new(
                 target_space,
-                symbol
-                    .address()
-                    .checked_add(if is_object {
-                        section_start
-                    } else {
-                        base_addr.offset()
-                    })
-                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?,
+                if is_object {
+                    symbol
+                        .address()
+                        .checked_add(section_start)
+                        .ok_or_else(|| LoaderError::address_overflow(base_addr))?
+                } else {
+                    symbol
+                        .address()
+                        .wrapping_sub(preferred_base)
+                        .wrapping_add(base_addr.offset())
+                },
             );
 
             tracing::trace!(
@@ -440,9 +468,12 @@ impl ElfSymbolData {
                     .add_extern()
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?
             } else {
-                base_addr
-                    .checked_add(sym.address())
-                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?
+                Address::new(
+                    target_space,
+                    sym.address()
+                        .wrapping_sub(preferred_base)
+                        .wrapping_add(base_addr.offset()),
+                )
             }; // FIXME: this needs to be mapped, see above.
             let sym = sym.name().ok();
 
@@ -629,6 +660,8 @@ where
     segms_split: Option<(IntoRangesIter<u64>, ElfSegment<'data, 'file, Elf, R>)>,
     // current base address
     pub(crate) current_base: Address,
+    // the binary's preferred load address
+    pub(crate) preferred_base: u64,
     // mapping hints provided by mapping symbols
     pub(crate) mapping_hints: &'file BTreeMap<Address, ContextHint>,
     // mapping of local and external symbols
@@ -651,6 +684,7 @@ where
         symbols: &'file IndexedSymbolTable,
         externs: &'file ExternSegment,
         base: Address,
+        preferred_base: u64,
     ) -> Self {
         let is_object = elf.kind() == ObjectKind::Relocatable;
         Self {
@@ -660,6 +694,7 @@ where
             covered: RangeSetBlaze::new(),
             segms_split: None,
             current_base: base,
+            preferred_base,
             mapping_hints,
             symbols,
             extern_segm: Some(externs),
@@ -827,13 +862,25 @@ where
         };
 
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
+            ElfSegmentRelocator::new(
+                self.elf,
+                self.symbols,
+                self.is_object,
+                Address::new(
+                    self.current_base.space(),
+                    self.current_base.offset().wrapping_sub(self.preferred_base),
+                ),
+            );
 
         if let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
 
+            let loaded_segm_start = segm
+                .address()
+                .wrapping_sub(self.preferred_base)
+                .wrapping_add(self.current_base.offset());
             let rvsize = (*range.end() - *range.start() + 1) as usize;
-            let rvstart = (*range.start() - segm.address()) as usize;
+            let rvstart = (*range.start() - loaded_segm_start) as usize;
             let rvend = rvsize + rvstart;
 
             let bytes = if data.len() < rvend {
@@ -889,7 +936,15 @@ where
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
+            ElfSegmentRelocator::new(
+                self.elf,
+                self.symbols,
+                self.is_object,
+                Address::new(
+                    self.current_base.space(),
+                    self.current_base.offset().wrapping_sub(self.preferred_base),
+                ),
+            );
 
         for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -902,15 +957,16 @@ where
                 continue;
             }
 
-            let address = self
-                .current_base
-                .checked_add(sect.address())
-                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+            let address = Address::new(
+                self.current_base.space(),
+                sect.address()
+                    .wrapping_sub(self.preferred_base)
+                    .wrapping_add(self.current_base.offset()),
+            );
 
-            let last_address = self
-                .current_base
-                .checked_add(sect.address().wrapping_add(size).wrapping_sub(1))
-                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+            let last_address = address
+                .checked_add(size.wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(address))?;
 
             if last_address < address {
                 tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
@@ -972,7 +1028,15 @@ where
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         let relocator =
-            ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, self.current_base);
+            ElfSegmentRelocator::new(
+                self.elf,
+                self.symbols,
+                self.is_object,
+                Address::new(
+                    self.current_base.space(),
+                    self.current_base.offset().wrapping_sub(self.preferred_base),
+                ),
+            );
 
         for segm in self.segms.by_ref() {
             let size = segm.size();
@@ -982,15 +1046,16 @@ where
             }
 
             let space = self.current_base.space();
-            let address = self
-                .current_base
-                .checked_add(segm.address())
-                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+            let address = Address::new(
+                space,
+                segm.address()
+                    .wrapping_sub(self.preferred_base)
+                    .wrapping_add(self.current_base.offset()),
+            );
 
-            let last_address = self
-                .current_base
-                .checked_add(segm.address().wrapping_add(size).wrapping_sub(1))
-                .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
+            let last_address = address
+                .checked_add(size.wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(address))?;
 
             if last_address < address {
                 tracing::debug!("segment bounds {address}-{last_address} overflow; skipping");
@@ -1186,6 +1251,7 @@ impl Loadable for Elf<'_> {
                 &self.symbols,
                 &self.extern_segm,
                 self.base,
+                self.preferred_base,
             ))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )
@@ -1448,6 +1514,19 @@ mod test {
         }
 
         assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_exec_reject_rebase() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, RawAddress::new(0x1000_0000u64));
+
+        let result =
+            Elf::new_with(BytesOrMapping::from_file("tests/executable")?, attributes);
+
+        assert!(result.is_err());
 
         Ok(())
     }
