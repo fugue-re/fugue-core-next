@@ -31,6 +31,7 @@ pub struct Object<'a> {
     metadata: LoadableMetadata,
     attributes: AttributeMap,
     base: Address,
+    preferred_base: u64,
 }
 
 pub fn object_language<'a>(object: &impl ObjectT<'a>) -> Result<&'static Language, LoaderError> {
@@ -81,15 +82,36 @@ impl<'a> Object<'a> {
 
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
 
+        let preferred_base = view
+            .segments()
+            .filter(|segm| segm.size() != 0)
+            .map(|segm| segm.address())
+            .min()
+            .unwrap_or(0);
+
         let base = attributes
             .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .map(|addr| Address::in_space(addr, target_space))
-            .unwrap_or_else(|| Address::in_space(0u64, target_space));
+            .unwrap_or_else(|| Address::in_space(preferred_base, target_space));
+
+        if base.offset() != preferred_base {
+            return Err(LoaderError::format_with(
+                "cannot rebase image: generic object loader has no relocation support",
+            ));
+        }
 
         let entry = view.entry();
 
         if entry != 0 {
-            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, Address::new(base.space(), entry));
+            attributes.set_attr(
+                ATTRIBUTE_ENTRY_POINT,
+                Address::new(
+                    base.space(),
+                    entry
+                        .wrapping_sub(preferred_base)
+                        .wrapping_add(base.offset()),
+                ),
+            );
         }
 
         Ok(Self {
@@ -98,6 +120,7 @@ impl<'a> Object<'a> {
             metadata,
             attributes,
             base,
+            preferred_base,
         })
     }
 
@@ -162,6 +185,8 @@ impl Loadable for Object<'_> {
     ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
         let view = self.object.borrow_view();
         let space = self.base.space();
+        let preferred_base = self.preferred_base;
+        let base = self.base.offset();
 
         // NOTE: we need to apply relocations
         // NOTE: we need to make a mapping of externs
@@ -171,7 +196,10 @@ impl Loadable for Object<'_> {
                 return None;
             }
 
-            let address = Address::new(space, segm.address());
+            let address = Address::new(
+                space,
+                segm.address().wrapping_sub(preferred_base).wrapping_add(base),
+            );
             let data = segm.data().unwrap_or_default();
 
             let bytes = if data.len() as u64 != segm.size() {
@@ -209,7 +237,12 @@ impl Loadable for Object<'_> {
                 continue;
             }
 
-            let nstart = Address::new(space, segm.address());
+            let nstart = Address::new(
+                space,
+                segm.address()
+                    .wrapping_sub(self.preferred_base)
+                    .wrapping_add(self.base.offset()),
+            );
             let nend = nstart + segm.size();
 
             start = Some(start.map_or(nstart, |start| start.min(nstart)));
