@@ -549,9 +549,7 @@ fn elf_segment_properties<'a>(
         props.insert(SegmentProperties::PERM_WRITE);
     }
 
-    if p_flags & PF_X == PF_X
-        && !config.contains(ElfLoaderProperties::IGNORE_SEGMENT_EXEC_PERMISSION)
-    {
+    if p_flags & PF_X == PF_X && !config.ignore_segment_exec_permission() {
         props.insert(SegmentProperties::PERM_EXECUTE);
     }
 
@@ -570,6 +568,7 @@ bitflags! {
 
         // loader state tracking
         const HAS_LOADED_SECTIONS = 0b0001_0000;
+        const IS_OBJECT = 0b0010_0000;
 
         // derived configuration
         const IGNORE_SEGMENT_EXEC_PERMISSION =
@@ -589,6 +588,14 @@ impl ElfLoaderProperties {
         }
 
         config
+    }
+
+    pub(crate) fn is_object(&self) -> bool {
+        self.contains(Self::IS_OBJECT)
+    }
+
+    pub(crate) fn ignore_segment_exec_permission(&self) -> bool {
+        self.contains(Self::IGNORE_SEGMENT_EXEC_PERMISSION)
     }
 }
 
@@ -618,8 +625,6 @@ where
     pub(crate) symbols: &'file IndexedSymbolTable,
     // virtual segment containing externals
     pub(crate) extern_segm: Option<&'file ExternSegment>,
-    // if we're working with an object file or not
-    is_object: bool,
     // loader config
     config: ElfLoaderProperties,
 }
@@ -637,9 +642,11 @@ where
         externs: &'file ExternSegment,
         base: Address,
         preferred_base: u64,
-        config: ElfLoaderProperties,
+        mut config: ElfLoaderProperties,
     ) -> Self {
-        let is_object = elf.kind() == ObjectKind::Relocatable;
+        if elf.kind() == ObjectKind::Relocatable {
+            config.insert(ElfLoaderProperties::IS_OBJECT);
+        }
         Self {
             elf,
             sects: elf.sections(),
@@ -651,7 +658,6 @@ where
             mapping_hints,
             symbols,
             extern_segm: Some(externs),
-            is_object,
             config,
         }
     }
@@ -798,7 +804,7 @@ where
             self.covered.ranges_insert(vrange);
 
             let relocator =
-                ElfSegmentRelocator::new(self.elf, self.symbols, self.is_object, address);
+                ElfSegmentRelocator::new(self.elf, self.symbols, self.config.is_object(), address);
 
             relocator.apply(address, &mut lsegm, &sect)?;
 
@@ -818,7 +824,7 @@ where
         let relocator = ElfSegmentRelocator::new(
             self.elf,
             self.symbols,
-            self.is_object,
+            self.config.is_object(),
             Address::new(
                 self.current_base.space(),
                 self.current_base.offset().wrapping_sub(self.preferred_base),
@@ -891,7 +897,7 @@ where
         let relocator = ElfSegmentRelocator::new(
             self.elf,
             self.symbols,
-            self.is_object,
+            self.config.is_object(),
             Address::new(
                 self.current_base.space(),
                 self.current_base.offset().wrapping_sub(self.preferred_base),
@@ -982,7 +988,7 @@ where
         let relocator = ElfSegmentRelocator::new(
             self.elf,
             self.symbols,
-            self.is_object,
+            self.config.is_object(),
             Address::new(
                 self.current_base.space(),
                 self.current_base.offset().wrapping_sub(self.preferred_base),
@@ -1120,7 +1126,7 @@ where
     type Item = LoadableSegment<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        if self.is_object {
+        if self.config.is_object() {
             self.next_unlinked()
         } else {
             self.next_linked()
