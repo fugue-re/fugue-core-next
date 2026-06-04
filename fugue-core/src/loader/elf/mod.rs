@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
+use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::elf::{
     FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
@@ -46,6 +47,8 @@ const STT_GNU_UNIQUE: u8 = STT_LOOS;
 
 pub const ELF_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
+
+pub const ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS: &str = "loader.elf.override_segment_permissions";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -499,7 +502,10 @@ impl ElfSymbolData {
     }
 }
 
-pub fn elf_section_properties<'a>(sect: &impl ObjectSection<'a>) -> SegmentProperties {
+fn elf_section_properties<'a>(
+    sect: &impl ObjectSection<'a>,
+    _config: &ElfLoaderProperties,
+) -> SegmentProperties {
     let SectionFlags::Elf { sh_flags } = sect.flags() else {
         // NOTE: we could probably panic here
         return SegmentProperties::empty();
@@ -524,7 +530,10 @@ pub fn elf_section_properties<'a>(sect: &impl ObjectSection<'a>) -> SegmentPrope
     props
 }
 
-pub fn elf_segment_properties<'a>(segm: &impl ObjectSegment<'a>) -> SegmentProperties {
+fn elf_segment_properties<'a>(
+    segm: &impl ObjectSegment<'a>,
+    config: &ElfLoaderProperties,
+) -> SegmentProperties {
     let SegmentFlags::Elf { p_flags } = segm.flags() else {
         // NOTE: we could probably panic here
         return SegmentProperties::empty();
@@ -540,7 +549,9 @@ pub fn elf_segment_properties<'a>(segm: &impl ObjectSegment<'a>) -> SegmentPrope
         props.insert(SegmentProperties::PERM_WRITE);
     }
 
-    if p_flags & PF_X == PF_X {
+    if p_flags & PF_X == PF_X
+        && !config.contains(ElfLoaderProperties::IGNORE_SEGMENT_EXEC_PERMISSION)
+    {
         props.insert(SegmentProperties::PERM_EXECUTE);
     }
 
@@ -551,95 +562,34 @@ pub fn elf_segment_properties<'a>(segm: &impl ObjectSegment<'a>) -> SegmentPrope
     props
 }
 
-pub fn elf_section<'a>(
-    sect: &impl ObjectSection<'a>,
-    base: impl Into<Address>,
-) -> Option<LoadableSegment<'a>> {
-    let SectionFlags::Elf { sh_flags } = sect.flags() else {
-        return None;
-    };
+bitflags! {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+    pub(crate) struct ElfLoaderProperties: u8 {
+        // user configuration
+        const OVERRIDE_SEGMENT_PERMISSIONS = 0b0000_0001;
 
-    if sect.size() == 0 || (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
-        return None;
+        // loader state tracking
+        const HAS_LOADED_SECTIONS = 0b0001_0000;
+
+        // derived configuration
+        const IGNORE_SEGMENT_EXEC_PERMISSION =
+            Self::OVERRIDE_SEGMENT_PERMISSIONS.bits() | Self::HAS_LOADED_SECTIONS.bits();
     }
-
-    let base = base.into();
-    let space = base.space();
-    let address = Address::in_space(sect.address().checked_add(base.offset())?, space);
-    let data = sect.data().unwrap_or_default();
-
-    let bytes = if data.len() as u64 != sect.size() {
-        let mut data = data.to_owned();
-        data.resize(sect.size() as _, 0);
-
-        Cow::Owned(data)
-    } else {
-        Cow::Borrowed(data)
-    };
-
-    Some(LoadableSegment {
-        name: sect
-            .name()
-            .ok()
-            .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
-        address,
-        properties: elf_section_properties(sect),
-        bytes,
-        ..Default::default()
-    })
 }
 
-pub fn elf_segment<'a>(
-    segm: &impl ObjectSegment<'a>,
-    base: impl Into<Address>,
-) -> Option<LoadableSegment<'a>> {
-    if segm.size() == 0 {
-        return None;
+impl ElfLoaderProperties {
+    pub(crate) fn new(attrs: &AttributeMap) -> Self {
+        let mut config = Self::empty();
+
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS)
+            .unwrap_or_default()
+        {
+            config.insert(Self::OVERRIDE_SEGMENT_PERMISSIONS);
+        }
+
+        config
     }
-
-    let base = base.into();
-    let space = base.space();
-    let address = Address::in_space(segm.address().checked_add(base.offset())?, space);
-    let data = segm.data().unwrap_or_default();
-
-    let bytes = if data.len() as u64 != segm.size() {
-        let mut data = data.to_owned();
-        data.resize(segm.size() as _, 0);
-
-        Cow::Owned(data)
-    } else {
-        Cow::Borrowed(data)
-    };
-
-    Some(LoadableSegment {
-        name: segm
-            .name()
-            .ok()
-            .flatten()
-            .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
-        address,
-        properties: elf_segment_properties(segm),
-        bytes,
-        ..Default::default()
-    })
-}
-
-pub fn elf_sections<'a>(
-    elf: &'a impl Object<'a>,
-    base: impl Into<Address>,
-) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    let base = base.into();
-    elf.sections()
-        .filter_map(move |sect| elf_section(&sect, base))
-}
-
-pub fn elf_segments<'a>(
-    elf: &'a impl Object<'a>,
-    base: impl Into<Address>,
-) -> impl Iterator<Item = LoadableSegment<'a>> + 'a {
-    let base = base.into();
-    elf.segments()
-        .filter_map(move |segm| elf_segment(&segm, base))
 }
 
 pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
@@ -670,6 +620,8 @@ where
     pub(crate) extern_segm: Option<&'file ExternSegment>,
     // if we're working with an object file or not
     is_object: bool,
+    // loader config
+    config: ElfLoaderProperties,
 }
 
 impl<'data, 'file, Elf, R> ElfLoadableSegments<'data, 'file, Elf, R>
@@ -685,6 +637,7 @@ where
         externs: &'file ExternSegment,
         base: Address,
         preferred_base: u64,
+        config: ElfLoaderProperties,
     ) -> Self {
         let is_object = elf.kind() == ObjectKind::Relocatable;
         Self {
@@ -699,6 +652,7 @@ where
             symbols,
             extern_segm: Some(externs),
             is_object,
+            config,
         }
     }
 
@@ -830,7 +784,7 @@ where
                     .ok()
                     .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
                 address,
-                properties: elf_section_properties(&sect),
+                properties: elf_section_properties(&sect, &self.config),
                 bytes,
                 mapping_hints: Cow::Owned(
                     self.mapping_hints
@@ -861,16 +815,15 @@ where
             return Ok(None);
         };
 
-        let relocator =
-            ElfSegmentRelocator::new(
-                self.elf,
-                self.symbols,
-                self.is_object,
-                Address::new(
-                    self.current_base.space(),
-                    self.current_base.offset().wrapping_sub(self.preferred_base),
-                ),
-            );
+        let relocator = ElfSegmentRelocator::new(
+            self.elf,
+            self.symbols,
+            self.is_object,
+            Address::new(
+                self.current_base.space(),
+                self.current_base.offset().wrapping_sub(self.preferred_base),
+            ),
+        );
 
         if let Some(range) = covered.next() {
             let data = segm.data().unwrap_or_default();
@@ -909,7 +862,7 @@ where
                     .flatten()
                     .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
                 address,
-                properties: elf_segment_properties(&*segm),
+                properties: elf_segment_properties(&*segm, &self.config),
                 bytes,
                 mapping_hints: Cow::Owned(
                     self.mapping_hints
@@ -935,16 +888,15 @@ where
     pub(crate) fn next_linked_section(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator =
-            ElfSegmentRelocator::new(
-                self.elf,
-                self.symbols,
-                self.is_object,
-                Address::new(
-                    self.current_base.space(),
-                    self.current_base.offset().wrapping_sub(self.preferred_base),
-                ),
-            );
+        let relocator = ElfSegmentRelocator::new(
+            self.elf,
+            self.symbols,
+            self.is_object,
+            Address::new(
+                self.current_base.space(),
+                self.current_base.offset().wrapping_sub(self.preferred_base),
+            ),
+        );
 
         for sect in self.sects.by_ref() {
             let SectionFlags::Elf { sh_flags } = sect.flags() else {
@@ -1003,7 +955,7 @@ where
                     .ok()
                     .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
                 address,
-                properties: elf_section_properties(&sect),
+                properties: elf_section_properties(&sect, &self.config),
                 bytes,
                 mapping_hints: Cow::Owned(
                     self.mapping_hints
@@ -1027,16 +979,15 @@ where
     pub(crate) fn next_linked_segment(
         &mut self,
     ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let relocator =
-            ElfSegmentRelocator::new(
-                self.elf,
-                self.symbols,
-                self.is_object,
-                Address::new(
-                    self.current_base.space(),
-                    self.current_base.offset().wrapping_sub(self.preferred_base),
-                ),
-            );
+        let relocator = ElfSegmentRelocator::new(
+            self.elf,
+            self.symbols,
+            self.is_object,
+            Address::new(
+                self.current_base.space(),
+                self.current_base.offset().wrapping_sub(self.preferred_base),
+            ),
+        );
 
         for segm in self.segms.by_ref() {
             let size = segm.size();
@@ -1116,7 +1067,7 @@ where
                     .flatten()
                     .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
                 address,
-                properties: elf_segment_properties(&segm),
+                properties: elf_segment_properties(&segm, &self.config),
                 bytes,
                 mapping_hints: Cow::Owned(
                     self.mapping_hints
@@ -1147,6 +1098,7 @@ where
         }
 
         if let Some(v) = self.next_linked_section()? {
+            self.config.insert(ElfLoaderProperties::HAS_LOADED_SECTIONS);
             return Ok(Some(v));
         }
 
@@ -1242,6 +1194,7 @@ impl Loadable for Elf<'_> {
         &'b self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'b>, Error = LoaderError> + 'b {
         let view = self.object.borrow_view();
+        let props = ElfLoaderProperties::new(self.attributes());
 
         with_elf!(
             view,
@@ -1252,6 +1205,7 @@ impl Loadable for Elf<'_> {
                 &self.extern_segm,
                 self.base,
                 self.preferred_base,
+                props,
             ))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )
@@ -1523,8 +1477,7 @@ mod test {
         let mut attributes = AttributeMap::new();
         attributes.set_attr(ATTRIBUTE_IMAGE_BASE, RawAddress::new(0x1000_0000u64));
 
-        let result =
-            Elf::new_with(BytesOrMapping::from_file("tests/executable")?, attributes);
+        let result = Elf::new_with(BytesOrMapping::from_file("tests/executable")?, attributes);
 
         assert!(result.is_err());
 
