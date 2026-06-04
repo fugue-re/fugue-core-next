@@ -246,21 +246,26 @@ impl Constructor {
 
             for p in pieces {
                 match p {
-                    PrintPiece::Operand(index) => match &self.operands[*index as usize]
-                        .handle_resolver
-                    {
-                        OperandHandleResolver::None => {
-                            state.input().push_operand(*index as usize);
-                            state.input().constructor().format(data, state, writer)?;
-                            state.input().pop_operand();
+                    PrintPiece::Operand(index) => {
+                        state.input().push_operand(*index as usize);
+                        match &self.operands[*index as usize].handle_resolver {
+                            OperandHandleResolver::None => {
+                                state.input().constructor().format(data, state, writer)?;
+                            }
+                            OperandHandleResolver::Symbol(symbol) => {
+                                Symbol::format(
+                                    &data.symbols[*symbol as usize],
+                                    data,
+                                    state,
+                                    writer,
+                                )?;
+                            }
+                            OperandHandleResolver::Expression(expr) => {
+                                expr.format(data, state, writer)?;
+                            }
                         }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            Symbol::format(&data.symbols[*symbol as usize], data, state, writer)?;
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.format(data, state, writer)?;
-                        }
-                    },
+                        state.input().pop_operand();
+                    }
                     PrintPiece::Token(token) => {
                         writer.write_str(token)?;
                     }
@@ -309,21 +314,26 @@ impl Constructor {
 
             for p in pieces {
                 match p {
-                    PrintPiece::Operand(index) => match &self.operands[*index as usize]
-                        .handle_resolver
-                    {
-                        OperandHandleResolver::None => {
-                            state.input().push_operand(*index as usize);
-                            state.input().constructor().format(data, state, writer)?;
-                            state.input().pop_operand();
+                    PrintPiece::Operand(index) => {
+                        state.input().push_operand(*index as usize);
+                        match &self.operands[*index as usize].handle_resolver {
+                            OperandHandleResolver::None => {
+                                state.input().constructor().format(data, state, writer)?;
+                            }
+                            OperandHandleResolver::Symbol(symbol) => {
+                                Symbol::format(
+                                    &data.symbols[*symbol as usize],
+                                    data,
+                                    state,
+                                    writer,
+                                )?;
+                            }
+                            OperandHandleResolver::Expression(expr) => {
+                                expr.format(data, state, writer)?;
+                            }
                         }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            Symbol::format(&data.symbols[*symbol as usize], data, state, writer)?;
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.format(data, state, writer)?;
-                        }
-                    },
+                        state.input().pop_operand();
+                    }
                     PrintPiece::Token(token) => {
                         writer.write_str(token)?;
                     }
@@ -406,15 +416,14 @@ impl Constructor {
 
             for p in pieces {
                 if let PrintPiece::Operand(index) = p {
+                    state.input().push_operand(*index as usize);
                     match &self.operands[*index as usize].handle_resolver {
                         OperandHandleResolver::None => {
                             let mut inner = Operands::new();
-                            state.input().push_operand(*index as usize);
                             state
                                 .input()
                                 .constructor()
                                 .operands_inner(data, state, &mut inner)?;
-                            state.input().pop_operand();
                             operands.append(inner);
                         }
                         OperandHandleResolver::Symbol(symbol) => {
@@ -424,6 +433,7 @@ impl Constructor {
                             expr.operands(data, state, operands);
                         }
                     }
+                    state.input().pop_operand();
                 }
             }
 
