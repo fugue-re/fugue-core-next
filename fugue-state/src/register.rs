@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use fugue_bytes::Order;
+use fugue_bytes::ByteOrder;
 use fugue_base::{Address, AddressSpace, Translator, VarnodeData};
 use fugue_lifter_runtime::Language;
 
@@ -29,7 +29,7 @@ impl ReturnLocation {
 }
 
 #[derive(Debug, Clone)]
-pub struct RegisterState<T: StateValue, O: Order> {
+pub struct RegisterState<T: StateValue, O: ByteOrder> {
     program_counter: VarnodeData,
     stack_pointer: VarnodeData,
     register_names: Arc<RegisterNames>,
@@ -38,35 +38,35 @@ pub struct RegisterState<T: StateValue, O: Order> {
     marker: PhantomData<O>,
 }
 
-impl<T: StateValue, O: Order> AsRef<Self> for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> AsRef<Self> for RegisterState<T, O> {
     #[inline(always)]
     fn as_ref(&self) -> &Self {
         self
     }
 }
 
-impl<T: StateValue, O: Order> AsMut<Self> for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> AsMut<Self> for RegisterState<T, O> {
     #[inline(always)]
     fn as_mut(&mut self) -> &mut Self {
         self
     }
 }
 
-impl<T: StateValue, O: Order> AsRef<FlatState<T>> for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> AsRef<FlatState<T>> for RegisterState<T, O> {
     #[inline(always)]
     fn as_ref(&self) -> &FlatState<T> {
         &self.inner
     }
 }
 
-impl<T: StateValue, O: Order> AsMut<FlatState<T>> for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> AsMut<FlatState<T>> for RegisterState<T, O> {
     #[inline(always)]
     fn as_mut(&mut self) -> &mut FlatState<T> {
         &mut self.inner
     }
 }
 
-impl<T: StateValue, O: Order> Deref for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> Deref for RegisterState<T, O> {
     type Target = FlatState<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -74,19 +74,19 @@ impl<T: StateValue, O: Order> Deref for RegisterState<T, O> {
     }
 }
 
-impl<T: StateValue, O: Order> DerefMut for RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> DerefMut for RegisterState<T, O> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<T: StateValue, O: Order> From<RegisterState<T, O>> for FlatState<T> {
+impl<T: StateValue, O: ByteOrder> From<RegisterState<T, O>> for FlatState<T> {
     fn from(t: RegisterState<T, O>) -> Self {
         t.inner
     }
 }
 
-impl<V: StateValue, O: Order> State for RegisterState<V, O> {
+impl<V: StateValue, O: ByteOrder> State for RegisterState<V, O> {
     type Error = Error;
 
     #[inline(always)]
@@ -107,7 +107,7 @@ impl<V: StateValue, O: Order> State for RegisterState<V, O> {
     }
 }
 
-impl<V: StateValue, O: Order> StateOps for RegisterState<V, O> {
+impl<V: StateValue, O: ByteOrder> StateOps for RegisterState<V, O> {
     type Value = V;
 
     #[inline(always)]
@@ -161,7 +161,7 @@ impl<V: StateValue, O: Order> StateOps for RegisterState<V, O> {
     }
 }
 
-impl<T: StateValue, O: Order> RegisterState<T, O> {
+impl<T: StateValue, O: ByteOrder> RegisterState<T, O> {
     pub fn new(language: &'static Language) -> Self {
         let program_counter = *translator.program_counter();
         let stack_pointer = *convention.stack_pointer().varnode();

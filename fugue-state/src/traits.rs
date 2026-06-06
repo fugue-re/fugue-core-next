@@ -1,6 +1,6 @@
 use fugue_bv::BitVec;
-use fugue_bytes::traits::ByteCast;
-use fugue_bytes::Order;
+use fugue_bytes::ByteCast;
+use fugue_bytes::ByteOrder;
 use fugue_ir::Address;
 
 use paste::paste;
@@ -22,25 +22,25 @@ where
 }
 
 pub trait FromStateValues<V: StateValue>: Sized {
-    fn from_values<O: Order>(values: &[V]) -> Self;
+    fn from_values<O: ByteOrder>(values: &[V]) -> Self;
 }
 
 pub trait IntoStateValues<V: StateValue>: Sized {
-    fn into_values<O: Order>(self, values: &mut [V]);
+    fn into_values<O: ByteOrder>(self, values: &mut [V]);
 }
 
 macro_rules! impl_for {
     ($t:ident) => {
         impl FromStateValues<u8> for $t {
             #[inline(always)]
-            fn from_values<O: Order>(buf: &[u8]) -> Self {
+            fn from_values<O: ByteOrder>(buf: &[u8]) -> Self {
                 <$t as ByteCast>::from_bytes::<O>(buf)
             }
         }
 
         impl IntoStateValues<u8> for $t {
             #[inline(always)]
-            fn into_values<O: Order>(self, buf: &mut [u8]) {
+            fn into_values<O: ByteOrder>(self, buf: &mut [u8]) {
                 <$t as ByteCast>::into_bytes::<O>(&self, buf)
             }
         }
@@ -61,21 +61,21 @@ impls_for![bool, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize]
 
 impl FromStateValues<u8> for BitVec {
     #[inline(always)]
-    fn from_values<O: Order>(values: &[u8]) -> Self {
+    fn from_values<O: ByteOrder>(values: &[u8]) -> Self {
         BitVec::from_bytes::<O>(values, false)
     }
 }
 
 impl IntoStateValues<u8> for BitVec {
     #[inline(always)]
-    fn into_values<O: Order>(self, values: &mut [u8]) {
+    fn into_values<O: ByteOrder>(self, values: &mut [u8]) {
         self.into_bytes::<O>(values)
     }
 }
 
 impl IntoStateValues<u8> for &'_ BitVec {
     #[inline(always)]
-    fn into_values<O: Order>(self, values: &mut [u8]) {
+    fn into_values<O: ByteOrder>(self, values: &mut [u8]) {
         if O::ENDIAN.is_big() {
             self.to_be_bytes(values)
         } else {

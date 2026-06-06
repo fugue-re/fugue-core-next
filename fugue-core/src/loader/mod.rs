@@ -6,7 +6,7 @@ use std::path::Path;
 
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
-use fugue_bytes::traits::ByteCast;
+use fugue_bytes::ByteCast;
 use fugue_bytes::{BE, LE};
 use smallvec::{SmallVec, smallvec};
 use thiserror::Error;

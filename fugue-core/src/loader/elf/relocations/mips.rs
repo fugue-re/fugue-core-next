@@ -1,4 +1,4 @@
-use fugue_bytes::traits::ByteCast;
+use fugue_bytes::ByteCast;
 use object::elf::{
     R_MIPS_16, R_MIPS_26, R_MIPS_32, R_MIPS_CALL16, R_MIPS_COPY, R_MIPS_GLOB_DAT, R_MIPS_GOT16,
     R_MIPS_HI16, R_MIPS_JALR, R_MIPS_JUMP_SLOT, R_MIPS_LO16, R_MIPS_NONE, R_MIPS_PC16,

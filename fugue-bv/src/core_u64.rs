@@ -7,7 +7,7 @@ use std::ops::{
 };
 use std::str::FromStr;
 
-use fugue_bytes::Order;
+use fugue_bytes::ByteOrder;
 use num_integer::{ExtendedGcd, Integer};
 use num_traits::{AsPrimitive, ToPrimitive};
 
@@ -321,7 +321,7 @@ impl BitVec {
         }
     }
 
-    pub fn from_bytes<O: Order>(bytes: &[u8], signed: bool) -> BitVec {
+    pub fn from_bytes<O: ByteOrder>(bytes: &[u8], signed: bool) -> BitVec {
         let v = if O::ENDIAN.is_big() {
             Self::from_be_bytes(bytes)
         } else {
@@ -335,7 +335,7 @@ impl BitVec {
         }
     }
 
-    pub fn into_bytes<O: Order>(self, bytes: &mut [u8]) {
+    pub fn into_bytes<O: ByteOrder>(self, bytes: &mut [u8]) {
         if O::ENDIAN.is_big() {
             self.to_be_bytes(bytes)
         } else {
@@ -343,7 +343,7 @@ impl BitVec {
         }
     }
 
-    pub fn into_bytes_unchecked<O: Order>(self, bytes: &mut [u8]) {
+    pub fn into_bytes_unchecked<O: ByteOrder>(self, bytes: &mut [u8]) {
         if O::ENDIAN.is_big() {
             self.to_be_bytes_unchecked(bytes)
         } else {

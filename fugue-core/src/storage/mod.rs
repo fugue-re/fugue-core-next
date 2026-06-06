@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use bitflags::bitflags;
 use fugue_bytes::BE;
-use fugue_bytes::order::{ReadBytesExt as _, WriteBytesExt as _};
+use fugue_bytes::traits::{ReadBytesExt as _, WriteBytesExt as _};
 use hex_display::HexDisplayExt;
 use thiserror::Error;
 use walkdir::WalkDir;
