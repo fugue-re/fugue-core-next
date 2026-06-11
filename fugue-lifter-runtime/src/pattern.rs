@@ -89,12 +89,24 @@ impl PatternExpression {
             let value = self
                 .resolve(data, state)
                 .expect("value previously resolved");
-            if value < 0 {
+            if value < 0 && self.has_signed_terms(data) {
                 write!(writer, "-{:#x}", -(value as i128))
             } else {
-                write!(writer, "{:#x}", value)
+                write!(writer, "{:#x}", value as u64)
             }
         }
+    }
+
+    fn has_signed_terms(&self, data: &'static LanguageData) -> bool {
+        self.operations(data).iter().any(|op| match op {
+            PatternOp::TokenField { sign_bit, .. } | PatternOp::ContextField { sign_bit, .. } => {
+                *sign_bit
+            }
+            PatternOp::Constant { value } => *value < 0,
+            PatternOp::Sub | PatternOp::Minus | PatternOp::Not => true,
+            PatternOp::Operand { value, .. } => value.has_signed_terms(data),
+            _ => false,
+        })
     }
 
     /// # Safety
