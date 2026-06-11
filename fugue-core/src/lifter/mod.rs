@@ -11,14 +11,13 @@ use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 use thiserror::Error;
 
-use crate::arch;
 use crate::ir::Address;
 
 pub mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
 pub mod dynamic;
-pub use dynamic::LanguageLoader;
+pub use dynamic::{LanguageLoader, resolve_language, resolve_language_with};
 
 pub mod lifter;
 pub use lifter::{Lifter, LifterError};
@@ -52,29 +51,6 @@ impl LanguageError {
 
     pub fn unsupported_extension(path: impl Into<PathBuf>) -> Self {
         Self::UnsupportedExtension { path: path.into() }
-    }
-}
-
-pub fn resolve_language(s: impl AsRef<str>) -> Result<&'static Language, LanguageError> {
-    let lid = s.as_ref().parse::<LanguageId>()?;
-    let loader = LanguageLoader::from_env()?;
-    Ok(loader.load(&lid)?)
-}
-
-pub fn resolve_language_with(
-    loader: &LanguageLoader,
-    s: impl AsRef<str>,
-) -> Result<&'static Language, LanguageError> {
-    let id = s.as_ref().parse::<LanguageId>()?;
-    let is_be = id.is_big_endian();
-    let variant = id.variant();
-    match (id.processor(), id.bits()) {
-        ("ARM", 32) => arch::arm::Arm::resolve_variant_with(loader, is_be, variant),
-        ("AARCH64", 64) => arch::aarch64::AArch64::resolve_variant_with(loader, is_be, variant),
-        ("MIPS", 32) => arch::mips::Mips::resolve_variant_with(loader, is_be, variant),
-        ("x86", 32) => arch::x86::X86::resolve_variant_with(loader, variant),
-        ("x86", 64) => arch::x86_64::X86_64::resolve_variant_with(loader, variant),
-        _ => Err(LanguageError::Unsupported),
     }
 }
 
