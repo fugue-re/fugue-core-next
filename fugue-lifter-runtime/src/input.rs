@@ -402,7 +402,7 @@ impl ParserInput {
         result <<= bytes_off as u32 * 8;
         result = result.checked_shr(unused as u32 * 8).unwrap_or(0);
 
-        let remaining = (bytes_off + size) as i32 - u32::BITS as i32;
+        let remaining = (bytes_off + size) as i32 - size_of::<u32>() as i32;
         if remaining <= 0 {
             return result;
         }

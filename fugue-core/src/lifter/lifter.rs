@@ -336,4 +336,26 @@ mod test {
         let op1_2 = op1.group().unwrap().get(2).unwrap();
         assert_eq!(op1_2.value(), Some(0x10));
     }
+
+    #[test]
+    fn test_vex_decode() {
+        let mut lifter = x86_64_lifter();
+
+        let cases: &[(&[u8], &str)] = &[
+            (&[0xc5, 0xfd, 0x10, 0xf9], "VMOVUPD YMM7, YMM1"),
+            (&[0xc5, 0xf5, 0x5d, 0xff], "VMINPD YMM7, YMM1, YMM7"),
+            (&[0xc4, 0xe3, 0x6d, 0x4c, 0xd5, 0x00], "VPBLENDVB YMM2, YMM2, YMM5, YMM0"),
+            (&[0xc4, 0xe3, 0xfd, 0x01, 0xc1, 0x4e], "VPERMPD YMM0, YMM1, 0x4e"),
+            (&[0xc4, 0xe3, 0x7d, 0x19, 0xd8, 0x01], "VEXTRACTF128 XMM0, YMM3, 0x1"),
+            (&[0xc4, 0xe2, 0x6d, 0x8c, 0x01], "VPMASKMOVD YMM0, YMM2, ymmword ptr [RCX]"),
+            (&[0x62, 0xf2, 0xf5, 0x08, 0x3f, 0xc8], "VPMAXUQ XMM1, XMM1, XMM0"),
+        ];
+
+        for (bytes, expected) in cases {
+            let mut output = String::new();
+            let disasm = lifter.disassemble(0x1000, bytes, &mut output);
+            assert!(disasm.is_some(), "failed to decode {bytes:02x?}");
+            assert_eq!(&output, expected, "for bytes {bytes:02x?}");
+        }
+    }
 }
