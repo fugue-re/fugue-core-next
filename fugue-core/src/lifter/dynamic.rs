@@ -5,6 +5,7 @@ use fugue_bytes::Endian;
 use fugue_lifter::runtime::Language;
 use fugue_sleigh_language::LanguageDB;
 
+use crate::arch;
 use crate::lifter::{LanguageError, LanguageId};
 
 const ENV_VAR: &str = "FUGUE_LANGUAGE_DIR";
@@ -111,3 +112,50 @@ impl LanguageLoader {
         }
     }
 }
+
+fn resolve_language_by_id(
+    id: &LanguageId,
+    loader: Option<&LanguageLoader>,
+) -> Result<Option<&'static Language>, LanguageError> {
+    let is_be = id.is_big_endian();
+    let variant = id.variant();
+    let language = match (id.processor(), id.bits(), loader) {
+        ("ARM", 32, Some(loader)) => arch::arm::Arm::resolve_variant_with(loader, is_be, variant)?,
+        ("ARM", 32, None) => arch::arm::Arm::resolve_variant(is_be, variant)?,
+        ("AARCH64", 64, Some(loader)) => {
+            arch::aarch64::AArch64::resolve_variant_with(loader, is_be, variant)?
+        }
+        ("AARCH64", 64, None) => arch::aarch64::AArch64::resolve_variant(is_be, variant)?,
+        ("MIPS", 32, Some(loader)) => {
+            arch::mips::Mips::resolve_variant_with(loader, is_be, variant)?
+        }
+        ("MIPS", 32, None) => arch::mips::Mips::resolve_variant(is_be, variant)?,
+        ("x86", 32, Some(loader)) => arch::x86::X86::resolve_variant_with(loader, variant)?,
+        ("x86", 32, None) => arch::x86::X86::resolve_variant(variant)?,
+        ("x86", 64, Some(loader)) => arch::x86_64::X86_64::resolve_variant_with(loader, variant)?,
+        ("x86", 64, None) => arch::x86_64::X86_64::resolve_variant(variant)?,
+        _ => return Ok(None),
+    };
+
+    Ok(Some(language))
+}
+
+pub fn resolve_language(s: impl AsRef<str>) -> Result<&'static Language, LanguageError> {
+    let id = s.as_ref().parse::<LanguageId>()?;
+    match resolve_language_by_id(&id, None)? {
+        Some(language) => Ok(language),
+        None => {
+            let loader = LanguageLoader::from_env()?;
+            Ok(loader.load(&id)?)
+        }
+    }
+}
+
+pub fn resolve_language_with(
+    s: impl AsRef<str>,
+    loader: &LanguageLoader,
+) -> Result<&'static Language, LanguageError> {
+    let id = s.as_ref().parse::<LanguageId>()?;
+    resolve_language_by_id(&id, Some(loader))?.ok_or(LanguageError::Unsupported)
+}
+
