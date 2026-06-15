@@ -6,12 +6,16 @@ use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 use crate::arch::Arch;
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
-    LiftingContext,
+    ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
+    LanguageLoader, Lifter, LiftingContext,
 };
+
+static MAPPING_SYMBOL_CODE: LazySymbol = lazy_symbol!("$x");
+static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
 struct ArchData {
@@ -60,6 +64,18 @@ impl ArchT for AArch64 {
 
     fn gprs(&self) -> &[Varnode] {
         &self.data.gprs
+    }
+
+    fn resolve_mapping_symbol(&self, symbol: &Symbol) -> Option<ContextHint> {
+        if symbol == &*MAPPING_SYMBOL_CODE {
+            return Some(ContextHint::code());
+        }
+
+        if symbol == &*MAPPING_SYMBOL_DATA {
+            return Some(ContextHint::data());
+        }
+
+        None
     }
 
     fn language(&self) -> &'static Language {
