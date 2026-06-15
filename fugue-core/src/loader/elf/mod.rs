@@ -363,10 +363,12 @@ impl ElfSymbolData {
 
             // NOTE: here we deal with mapping symbols, which are used to indicate code/data
             // boundaries, etc. and do not need to be added to the symbol table.
-            if symbol.address() != 0
-                && let Ok(name) = symbol.name()
+            if let Ok(name) = symbol.name()
                 && let Some(context) = arch.resolve_mapping_symbol(name)
             {
+                tracing::trace!(
+                    "symbol {name} in section {section:?} at {address} is a mapping symbol"
+                );
                 mapping_hints.insert(address, context);
                 continue;
             }
@@ -388,7 +390,7 @@ impl ElfSymbolData {
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
-                tracing::debug!("symbol {address} is not a function or data: {st_type:x}");
+                tracing::debug!("symbol {address} is not a function or data: {st_bind:x}/{st_type:x}");
                 SymbolProperties::NONE
             };
 
@@ -1332,6 +1334,38 @@ mod test {
             for (_, sym) in elf.symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_elf_ko_rel() -> Result<(), Box<dyn std::error::Error>> {
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_line_number(true)
+            .with_file(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let elf = Elf::new(BytesOrMapping::from_file("tests/inv-icm42600.ko")?)?;
+            let mut segments = elf.segments();
+            while let Some(segm) = segments.next()? {
+                tracing::info!(
+                    "{}-{} ({:?})",
+                    segm.address(),
+                    segm.address() + segm.len(),
+                    segm.name()
+                );
+            }
+            tracing::info!("architecture: {}", elf.architecture());
+
+            /*
+            for (_, sym) in elf.symbols().iter() {
+                tracing::info!("symbol {sym}");
+            }
+            */
 
             Ok(())
         })
