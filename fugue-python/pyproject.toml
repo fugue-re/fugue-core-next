@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fugue"
+version = "0.3.0"
+requires-python = ">=3.9"
+description = "Python bindings for fugue-core"
+
+[tool.maturin]
+module-name = "fugue"
+manifest-path = "Cargo.toml"
