@@ -16,10 +16,9 @@ use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
 use range_set_blaze::RangeSetBlaze;
 
 use crate::arch::Arch;
-use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, RawAddress, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, ExternSegment, RawAddress, SegmentProperties, SymbolIndex, SymbolProperties,
+    SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -27,7 +26,6 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
-use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
@@ -213,7 +211,7 @@ impl<'a> Pe<'a> {
         &self.object.borrow_loaded().state.mapping_hints
     }
 
-    pub fn symbols(&self) -> &IndexedSymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.object.borrow_loaded().state.symbols
     }
 
@@ -249,7 +247,7 @@ struct PeLoadState {
     preferred_base: u64,
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<Address, Address>,
 }
@@ -318,7 +316,7 @@ impl PeLoadState {
 struct PeSymbolData {
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<Address, Address>,
 }
@@ -374,7 +372,7 @@ impl PeSymbolData {
             return Err(LoaderError::address_overflow(base));
         }
 
-        let mut symbols = IndexedSymbolTable::new();
+        let mut symbols = SymbolTable::new();
         let mut extern_segm = ExternSegment::new(
             Address::new(target_space, aligned_extern_base),
             addr_align,
@@ -738,7 +736,7 @@ impl Loadable for Pe<'_> {
         self.object.borrow_loaded().state.architecture.clone()
     }
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         Some(&self.object.borrow_loaded().state.symbols)
     }
 
@@ -770,10 +768,7 @@ impl Loadable for Pe<'_> {
         LoadableSegmentBounds::new(start..end)
     }
 
-    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
-    where
-        P: ProjectStorageProvider,
-    {
+    fn analysers(&self) -> impl LoadableAnalysers {
         PeAnalysers::new(self)
     }
 }

@@ -10,7 +10,7 @@ pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
 pub mod table;
-pub use table::IndexedFunctionTable;
+pub use table::FunctionTable;
 
 pub type FunctionId = Id<Function>;
 
