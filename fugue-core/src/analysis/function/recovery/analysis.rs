@@ -13,23 +13,20 @@ use super::{
     PartialFunctionWithContext, Translator,
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::ir::traits::{CodeBlockTable, FunctionTable, SymbolTable};
-use crate::ir::{Address, AddressWithContext, RawAddress, RawAddressRangeSet};
+use crate::ir::{
+    Address, AddressWithContext, CodeBlockTable, FunctionTable, RawAddress, RawAddressRangeSet,
+};
 use crate::project::{Project, ProjectMut};
-use crate::storage::project::InMemoryProvider;
+use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::{ProjectStorageProvider, SegmentStorage};
 use crate::types::Confidence;
 
-pub struct FunctionRecovery<P = InMemoryProvider>
-where
-    P: ProjectStorageProvider,
-{
+pub struct FunctionRecovery {
     candidates: VecDeque<AddressWithContext>,
-    builder: FunctionBuilder<P>,
-    discovery_passes: AnalysisGroup<P, FunctionDiscoveryContext>,
-    structuring_passes: AnalysisGroup<P, FunctionStructuringContext>,
-    commit_hook: Option<Box<dyn FunctionRecoveryCommitHook<P> + 'static>>,
+    builder: FunctionBuilder,
+    discovery_passes: AnalysisGroup<FunctionDiscoveryContext>,
+    structuring_passes: AnalysisGroup<FunctionStructuringContext>,
+    commit_hook: Option<Box<dyn FunctionRecoveryCommitHook + 'static>>,
     pending_functions: BTreeMap<Address, PartialFunction>,
 }
 
@@ -110,8 +107,8 @@ impl FunctionDiscoveryContext {
 
     fn covered_by_minmax_block_bounds(
         &self,
-        ftable: &impl FunctionTable,
-        cbtable: &impl CodeBlockTable,
+        ftable: &FunctionTable,
+        cbtable: &CodeBlockTable,
     ) -> RawAddressRangeSet {
         let mut covered = RawAddressRangeSet::new();
 
@@ -145,8 +142,8 @@ impl FunctionDiscoveryContext {
 
     fn covered_by_all_block_bounds(
         &self,
-        ftable: &impl FunctionTable,
-        cbtable: &impl CodeBlockTable,
+        ftable: &FunctionTable,
+        cbtable: &CodeBlockTable,
     ) -> RawAddressRangeSet {
         let mut covered = RawAddressRangeSet::new();
 
@@ -162,11 +159,7 @@ impl FunctionDiscoveryContext {
         covered
     }
 
-    pub fn covered(
-        &self,
-        ftable: &impl FunctionTable,
-        cbtable: &impl CodeBlockTable,
-    ) -> RawAddressRangeSet {
+    pub fn covered(&self, ftable: &FunctionTable, cbtable: &CodeBlockTable) -> RawAddressRangeSet {
         if self.config.use_fine_grained_block_coverage() {
             self.covered_by_all_block_bounds(ftable, cbtable)
         } else {
@@ -176,8 +169,8 @@ impl FunctionDiscoveryContext {
 
     pub fn gaps(
         &self,
-        ftable: &impl FunctionTable,
-        cbtable: &impl CodeBlockTable,
+        ftable: &FunctionTable,
+        cbtable: &CodeBlockTable,
         segments: &SegmentStorage,
         space_id: AddressSpaceId,
     ) -> Result<RawAddressRangeSet, FunctionRecoveryError> {
@@ -299,19 +292,13 @@ impl FunctionStructuringContext {
     }
 }
 
-impl<P> Default for FunctionRecovery<P>
-where
-    P: ProjectStorageProvider,
-{
+impl Default for FunctionRecovery {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P> FunctionRecovery<P>
-where
-    P: ProjectStorageProvider,
-{
+impl FunctionRecovery {
     pub fn new() -> Self {
         FunctionRecovery::new_with(FunctionRecoveryConfig::default())
     }
@@ -348,38 +335,36 @@ where
     pub fn add_candidate_discovery_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, FunctionDiscoveryContext> + 'static,
+        pass: impl AnalysisPass<FunctionDiscoveryContext> + 'static,
     ) {
         self.discovery_passes.add_pass(name, pass);
     }
 
-    pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<P, FunctionDiscoveryContext> {
+    pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<FunctionDiscoveryContext> {
         &self.discovery_passes
     }
 
     pub fn candidate_discovery_passes_mut(
         &mut self,
-    ) -> &mut AnalysisGroup<P, FunctionDiscoveryContext> {
+    ) -> &mut AnalysisGroup<FunctionDiscoveryContext> {
         &mut self.discovery_passes
     }
 
     pub fn add_inter_function_structuring_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, FunctionStructuringContext> + 'static,
+        pass: impl AnalysisPass<FunctionStructuringContext> + 'static,
     ) {
         self.structuring_passes.add_pass(name, pass);
     }
 
-    pub fn inter_function_structuring_passes(
-        &self,
-    ) -> &AnalysisGroup<P, FunctionStructuringContext> {
+    pub fn inter_function_structuring_passes(&self) -> &AnalysisGroup<FunctionStructuringContext> {
         &self.structuring_passes
     }
 
     pub fn inter_function_structuring_passes_mut(
         &mut self,
-    ) -> &mut AnalysisGroup<P, FunctionStructuringContext> {
+    ) -> &mut AnalysisGroup<FunctionStructuringContext> {
         &mut self.structuring_passes
     }
 
@@ -388,7 +373,7 @@ where
     pub fn add_builder_initialisation_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, FunctionBuilderContext> + 'static,
+        pass: impl AnalysisPass<FunctionBuilderContext> + 'static,
     ) {
         self.builder.add_initialisation_pass(name, pass);
     }
@@ -396,14 +381,14 @@ where
     pub fn add_builder_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, PartialFunctionWithContext> + 'static,
+        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
     ) {
         self.builder.add_post_lifting_pass(name, pass);
     }
 
     // hooks
 
-    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook<P> + 'static) {
+    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook + 'static) {
         self.commit_hook = Some(Box::new(hook));
     }
 }
@@ -438,11 +423,8 @@ fn update_function(
     )
 }
 
-impl<P> AnalysisPass<P> for FunctionRecovery<P>
-where
-    P: ProjectStorageProvider,
-{
-    fn analyse(&mut self, project: &mut Project<P>) -> Result<(), AnalysisError> {
+impl AnalysisPass for FunctionRecovery {
+    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         tracing::debug!("starting function recovery");
 
         let span = tracing::span!(Level::TRACE, "function-recovery");
@@ -641,7 +623,7 @@ where
 
                 let fid = f.id();
 
-                drop(f);
+                let _ = f;
 
                 ftable.remove_by_id(fid);
             }

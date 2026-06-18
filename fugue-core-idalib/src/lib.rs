@@ -11,8 +11,8 @@ use fugue_core::arch::x86::X86;
 use fugue_core::arch::x86_64::X86_64;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
-    Address, AddressWithContext, ExternSegment, FlowKind, IndexedSymbolTable, RawAddress,
-    SegmentProperties, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressWithContext, ExternSegment, FlowKind, RawAddress, SegmentProperties,
+    SymbolIndex, SymbolProperties, SymbolTable, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
@@ -21,7 +21,6 @@ use fugue_core::loader::{
 };
 use fugue_core::project::Project;
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
-use fugue_core::storage::ProjectStorageProvider;
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
 
@@ -35,18 +34,15 @@ const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 pub struct IDABinary {
     database: Rc<IDB>,
     architecture: Arch,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
     extern_segm: Option<ExternSegment>,
     mark_thumb: bool,
     metadata: LoadableMetadata,
     attributes: AttributeMap,
 }
 
-fn ida_symbols(
-    arch: &Arch,
-    db: &IDB,
-) -> Result<(IndexedSymbolTable, Option<ExternSegment>), LoaderError> {
-    let mut symbols = IndexedSymbolTable::new();
+fn ida_symbols(arch: &Arch, db: &IDB) -> Result<(SymbolTable, Option<ExternSegment>), LoaderError> {
+    let mut symbols = SymbolTable::new();
     let mut externs = db.segment_by_name("extern").map(|segm| {
         let addr = segm.start_address();
         let templ = arch.external_thunk_template();
@@ -163,7 +159,7 @@ impl IDABinary {
         &self.database
     }
 
-    pub fn symbols(&self) -> &IndexedSymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
 
@@ -261,7 +257,7 @@ impl Loadable for IDABinary {
         &self.metadata
     }
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         Some(&self.symbols)
     }
 
@@ -349,14 +345,11 @@ pub struct IDAAnalysers<'a> {
     binary: &'a IDABinary,
 }
 
-impl<'a, P> LoadableAnalysers<P> for IDAAnalysers<'a>
-where
-    P: ProjectStorageProvider,
-{
+impl<'a> LoadableAnalysers for IDAAnalysers<'a> {
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         let mut recovery = FunctionRecovery::new_with(
             config
                 .with_segment_function_hints(false)
@@ -399,13 +392,10 @@ impl IDAFunctionDiscovery {
     }
 }
 
-impl<P> AnalysisPass<P, FunctionDiscoveryContext> for IDAFunctionDiscovery
-where
-    P: ProjectStorageProvider,
-{
+impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
     fn analyse_with(
         &mut self,
-        project: &mut Project<P>,
+        project: &mut Project,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
@@ -458,13 +448,10 @@ impl IDAFunctionBuilder {
     }
 }
 
-impl<P> AnalysisPass<P, FunctionBuilderContext> for IDAFunctionBuilder
-where
-    P: ProjectStorageProvider,
-{
+impl AnalysisPass<FunctionBuilderContext> for IDAFunctionBuilder {
     fn analyse_with(
         &mut self,
-        _project: &mut Project<P>,
+        _project: &mut Project,
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();

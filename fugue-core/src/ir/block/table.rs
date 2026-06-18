@@ -5,9 +5,6 @@ use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::traits::{
-    CodeBlockIter, CodeBlockIterMut, CodeBlockMut, CodeBlockRef, CodeBlockTable as CodeBlockTableT,
-};
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
@@ -17,20 +14,20 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 #[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct IndexedCodeBlockTable {
+pub struct CodeBlockTable {
     bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     blocks: Vec<CodeBlock>,
     free_ids: Vec<Id<CodeBlock>>,
 }
 
-impl IndexedCodeBlockTable {
+impl CodeBlockTable {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 #[derive(Debug, Error)]
-pub enum IndexedCodeBlockTableError {
+pub enum CodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
@@ -39,7 +36,7 @@ pub enum IndexedCodeBlockTableError {
     Storage(#[from] EntityStorageError),
 }
 
-impl IndexedCodeBlockTableError {
+impl CodeBlockTableError {
     pub fn other<E>(error: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -55,16 +52,61 @@ impl IndexedCodeBlockTableError {
     }
 }
 
-impl CodeBlockTableT for IndexedCodeBlockTable {
-    type CodeBlockIter<'a> = CodeBlockIter<'a>;
-    type CodeBlockIterMut<'a> = CodeBlockIterMut<'a>;
-    type CodeBlockMut<'a> = CodeBlockMut<'a>;
-    type CodeBlockRef<'a> = CodeBlockRef<'a>;
-    type Error = IndexedCodeBlockTableError;
+pub type CodeBlockRef<'a> = &'a CodeBlock;
+pub type CodeBlockMut<'a> = &'a mut CodeBlock;
 
-    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, Self::Error>
+pub struct CodeBlockIter<'a> {
+    inner: Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a>,
+}
+
+impl<'a> CodeBlockIter<'a> {
+    pub fn new(iter: impl Iterator<Item = CodeBlockRef<'a>> + 'a) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for CodeBlockIter<'a> {
+    type Item = CodeBlockRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+pub struct CodeBlockIterMut<'a> {
+    inner: Box<dyn Iterator<Item = CodeBlockMut<'a>> + 'a>,
+}
+
+impl<'a> CodeBlockIterMut<'a> {
+    pub fn new(iter: impl Iterator<Item = CodeBlockMut<'a>> + 'a) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for CodeBlockIterMut<'a> {
+    type Item = CodeBlockMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl CodeBlockTable {
+    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
     where
-        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, Self::Error>,
+        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
             (true, free_id)
@@ -75,7 +117,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         let nblk = f(id, addr)?;
 
         if nblk.start() != addr {
-            return Err(IndexedCodeBlockTableError::AddressMismatch);
+            return Err(CodeBlockTableError::AddressMismatch);
         }
 
         let range = nblk.start().address()..nblk.next_address().address();
@@ -97,7 +139,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         Ok(id)
     }
 
-    fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
+    pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
         let Some(blk) = self
             .blocks
             .get_mut(id.index())
@@ -129,7 +171,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         true
     }
 
-    fn remove_by_address(&mut self, addr: Address) -> usize {
+    pub fn remove_by_address(&mut self, addr: Address) -> usize {
         let mut removed = 0;
 
         let space = addr.space();
@@ -162,7 +204,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         removed
     }
 
-    fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
+    pub fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
         let mut removed = 0;
 
         let space = addr.space();
@@ -203,19 +245,19 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         removed
     }
 
-    fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {
+    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {
         self.blocks
             .get(id.index())
             .filter(|blk| blk.id().is_valid())
     }
 
-    fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut> {
+    pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut> {
         self.blocks
             .get_mut(id.index())
             .filter(|blk| blk.id().is_valid())
     }
 
-    fn get_by_address(&self, maddr: Address) -> CodeBlockIter {
+    pub fn get_by_address(&self, maddr: Address) -> CodeBlockIter<'_> {
         let space = maddr.space();
         let addr = maddr.address();
 
@@ -232,7 +274,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn get_by_address_and_context<'a>(
+    pub fn get_by_address_and_context<'a>(
         &'a self,
         maddr: Address,
         context: &'a ContextSet,
@@ -253,7 +295,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut {
+    pub fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut<'_> {
         let space = maddr.space();
         let addr = maddr.address();
 
@@ -279,7 +321,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn get_by_address_and_context_mut<'a>(
+    pub fn get_by_address_and_context_mut<'a>(
         &'a mut self,
         maddr: Address,
         context: &'a ContextSet,
@@ -302,7 +344,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn contains(&self, addr: Address) -> bool {
+    pub fn contains(&self, addr: Address) -> bool {
         let space = addr.space();
         let addr = addr.address();
 
@@ -311,7 +353,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
             .map_or(false, |bounds| bounds.has_overlap(addr..=addr))
     }
 
-    fn overlaps<'a>(&'a self, addr: Address) -> CodeBlockIter<'a> {
+    pub fn overlaps(&self, addr: Address) -> CodeBlockIter<'_> {
         let space = addr.space();
         let addr = addr.address();
 
@@ -327,7 +369,7 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         )
     }
 
-    fn overlaps_mut<'a>(&'a mut self, addr: Address) -> CodeBlockIterMut<'a> {
+    pub fn overlaps_mut(&mut self, addr: Address) -> CodeBlockIterMut<'_> {
         let space = addr.space();
         let addr = addr.address();
 
@@ -345,28 +387,28 @@ impl CodeBlockTableT for IndexedCodeBlockTable {
         }))
     }
 
-    fn iter(&self) -> CodeBlockIter {
+    pub fn iter(&self) -> CodeBlockIter<'_> {
         CodeBlockIter::new(self.blocks.iter().filter(|blk| blk.id().is_valid()))
     }
 
-    fn iter_mut(&mut self) -> CodeBlockIterMut {
+    pub fn iter_mut(&mut self) -> CodeBlockIterMut<'_> {
         CodeBlockIterMut::new(self.blocks.iter_mut().filter(|blk| blk.id().is_valid()))
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.blocks.len() - self.free_ids.len()
     }
 }
 
-impl Entity for IndexedCodeBlockTable {
+impl Entity for CodeBlockTable {
     const ID: EntityId = ENTITY_CODE_BLOCK_TABLE_ID;
 }
 
-impl ProjectEntityFromStorage for IndexedCodeBlockTable {
+impl ProjectEntityFromStorage for CodeBlockTable {
     fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
         storage.get(&ProjectEntity::CodeBlockTable)
     }
@@ -376,7 +418,7 @@ impl ProjectEntityFromStorage for IndexedCodeBlockTable {
     }
 }
 
-impl PersistableProjectEntity for IndexedCodeBlockTable {
+impl PersistableProjectEntity for CodeBlockTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         storage.insert(&ProjectEntity::CodeBlockTable, self)
     }
@@ -389,7 +431,7 @@ mod test {
 
     #[test]
     fn test_basic_operations() {
-        let mut table = IndexedCodeBlockTable::new();
+        let mut table = CodeBlockTable::new();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
 
@@ -414,7 +456,7 @@ mod test {
 
     #[test]
     fn test_overlapped() {
-        let mut table = IndexedCodeBlockTable::new();
+        let mut table = CodeBlockTable::new();
 
         let addr1 = Address::from(0x1000);
         let addr2 = Address::from(0x1000); // overlaps with addr1

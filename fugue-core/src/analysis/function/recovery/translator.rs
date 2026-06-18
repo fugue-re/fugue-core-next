@@ -2,7 +2,6 @@ use super::FunctionRecoveryError;
 use crate::ir::{Address, Insn};
 use crate::lifter::{Disassembler, Lifter, LiftingContext};
 use crate::project::Project;
-use crate::storage::ProjectStorageProvider;
 
 pub struct Translator {
     disassembler: Disassembler,
@@ -10,10 +9,7 @@ pub struct Translator {
 }
 
 impl Translator {
-    pub fn new<P>(project: &Project<P>) -> Self
-    where
-        P: ProjectStorageProvider,
-    {
+    pub fn new(project: &Project) -> Self {
         let disassembler = project.arch().disassembler();
         let lifter = project.arch().lifter();
 

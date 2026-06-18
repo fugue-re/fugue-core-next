@@ -1,7 +1,5 @@
 use super::{FunctionRecoveryError, PartialFunction};
 use crate::project::Project;
-use crate::storage::ProjectStorageProvider;
-use crate::storage::project::InMemoryProvider;
 use crate::types::Confidence;
 
 pub struct FunctionRecoveryCommitContext {
@@ -30,52 +28,44 @@ impl FunctionRecoveryCommitContext {
     }
 }
 
-pub trait FunctionRecoveryCommitHook<P = InMemoryProvider>
-where
-    P: ProjectStorageProvider,
-{
+pub trait FunctionRecoveryCommitHook {
     fn should_commit(
         &self,
-        project: &mut Project<P>,
+        project: &mut Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
-impl<P, F> FunctionRecoveryCommitHook<P> for F
+impl<F> FunctionRecoveryCommitHook for F
 where
-    F: Fn(&mut Project<P>, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>,
-    P: ProjectStorageProvider,
+    F: Fn(&mut Project, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>,
 {
     fn should_commit(
         &self,
-        project: &mut Project<P>,
+        project: &mut Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         (self)(project, context)
     }
 }
 
-impl<P> FunctionRecoveryCommitHook<P> for Box<dyn FunctionRecoveryCommitHook<P> + 'static>
-where
-    P: ProjectStorageProvider,
-{
+impl FunctionRecoveryCommitHook for Box<dyn FunctionRecoveryCommitHook + 'static> {
     fn should_commit(
         &self,
-        project: &mut Project<P>,
+        project: &mut Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         self.as_ref().should_commit(project, context)
     }
 }
 
-impl<P, T> FunctionRecoveryCommitHook<P> for Option<T>
+impl<T> FunctionRecoveryCommitHook for Option<T>
 where
-    T: FunctionRecoveryCommitHook<P>,
-    P: ProjectStorageProvider,
+    T: FunctionRecoveryCommitHook,
 {
     fn should_commit(
         &self,
-        project: &mut Project<P>,
+        project: &mut Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         match self {

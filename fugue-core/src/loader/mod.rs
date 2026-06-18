@@ -13,10 +13,9 @@ use thiserror::Error;
 use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
-use crate::ir::symbol::IndexedSymbolTable;
+use crate::ir::symbol::SymbolTable;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::{ContextHint, LanguageError};
-use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -630,7 +629,7 @@ pub trait Loadable {
 
     fn architecture(&self) -> Arch;
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         None
     }
 
@@ -640,26 +639,20 @@ pub trait Loadable {
 
     fn segment_bounds(&self) -> LoadableSegmentBounds;
 
-    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
-    where
-        P: ProjectStorageProvider,
-    {
+    fn analysers(&self) -> impl LoadableAnalysers {
         DefaultLoadableAnalysers
     }
 }
 
-pub trait LoadableAnalysers<P>
-where
-    P: ProjectStorageProvider,
-{
-    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
+pub trait LoadableAnalysers {
+    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
         self.function_recovery_with(FunctionRecoveryConfig::default())
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         Ok(FunctionRecovery::new_with(config))
     }
 }
@@ -667,38 +660,36 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultLoadableAnalysers;
 
-impl<P> LoadableAnalysers<P> for DefaultLoadableAnalysers where P: ProjectStorageProvider {}
+impl LoadableAnalysers for DefaultLoadableAnalysers {}
 
-impl<P, T> LoadableAnalysers<P> for Box<T>
+impl<T> LoadableAnalysers for Box<T>
 where
-    P: ProjectStorageProvider,
-    T: LoadableAnalysers<P> + ?Sized,
+    T: LoadableAnalysers + ?Sized,
 {
-    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
+    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
         self.as_ref().function_recovery()
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         self.as_ref().function_recovery_with(config)
     }
 }
 
-impl<P, T> LoadableAnalysers<P> for &T
+impl<T> LoadableAnalysers for &T
 where
-    P: ProjectStorageProvider,
-    T: LoadableAnalysers<P> + ?Sized,
+    T: LoadableAnalysers + ?Sized,
 {
-    fn function_recovery(&self) -> Result<FunctionRecovery<P>, AnalysisError> {
+    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
         (*self).function_recovery()
     }
 
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         (*self).function_recovery_with(config)
     }
 }
@@ -789,7 +780,7 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         match self {
             Self::Elf(elf) => Some(elf.symbols()),
             Self::Pe(pe) => Some(pe.symbols()),
@@ -837,14 +828,11 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
-    where
-        P: ProjectStorageProvider,
-    {
+    fn analysers(&self) -> impl LoadableAnalysers {
         match self {
-            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers<P>>,
-            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers<P>>,
-            Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers<P>>,
+            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers>,
+            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers>,
+            Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers>,
         }
     }
 }

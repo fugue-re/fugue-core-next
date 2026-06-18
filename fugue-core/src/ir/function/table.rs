@@ -3,9 +3,6 @@ use std::mem;
 
 use thiserror::Error;
 
-use crate::ir::traits::{
-    FunctionIter, FunctionIterMut, FunctionMut, FunctionRef, FunctionTable as FunctionTableT,
-};
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
@@ -25,13 +22,13 @@ use crate::storage::{EntityStorage, EntityStorageError};
 // dropped.
 //
 #[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct IndexedFunctionTable {
+pub struct FunctionTable {
     addresses: BTreeMap<Address, Id<Function>>,
     functions: Vec<Function>,
     free_ids: Vec<Id<Function>>,
 }
 
-impl IndexedFunctionTable {
+impl FunctionTable {
     pub fn new() -> Self {
         Self::default()
     }
@@ -46,7 +43,7 @@ impl IndexedFunctionTable {
 }
 
 #[derive(Debug, Error)]
-pub enum IndexedFunctionTableError {
+pub enum FunctionTableError {
     #[error("function to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
@@ -55,7 +52,7 @@ pub enum IndexedFunctionTableError {
     Storage(#[from] EntityStorageError),
 }
 
-impl IndexedFunctionTableError {
+impl FunctionTableError {
     pub fn custom<E>(error: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -71,22 +68,67 @@ impl IndexedFunctionTableError {
     }
 }
 
-impl FunctionTableT for IndexedFunctionTable {
-    type Error = IndexedFunctionTableError;
-    type FunctionIter<'a> = FunctionIter<'a>;
-    type FunctionIterMut<'a> = FunctionIterMut<'a>;
-    type FunctionMut<'a> = FunctionMut<'a>;
-    type FunctionRef<'a> = FunctionRef<'a>;
+pub type FunctionRef<'a> = &'a Function;
+pub type FunctionMut<'a> = &'a mut Function;
 
-    fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, Self::Error>
+pub struct FunctionIter<'a> {
+    inner: Box<dyn Iterator<Item = FunctionRef<'a>> + 'a>,
+}
+
+impl<'a> FunctionIter<'a> {
+    pub fn new(iter: impl Iterator<Item = FunctionRef<'a>> + 'a) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for FunctionIter<'a> {
+    type Item = FunctionRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+pub struct FunctionIterMut<'a> {
+    inner: Box<dyn Iterator<Item = FunctionMut<'a>> + 'a>,
+}
+
+impl<'a> FunctionIterMut<'a> {
+    pub fn new(iter: impl Iterator<Item = FunctionMut<'a>> + 'a) -> Self {
+        Self {
+            inner: Box::new(iter),
+        }
+    }
+}
+
+impl<'a> Iterator for FunctionIterMut<'a> {
+    type Item = FunctionMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl FunctionTable {
+    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
     where
-        F: FnOnce(Id<Function>, Address) -> Result<Function, Self::Error>,
+        F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
     {
         if let Some(existing) = self.get_by_address_mut(addr) {
             let nf = f(existing.id(), addr)?;
 
             if nf.entry() != addr {
-                return Err(IndexedFunctionTableError::AddressMismatch);
+                return Err(FunctionTableError::AddressMismatch);
             }
 
             *existing = nf;
@@ -103,7 +145,7 @@ impl FunctionTableT for IndexedFunctionTable {
         let nf = f(id, addr)?;
 
         if nf.entry() != addr {
-            return Err(IndexedFunctionTableError::AddressMismatch);
+            return Err(FunctionTableError::AddressMismatch);
         }
 
         self.addresses.insert(addr, id);
@@ -118,7 +160,7 @@ impl FunctionTableT for IndexedFunctionTable {
         Ok(id)
     }
 
-    fn remove_by_id(&mut self, id: Id<Function>) -> bool {
+    pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
         let Some(f) = self
             .functions
             .get_mut(id.index())
@@ -135,7 +177,7 @@ impl FunctionTableT for IndexedFunctionTable {
         true
     }
 
-    fn remove_by_address(&mut self, addr: Address) -> bool {
+    pub fn remove_by_address(&mut self, addr: Address) -> bool {
         let Some(id) = self.addresses.remove(&addr) else {
             return false;
         };
@@ -146,56 +188,56 @@ impl FunctionTableT for IndexedFunctionTable {
         true
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.functions.len() - self.free_ids.len()
     }
 
-    fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
+    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
         self.functions.get(id.index()).filter(|f| f.id().is_valid())
     }
 
-    fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
+    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
         self.functions
             .get_mut(id.index())
             .filter(|f| f.id().is_valid())
     }
 
-    fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
+    pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
         self.addresses
             .get(&addr)
             .copied()
             .and_then(|id| self.get_by_id(id))
     }
 
-    fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
+    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
         self.addresses
             .get(&addr)
             .copied()
             .and_then(|id| self.get_by_id_mut(id))
     }
 
-    fn addresses<'a>(&'a self) -> impl Iterator<Item = Address> + 'a {
+    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
         self.addresses.keys().copied()
     }
 
-    fn iter<'a>(&'a self) -> FunctionIter<'a> {
+    pub fn iter(&self) -> FunctionIter<'_> {
         FunctionIter::new(self.functions.iter().filter(|f| f.id().is_valid()))
     }
 
-    fn iter_mut<'a>(&'a mut self) -> FunctionIterMut<'a> {
+    pub fn iter_mut(&mut self) -> FunctionIterMut<'_> {
         FunctionIterMut::new(self.functions.iter_mut().filter(|f| f.id().is_valid()))
     }
 }
 
-impl Entity for IndexedFunctionTable {
+impl Entity for FunctionTable {
     const ID: EntityId = ENTITY_FUNCTION_TABLE_ID;
 }
 
-impl ProjectEntityFromStorage for IndexedFunctionTable {
+impl ProjectEntityFromStorage for FunctionTable {
     fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
         storage.get(&ProjectEntity::FunctionTable)
     }
@@ -205,7 +247,7 @@ impl ProjectEntityFromStorage for IndexedFunctionTable {
     }
 }
 
-impl PersistableProjectEntity for IndexedFunctionTable {
+impl PersistableProjectEntity for FunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         storage.insert(&ProjectEntity::FunctionTable, self)
     }
@@ -217,7 +259,7 @@ mod test {
 
     #[test]
     fn test_basic_operations() {
-        let mut table = IndexedFunctionTable::new();
+        let mut table = FunctionTable::new();
 
         let addr = Address::from(0x1000);
         let func_id = table
@@ -237,7 +279,7 @@ mod test {
 
     #[test]
     fn test_removal_operations() {
-        let mut table = IndexedFunctionTable::new();
+        let mut table = FunctionTable::new();
 
         let addr1 = Address::from(0x1000);
         let addr2 = Address::from(0x2000);

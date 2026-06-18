@@ -1,47 +1,35 @@
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::Address;
-use crate::ir::traits::SymbolTable as _;
+use crate::ir::{Address, CodeBlockTable, FunctionTable, SymbolTable};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};
-use crate::storage::project::{
-    InMemoryProvider, PersistableProjectEntity, ProjectEntityFromStorage,
-};
+use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ProjectStorage, ProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
+    DefaultProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
+    TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
 };
 
-pub type InMemoryProject = Project<InMemoryProvider>;
-
-pub struct Project<S = InMemoryProvider>
-where
-    S: ProjectStorageProvider,
-{
+pub struct Project {
     pub(crate) arch: Arch,
     pub(crate) language: &'static Language,
-    pub(crate) symbols: <S::ProjectStorage as ProjectStorage>::SymbolTable,
-    pub(crate) functions: <S::ProjectStorage as ProjectStorage>::FunctionTable,
-    pub(crate) blocks: <S::ProjectStorage as ProjectStorage>::CodeBlockTable,
+    pub(crate) symbols: SymbolTable,
+    pub(crate) functions: FunctionTable,
+    pub(crate) blocks: CodeBlockTable,
     pub(crate) attributes: AttributeMap,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
-    _marker: PhantomData<S>,
 }
 
-impl<S> Drop for Project<S>
-where
-    S: ProjectStorageProvider,
-{
+impl Drop for Project {
     fn drop(&mut self) {
         if let Err(e) = self.persist() {
             tracing::error!("failed to persist project data: {e}");
@@ -49,32 +37,24 @@ where
     }
 }
 
-pub struct ProjectRef<'a, S>
-where
-    S: ProjectStorageProvider,
-{
+pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
     pub language: &'static Language,
-    pub symbols: &'a <S::ProjectStorage as ProjectStorage>::SymbolTable,
-    pub functions: &'a <S::ProjectStorage as ProjectStorage>::FunctionTable,
-    pub blocks: &'a <S::ProjectStorage as ProjectStorage>::CodeBlockTable,
+    pub symbols: &'a SymbolTable,
+    pub functions: &'a FunctionTable,
+    pub blocks: &'a CodeBlockTable,
     pub attributes: &'a AttributeMap,
     pub storage: &'a StorageContainer,
-    _marker: PhantomData<S>,
 }
 
-pub struct ProjectMut<'a, S>
-where
-    S: ProjectStorageProvider,
-{
+pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
-    pub symbols: &'a mut <S::ProjectStorage as ProjectStorage>::SymbolTable,
-    pub functions: &'a mut <S::ProjectStorage as ProjectStorage>::FunctionTable,
-    pub blocks: &'a mut <S::ProjectStorage as ProjectStorage>::CodeBlockTable,
+    pub symbols: &'a mut SymbolTable,
+    pub functions: &'a mut FunctionTable,
+    pub blocks: &'a mut CodeBlockTable,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
-    _marker: PhantomData<S>,
 }
 
 #[derive(Debug, Error)]
@@ -87,10 +67,7 @@ pub enum ProjectError {
     StorageProvider(#[from] StorageProviderError),
 }
 
-impl<S> Project<S>
-where
-    S: ProjectStorageProvider,
-{
+impl Project {
     pub fn new(loadable: &impl Loadable) -> Result<Self, ProjectError> {
         Self::new_with(loadable, AttributeMap::default())
     }
@@ -99,6 +76,27 @@ where
         loadable: &impl Loadable,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError> {
+        Self::new_with_provider::<DefaultProjectStorageProvider>(loadable, attributes)
+    }
+
+    pub fn new_transient(loadable: &impl Loadable) -> Result<Self, ProjectError> {
+        Self::new_with_provider::<TransientStorageProvider>(loadable, AttributeMap::default())
+    }
+
+    pub fn new_transient_with(
+        loadable: &impl Loadable,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError> {
+        Self::new_with_provider::<TransientStorageProvider>(loadable, attributes)
+    }
+
+    pub fn new_with_provider<P>(
+        loadable: &impl Loadable,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
         // NOTE: we make a copy of the loader attributes, as project attributes will be a superset.
         let mut attributes = attributes.into();
 
@@ -106,8 +104,7 @@ where
 
         tracing::trace!("initialising project storage layer");
 
-        let storage =
-            StorageContainer::from_loadable::<S::StorageProvider>(loadable, &mut attributes)?;
+        let storage = StorageContainer::from_loadable::<P>(loadable, &mut attributes)?;
 
         Self::from_storage(Some(loadable), storage, attributes)
     }
@@ -142,7 +139,7 @@ where
 
         tracing::trace!("loading project symbols");
 
-        let symbols_builder = || match S::ProjectStorage::symbol_table(&storage.entities)? {
+        let symbols_builder = || match SymbolTable::from_entity_storage(&storage.entities)? {
             Some(symbols) => Ok(symbols),
             None => {
                 let Some(loadable) = loadable else {
@@ -150,8 +147,7 @@ where
                     return Err(StorageProviderError::NotAStandaloneProject.into());
                 };
 
-                let mut symbols =
-                    <S::ProjectStorage as ProjectStorage>::SymbolTable::default_from_entity_storage(&storage.entities)?;
+                let mut symbols = SymbolTable::default_from_entity_storage(&storage.entities)?;
 
                 if let Some(loadable_symbols) = loadable.symbols() {
                     tracing::trace!(
@@ -177,14 +173,10 @@ where
 
         tracing::trace!("loading project functions");
 
-        let functions_builder = || match S::ProjectStorage::function_table(&storage.entities)? {
+        let functions_builder = || match FunctionTable::from_entity_storage(&storage.entities)? {
             Some(functions) => Ok(functions),
-            None => {
-                <S::ProjectStorage as ProjectStorage>::FunctionTable::default_from_entity_storage(
-                    &storage.entities,
-                )
-                .map_err(ProjectError::from)
-            }
+            None => FunctionTable::default_from_entity_storage(&storage.entities)
+                .map_err(ProjectError::from),
         };
 
         let functions = match functions_builder() {
@@ -197,14 +189,10 @@ where
 
         tracing::trace!("loading project code blocks");
 
-        let blocks_builder = || match S::ProjectStorage::code_block_table(&storage.entities)? {
+        let blocks_builder = || match CodeBlockTable::from_entity_storage(&storage.entities)? {
             Some(blocks) => Ok(blocks),
-            None => {
-                <S::ProjectStorage as ProjectStorage>::CodeBlockTable::default_from_entity_storage(
-                    &storage.entities,
-                )
-                .map_err(ProjectError::from)
-            }
+            None => CodeBlockTable::default_from_entity_storage(&storage.entities)
+                .map_err(ProjectError::from),
         };
 
         let blocks = match blocks_builder() {
@@ -223,11 +211,10 @@ where
             blocks,
             attributes,
             storage,
-            _marker: PhantomData,
         })
     }
 
-    pub fn from_bytes<P>(bytes: &[u8]) -> Result<Self, ProjectError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProjectError> {
         Self::from_bytes_with(bytes, AttributeMap::default())
     }
 
@@ -248,6 +235,23 @@ where
         Self::try_from_bytes_with::<Loader>(bytes, attributes)
     }
 
+    pub fn from_bytes_with_provider<P>(bytes: &[u8]) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
+        Self::from_bytes_with_provider_and_attributes::<P>(bytes, AttributeMap::default())
+    }
+
+    pub fn from_bytes_with_provider_and_attributes<P>(
+        bytes: &[u8],
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
+        Self::try_from_bytes_with_provider::<P, Loader>(bytes, attributes)
+    }
+
     pub fn try_from_bytes_with<'a, L>(
         bytes: &'a [u8],
         attributes: impl Into<AttributeMap>,
@@ -255,21 +259,34 @@ where
     where
         L: LoadableFromBytes<'a>,
     {
+        Self::try_from_bytes_with_provider::<DefaultProjectStorageProvider, L>(bytes, attributes)
+    }
+
+    pub fn try_from_bytes_with_provider<'a, P, L>(
+        bytes: &'a [u8],
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+        L: LoadableFromBytes<'a>,
+    {
         let mut attributes = attributes.into();
 
         if let Some(path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
-            return match S::StorageProvider::from_storage(path, &mut attributes) {
+            return match P::from_storage(path, &mut attributes) {
                 Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
                 Err(e) if e.requires_loadable() => L::from_bytes_with(bytes, attributes)
                     .map_err(ProjectError::from)
-                    .and_then(|loader| Self::new(&loader)),
+                    .and_then(|loader| {
+                        Self::new_with_provider::<P>(&loader, AttributeMap::default())
+                    }),
                 Err(e) => Err(ProjectError::from(e)),
             };
         }
 
         L::from_bytes_with(bytes, attributes)
             .map_err(ProjectError::from)
-            .and_then(|loader| Self::new(&loader))
+            .and_then(|loader| Self::new_with_provider::<P>(&loader, AttributeMap::default()))
     }
 
     /// Loads or creates a project from the given file path.
@@ -292,11 +309,50 @@ where
         Self::try_from_file_with::<Loader>(path, attributes)
     }
 
+    pub fn from_file_transient(path: impl AsRef<Path>) -> Result<Self, ProjectError> {
+        Self::from_file_with_provider::<TransientStorageProvider>(path)
+    }
+
+    pub fn from_file_transient_with(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError> {
+        Self::from_file_with_provider_and_attributes::<TransientStorageProvider>(path, attributes)
+    }
+
+    pub fn from_file_with_provider<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
+        Self::from_file_with_provider_and_attributes::<P>(path, AttributeMap::default())
+    }
+
+    pub fn from_file_with_provider_and_attributes<P>(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
+    {
+        Self::try_from_file_with_provider::<P, Loader>(path, attributes)
+    }
+
     pub fn try_from_file_with<L>(
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, ProjectError>
     where
+        L: LoadableFromFile,
+    {
+        Self::try_from_file_with_provider::<DefaultProjectStorageProvider, L>(path, attributes)
+    }
+
+    pub fn try_from_file_with_provider<P, L>(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, ProjectError>
+    where
+        P: StorageProvider,
         L: LoadableFromFile,
     {
         let path = path.as_ref();
@@ -314,11 +370,11 @@ where
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .expect("valid project path");
 
-        match S::StorageProvider::from_storage(project_path, &mut attributes) {
+        match P::from_storage(project_path, &mut attributes) {
             Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
             Err(e) if e.requires_loadable() => L::from_file_with(path, attributes)
                 .map_err(ProjectError::from)
-                .and_then(|loader| Self::new(&loader)),
+                .and_then(|loader| Self::new_with_provider::<P>(&loader, AttributeMap::default())),
             Err(e) => Err(ProjectError::from(e)),
         }
     }
@@ -339,27 +395,27 @@ where
         self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
     }
 
-    pub fn symbols(&self) -> &<S::ProjectStorage as ProjectStorage>::SymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
 
-    pub fn symbols_mut(&mut self) -> &mut <S::ProjectStorage as ProjectStorage>::SymbolTable {
+    pub fn symbols_mut(&mut self) -> &mut SymbolTable {
         &mut self.symbols
     }
 
-    pub fn blocks(&self) -> &<S::ProjectStorage as ProjectStorage>::CodeBlockTable {
+    pub fn blocks(&self) -> &CodeBlockTable {
         &self.blocks
     }
 
-    pub fn blocks_mut(&mut self) -> &mut <S::ProjectStorage as ProjectStorage>::CodeBlockTable {
+    pub fn blocks_mut(&mut self) -> &mut CodeBlockTable {
         &mut self.blocks
     }
 
-    pub fn functions(&self) -> &<S::ProjectStorage as ProjectStorage>::FunctionTable {
+    pub fn functions(&self) -> &FunctionTable {
         &self.functions
     }
 
-    pub fn functions_mut(&mut self) -> &mut <S::ProjectStorage as ProjectStorage>::FunctionTable {
+    pub fn functions_mut(&mut self) -> &mut FunctionTable {
         &mut self.functions
     }
 
@@ -421,7 +477,7 @@ where
         Ok(())
     }
 
-    pub fn fields(&self) -> ProjectRef<S> {
+    pub fn fields(&self) -> ProjectRef<'_> {
         ProjectRef {
             arch: &self.arch,
             language: self.language,
@@ -430,11 +486,10 @@ where
             blocks: &self.blocks,
             attributes: &self.attributes,
             storage: &self.storage,
-            _marker: PhantomData,
         }
     }
 
-    pub fn fields_mut(&mut self) -> ProjectMut<S> {
+    pub fn fields_mut(&mut self) -> ProjectMut<'_> {
         ProjectMut {
             arch: &mut self.arch,
             language: self.language,
@@ -443,7 +498,6 @@ where
             blocks: &mut self.blocks,
             attributes: &mut self.attributes,
             storage: &mut self.storage,
-            _marker: PhantomData,
         }
     }
 }
@@ -457,13 +511,12 @@ mod test {
     use crate::storage::DefaultPersistentEntityStorage;
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::storage::DefaultPersistentSegmentStorage;
+    #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
+    use crate::storage::PersistentStorageProvider;
     #[cfg(feature = "mdbx")]
     use crate::storage::entities::MdbxEntityStorage;
     #[cfg(feature = "rocksdb")]
     use crate::storage::entities::RocksDbEntityStorage;
-    #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
-    use crate::storage::project::DefaultPersistentProjectStorageProvider;
-    use crate::storage::project::DefaultTransientProjectStorageProvider;
 
     fn with_logging(
         f: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
@@ -481,8 +534,7 @@ mod test {
     #[test]
     fn test_project() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let project =
-                Project::<DefaultTransientProjectStorageProvider>::from_file("tests/ls.elf")?;
+            let project = Project::from_file_transient("tests/ls.elf")?;
 
             let mut bytes = [0u8; 32];
             project.segments().read_bytes(0x4000u32, &mut bytes)?;
@@ -504,12 +556,12 @@ mod test {
     #[test]
     fn test_project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let project = Project::<
-                DefaultPersistentProjectStorageProvider<
+            let project = Project::from_file_with_provider_and_attributes::<
+                PersistentStorageProvider<
                     DefaultPersistentEntityStorage,
                     DefaultPersistentSegmentStorage,
                 >,
-            >::from_file_with(
+            >(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "tests/ls.fdbz"
@@ -526,12 +578,9 @@ mod test {
     #[test]
     fn test_project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let project = Project::<
-                DefaultPersistentProjectStorageProvider<
-                    MdbxEntityStorage,
-                    DefaultPersistentSegmentStorage,
-                >,
-            >::from_file_with(
+            let project = Project::from_file_with_provider_and_attributes::<
+                PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+            >(
                 "tests/ls.elf",
                 attributes![
                     ATTRIBUTE_PROJECT_PATH => "tests/ls.mdbx.fdbz"
@@ -548,12 +597,9 @@ mod test {
     #[test]
     fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let _project = Project::<
-                DefaultPersistentProjectStorageProvider<
-                    RocksDbEntityStorage,
-                    DefaultPersistentSegmentStorage,
-                >,
-            >::from_file("tests/test-project.rdb.fdbz")?;
+            let _project = Project::from_file_with_provider::<
+                PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+            >("tests/test-project.rdb.fdbz")?;
 
             /*
             let functions = project.functions();

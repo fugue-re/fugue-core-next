@@ -6,8 +6,6 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::project::Project;
-use crate::storage::ProjectStorageProvider;
-use crate::storage::project::InMemoryProvider;
 
 pub mod function;
 
@@ -50,19 +48,14 @@ impl AnalysisError {
 }
 
 pub type NoState = ();
-pub type BoxedAnalysisPass<P = InMemoryProvider, S = NoState> =
-    Box<dyn AnalysisPass<P, S> + 'static>;
+pub type BoxedAnalysisPass<S = NoState> = Box<dyn AnalysisPass<S> + 'static>;
 
-pub struct AnalysisManager<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    passes: IndexMap<String, Box<dyn AnalysisPass<P, S> + 'static>>,
+pub struct AnalysisManager<S = NoState> {
+    passes: IndexMap<String, Box<dyn AnalysisPass<S> + 'static>>,
 }
 
-impl<P, S> Default for AnalysisManager<P, S>
+impl<S> Default for AnalysisManager<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     fn default() -> Self {
@@ -70,9 +63,8 @@ where
     }
 }
 
-impl<P, S> AnalysisManager<P, S>
+impl<S> AnalysisManager<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     pub fn new() -> Self {
@@ -81,25 +73,25 @@ where
         }
     }
 
-    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<P, S> + 'static) {
+    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
         self.passes.insert(name.into(), Box::new(pass));
     }
 
     pub fn get_pass<T>(&self, name: impl Borrow<str>) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.get_boxed_pass(name)
             .and_then(|pass| pass.as_ref().downcast_ref::<T>())
     }
 
-    pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<P, S>> {
+    pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<S>> {
         self.passes.get(name.borrow())
     }
 
     pub fn get_pass_mut<T>(&mut self, name: impl Borrow<str>) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.get_boxed_pass_mut(name)
             .and_then(|pass| pass.as_mut().downcast_mut::<T>())
@@ -108,7 +100,7 @@ where
     pub fn get_boxed_pass_mut(
         &mut self,
         name: impl Borrow<str>,
-    ) -> Option<&mut BoxedAnalysisPass<P, S>> {
+    ) -> Option<&mut BoxedAnalysisPass<S>> {
         self.passes.get_mut(name.borrow())
     }
 
@@ -116,7 +108,7 @@ where
         &mut self,
         target: impl Borrow<str>,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
     ) {
         let target = target.borrow();
 
@@ -131,7 +123,7 @@ where
         &mut self,
         target: impl Borrow<str>,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
     ) {
         let target = target.borrow();
 
@@ -143,27 +135,27 @@ where
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<P, S>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
         self.passes.iter().map(|(name, pass)| (name.as_ref(), pass))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<P, S>)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
         self.passes
             .iter_mut()
             .map(move |(name, pass)| (name.as_ref(), pass))
     }
 
-    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<P, S>)> {
+    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
         self.iter()
     }
 
-    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<P, S>)> {
+    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
         self.iter_mut()
     }
 
     pub fn analyse_with(
         &mut self,
-        project: &mut Project<P>,
+        project: &mut Project,
         pass_name: impl Borrow<str>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
@@ -182,11 +174,8 @@ impl AnalysisManager {
     }
 }
 
-pub trait AnalysisPass<P = InMemoryProvider, S = NoState>: Downcast
-where
-    P: ProjectStorageProvider,
-{
-    fn analyse(&mut self, #[allow(unused)] project: &mut Project<P>) -> Result<(), AnalysisError> {
+pub trait AnalysisPass<S = NoState>: Downcast {
+    fn analyse(&mut self, #[allow(unused)] project: &mut Project) -> Result<(), AnalysisError> {
         unimplemented!(
             "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
         )
@@ -194,59 +183,47 @@ where
 
     fn analyse_with(
         &mut self,
-        project: &mut Project<P>,
+        project: &mut Project,
         #[allow(unused)] state: &mut S,
     ) -> Result<(), AnalysisError> {
         self.analyse(project)
     }
 
-    fn as_group(&self) -> Option<&AnalysisGroup<P, S>> {
+    fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         None
     }
 
-    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<P, S>> {
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<S>> {
         None
     }
 }
 
-impl_downcast!(AnalysisPass<P, S> where P: ProjectStorageProvider);
+impl_downcast!(AnalysisPass<S>);
 
-impl<P, S, F> AnalysisPass<P, S> for F
+impl<S, F> AnalysisPass<S> for F
 where
-    F: FnMut(&mut Project<P>, &mut S) -> Result<(), AnalysisError> + 'static,
-    P: ProjectStorageProvider,
+    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError> + 'static,
     S: 'static,
 {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project<P>,
-        state: &mut S,
-    ) -> Result<(), AnalysisError> {
+    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         self(project, state)
     }
 }
 
-pub trait AnalysisCondition<P, S>
-where
-    P: ProjectStorageProvider,
-{
+pub trait AnalysisCondition<S> {
     fn evaluate(&mut self, state: &mut S) -> bool;
 }
 
-impl<F, P, S> AnalysisCondition<P, S> for F
+impl<F, S> AnalysisCondition<S> for F
 where
     F: FnMut(&mut S) -> bool,
-    P: ProjectStorageProvider,
 {
     fn evaluate(&mut self, state: &mut S) -> bool {
         self(state)
     }
 }
 
-impl<P, S> AnalysisCondition<P, S> for usize
-where
-    P: ProjectStorageProvider,
-{
+impl<S> AnalysisCondition<S> for usize {
     fn evaluate(&mut self, _state: &mut S) -> bool {
         if let Some(nself) = self.checked_sub(1) {
             *self = nself;
@@ -257,17 +234,13 @@ where
     }
 }
 
-pub struct AnalysisGroup<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    passes: IndexMap<String, Box<dyn AnalysisPass<P, S> + 'static>>,
+pub struct AnalysisGroup<S = NoState> {
+    passes: IndexMap<String, Box<dyn AnalysisPass<S> + 'static>>,
 }
 
-impl<P, S, T> FromIterator<T> for AnalysisGroup<P, S>
+impl<S, T> FromIterator<T> for AnalysisGroup<S>
 where
-    T: AnalysisPass<P, S> + 'static,
-    P: ProjectStorageProvider,
+    T: AnalysisPass<S> + 'static,
     S: 'static,
 {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
@@ -277,9 +250,8 @@ where
     }
 }
 
-impl<P, S> Default for AnalysisGroup<P, S>
+impl<S> Default for AnalysisGroup<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     fn default() -> Self {
@@ -287,9 +259,8 @@ where
     }
 }
 
-impl<P, S> AnalysisGroup<P, S>
+impl<S> AnalysisGroup<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     pub fn new() -> Self {
@@ -298,29 +269,29 @@ where
         }
     }
 
-    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<P, S> + 'static) {
+    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
         self.passes.insert(name.into(), Box::new(pass));
     }
 
     pub fn add_passes(
         &mut self,
         prefix: impl Into<String>,
-        passes: impl IntoIterator<Item = impl AnalysisPass<P, S> + 'static>,
+        passes: impl IntoIterator<Item = impl AnalysisPass<S> + 'static>,
     ) {
         let prefix = prefix.into();
         self.passes.extend(passes.into_iter().map(|pass| {
             let name = format!("{prefix}-{}", Uuid::now_v7().as_hyphenated());
-            (name, Box::new(pass) as Box<dyn AnalysisPass<P, S>>)
+            (name, Box::new(pass) as Box<dyn AnalysisPass<S>>)
         }));
     }
 
-    pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<P, S>> {
+    pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<S>> {
         self.passes.get(name.borrow())
     }
 
     pub fn get_pass<T>(&self, name: impl Borrow<str>) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.get_boxed_pass(name)
             .and_then(|pass| pass.as_ref().downcast_ref::<T>())
@@ -329,13 +300,13 @@ where
     pub fn get_boxed_pass_mut(
         &mut self,
         name: impl Borrow<str>,
-    ) -> Option<&mut BoxedAnalysisPass<P, S>> {
+    ) -> Option<&mut BoxedAnalysisPass<S>> {
         self.passes.get_mut(name.borrow())
     }
 
     pub fn get_pass_mut<T>(&mut self, name: impl Borrow<str>) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.get_boxed_pass_mut(name)
             .and_then(|pass| pass.as_mut().downcast_mut::<T>())
@@ -345,7 +316,7 @@ where
         &mut self,
         target: impl Borrow<str>,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
     ) {
         let target = target.borrow();
 
@@ -360,7 +331,7 @@ where
         &mut self,
         target: impl Borrow<str>,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
     ) {
         let target = target.borrow();
 
@@ -372,21 +343,21 @@ where
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<P, S>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
         self.passes.iter().map(|(name, pass)| (name.as_ref(), pass))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<P, S>)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
         self.passes
             .iter_mut()
             .map(move |(name, pass)| (name.as_ref(), pass))
     }
 
-    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<P, S>)> {
+    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
         self.iter()
     }
 
-    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<P, S>)> {
+    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
         self.iter_mut()
     }
 
@@ -399,47 +370,38 @@ where
     }
 }
 
-impl<P, S> AnalysisPass<P, S> for AnalysisGroup<P, S>
+impl<S> AnalysisPass<S> for AnalysisGroup<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project<P>,
-        state: &mut S,
-    ) -> Result<(), AnalysisError> {
+    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         for pass in self.passes.values_mut() {
             pass.analyse_with(project, state)?;
         }
         Ok(())
     }
 
-    fn as_group(&self) -> Option<&AnalysisGroup<P, S>> {
+    fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         Some(self)
     }
 
-    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<P, S>> {
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<S>> {
         Some(self)
     }
 }
 
-pub struct IteratedAnalysis<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    pass: Box<dyn AnalysisPass<P, S> + 'static>,
-    condition: Box<dyn AnalysisCondition<P, S> + 'static>,
+pub struct IteratedAnalysis<S = NoState> {
+    pass: Box<dyn AnalysisPass<S> + 'static>,
+    condition: Box<dyn AnalysisCondition<S> + 'static>,
 }
 
-impl<P, S> IteratedAnalysis<P, S>
+impl<S> IteratedAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     pub fn new(
-        pass: impl AnalysisPass<P, S> + 'static,
-        condition: impl AnalysisCondition<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
+        condition: impl AnalysisCondition<S> + 'static,
     ) -> Self {
         IteratedAnalysis {
             pass: Box::new(pass),
@@ -447,78 +409,69 @@ where
         }
     }
 
-    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<S> {
         &self.pass
     }
 
-    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<S> {
         &mut self.pass
     }
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
-    pub fn condition(&self) -> &(dyn AnalysisCondition<P, S> + 'static) {
+    pub fn condition(&self) -> &(dyn AnalysisCondition<S> + 'static) {
         &*self.condition
     }
 
-    pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<P, S> + 'static> {
+    pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<S> + 'static> {
         &mut self.condition
     }
 }
 
-impl<P, S> AnalysisPass<P, S> for IteratedAnalysis<P, S>
+impl<S> AnalysisPass<S> for IteratedAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project<P>,
-        state: &mut S,
-    ) -> Result<(), AnalysisError> {
+    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         while self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
         }
         Ok(())
     }
 
-    fn as_group(&self) -> Option<&AnalysisGroup<P, S>> {
+    fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         self.pass.as_group()
     }
 
-    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<P, S>> {
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<S>> {
         self.pass.as_group_mut()
     }
 }
 
-pub struct ConditionalAnalysis<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    pass: Box<dyn AnalysisPass<P, S> + 'static>,
-    condition: Box<dyn AnalysisCondition<P, S> + 'static>,
+pub struct ConditionalAnalysis<S = NoState> {
+    pass: Box<dyn AnalysisPass<S> + 'static>,
+    condition: Box<dyn AnalysisCondition<S> + 'static>,
 }
 
-impl<P, S> ConditionalAnalysis<P, S>
+impl<S> ConditionalAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
     pub fn new(
-        pass: impl AnalysisPass<P, S> + 'static,
-        condition: impl AnalysisCondition<P, S> + 'static,
+        pass: impl AnalysisPass<S> + 'static,
+        condition: impl AnalysisCondition<S> + 'static,
     ) -> Self {
         ConditionalAnalysis {
             pass: Box::new(pass),
@@ -526,100 +479,91 @@ where
         }
     }
 
-    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<S> {
         &self.pass
     }
 
-    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<S> {
         &mut self.pass
     }
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_mut().downcast_mut::<T>()
     }
 
-    pub fn condition(&self) -> &(dyn AnalysisCondition<P, S> + 'static) {
+    pub fn condition(&self) -> &(dyn AnalysisCondition<S> + 'static) {
         &*self.condition
     }
 
-    pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<P, S> + 'static> {
+    pub fn condition_mut(&mut self) -> &mut Box<dyn AnalysisCondition<S> + 'static> {
         &mut self.condition
     }
 }
 
-impl<P, S> AnalysisPass<P, S> for ConditionalAnalysis<P, S>
+impl<S> AnalysisPass<S> for ConditionalAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project<P>,
-        state: &mut S,
-    ) -> Result<(), AnalysisError> {
+    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         if self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
         }
         Ok(())
     }
 
-    fn as_group(&self) -> Option<&AnalysisGroup<P, S>> {
+    fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         self.pass.as_group()
     }
 
-    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<P, S>> {
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<S>> {
         self.pass.as_group_mut()
     }
 }
 
-pub struct StatefulAnalysis<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    pass: Box<dyn AnalysisPass<P, S> + 'static>,
+pub struct StatefulAnalysis<S = NoState> {
+    pass: Box<dyn AnalysisPass<S> + 'static>,
     state: S,
 }
 
-impl<P, S> StatefulAnalysis<P, S>
+impl<S> StatefulAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    pub fn new(pass: impl AnalysisPass<P, S> + 'static, state: S) -> Self {
+    pub fn new(pass: impl AnalysisPass<S> + 'static, state: S) -> Self {
         StatefulAnalysis {
             pass: Box::new(pass),
             state,
         }
     }
 
-    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<S> {
         &self.pass
     }
 
-    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<S> {
         &mut self.pass
     }
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_mut().downcast_mut::<T>()
     }
@@ -636,54 +580,49 @@ where
 // NOTE: AnalysisPass here will always be AnalysisPass<NoState>; this means that we
 // cannot implement `as_group` or `as_group_mut` for `StatefulAnalysis` as it would
 // require `S` to be `NoState` as well.
-impl<P, S> AnalysisPass<P> for StatefulAnalysis<P, S>
+impl<S> AnalysisPass for StatefulAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn analyse(&mut self, project: &mut Project<P>) -> Result<(), AnalysisError> {
+    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         self.pass.analyse_with(project, &mut self.state)
     }
 }
 
-pub struct OneShotAnalysis<P = InMemoryProvider, S = NoState>
-where
-    P: ProjectStorageProvider,
-{
-    pass: Box<dyn AnalysisPass<P, S> + 'static>,
+pub struct OneShotAnalysis<S = NoState> {
+    pass: Box<dyn AnalysisPass<S> + 'static>,
     executed: bool,
 }
 
-impl<P, S> OneShotAnalysis<P, S>
+impl<S> OneShotAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    pub fn new(pass: impl AnalysisPass<P, S> + 'static) -> Self {
+    pub fn new(pass: impl AnalysisPass<S> + 'static) -> Self {
         OneShotAnalysis {
             pass: Box::new(pass),
             executed: false,
         }
     }
 
-    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass(&self) -> &BoxedAnalysisPass<S> {
         &self.pass
     }
 
-    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<P, S> {
+    pub fn boxed_pass_mut(&mut self) -> &mut BoxedAnalysisPass<S> {
         &mut self.pass
     }
 
     pub fn pass<T>(&self) -> Option<&T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_ref().downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
-        T: AnalysisPass<P, S>,
+        T: AnalysisPass<S>,
     {
         self.pass.as_mut().downcast_mut::<T>()
     }
@@ -693,16 +632,11 @@ where
     }
 }
 
-impl<P, S> AnalysisPass<P, S> for OneShotAnalysis<P, S>
+impl<S> AnalysisPass<S> for OneShotAnalysis<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project<P>,
-        state: &mut S,
-    ) -> Result<(), AnalysisError> {
+    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
         if !self.executed {
             self.executed = true;
             self.pass.analyse_with(project, state)?;
@@ -710,56 +644,51 @@ where
         Ok(())
     }
 
-    fn as_group(&self) -> Option<&AnalysisGroup<P, S>> {
+    fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         self.pass.as_group()
     }
 
-    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<P, S>> {
+    fn as_group_mut(&mut self) -> Option<&mut AnalysisGroup<S>> {
         self.pass.as_group_mut()
     }
 }
 
-pub trait AnalysisPassExt<P, S>
+pub trait AnalysisPassExt<S>
 where
-    P: ProjectStorageProvider,
     S: 'static,
 {
-    fn conditional(
-        self,
-        condition: impl AnalysisCondition<P, S> + 'static,
-    ) -> ConditionalAnalysis<P, S>
+    fn conditional(self, condition: impl AnalysisCondition<S> + 'static) -> ConditionalAnalysis<S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static,
+        Self: AnalysisPass<S> + Sized + 'static,
     {
         ConditionalAnalysis::new(self, condition)
     }
 
-    fn iterated(self, condition: impl AnalysisCondition<P, S> + 'static) -> IteratedAnalysis<P, S>
+    fn iterated(self, condition: impl AnalysisCondition<S> + 'static) -> IteratedAnalysis<S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static,
+        Self: AnalysisPass<S> + Sized + 'static,
     {
         IteratedAnalysis::new(self, condition)
     }
 
-    fn with_state(self, state: S) -> StatefulAnalysis<P, S>
+    fn with_state(self, state: S) -> StatefulAnalysis<S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static,
+        Self: AnalysisPass<S> + Sized + 'static,
     {
         StatefulAnalysis::new(self, state)
     }
 
-    fn one_shot(self) -> OneShotAnalysis<P, S>
+    fn one_shot(self) -> OneShotAnalysis<S>
     where
-        Self: AnalysisPass<P, S> + Sized + 'static,
+        Self: AnalysisPass<S> + Sized + 'static,
     {
         OneShotAnalysis::new(self)
     }
 }
 
-impl<P, S, T> AnalysisPassExt<P, S> for T
+impl<S, T> AnalysisPassExt<S> for T
 where
-    T: AnalysisPass<P, S> + Sized + 'static,
-    P: ProjectStorageProvider,
+    T: AnalysisPass<S> + Sized + 'static,
     S: 'static,
 {
 }
@@ -857,7 +786,7 @@ mod test {
 
         assert!(g2.is_none());
 
-        let mut analyses = AnalysisManager::<_, Vec<usize>>::new();
+        let mut analyses = AnalysisManager::<Vec<usize>>::new();
 
         analyses.add_pass(
             "cond-hello-world",
@@ -898,15 +827,15 @@ mod test {
 
         assert!(
             analyses
-                .get_pass::<IteratedAnalysis<_, Vec<usize>>>("cond-hello-world")
+                .get_pass::<IteratedAnalysis<Vec<usize>>>("cond-hello-world")
                 .is_some()
         );
 
         assert!(
             analyses
-                .get_pass_mut::<IteratedAnalysis<_, Vec<usize>>>("cond-hello-world")
+                .get_pass_mut::<IteratedAnalysis<Vec<usize>>>("cond-hello-world")
                 .unwrap()
-                .pass_mut::<AnalysisGroup<_, Vec<usize>>>()
+                .pass_mut::<AnalysisGroup<Vec<usize>>>()
                 .is_some()
         );
 

@@ -1,7 +1,6 @@
 use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::loader::{LoadableAnalysers, Pe};
-use crate::storage::ProjectStorageProvider;
 
 #[derive(Clone, Copy)]
 pub struct PeAnalysers<'a> {
@@ -14,14 +13,11 @@ impl<'a> PeAnalysers<'a> {
     }
 }
 
-impl<'a, P> LoadableAnalysers<P> for PeAnalysers<'a>
-where
-    P: ProjectStorageProvider,
-{
+impl<'a> LoadableAnalysers for PeAnalysers<'a> {
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         let _ = self.pe;
         Ok(FunctionRecovery::new_with(config))
     }
