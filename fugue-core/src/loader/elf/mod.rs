@@ -390,7 +390,9 @@ impl ElfSymbolData {
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
-                tracing::debug!("symbol {address} is not a function or data: {st_bind:x}/{st_type:x}");
+                tracing::debug!(
+                    "symbol {address} is not a function or data: {st_bind:x}/{st_type:x}"
+                );
                 SymbolProperties::NONE
             };
 

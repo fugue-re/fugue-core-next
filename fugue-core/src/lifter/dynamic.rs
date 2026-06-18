@@ -158,4 +158,3 @@ pub fn resolve_language_with(
     let id = s.as_ref().parse::<LanguageId>()?;
     resolve_language_by_id(&id, Some(loader))?.ok_or(LanguageError::Unsupported)
 }
-

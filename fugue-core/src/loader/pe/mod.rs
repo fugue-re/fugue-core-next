@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
+use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::endian::LittleEndian as LE;
 use object::pe::{
@@ -36,18 +37,48 @@ use crate::types::{AttributeMap, BytesOrMapping};
 mod analysers;
 pub use analysers::PeAnalysers;
 
+mod permissive;
+
 mod relocations;
 pub use relocations::PeSegmentRelocator;
 
 pub const PE_EXPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const PE_IMPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
+pub const ATTRIBUTE_PERMISSIVE: &str = "loader.pe.permissive";
+
+bitflags! {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+    pub(crate) struct PeLoaderProperties: u8 {
+        const PERMISSIVE = 0b0000_0001;
+    }
+}
+
+impl PeLoaderProperties {
+    pub(crate) fn new(attributes: &AttributeMap) -> Self {
+        let mut config = Self::empty();
+
+        if attributes
+            .get_attr::<bool>(ATTRIBUTE_PERMISSIVE)
+            .unwrap_or_default()
+        {
+            config.insert(Self::PERMISSIVE);
+        }
+
+        config
+    }
+
+    pub(crate) fn is_permissive(&self) -> bool {
+        self.contains(Self::PERMISSIVE)
+    }
+}
+
 #[ouroboros::self_referencing]
 struct PeInner<'a> {
     data: BytesOrMapping<'a>,
     #[borrows(data)]
     #[covariant]
-    view: PeFileRepr<'this, 'a>,
+    loaded: PeLoadedRepr<'this, 'a>,
 }
 
 pub enum PeFileRepr<'this, 'data> {
@@ -76,17 +107,26 @@ impl<'this, 'data> PeFileRepr<'this, 'data> {
     }
 }
 
+impl<'a> PeInner<'a> {
+    fn from_bytes(
+        data: BytesOrMapping<'a>,
+        attributes: &AttributeMap,
+    ) -> Result<Self, LoaderError> {
+        Self::try_new(data, |data| PeLoadedRepr::parse(data, attributes))
+    }
+
+    fn from_bytes_or_recover(
+        data: BytesOrMapping<'a>,
+        attributes: &AttributeMap,
+    ) -> Result<Self, (BytesOrMapping<'a>, LoaderError)> {
+        Self::try_new_or_recover(data, |data| PeLoadedRepr::parse(data, attributes))
+            .map_err(|(error, heads)| (heads.data, error))
+    }
+}
+
 pub struct Pe<'a> {
     object: PeInner<'a>,
-    architecture: Arch,
     metadata: LoadableMetadata,
-    base: Address,
-    preferred_base: u64,
-    bounds: RangeInclusive<Address>,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
-    extern_segm: ExternSegment,
-    import_slots: BTreeMap<Address, Address>,
     attributes: AttributeMap,
 }
 
@@ -99,12 +139,129 @@ impl<'a> Pe<'a> {
         data: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let object = PeInner::try_new(data.into(), |data| PeFileRepr::parse(data))?;
-        let view = object.borrow_view();
+        let attributes = attributes.into();
+        let config = PeLoaderProperties::new(&attributes);
+
+        let (data, error) = match PeInner::from_bytes_or_recover(data.into(), &attributes) {
+            Ok(object) => return Ok(Self::from_inner(object, attributes)),
+            Err(failed) => failed,
+        };
+
+        if !config.is_permissive() {
+            return Err(error);
+        }
+
+        let space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+        let Some(repaired) = permissive::try_repair(data, space)? else {
+            return Err(error);
+        };
+
+        let object = PeInner::from_bytes(repaired, &attributes)?;
+        Ok(Self::from_inner(object, attributes))
+    }
+
+    fn from_inner(object: PeInner<'a>, attributes: AttributeMap) -> Self {
+        let metadata = LoadableMetadata::new(
+            object.borrow_data(),
+            format!("Fugue v{} PE Loader", env!("CARGO_PKG_VERSION")),
+        );
+
+        let mut slf = Self {
+            object,
+            metadata,
+            attributes,
+        };
+
+        if let Some(entry) = slf.entry() {
+            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        }
+
+        slf
+    }
+
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
+        Self::from_file_with(path, AttributeMap::new())
+    }
+
+    pub fn from_file_with(
+        path: impl AsRef<Path>,
+        attributes: impl Into<AttributeMap>,
+    ) -> Result<Self, LoaderError> {
+        let path = path.as_ref();
+        let data = BytesOrMapping::from_file(path)?;
+        let mut loaded = Self::new_with(data, attributes)?;
+        loaded.metadata.set_path(path.display().to_string());
+        Ok(loaded)
+    }
+
+    pub fn entry(&self) -> Option<Address> {
+        let loaded = self.object.borrow_loaded();
+        let state = &loaded.state;
+        let entry = with_pe!(&loaded.view, pe | pe.entry());
+        (entry != 0).then(|| Address::new(state.base.space(), state.rebase_offset(entry)))
+    }
+
+    pub fn convention(&self) -> Option<&'a str> {
+        None
+    }
+
+    pub fn loaded_view(&self) -> &PeFileRepr<'_, 'a> {
+        &self.object.borrow_loaded().view
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+        &self.object.borrow_loaded().state.mapping_hints
+    }
+
+    pub fn symbols(&self) -> &IndexedSymbolTable {
+        &self.object.borrow_loaded().state.symbols
+    }
+
+    pub fn extern_segment(&self) -> &ExternSegment {
+        &self.object.borrow_loaded().state.extern_segm
+    }
+
+    pub fn target_space(&self) -> AddressSpaceId {
+        self.object.borrow_loaded().state.base.space()
+    }
+}
+
+struct PeLoadedRepr<'this, 'data> {
+    view: PeFileRepr<'this, 'data>,
+    state: PeLoadState,
+}
+
+impl<'this, 'data> PeLoadedRepr<'this, 'data> {
+    fn parse(
+        data: &'this BytesOrMapping<'data>,
+        attributes: &AttributeMap,
+    ) -> Result<Self, LoaderError> {
+        let view = PeFileRepr::parse(data)?;
+        let state = PeLoadState::from_view(&view, attributes)?;
+
+        Ok(Self { view, state })
+    }
+}
+
+struct PeLoadState {
+    architecture: Arch,
+    base: Address,
+    preferred_base: u64,
+    bounds: RangeInclusive<Address>,
+    mapping_hints: BTreeMap<Address, ContextHint>,
+    symbols: IndexedSymbolTable,
+    extern_segm: ExternSegment,
+    import_slots: BTreeMap<Address, Address>,
+}
+
+impl PeLoadState {
+    fn from_view(
+        view: &PeFileRepr<'_, '_>,
+        attributes: &AttributeMap,
+    ) -> Result<Self, LoaderError> {
         let language = with_pe!(view, pe | object_language(pe))?;
         let architecture = Arch::new(language);
 
-        let attributes = attributes.into();
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
         let preferred_base = with_pe!(view, pe | pe.relative_address_base());
 
@@ -126,26 +283,21 @@ impl<'a> Pe<'a> {
             }
         }
 
+        let symbols = with_pe!(
+            view,
+            pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base)
+        )?;
+
         let PeSymbolData {
             bounds,
             mapping_hints,
             symbols,
             extern_segm,
             import_slots,
-        } = with_pe!(
-            view,
-            pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base)
-        )?;
+        } = symbols;
 
-        let metadata = LoadableMetadata::new(
-            object.borrow_data(),
-            format!("Fugue v{} PE Loader", env!("CARGO_PKG_VERSION")),
-        );
-
-        let mut slf = Self {
-            object,
+        Ok(Self {
             architecture,
-            metadata,
             base,
             preferred_base,
             bounds,
@@ -153,58 +305,7 @@ impl<'a> Pe<'a> {
             symbols,
             extern_segm,
             import_slots,
-            attributes,
-        };
-
-        if let Some(entry) = slf.entry() {
-            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
-        }
-
-        Ok(slf)
-    }
-
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
-        Self::from_file_with(path, AttributeMap::new())
-    }
-
-    pub fn from_file_with(
-        path: impl AsRef<Path>,
-        attributes: impl Into<AttributeMap>,
-    ) -> Result<Self, LoaderError> {
-        let path = path.as_ref();
-        let data = BytesOrMapping::from_file(path)?;
-        let mut loaded = Self::new_with(data, attributes)?;
-        loaded.metadata.set_path(path.display().to_string());
-        Ok(loaded)
-    }
-
-    pub fn entry(&self) -> Option<Address> {
-        let entry = with_pe!(self.object.borrow_view(), pe | pe.entry());
-        (entry != 0).then(|| Address::new(self.base.space(), self.rebase_offset(entry)))
-    }
-
-    pub fn convention(&self) -> Option<&'a str> {
-        None
-    }
-
-    pub fn loaded_view(&self) -> &PeFileRepr<'_, 'a> {
-        self.object.borrow_view()
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
-        &self.mapping_hints
-    }
-
-    pub fn symbols(&self) -> &IndexedSymbolTable {
-        &self.symbols
-    }
-
-    pub fn extern_segment(&self) -> &ExternSegment {
-        &self.extern_segm
-    }
-
-    pub fn target_space(&self) -> AddressSpaceId {
-        self.base.space()
+        })
     }
 
     fn rebase_offset(&self, address: u64) -> u64 {
@@ -634,38 +735,38 @@ impl Loadable for Pe<'_> {
     }
 
     fn architecture(&self) -> Arch {
-        self.architecture.clone()
+        self.object.borrow_loaded().state.architecture.clone()
     }
 
     fn symbols(&self) -> Option<&IndexedSymbolTable> {
-        Some(&self.symbols)
+        Some(&self.object.borrow_loaded().state.symbols)
     }
 
     fn segments<'b>(
         &'b self,
     ) -> impl FallibleIterator<Item = LoadableSegment<'b>, Error = LoaderError> + 'b {
-        let view = self.object.borrow_view();
+        let loaded = self.object.borrow_loaded();
+        let view = &loaded.view;
+        let state = &loaded.state;
 
         with_pe!(
             view,
             pe | Box::new(PeLoadableSegments::new(
                 pe,
-                self.base,
-                self.preferred_base,
-                &self.import_slots,
-                &self.extern_segm,
+                state.base,
+                state.preferred_base,
+                &state.import_slots,
+                &state.extern_segm,
             ))
                 as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
         )
     }
 
     fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let start = *self.bounds.start();
-        let end = self
-            .bounds
-            .end()
-            .checked_add(1u64)
-            .unwrap_or(*self.bounds.end());
+        let loaded = self.object.borrow_loaded();
+        let bounds = &loaded.state.bounds;
+        let start = *bounds.start();
+        let end = bounds.end().checked_add(1u64).unwrap_or(*bounds.end());
         LoadableSegmentBounds::new(start..end)
     }
 
@@ -687,7 +788,7 @@ mod test {
     use object::read::pe::{Import, PeFile64};
     use object::{Object, ObjectSection};
 
-    use super::Pe;
+    use super::{ATTRIBUTE_PERMISSIVE, Pe};
     use crate::attributes;
     use crate::ir::{Address, RawAddress};
     use crate::loader::{Loadable, LoadableSegment, LoaderError};
@@ -867,5 +968,20 @@ mod test {
         };
 
         assert!(matches!(err, LoaderError::AddressOverflow(_)));
+    }
+
+    #[test]
+    fn test_pe_memory_dump() -> Result<(), Box<dyn std::error::Error>> {
+        let path = "tests/135b5560b10894c9022d926a88210684eaeb0a541eeb3947ea50655df39471a0.bin";
+
+        assert!(Pe::new(BytesOrMapping::from_file(path)?).is_err());
+
+        let pe = Pe::new_with(
+            BytesOrMapping::from_file(path)?,
+            attributes![ATTRIBUTE_PERMISSIVE => true],
+        )?;
+        let _segments = load_segments(&pe)?;
+
+        Ok(())
     }
 }

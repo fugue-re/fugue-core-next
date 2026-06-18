@@ -41,7 +41,7 @@ itertools = "0.14"
 libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"
 memmap2 = "0.9"
-object = "0.38"
+object = "0.39"
 ouroboros = "0.18"
 quick_cache = "0.6"
 parking_lot = "0.12"
