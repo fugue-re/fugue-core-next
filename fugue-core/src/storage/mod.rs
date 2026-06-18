@@ -25,7 +25,6 @@ use entities::{
 };
 
 pub mod project;
-pub use project::{ProjectStorage, ProjectStorageProvider};
 
 pub mod segments;
 pub use segments::{
@@ -334,6 +333,16 @@ where
 
 pub type DefaultPersistentStorageProvider =
     PersistentStorageProvider<DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage>;
+
+#[cfg(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite"))]
+pub type DefaultProjectStorageProvider = DefaultPersistentStorageProvider;
+
+#[cfg(all(
+    not(feature = "mdbx"),
+    not(feature = "rocksdb"),
+    not(feature = "sqlite")
+))]
+pub type DefaultProjectStorageProvider = TransientStorageProvider;
 
 pub struct CompressedPersistentStorage {
     header: FugueStorageHeader,

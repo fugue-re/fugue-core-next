@@ -9,7 +9,7 @@ use crate::arch::Arch;
 use crate::ir::{Address, AddressWithContext, FlowKind, FlowTarget, RawAddressRangeSet};
 use crate::lifter::ContextSet;
 use crate::project::Project;
-use crate::storage::{ProjectStorageProvider, SegmentStorage};
+use crate::storage::SegmentStorage;
 
 pub struct PartialFunctionWithContext {
     pub config: FunctionRecoveryConfig,
@@ -40,26 +40,20 @@ pub struct FunctionBuilderContext {
     cut_points: Vec<usize>,
 }
 
-pub struct FunctionBuilder<P>
-where
-    P: ProjectStorageProvider,
-{
+pub struct FunctionBuilder {
     // The configuration for the function recovery process.
     config: FunctionRecoveryConfig,
     // The context of the function being built.
     context: FunctionBuilderContext,
     // These passes run once per function prior to the main lifting loop.
-    initialisation_passes: AnalysisGroup<P, FunctionBuilderContext>,
+    initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
     // These passes run each iteration of the main lifting loop after all candidates within the
     // pass have been lifted and the function's control-flow has been structured based on the
     // identified blocks and flows.
-    post_lifting_passes: AnalysisGroup<P, PartialFunctionWithContext>,
+    post_lifting_passes: AnalysisGroup<PartialFunctionWithContext>,
 }
 
-impl<P> FunctionBuilder<P>
-where
-    P: ProjectStorageProvider,
-{
+impl FunctionBuilder {
     pub fn new(config: FunctionRecoveryConfig) -> Self {
         FunctionBuilder {
             config,
@@ -73,19 +67,19 @@ where
         &self.config
     }
 
-    pub fn initialisation_passes(&self) -> &AnalysisGroup<P, FunctionBuilderContext> {
+    pub fn initialisation_passes(&self) -> &AnalysisGroup<FunctionBuilderContext> {
         &self.initialisation_passes
     }
 
-    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<P, FunctionBuilderContext> {
+    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<FunctionBuilderContext> {
         &mut self.initialisation_passes
     }
 
-    pub fn post_lifting_passes(&self) -> &AnalysisGroup<P, PartialFunctionWithContext> {
+    pub fn post_lifting_passes(&self) -> &AnalysisGroup<PartialFunctionWithContext> {
         &self.post_lifting_passes
     }
 
-    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<P, PartialFunctionWithContext> {
+    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<PartialFunctionWithContext> {
         &mut self.post_lifting_passes
     }
 
@@ -100,7 +94,7 @@ where
     pub fn add_initialisation_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, FunctionBuilderContext> + 'static,
+        pass: impl AnalysisPass<FunctionBuilderContext> + 'static,
     ) {
         self.initialisation_passes.add_pass(name, pass);
     }
@@ -108,14 +102,14 @@ where
     pub fn add_post_lifting_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<P, PartialFunctionWithContext> + 'static,
+        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
     ) {
         self.post_lifting_passes.add_pass(name, pass);
     }
 
     pub fn analyse(
         &mut self,
-        project: &mut Project<P>,
+        project: &mut Project,
         translator: &mut Translator,
         candidate: impl Into<AddressWithContext>,
     ) -> Result<PartialFunction, FunctionRecoveryError> {
@@ -436,18 +430,15 @@ impl FunctionBuilderContext {
         }
     }
 
-    pub fn analyse<S>(
+    pub fn analyse(
         &mut self,
-        project: &mut Project<S>,
+        project: &mut Project,
         translator: &mut Translator,
         candidate: impl Into<AddressWithContext>,
         config: &FunctionRecoveryConfig,
-        initialisation_passes: &mut AnalysisGroup<S, FunctionBuilderContext>,
-        post_lifting_passes: &mut AnalysisGroup<S, PartialFunctionWithContext>,
-    ) -> Result<PartialFunction, FunctionRecoveryError>
-    where
-        S: ProjectStorageProvider,
-    {
+        initialisation_passes: &mut AnalysisGroup<FunctionBuilderContext>,
+        post_lifting_passes: &mut AnalysisGroup<PartialFunctionWithContext>,
+    ) -> Result<PartialFunction, FunctionRecoveryError> {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context

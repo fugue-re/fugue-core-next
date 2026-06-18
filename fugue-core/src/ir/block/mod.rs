@@ -11,7 +11,7 @@ use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 
 pub mod table;
-pub use table::IndexedCodeBlockTable;
+pub use table::CodeBlockTable;
 
 pub type CodeBlockId = Id<CodeBlock>;
 

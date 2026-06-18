@@ -1,23 +1,36 @@
 use std::borrow::Cow;
-use std::fs::File;
-use std::io::Error;
+use std::fs::{File, OpenOptions};
+use std::io;
 use std::ops::{Deref, Range};
 use std::path::Path;
 use std::sync::Arc;
 
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapMut, MmapOptions};
 use object::ReadRef;
 
 pub enum BytesOrMapping<'a> {
     Bytes(Cow<'a, [u8]>),
-    Mapping(Mmap),
+    Mapping(FileMapping),
+    MappingMut(MmapMut),
+}
+
+pub struct FileMapping {
+    file: File,
+    map: Mmap,
+}
+
+impl FileMapping {
+    fn bytes(&self) -> &[u8] {
+        self.map.as_ref()
+    }
 }
 
 impl<'a> AsRef<[u8]> for BytesOrMapping<'a> {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::Bytes(bytes) => bytes.as_ref(),
-            Self::Mapping(mapping) => mapping.as_ref(),
+            Self::Mapping(mapping) => mapping.bytes(),
+            Self::MappingMut(mapping) => mapping.as_ref(),
         }
     }
 }
@@ -44,16 +57,44 @@ impl<'a> BytesOrMapping<'a> {
         BytesOrMapping::Bytes(bytes.into())
     }
 
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Ok(BytesOrMapping::Mapping(unsafe {
-            Mmap::map(&File::open(&path)?)?
-        }))
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let file = File::open(&path)?;
+        let map = unsafe { Mmap::map(&file)? };
+        Ok(BytesOrMapping::Mapping(FileMapping { file, map }))
+    }
+
+    pub fn from_file_mut(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        let map = unsafe { MmapOptions::new().map_mut(&file)? };
+        Ok(BytesOrMapping::MappingMut(map))
+    }
+
+    pub fn into_copy_on_write(self) -> Result<Self, io::Error> {
+        match self {
+            Self::Mapping(FileMapping { file, .. }) => {
+                let map = unsafe { MmapOptions::new().map_copy(&file)? };
+                Ok(BytesOrMapping::MappingMut(map))
+            }
+            Self::Bytes(Cow::Borrowed(bytes)) => {
+                Ok(BytesOrMapping::Bytes(Cow::Owned(bytes.to_vec())))
+            }
+            owned @ (Self::Bytes(Cow::Owned(_)) | Self::MappingMut(_)) => Ok(owned),
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut [u8]> {
+        match self {
+            Self::MappingMut(mapping) => Some(&mut mapping[..]),
+            Self::Bytes(Cow::Owned(bytes)) => Some(bytes.as_mut_slice()),
+            Self::Bytes(Cow::Borrowed(_)) | Self::Mapping(_) => None,
+        }
     }
 
     pub fn into_owned(self) -> BytesOrMapping<'static> {
         match self {
             Self::Bytes(bytes) => BytesOrMapping::Bytes(Cow::Owned(bytes.into_owned())),
             Self::Mapping(mapping) => BytesOrMapping::Mapping(mapping),
+            Self::MappingMut(mapping) => BytesOrMapping::MappingMut(mapping),
         }
     }
 

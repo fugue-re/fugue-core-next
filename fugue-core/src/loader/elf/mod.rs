@@ -19,10 +19,9 @@ use object::{
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
-use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, RawAddress, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, ExternSegment, RawAddress, SegmentProperties, SymbolIndex, SymbolProperties,
+    SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -30,7 +29,6 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
-use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
@@ -98,7 +96,7 @@ pub struct Elf<'a> {
     preferred_base: u64,
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
     sections: ElfSectionMap,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
@@ -205,7 +203,7 @@ impl<'a> Elf<'a> {
         &self.mapping_hints
     }
 
-    pub fn symbols(&self) -> &IndexedSymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
 
@@ -252,7 +250,7 @@ impl ElfSectionMap {
 struct ElfSymbolData {
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
     sections: ElfSectionMap,
     extern_segm: ExternSegment,
 }
@@ -346,7 +344,7 @@ impl ElfSymbolData {
             return Err(LoaderError::address_overflow(base_addr));
         }
 
-        let mut symbols = IndexedSymbolTable::new();
+        let mut symbols = SymbolTable::new();
 
         for (section, symbol) in elf
             .symbols()
@@ -404,7 +402,9 @@ impl ElfSymbolData {
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
-                tracing::debug!("symbol {address} is not a function or data: {st_bind:x}/{st_type:x}");
+                tracing::debug!(
+                    "symbol {address} is not a function or data: {st_bind:x}/{st_type:x}"
+                );
                 SymbolProperties::NONE
             };
 
@@ -662,7 +662,7 @@ where
     // mapping hints provided by mapping symbols
     pub(crate) mapping_hints: &'file BTreeMap<Address, ContextHint>,
     // mapping of local and external symbols
-    pub(crate) symbols: &'file IndexedSymbolTable,
+    pub(crate) symbols: &'file SymbolTable,
     // assigned base address per section index (relocatable objects)
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
@@ -680,7 +680,7 @@ where
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
         mapping_hints: &'file BTreeMap<Address, ContextHint>,
-        symbols: &'file IndexedSymbolTable,
+        symbols: &'file SymbolTable,
         sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
         base: Address,
@@ -1211,7 +1211,7 @@ impl Loadable for Elf<'_> {
         self.architecture.clone()
     }
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         Some(&self.symbols)
     }
 
@@ -1243,10 +1243,7 @@ impl Loadable for Elf<'_> {
         LoadableSegmentBounds::new(start..end)
     }
 
-    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
-    where
-        P: ProjectStorageProvider,
-    {
+    fn analysers(&self) -> impl LoadableAnalysers {
         ElfAnalysers::new(self)
     }
 }

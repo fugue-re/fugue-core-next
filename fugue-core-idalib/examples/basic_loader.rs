@@ -3,9 +3,8 @@ use std::time::Instant;
 use fallible_iterator::FallibleIterator;
 use fugue_core::analysis::AnalysisPass;
 use fugue_core::attributes;
-use fugue_core::ir::traits::FunctionTable;
 use fugue_core::loader::{Loadable, LoadableAnalysers, LoadableFromFile};
-use fugue_core::project::InMemoryProject;
+use fugue_core::project::Project;
 use fugue_core_idalib::{IDABinary, ATTRIBUTE_IDA_DATABASE_PATH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let mut project = InMemoryProject::new(&binary)?;
+        let mut project = Project::new_transient(&binary)?;
         let mut analyser = binary.analysers().function_recovery()?;
 
         let t0 = Instant::now();

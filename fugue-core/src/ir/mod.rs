@@ -11,14 +11,14 @@ pub use address::{
 };
 
 pub mod block;
-pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, IndexedCodeBlockTable};
+pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable};
 
 pub mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
 pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties, IndexedFunctionTable};
+pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
 
 pub mod insn;
 pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
@@ -34,11 +34,9 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 
 pub mod symbol;
 pub use symbol::{
-    IndexedSymbolTable, LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap,
-    SymbolProperties, SymbolTableSelector,
+    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties,
+    SymbolTable, SymbolTableSelector,
 };
-
-pub mod traits;
 
 pub struct Id<T> {
     id: u32,

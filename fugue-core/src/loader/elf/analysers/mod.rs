@@ -2,7 +2,6 @@ use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::FunctionRecoveryPatternMatcher;
 use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
-use crate::storage::ProjectStorageProvider;
 
 mod specs;
 
@@ -17,14 +16,11 @@ impl<'a> ElfAnalysers<'a> {
     }
 }
 
-impl<'a, P> LoadableAnalysers<P> for ElfAnalysers<'a>
-where
-    P: ProjectStorageProvider,
-{
+impl<'a> LoadableAnalysers for ElfAnalysers<'a> {
     fn function_recovery_with(
         &self,
         config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery<P>, AnalysisError> {
+    ) -> Result<FunctionRecovery, AnalysisError> {
         let mut analyser = FunctionRecovery::new_with(config);
         let mut patttern_matcher = FunctionRecoveryPatternMatcher::new();
 
