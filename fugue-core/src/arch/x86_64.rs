@@ -3,10 +3,12 @@ pub use fugue_lifter::x86_64::*;
 use yaxpeax_arch::*;
 use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
 
+use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
@@ -148,6 +150,34 @@ impl X86_64 {
         let lid = LanguageId::new_with("x86", false, 64, variant);
         Ok(loader.load(&lid)?)
     }
+}
+
+fn supports_language(language: &'static Language) -> bool {
+    language.processor() == "x86" && language.address_bits() == 64
+}
+
+fn provide_language(
+    id: &LanguageId,
+    source: &LanguageSource<'_>,
+) -> Result<Option<&'static Language>, LanguageError> {
+    if id.processor() != "x86" || id.bits() != 64 || id.is_big_endian() {
+        return Ok(None);
+    }
+
+    let language = match source.loader() {
+        Some(loader) => X86_64::resolve_variant_with(loader, id.variant())?,
+        None => X86_64::resolve_variant(id.variant())?,
+    };
+
+    Ok(Some(language))
+}
+
+crate::registry::submit! {
+    ArchProvider::new("x86-64", supports_language, X86_64::new)
+}
+
+crate::registry::submit! {
+    LanguageProvider::new("x86-64", provide_language)
 }
 
 struct X86_64Disassembler {

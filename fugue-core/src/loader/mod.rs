@@ -25,9 +25,6 @@ pub use elf::Elf;
 // pub mod macho
 // pub use macho::Macho;
 
-pub mod object;
-pub use object::Object;
-
 pub mod pe;
 pub use pe::Pe;
 
@@ -38,6 +35,8 @@ pub use shellcode::Shellcode;
 pub enum LoaderError {
     #[error("cannot load object: address overflow using base address of {0}")]
     AddressOverflow(Address),
+    #[error("cannot apply loader extension: {0}")]
+    Extension(anyhow::Error),
     #[error("cannot load object: {0}")]
     Format(anyhow::Error),
     #[error("cannot read object: {0}")]
@@ -46,6 +45,8 @@ pub enum LoaderError {
     Language(#[from] LanguageError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
+    #[error("cannot load object: unsupported file format")]
+    UnsupportedFormat,
     #[error("cannot load object: unsupported architecture")]
     UnsupportedArch,
 }
@@ -53,6 +54,20 @@ pub enum LoaderError {
 impl LoaderError {
     pub fn address_overflow(address: impl Into<Address>) -> Self {
         Self::AddressOverflow(address.into())
+    }
+
+    pub fn extension<E>(e: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Extension(e.into())
+    }
+
+    pub fn extension_with<M>(m: M) -> Self
+    where
+        M: Debug + Display + Send + Sync + 'static,
+    {
+        Self::Extension(anyhow::Error::msg(m))
     }
 
     pub fn format<E>(e: E) -> Self
@@ -697,7 +712,6 @@ where
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
     Pe(pe::Pe<'a>),
-    Object(object::Object<'a>),
 }
 
 impl<'a> Loader<'a> {
@@ -721,10 +735,7 @@ impl<'a> Loader<'a> {
                 let pe = Pe::new_with(data, attributes)?;
                 Self::Pe(pe)
             }
-            _ => {
-                let object = object::Object::new_with(data, attributes)?;
-                Self::Object(object)
-            }
+            _ => return Err(LoaderError::UnsupportedFormat),
         };
         Ok(loaded)
     }
@@ -768,7 +779,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.architecture(),
             Self::Pe(pe) => pe.architecture(),
-            Self::Object(object) => object.architecture(),
         }
     }
 
@@ -776,7 +786,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.metadata(),
             Self::Pe(pe) => pe.metadata(),
-            Self::Object(object) => object.metadata(),
         }
     }
 
@@ -784,7 +793,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => Some(elf.symbols()),
             Self::Pe(pe) => Some(pe.symbols()),
-            Self::Object(object) => object.symbols(),
         }
     }
 
@@ -792,7 +800,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.attributes(),
             Self::Pe(pe) => pe.attributes(),
-            Self::Object(object) => object.attributes(),
         }
     }
 
@@ -800,7 +807,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.attributes_mut(),
             Self::Pe(pe) => pe.attributes_mut(),
-            Self::Object(object) => object.attributes_mut(),
         }
     }
 
@@ -814,9 +820,6 @@ impl Loadable for Loader<'_> {
             Self::Pe(pe) => {
                 Box::new(pe.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
             }
-            Self::Object(object) => {
-                Box::new(object.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
-            }
         }
     }
 
@@ -824,7 +827,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => elf.segment_bounds(),
             Self::Pe(pe) => pe.segment_bounds(),
-            Self::Object(object) => object.segment_bounds(),
         }
     }
 
@@ -832,7 +834,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers>,
             Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers>,
-            Self::Object(object) => Box::new(object.analysers()) as Box<dyn LoadableAnalysers>,
         }
     }
 }

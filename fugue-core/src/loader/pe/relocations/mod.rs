@@ -4,6 +4,7 @@ use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{Architecture, Object, ReadRef};
 
 use crate::ir::Address;
+use crate::loader::pe::extensions::RelocationContext;
 use crate::loader::{LoadableSegment, LoaderError};
 
 pub mod generic;
@@ -102,7 +103,7 @@ where
                 let Some(offset) = address.checked_sub(start) else {
                     continue;
                 };
-                self.apply_relocation(lsegm, offset as usize, reloc.typ);
+                self.apply_relocation(lsegm, offset as usize, reloc.typ)?;
             }
         }
 
@@ -132,15 +133,45 @@ where
         Ok(())
     }
 
-    fn apply_relocation(&self, lsegm: &mut LoadableSegment<'data>, offset: usize, reloc_type: u16) {
+    fn apply_relocation(
+        &self,
+        lsegm: &mut LoadableSegment<'data>,
+        offset: usize,
+        reloc_type: u16,
+    ) -> Result<(), LoaderError> {
+        let patch_address = lsegm.address() + offset;
+        let mut context = RelocationContext::new(
+            self.pe,
+            self.current_base,
+            Address::new(self.current_base.space(), self.preferred_base),
+            patch_address,
+            offset,
+            reloc_type,
+            lsegm,
+        );
+
+        if context.apply_relocation()? {
+            return Ok(());
+        }
+
         match self.pe.architecture() {
-            Architecture::Aarch64 => self.apply_aarch64_relocation(lsegm, offset, reloc_type),
-            Architecture::Arm => self.apply_arm_relocation(lsegm, offset, reloc_type),
-            Architecture::I386 => self.apply_x86_relocation(lsegm, offset, reloc_type),
-            Architecture::X86_64 => self.apply_x86_64_relocation(lsegm, offset, reloc_type),
+            Architecture::Aarch64 => {
+                self.apply_aarch64_relocation(context.segment_mut(), offset, reloc_type)
+            }
+            Architecture::Arm => {
+                self.apply_arm_relocation(context.segment_mut(), offset, reloc_type)
+            }
+            Architecture::I386 => {
+                self.apply_x86_relocation(context.segment_mut(), offset, reloc_type)
+            }
+            Architecture::X86_64 => {
+                self.apply_x86_64_relocation(context.segment_mut(), offset, reloc_type)
+            }
             arch => tracing::warn!(
                 "unsupported PE architecture {arch:?} for relocation type {reloc_type:#x}"
             ),
         }
+
+        Ok(())
     }
 }

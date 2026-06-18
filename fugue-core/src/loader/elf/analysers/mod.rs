@@ -1,7 +1,9 @@
 use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::FunctionRecoveryPatternMatcher;
 use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
+use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryHandler};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
+use crate::registry;
 
 mod specs;
 
@@ -22,15 +24,30 @@ impl<'a> LoadableAnalysers for ElfAnalysers<'a> {
         config: FunctionRecoveryConfig,
     ) -> Result<FunctionRecovery, AnalysisError> {
         let mut analyser = FunctionRecovery::new_with(config);
-        let mut patttern_matcher = FunctionRecoveryPatternMatcher::new();
-
         let arch = self.elf.architecture();
-        let convention = self.elf.convention().unwrap_or("default");
+        let context = AnalysisContext::new(self.elf, arch, self.elf.convention());
 
-        specs::configure_analyser(&arch, convention, &mut patttern_matcher)?;
-
-        analyser.add_candidate_discovery_pass("elf-loader-patterns", patttern_matcher);
+        context.configure_function_recovery(&mut analyser)?;
 
         Ok(analyser)
     }
+}
+
+fn configure_builtin_function_recovery(
+    context: &AnalysisContext<'_>,
+    analyser: &mut FunctionRecovery,
+) -> Result<(), AnalysisError> {
+    let mut patttern_matcher = FunctionRecoveryPatternMatcher::new();
+
+    let convention = context.convention().unwrap_or("default");
+
+    specs::configure_analyser(context.arch(), convention, &mut patttern_matcher)?;
+
+    analyser.add_candidate_discovery_pass("elf-loader-patterns", patttern_matcher);
+
+    Ok(())
+}
+
+registry::submit! {
+    FunctionRecoveryHandler::new("elf-loader-patterns", configure_builtin_function_recovery)
 }

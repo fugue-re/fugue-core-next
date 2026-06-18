@@ -5,10 +5,12 @@ use yaxpeax_arch::*;
 use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
 
 use crate::arch::Arch;
+use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
 use crate::lazy_symbol;
+use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
@@ -192,6 +194,34 @@ impl Arm {
         let lid = LanguageId::new_with("ARM", is_be, 32, variant);
         Ok(loader.load(&lid)?)
     }
+}
+
+fn supports_language(language: &'static Language) -> bool {
+    language.processor() == "ARM" && language.address_bits() == 32
+}
+
+fn provide_language(
+    id: &LanguageId,
+    source: &LanguageSource<'_>,
+) -> Result<Option<&'static Language>, LanguageError> {
+    if id.processor() != "ARM" || id.bits() != 32 {
+        return Ok(None);
+    }
+
+    let language = match source.loader() {
+        Some(loader) => Arm::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
+        None => Arm::resolve_variant(id.is_big_endian(), id.variant())?,
+    };
+
+    Ok(Some(language))
+}
+
+crate::registry::submit! {
+    ArchProvider::new("arm", supports_language, Arm::new)
+}
+
+crate::registry::submit! {
+    LanguageProvider::new("arm", provide_language)
 }
 
 struct ArmDisassembler {

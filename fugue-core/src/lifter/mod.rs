@@ -17,7 +17,10 @@ pub mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
 pub mod dynamic;
-pub use dynamic::{LanguageLoader, resolve_language, resolve_language_with};
+pub use dynamic::{
+    LanguageLoader, resolve_language, resolve_language_id, resolve_language_id_with,
+    resolve_language_with,
+};
 
 pub mod lifter;
 pub use lifter::{Lifter, LifterError};
@@ -34,6 +37,8 @@ pub enum LanguageError {
     Database(#[from] SleighLanguageError),
     #[error("environment variable `{0}` is not set")]
     Environment(&'static str),
+    #[error("ambiguous language provider for `{0}`")]
+    AmbiguousProvider(String),
     #[error(transparent)]
     Load(#[from] LanguageLoadError),
     #[error(transparent)]

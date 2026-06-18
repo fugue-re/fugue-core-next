@@ -16,8 +16,11 @@ use crate::storage::entities::{Entity, EntityId};
 pub mod aarch64;
 pub mod arm;
 pub mod mips;
+pub mod registry;
 pub mod x86;
 pub mod x86_64;
+
+pub use registry::ArchError;
 
 pub mod traits;
 use traits::Arch as ArchT;
@@ -130,22 +133,12 @@ impl Entity for Arch {
 }
 
 impl Arch {
+    pub fn try_new(language: &'static Language) -> Result<Self, ArchError> {
+        registry::provide_arch(language)
+    }
+
     pub fn new(language: &'static Language) -> Self {
-        match language.processor() {
-            "ARM" => arm::Arm::new(language),
-            "AARCH64" => aarch64::AArch64::new(language),
-            "MIPS" => mips::Mips::new(language),
-            "x86" => {
-                if language.address_bits() == 32 {
-                    x86::X86::new(language)
-                } else {
-                    x86_64::X86_64::new(language)
-                }
-            }
-            _ => {
-                unreachable!("unsupported language: {language}");
-            }
-        }
+        Self::try_new(language).unwrap_or_else(|_| panic!("unsupported language: {language}"))
     }
 
     pub fn disassembler(&self) -> Disassembler {
