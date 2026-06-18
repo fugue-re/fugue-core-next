@@ -8,9 +8,8 @@ use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::endian::LittleEndian as LE;
 use object::pe::{
-    ImageNtHeaders32, ImageNtHeaders64, IMAGE_DIRECTORY_ENTRY_BASERELOC,
-    IMAGE_SCN_CNT_UNINITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
-    IMAGE_SCN_MEM_WRITE,
+    IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_SCN_CNT_UNINITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE,
+    IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, ImageNtHeaders32, ImageNtHeaders64,
 };
 use object::read::pe::{self, ImageNtHeaders, PeFile, PeSection, PeSectionIterator};
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
@@ -28,8 +27,8 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
-use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::ProjectStorageProvider;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
 };
@@ -152,7 +151,8 @@ impl<'a> Pe<'a> {
             return Err(error);
         }
 
-        let Some(repaired) = permissive::repair(data)? else {
+        let space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+        let Some(repaired) = permissive::try_repair(data, space)? else {
             return Err(error);
         };
 
@@ -784,16 +784,16 @@ mod test {
 
     use fallible_iterator::FallibleIterator;
     use object::endian::LittleEndian as LE;
-    use object::pe::{ImageNtHeaders64, IMAGE_REL_BASED_DIR64};
+    use object::pe::{IMAGE_REL_BASED_DIR64, ImageNtHeaders64};
     use object::read::pe::{Import, PeFile64};
     use object::{Object, ObjectSection};
 
-    use super::{Pe, ATTRIBUTE_PERMISSIVE};
+    use super::{ATTRIBUTE_PERMISSIVE, Pe};
     use crate::attributes;
     use crate::ir::{Address, RawAddress};
     use crate::loader::{Loadable, LoadableSegment, LoaderError};
-    use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
     use crate::types::BytesOrMapping;
+    use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
 
     fn load_segments(
         pe: &Pe<'_>,
