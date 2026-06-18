@@ -12,9 +12,9 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::project::Project;
+use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
-use crate::storage::{ProjectStorageProvider, SegmentStorage};
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryPatternMatcherError {
@@ -133,15 +133,12 @@ impl FunctionRecoveryPatternMatcher {
         }
     }
 
-    fn analyse_space<P>(
+    fn analyse_space(
         &mut self,
-        project: &Project<P>,
+        project: &Project,
         state: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
-    ) -> Result<(), AnalysisError>
-    where
-        P: ProjectStorageProvider,
-    {
+    ) -> Result<(), AnalysisError> {
         let segments = project.segments();
         let gaps = state
             .gaps(project.functions(), project.blocks(), segments, space_id)
@@ -196,13 +193,10 @@ impl FunctionRecoveryPatternMatcher {
     }
 }
 
-impl<P> AnalysisPass<P, FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher
-where
-    P: ProjectStorageProvider,
-{
+impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher {
     fn analyse_with(
         &mut self,
-        project: &mut Project<P>,
+        project: &mut Project,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segments = project.segments();

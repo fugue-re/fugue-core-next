@@ -1,5 +1,7 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
+use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, RangeBounds, RangeInclusive, Sub, SubAssign};
+use std::str::FromStr;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,19 @@ impl Debug for RawAddress {
 impl Display for RawAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#x}", self.0)
+    }
+}
+
+impl FromStr for RawAddress {
+    type Err = ParseIntError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let address = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+            .map_or_else(|| value.parse::<u64>(), |hex| u64::from_str_radix(hex, 16))?;
+
+        Ok(Self(address))
     }
 }
 

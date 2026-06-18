@@ -188,6 +188,7 @@ impl Arm {
             }
             _ => {}
         }
+        let variant = variant.or(Some("v8"));
         let lid = LanguageId::new_with("ARM", is_be, 32, variant);
         Ok(loader.load(&lid)?)
     }

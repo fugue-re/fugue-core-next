@@ -4,10 +4,9 @@ use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 use super::{FunctionRecoveryError, Translator};
 use crate::analysis::function::recovery::builder::CodeBlockStructuringContext;
 use crate::analysis::function::recovery::{FunctionBuilderContext, FunctionRecoveryConfig};
-use crate::ir::traits::{CodeBlockTable, FunctionTable};
 use crate::ir::{
-    Address, CodeBlock, CodeBlockProperties, Function, FunctionId, FunctionProperties, Insn,
-    InsnList, Symbol,
+    Address, CodeBlock, CodeBlockProperties, CodeBlockTable, Function, FunctionId,
+    FunctionProperties, FunctionTable, Insn, InsnList, Symbol,
 };
 use crate::lifter::{ContextSet, LifterError};
 use crate::storage::SegmentStorage;
@@ -531,15 +530,11 @@ impl PartialFunction {
         self.properties.insert(FunctionProperties::EXTERNAL);
     }
 
-    pub fn commit<FT, BT>(
+    pub fn commit(
         self,
-        ftable: &mut FT,
-        cbtable: &mut BT,
-    ) -> Result<FunctionId, FunctionRecoveryError>
-    where
-        FT: FunctionTable,
-        BT: CodeBlockTable,
-    {
+        ftable: &mut FunctionTable,
+        cbtable: &mut CodeBlockTable,
+    ) -> Result<FunctionId, FunctionRecoveryError> {
         // first we create the code blocks
         let mut bids = Vec::with_capacity(self.blocks.len());
         for block in self.blocks.iter() {
@@ -562,7 +557,7 @@ impl PartialFunction {
 
         for (i, block) in self.blocks.iter().enumerate() {
             let bid = bids[i];
-            let mut cb = cbtable.get_by_id_mut(bid).expect("code block exists");
+            let cb = cbtable.get_by_id_mut(bid).expect("code block exists");
 
             for &succ_idx in block.successors().iter() {
                 let succ_bid = bids[succ_idx];

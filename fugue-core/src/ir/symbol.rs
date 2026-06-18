@@ -8,11 +8,6 @@ pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
 };
 
-pub use crate::ir::traits::SymbolTableSelector;
-use crate::ir::traits::{
-    SymbolEntryIter as BoxedSymbolEntryIter, SymbolEntryIterMut as BoxedSymbolEntryIterMut,
-    SymbolIndexAndEntryIter as BoxedSymbolIndexAndEntryIter, SymbolTable as SymbolTableT,
-};
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
@@ -21,6 +16,25 @@ use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type SymbolId = Id<Symbol>;
 pub type LazySymbol = LazyLock<Symbol>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolTableSelector(usize);
+
+impl SymbolTableSelector {
+    pub const fn new(selector: usize) -> Self {
+        Self(selector)
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0
+    }
+}
+
+impl Display for SymbolTableSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}", self.0)
+    }
+}
 
 #[macro_export]
 macro_rules! lazy_symbol {
@@ -365,7 +379,7 @@ impl SymbolIndex {
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
-pub struct IndexedSymbolTable {
+pub struct SymbolTable {
     // all known symbols
     symbols: Vec<SymbolEntry>,
     // map from each original symbol table to its symbols
@@ -378,11 +392,11 @@ pub struct IndexedSymbolTable {
     free_ids: Vec<Id<Symbol>>,
 }
 
-impl Entity for IndexedSymbolTable {
+impl Entity for SymbolTable {
     const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
 }
 
-impl ProjectEntityFromStorage for IndexedSymbolTable {
+impl ProjectEntityFromStorage for SymbolTable {
     fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
         tracing::trace!("loading symbol table from entity storage");
         storage.get(&ProjectEntity::SymbolTable)
@@ -394,7 +408,7 @@ impl ProjectEntityFromStorage for IndexedSymbolTable {
     }
 }
 
-impl PersistableProjectEntity for IndexedSymbolTable {
+impl PersistableProjectEntity for SymbolTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         tracing::trace!("persisting symbol table with {} entries", self.len());
         storage.insert(&ProjectEntity::SymbolTable, self)
@@ -460,7 +474,7 @@ impl<'a> Iterator for SymbolEntryIterMut<'a> {
 
 impl<'a> ExactSizeIterator for SymbolEntryIterMut<'a> {}
 
-impl IndexedSymbolTable {
+impl SymbolTable {
     pub fn new() -> Self {
         Self::default()
     }
@@ -895,133 +909,6 @@ impl IndexedSymbolTable {
     }
 }
 
-impl SymbolTableT for IndexedSymbolTable {
-    type SymbolEntryIter<'a> = BoxedSymbolEntryIter<'a>;
-    type SymbolEntryIterMut<'a> = BoxedSymbolEntryIterMut<'a>;
-    type SymbolEntryMut<'a> = &'a mut SymbolEntry;
-    type SymbolEntryRef<'a> = &'a SymbolEntry;
-    type SymbolIndexAndEntryIter<'a> = BoxedSymbolIndexAndEntryIter<'a>;
-
-    fn get<'a>(&'a self, symbol: &str) -> Option<Self::SymbolEntryIter<'a>> {
-        Self::get(self, symbol).map(BoxedSymbolEntryIter::new)
-    }
-
-    fn get_mut<'a>(&'a mut self, symbol: &str) -> Option<Self::SymbolEntryIterMut<'a>> {
-        Self::get_mut(self, symbol).map(BoxedSymbolEntryIterMut::new)
-    }
-
-    fn get_first(&self, symbol: &str) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
-        Self::get_first(self, symbol)
-    }
-
-    fn get_first_mut(&mut self, symbol: &str) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
-        Self::get_first_mut(self, symbol)
-    }
-
-    fn get_by_id(&self, id: Id<Symbol>) -> Option<Self::SymbolEntryRef<'_>> {
-        Self::get_by_id(self, id)
-    }
-
-    fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<Self::SymbolEntryMut<'_>> {
-        Self::get_by_id_mut(self, id)
-    }
-
-    fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
-        Self::get_by_index(self, index)
-    }
-
-    fn get_by_index_mut(
-        &mut self,
-        index: SymbolIndex,
-    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
-        Self::get_by_index_mut(self, index)
-    }
-
-    fn get_by_address(&self, address: Address) -> Self::SymbolEntryIter<'_> {
-        BoxedSymbolEntryIter::new(Self::get_by_address(self, address))
-    }
-
-    fn get_by_address_mut(&mut self, address: Address) -> Self::SymbolEntryIterMut<'_> {
-        BoxedSymbolEntryIterMut::new(Self::get_by_address_mut(self, address))
-    }
-
-    fn get_first_by_address(
-        &self,
-        address: Address,
-    ) -> Option<(Id<Symbol>, Self::SymbolEntryRef<'_>)> {
-        Self::get_first_by_address(self, address)
-    }
-
-    fn get_first_by_address_mut(
-        &mut self,
-        address: Address,
-    ) -> Option<(Id<Symbol>, Self::SymbolEntryMut<'_>)> {
-        Self::get_first_by_address_mut(self, address)
-    }
-
-    fn contains(&self, symbol: &str) -> bool {
-        Self::contains(self, symbol)
-    }
-
-    fn contains_index(&self, index: SymbolIndex) -> bool {
-        Self::contains_index(self, index)
-    }
-
-    fn contains_address(&self, address: Address) -> bool {
-        Self::contains_address(self, address)
-    }
-
-    fn insert(
-        &mut self,
-        index: SymbolIndex,
-        address: Address,
-        symbol: Symbol,
-        properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
-        Self::insert(self, index, address, symbol, properties)
-    }
-
-    fn iter(&self) -> Self::SymbolEntryIter<'_> {
-        BoxedSymbolEntryIter::new(self.iter())
-    }
-
-    fn iter_by_selector(&self, selector: SymbolTableSelector) -> Self::SymbolEntryIter<'_> {
-        BoxedSymbolEntryIter::new(self.iter_by_selector(selector))
-    }
-
-    fn iter_by_address(&self) -> Self::SymbolEntryIter<'_> {
-        BoxedSymbolEntryIter::new(self.iter_by_address())
-    }
-
-    fn iter_by_index(&self) -> Self::SymbolIndexAndEntryIter<'_> {
-        BoxedSymbolIndexAndEntryIter::new(self.iter_by_index())
-    }
-
-    fn is_empty(&self) -> bool {
-        Self::is_empty(self)
-    }
-
-    fn len(&self) -> usize {
-        Self::len(self)
-    }
-
-    fn remove(&mut self, symbol: &str) -> usize {
-        Self::remove(self, symbol)
-    }
-
-    fn remove_by_address(&mut self, address: Address) -> usize {
-        Self::remove_by_address(self, address)
-    }
-
-    fn remove_by_id(&mut self, id: Id<Symbol>) -> bool {
-        Self::remove_by_id(self, id)
-    }
-
-    fn remove_by_index(&mut self, index: SymbolIndex) -> bool {
-        Self::remove_by_index(self, index)
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1050,7 +937,7 @@ mod test {
 
     #[test]
     fn test_symbol_index_free_list() {
-        let mut table = IndexedSymbolTable::new();
+        let mut table = SymbolTable::new();
         let sel = SymbolTableSelector::new(0);
 
         let (inserted1, id1) = table.insert_local(
@@ -1117,8 +1004,7 @@ mod test {
 
         // check the roundtrip for encode/decode
         let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&table).unwrap();
-        let decoded =
-            rkyv::from_bytes::<IndexedSymbolTable, rkyv::rancor::Error>(&encoded).unwrap();
+        let decoded = rkyv::from_bytes::<SymbolTable, rkyv::rancor::Error>(&encoded).unwrap();
 
         assert_eq!(table, decoded);
     }

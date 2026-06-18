@@ -14,15 +14,14 @@ use object::read::elf::{
 };
 use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
-    SectionFlags, SegmentFlags, SymbolFlags,
+    SectionFlags, SectionKind, SegmentFlags, SymbolFlags,
 };
 use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
 
 use crate::arch::Arch;
-use crate::ir::traits::SymbolTableSelector;
 use crate::ir::{
-    Address, ExternSegment, IndexedSymbolTable, RawAddress, SegmentProperties, SymbolIndex,
-    SymbolProperties,
+    Address, ExternSegment, RawAddress, SegmentProperties, SymbolIndex, SymbolProperties,
+    SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
 use crate::loader::object::object_language;
@@ -30,7 +29,6 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
 };
-use crate::storage::ProjectStorageProvider;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
@@ -49,6 +47,7 @@ pub const ELF_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0)
 pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 
 pub const ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS: &str = "loader.elf.override_segment_permissions";
+pub const ATTRIBUTE_SKIP_NOTE_SECTIONS: &str = "loader.elf.skip_note_sections";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -97,7 +96,8 @@ pub struct Elf<'a> {
     preferred_base: u64,
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
+    sections: ElfSectionMap,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
 }
@@ -143,14 +143,17 @@ impl<'a> Elf<'a> {
             ));
         }
 
+        let config = ElfLoaderProperties::new(&attributes);
+
         let ElfSymbolData {
             bounds,
             symbols,
+            sections,
             mapping_hints,
             extern_segm,
         } = with_elf!(
             view,
-            elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base)?
+            elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base, config)?
         );
 
         let metadata = LoadableMetadata::new(
@@ -167,6 +170,7 @@ impl<'a> Elf<'a> {
             bounds,
             mapping_hints,
             symbols,
+            sections,
             extern_segm,
             attributes,
         };
@@ -199,7 +203,7 @@ impl<'a> Elf<'a> {
         &self.mapping_hints
     }
 
-    pub fn symbols(&self) -> &IndexedSymbolTable {
+    pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
     }
 
@@ -223,10 +227,31 @@ impl<'a> Elf<'a> {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ElfSectionMap(Vec<Option<Address>>);
+
+impl ElfSectionMap {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn insert(&mut self, index: usize, address: Address) {
+        if index >= self.0.len() {
+            self.0.resize(index + 1, None);
+        }
+        self.0[index] = Some(address);
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<Address> {
+        self.0.get(index).copied().flatten()
+    }
+}
+
 struct ElfSymbolData {
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: IndexedSymbolTable,
+    symbols: SymbolTable,
+    sections: ElfSectionMap,
     extern_segm: ExternSegment,
 }
 
@@ -236,6 +261,7 @@ impl ElfSymbolData {
         arch: &Arch,
         base_addr: Address,
         preferred_base: u64,
+        config: ElfLoaderProperties,
     ) -> Result<Self, LoaderError> {
         let target_space = base_addr.space();
         // TODO:
@@ -249,7 +275,7 @@ impl ElfSymbolData {
         // which is only applicable for Thumb.
         let addr_align = arch.language().address_alignment().max(addr_size);
 
-        let mut section_map = Vec::new();
+        let mut sections = ElfSectionMap::new();
         let mut mapping_hints = BTreeMap::new();
 
         let mut min_addr = base_addr;
@@ -259,37 +285,29 @@ impl ElfSymbolData {
             let mut base = base_addr.offset();
             for sect in elf.sections() {
                 let SectionFlags::Elf { sh_flags } = sect.flags() else {
-                    // NOTE: we could probably panic here
-                    section_map.push(None);
                     continue;
                 };
 
                 if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
-                    section_map.push(None);
                     continue;
                 }
 
-                if sect.size() == 0 {
-                    section_map.push(None);
-                    base = base
-                        .checked_add(1)
-                        .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+                if config.skip_note_sections() && sect.kind() == SectionKind::Note {
                     continue;
                 }
 
-                let aligned_start =
-                    base.wrapping_add(sect.align().wrapping_sub(1)) & !sect.align().wrapping_sub(1);
+                let align = sect.align().max(1);
+                let aligned_start = base.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
 
                 if aligned_start < base {
                     tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
-                    section_map.push(None);
                     continue;
                 }
 
-                section_map.push(Some(aligned_start));
+                sections.insert(sect.index().0, Address::in_space(aligned_start, target_space));
 
                 base = aligned_start
-                    .checked_add(sect.size())
+                    .checked_add(sect.size().max(1))
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
             }
 
@@ -326,35 +344,29 @@ impl ElfSymbolData {
             return Err(LoaderError::address_overflow(base_addr));
         }
 
-        let mut symbols = IndexedSymbolTable::new();
+        let mut symbols = SymbolTable::new();
 
         for (section, symbol) in elf
             .symbols()
             .filter_map(|sym| sym.section_index().map(|idx| (idx, sym)))
         {
-            // NOTE: this will remove references to externs?
-            let Some(section_start) = section_map
-                .get(section.0)
-                .and_then(|start| *start)
-                .or_else(|| Some(elf.section_by_index(section).ok()?.address()))
-            else {
-                continue;
-            };
-
-            let address = Address::new(
-                target_space,
-                if is_object {
-                    symbol
-                        .address()
-                        .checked_add(section_start)
-                        .ok_or_else(|| LoaderError::address_overflow(base_addr))?
-                } else {
+            let address = if is_object {
+                let Some(section_start) = sections.get(section.0) else {
+                    continue;
+                };
+                Address::new(
+                    target_space,
+                    symbol.address().wrapping_add(section_start.offset()),
+                )
+            } else {
+                Address::new(
+                    target_space,
                     symbol
                         .address()
                         .wrapping_sub(preferred_base)
-                        .wrapping_add(base_addr.offset())
-                },
-            );
+                        .wrapping_add(base_addr.offset()),
+                )
+            };
 
             tracing::trace!(
                 "symbol {} in section {section:?} at {address}",
@@ -390,7 +402,9 @@ impl ElfSymbolData {
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
-                tracing::debug!("symbol {address} is not a function or data: {st_bind:x}/{st_type:x}");
+                tracing::debug!(
+                    "symbol {address} is not a function or data: {st_bind:x}/{st_type:x}"
+                );
                 SymbolProperties::NONE
             };
 
@@ -472,6 +486,17 @@ impl ElfSymbolData {
                 extern_segm
                     .add_extern()
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?
+            } else if is_object {
+                let Some(section_start) = sym
+                    .section_index()
+                    .and_then(|section| sections.get(section.0))
+                else {
+                    continue;
+                };
+                Address::new(
+                    target_space,
+                    sym.address().wrapping_add(section_start.offset()),
+                )
             } else {
                 Address::new(
                     target_space,
@@ -479,7 +504,7 @@ impl ElfSymbolData {
                         .wrapping_sub(preferred_base)
                         .wrapping_add(base_addr.offset()),
                 )
-            }; // FIXME: this needs to be mapped, see above.
+            };
             let sym = sym.name().ok();
 
             symbols.insert(
@@ -499,6 +524,7 @@ impl ElfSymbolData {
             bounds,
             mapping_hints,
             symbols,
+            sections,
             extern_segm,
         })
     }
@@ -567,6 +593,7 @@ bitflags! {
     pub(crate) struct ElfLoaderProperties: u8 {
         // user configuration
         const OVERRIDE_SEGMENT_PERMISSIONS = 0b0000_0001;
+        const SKIP_NOTE_SECTIONS = 0b0000_0010;
 
         // loader state tracking
         const HAS_LOADED_SECTIONS = 0b0001_0000;
@@ -589,11 +616,22 @@ impl ElfLoaderProperties {
             config.insert(Self::OVERRIDE_SEGMENT_PERMISSIONS);
         }
 
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_SKIP_NOTE_SECTIONS)
+            .unwrap_or_default()
+        {
+            config.insert(Self::SKIP_NOTE_SECTIONS);
+        }
+
         config
     }
 
     pub(crate) fn is_object(&self) -> bool {
         self.contains(Self::IS_OBJECT)
+    }
+
+    pub(crate) fn skip_note_sections(&self) -> bool {
+        self.contains(Self::SKIP_NOTE_SECTIONS)
     }
 
     pub(crate) fn ignore_segment_exec_permission(&self) -> bool {
@@ -624,7 +662,9 @@ where
     // mapping hints provided by mapping symbols
     pub(crate) mapping_hints: &'file BTreeMap<Address, ContextHint>,
     // mapping of local and external symbols
-    pub(crate) symbols: &'file IndexedSymbolTable,
+    pub(crate) symbols: &'file SymbolTable,
+    // assigned base address per section index (relocatable objects)
+    pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
     pub(crate) extern_segm: Option<&'file ExternSegment>,
     // loader config
@@ -640,7 +680,8 @@ where
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
         mapping_hints: &'file BTreeMap<Address, ContextHint>,
-        symbols: &'file IndexedSymbolTable,
+        symbols: &'file SymbolTable,
+        sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
         base: Address,
         preferred_base: u64,
@@ -659,6 +700,7 @@ where
             preferred_base,
             mapping_hints,
             symbols,
+            sections,
             extern_segm: Some(externs),
             config,
         }
@@ -719,41 +761,14 @@ where
 
     pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
         for sect in self.sects.by_ref() {
-            let SectionFlags::Elf { sh_flags } = sect.flags() else {
+            let Some(address) = self.sections.get(sect.index().0) else {
                 continue;
             };
 
-            let size = sect.size();
-
-            tracing::trace!(
-                "processing section with size {size}; is allocated: {}",
-                sh_flags as u32 & SHF_ALLOC == SHF_ALLOC
-            );
-
-            let is_alloc = sh_flags as u32 & SHF_ALLOC == SHF_ALLOC;
-
-            if !is_alloc {
-                continue;
-            }
-
-            if size == 0 {
-                // implies alloc. hence we add a gap with 1 byte alignment
-                self.current_base += 1usize;
-                continue;
-            }
-
-            let alignment_mask = sect.align().wrapping_sub(1);
-            let address = Address::new(
-                self.current_base.space(),
-                self.current_base.offset().wrapping_add(alignment_mask) & !alignment_mask,
-            );
-
-            if address < self.current_base {
-                tracing::debug!("section start {address:#x} overflow; skipping section");
-                continue;
-            }
-
-            let last_address = address + size - 1usize;
+            let span = sect.size().max(1);
+            let last_address = address
+                .checked_add(span.wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(address))?;
 
             if last_address < address {
                 tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
@@ -775,11 +790,9 @@ where
 
             tracing::trace!("loading section {address}-{last_address}");
 
-            self.current_base = Address::from(last_address) + 1usize;
-
-            let bytes = if data.len() as u64 != sect.size() {
+            let bytes = if data.len() as u64 != span {
                 let mut data = data.to_owned();
-                data.resize(sect.size() as _, 0);
+                data.resize(span as _, 0);
 
                 Cow::Owned(data)
             } else {
@@ -859,7 +872,9 @@ where
             };
 
             let address = Address::new(self.current_base.space(), *range.start());
-            let last_address = address + bytes.len() - 1usize;
+            let last_address = address
+                .checked_add((bytes.len() as u64).wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(address))?;
 
             tracing::trace!("loading segment {address}-{last_address}");
 
@@ -1064,7 +1079,9 @@ where
             };
 
             let address = Address::new(space, *range.start());
-            let last_address = address + bytes.len() - 1usize;
+            let last_address = address
+                .checked_add((bytes.len() as u64).wrapping_sub(1))
+                .ok_or_else(|| LoaderError::address_overflow(address))?;
 
             tracing::trace!("loading segment {address}-{last_address}");
 
@@ -1194,7 +1211,7 @@ impl Loadable for Elf<'_> {
         self.architecture.clone()
     }
 
-    fn symbols(&self) -> Option<&IndexedSymbolTable> {
+    fn symbols(&self) -> Option<&SymbolTable> {
         Some(&self.symbols)
     }
 
@@ -1210,6 +1227,7 @@ impl Loadable for Elf<'_> {
                 elf,
                 &self.mapping_hints,
                 &self.symbols,
+                &self.sections,
                 &self.extern_segm,
                 self.base,
                 self.preferred_base,
@@ -1225,10 +1243,7 @@ impl Loadable for Elf<'_> {
         LoadableSegmentBounds::new(start..end)
     }
 
-    fn analysers<P>(&self) -> impl LoadableAnalysers<P>
-    where
-        P: ProjectStorageProvider,
-    {
+    fn analysers(&self) -> impl LoadableAnalysers {
         ElfAnalysers::new(self)
     }
 }
@@ -1361,11 +1376,9 @@ mod test {
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            /*
             for (_, sym) in elf.symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
-            */
 
             Ok(())
         })

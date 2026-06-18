@@ -227,7 +227,7 @@ impl FunctionRecoveryConfig {
 mod test {
     use crate::analysis::AnalysisPass;
     use crate::loader::{Loadable, LoadableAnalysers, Loader, Shellcode};
-    use crate::project::InMemoryProject;
+    use crate::project::Project;
 
     #[test]
     fn test_control_flow_recovery_ls() -> Result<(), Box<dyn std::error::Error>> {
@@ -240,7 +240,7 @@ mod test {
 
         tracing::subscriber::with_default(subscriber, || {
             let loader = Loader::from_file("tests/ls.elf")?;
-            let mut project = InMemoryProject::new(&loader)?;
+            let mut project = Project::new_transient(&loader)?;
             let mut cfr = loader.analysers().function_recovery()?;
 
             cfr.add_candidate(0x4da0u64);
@@ -275,7 +275,7 @@ mod test {
             ];
 
             let loader = Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?;
-            let mut project = InMemoryProject::new(&loader)?;
+            let mut project = Project::new_transient(&loader)?;
             let mut cfr = loader.analysers().function_recovery()?;
 
             cfr.add_candidate(0x4EB14u64);
