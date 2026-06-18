@@ -198,7 +198,9 @@ impl Loadable for Object<'_> {
 
             let address = Address::new(
                 space,
-                segm.address().wrapping_sub(preferred_base).wrapping_add(base),
+                segm.address()
+                    .wrapping_sub(preferred_base)
+                    .wrapping_add(base),
             );
             let data = segm.data().unwrap_or_default();
 

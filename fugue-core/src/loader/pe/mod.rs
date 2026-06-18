@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
+use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::endian::LittleEndian as LE;
 use object::pe::{
@@ -36,11 +37,41 @@ use crate::types::{AttributeMap, BytesOrMapping};
 mod analysers;
 pub use analysers::PeAnalysers;
 
+mod permissive;
+
 mod relocations;
 pub use relocations::PeSegmentRelocator;
 
 pub const PE_EXPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const PE_IMPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
+
+pub const ATTRIBUTE_PERMISSIVE: &str = "loader.pe.permissive";
+
+bitflags! {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+    pub(crate) struct PeLoaderProperties: u8 {
+        const PERMISSIVE = 0b0000_0001;
+    }
+}
+
+impl PeLoaderProperties {
+    pub(crate) fn new(attributes: &AttributeMap) -> Self {
+        let mut config = Self::empty();
+
+        if attributes
+            .get_attr::<bool>(ATTRIBUTE_PERMISSIVE)
+            .unwrap_or_default()
+        {
+            config.insert(Self::PERMISSIVE);
+        }
+
+        config
+    }
+
+    pub(crate) fn is_permissive(&self) -> bool {
+        self.contains(Self::PERMISSIVE)
+    }
+}
 
 #[ouroboros::self_referencing]
 struct PeInner<'a> {
@@ -76,6 +107,12 @@ impl<'this, 'data> PeFileRepr<'this, 'data> {
     }
 }
 
+impl<'a> PeInner<'a> {
+    fn from_bytes(data: BytesOrMapping<'a>) -> Result<Self, LoaderError> {
+        Self::try_new(data, |data| PeFileRepr::parse(data))
+    }
+}
+
 pub struct Pe<'a> {
     object: PeInner<'a>,
     architecture: Arch,
@@ -99,32 +136,69 @@ impl<'a> Pe<'a> {
         data: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let object = PeInner::try_new(data.into(), |data| PeFileRepr::parse(data))?;
-        let view = object.borrow_view();
-        let language = with_pe!(view, pe | object_language(pe))?;
-        let architecture = Arch::new(language);
-
         let attributes = attributes.into();
-        let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
-        let preferred_base = with_pe!(view, pe | pe.relative_address_base());
+        let config = PeLoaderProperties::new(&attributes);
+        let object = PeInner::from_bytes(data.into())?;
 
-        let base = attributes
-            .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
-            .map(|addr| Address::in_space(addr, target_space))
-            .unwrap_or_else(|| Address::in_space(preferred_base, target_space));
+        let (data, error) = match Self::try_parse(object, &attributes) {
+            Ok(slf) => return Ok(slf),
+            Err(failed) => failed,
+        };
 
-        if base.offset() != preferred_base {
-            let has_relocations = with_pe!(
-                view,
-                pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
-            );
-
-            if !has_relocations {
-                return Err(LoaderError::format_with(
-                    "cannot rebase PE image without a base relocation directory",
-                ));
-            }
+        if !config.is_permissive() {
+            return Err(error);
         }
+
+        let Some(repaired) = permissive::repair(data)? else {
+            return Err(error);
+        };
+
+        let object = PeInner::from_bytes(repaired)?;
+        Self::try_parse(object, &attributes).map_err(|(_, error)| error)
+    }
+
+    fn try_parse(
+        object: PeInner<'a>,
+        attributes: &AttributeMap,
+    ) -> Result<Self, (BytesOrMapping<'a>, LoaderError)> {
+        let parsed = (|| -> Result<(Arch, Address, u64, PeSymbolData), LoaderError> {
+            let view = object.borrow_view();
+            let language = with_pe!(view, pe | object_language(pe))?;
+            let architecture = Arch::new(language);
+
+            let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+            let preferred_base = with_pe!(view, pe | pe.relative_address_base());
+
+            let base = attributes
+                .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
+                .map(|addr| Address::in_space(addr, target_space))
+                .unwrap_or_else(|| Address::in_space(preferred_base, target_space));
+
+            if base.offset() != preferred_base {
+                let has_relocations = with_pe!(
+                    view,
+                    pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
+                );
+
+                if !has_relocations {
+                    return Err(LoaderError::format_with(
+                        "cannot rebase PE image without a base relocation directory",
+                    ));
+                }
+            }
+
+            let symbols = with_pe!(
+                view,
+                pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base)
+            )?;
+
+            Ok((architecture, base, preferred_base, symbols))
+        })();
+
+        let (architecture, base, preferred_base, symbols) = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => return Err((object.into_heads().data, error)),
+        };
 
         let PeSymbolData {
             bounds,
@@ -132,10 +206,7 @@ impl<'a> Pe<'a> {
             symbols,
             extern_segm,
             import_slots,
-        } = with_pe!(
-            view,
-            pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base)
-        )?;
+        } = symbols;
 
         let metadata = LoadableMetadata::new(
             object.borrow_data(),
@@ -153,7 +224,7 @@ impl<'a> Pe<'a> {
             symbols,
             extern_segm,
             import_slots,
-            attributes,
+            attributes: attributes.clone(),
         };
 
         if let Some(entry) = slf.entry() {
@@ -687,7 +758,7 @@ mod test {
     use object::read::pe::{Import, PeFile64};
     use object::{Object, ObjectSection};
 
-    use super::Pe;
+    use super::{ATTRIBUTE_PERMISSIVE, Pe};
     use crate::attributes;
     use crate::ir::{Address, RawAddress};
     use crate::loader::{Loadable, LoadableSegment, LoaderError};
@@ -867,5 +938,20 @@ mod test {
         };
 
         assert!(matches!(err, LoaderError::AddressOverflow(_)));
+    }
+
+    #[test]
+    fn test_pe_memory_dump() -> Result<(), Box<dyn std::error::Error>> {
+        let path = "tests/135b5560b10894c9022d926a88210684eaeb0a541eeb3947ea50655df39471a0.bin";
+
+        assert!(Pe::new(BytesOrMapping::from_file(path)?).is_err());
+
+        let pe = Pe::new_with(
+            BytesOrMapping::from_file(path)?,
+            attributes![ATTRIBUTE_PERMISSIVE => true],
+        )?;
+        let _segments = load_segments(&pe)?;
+
+        Ok(())
     }
 }
