@@ -3,15 +3,14 @@ use std::sync::Arc;
 use ustr::Ustr;
 
 use crate::compiler::{self, CallFixup, CompilerSpec};
-use crate::deserialise::DeserialiseError;
-use crate::register::RegisterNames;
-use crate::spaces::{AddressSpace, AddressSpaces};
-use crate::varnode::VarnodeData;
-
 pub use crate::compiler::{
     DatatypeFilter, DatatypeKind, PrototypeRule, PrototypeRuleAction, PrototypeRuleCondition,
     RuleStorage,
 };
+use crate::deserialise::DeserialiseError;
+use crate::register::RegisterNames;
+use crate::spaces::{AddressSpace, AddressSpaces};
+use crate::varnode::VarnodeData;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum PrototypeOperand {

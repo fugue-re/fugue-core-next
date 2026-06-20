@@ -390,8 +390,14 @@ impl DatatypeFilter {
 
         let kind = DatatypeKind::from_name(&input.attribute_string("name")?)?;
 
-        let min_size = input.attribute("minsize").map(parse_int_radix).transpose()?;
-        let max_size = input.attribute("maxsize").map(parse_int_radix).transpose()?;
+        let min_size = input
+            .attribute("minsize")
+            .map(parse_int_radix)
+            .transpose()?;
+        let max_size = input
+            .attribute("maxsize")
+            .map(parse_int_radix)
+            .transpose()?;
         let max_primitives = input
             .attribute("maxprimitives")
             .map(parse_int_radix)
@@ -438,9 +444,16 @@ impl DatatypeFilter {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum PrototypeRuleCondition {
     Datatype(DatatypeFilter),
-    Varargs { first: usize },
-    Position { index: usize },
-    DatatypeAt { index: usize, datatype: DatatypeFilter },
+    Varargs {
+        first: usize,
+    },
+    Position {
+        index: usize,
+    },
+    DatatypeAt {
+        index: usize,
+        datatype: DatatypeFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -485,10 +498,7 @@ impl PrototypeRule {
         Self::from_xml_with(input, false)
     }
 
-    pub fn from_xml_with(
-        input: xml::Node,
-        killed_by_call: bool,
-    ) -> Result<Self, DeserialiseError> {
+    pub fn from_xml_with(input: xml::Node, killed_by_call: bool) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "rule" {
             return Err(DeserialiseError::TagUnexpected(
                 input.tag_name().name().to_owned(),
@@ -501,8 +511,9 @@ impl PrototypeRule {
         for child in input.children().filter(xml::Node::is_element) {
             match child.tag_name().name() {
                 "datatype" => {
-                    conditions
-                        .push(PrototypeRuleCondition::Datatype(DatatypeFilter::from_xml(child)?));
+                    conditions.push(PrototypeRuleCondition::Datatype(DatatypeFilter::from_xml(
+                        child,
+                    )?));
                 }
                 "varargs" => {
                     let first = child.attribute_int_opt("first", 0usize)?;
@@ -644,9 +655,7 @@ impl Prototype {
                     for c in child.children().filter(xml::Node::is_element) {
                         match c.tag_name().name() {
                             "pentry" => outputs.push(PrototypeEntry::from_xml(c, killed)?),
-                            "rule" => {
-                                output_rules.push(PrototypeRule::from_xml_with(c, killed)?)
-                            }
+                            "rule" => output_rules.push(PrototypeRule::from_xml_with(c, killed)?),
                             _ => (),
                         }
                     }

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
+use bytes::Bytes;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 use thiserror::Error;
@@ -33,6 +34,9 @@ pub use rocksdb::RocksDbEntityStorage;
 
 pub mod schema;
 pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
+
+pub mod writeback;
+pub use writeback::WriteBackWorker;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -690,9 +694,15 @@ fn entity_weight(encoded_len: usize) -> u32 {
         .saturating_add(ENTITY_CACHE_ENTRY_OVERHEAD)
 }
 
+enum WriteSink {
+    Sync,
+    Async(Arc<WriteBackWorker>),
+}
+
 pub struct EntityCache<K: EntityKey, E: Entity> {
     entities: Arc<EntityLru<K, E>>,
     storage: EntityStorage,
+    sink: WriteSink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -846,14 +856,31 @@ where
     E: Entity,
 {
     pub fn new(storage: EntityStorage, capacity_bytes: usize) -> Result<Self, EntityStorageError> {
+        Ok(Self::build(storage, WriteSink::Sync, capacity_bytes))
+    }
+
+    pub fn with_writeback(
+        storage: EntityStorage,
+        worker: Arc<WriteBackWorker>,
+        capacity_bytes: usize,
+    ) -> Result<Self, EntityStorageError> {
+        Ok(Self::build(
+            storage,
+            WriteSink::Async(worker),
+            capacity_bytes,
+        ))
+    }
+
+    fn build(storage: EntityStorage, sink: WriteSink, capacity_bytes: usize) -> Self {
         let weight_capacity = capacity_bytes.max(1) as u64;
         let estimated_items = (capacity_bytes / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
         let entities = Cache::with_weighter(estimated_items, weight_capacity, ByteWeighter);
 
-        Ok(Self {
+        Self {
             entities: Arc::new(entities),
             storage,
-        })
+            sink,
+        }
     }
 
     pub fn try_get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
@@ -861,20 +888,42 @@ where
             return Ok(Some(EntityRef::from_arc(cached.value)));
         }
 
+        if let WriteSink::Async(worker) = &self.sink {
+            let key_bytes = schema::make_key::<K, E>(key);
+            if let Some(pending) = worker.pending(&key_bytes) {
+                return match pending {
+                    Some(bytes) => {
+                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
+                            .map_err(EntityStorageError::decode)?;
+                        Ok(Some(self.admit(
+                            key.clone(),
+                            entity,
+                            entity_weight(bytes.len()),
+                        )))
+                    }
+                    None => Ok(None),
+                };
+            }
+        }
+
         let Some((entity, weight)) = self.load(key)? else {
             return Ok(None);
         };
 
+        Ok(Some(self.admit(key.clone(), entity, weight)))
+    }
+
+    fn admit(&self, key: K, entity: E, weight: u32) -> EntityRef<E> {
         let entity = Arc::new(entity);
         self.entities.insert(
-            key.clone(),
+            key,
             Cached {
                 value: entity.clone(),
                 weight,
             },
         );
 
-        Ok(Some(EntityRef::from_arc(entity)))
+        EntityRef::from_arc(entity)
     }
 
     pub fn get(&self, key: &K) -> Option<EntityRef<E>> {
@@ -884,6 +933,13 @@ where
     pub fn try_contains(&self, key: &K) -> Result<bool, EntityStorageError> {
         if self.entities.contains_key(key) {
             return Ok(true);
+        }
+
+        if let WriteSink::Async(worker) = &self.sink {
+            let key_bytes = schema::make_key::<K, E>(key);
+            if let Some(pending) = worker.pending(&key_bytes) {
+                return Ok(pending.is_some());
+            }
         }
 
         self.storage.contains::<K, E>(key)
@@ -896,16 +952,7 @@ where
     pub fn try_put(&self, key: K, entity: E) -> Result<EntityRef<E>, EntityStorageError> {
         let weight = self.store(&key, &entity)?;
 
-        let entity = Arc::new(entity);
-        self.entities.insert(
-            key,
-            Cached {
-                value: entity.clone(),
-                weight,
-            },
-        );
-
-        Ok(EntityRef::from_arc(entity))
+        Ok(self.admit(key, entity, weight))
     }
 
     pub fn put(&self, key: K, entity: E) -> EntityRef<E> {
@@ -933,7 +980,14 @@ where
     }
 
     pub fn try_remove(&self, key: &K) -> Result<(), EntityStorageError> {
-        self.storage.remove::<K, E>(key)?;
+        match &self.sink {
+            WriteSink::Sync => self.storage.remove::<K, E>(key)?,
+            WriteSink::Async(worker) => {
+                let key_bytes = schema::make_key::<K, E>(key);
+                worker.enqueue(key_bytes, None)?;
+            }
+        }
+
         self.entities.remove(key);
 
         Ok(())
@@ -944,6 +998,8 @@ where
     }
 
     pub fn try_iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
+        self.flush()?;
+
         let entities = self.entities.clone();
         let iter = self.storage.iter::<K, E>()?.map(move |result| {
             result.map(|(key, value)| match entities.get(&key) {
@@ -967,10 +1023,14 @@ where
     }
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
-        Ok(())
+        match &self.sink {
+            WriteSink::Sync => Ok(()),
+            WriteSink::Async(worker) => worker.flush(),
+        }
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter<'_>, EntityStorageError> {
+        self.flush()?;
         self.entities.clear();
         self.storage.bulk_inserter()
     }
@@ -1012,7 +1072,14 @@ where
             .map(|v| v.to_vec())
             .map_err(EntityStorageError::encode)?;
         let weight = entity_weight(encoded.len());
-        self.storage.insert_bytes::<K, E>(key, encoded)?;
+
+        match &self.sink {
+            WriteSink::Sync => self.storage.insert_bytes::<K, E>(key, encoded)?,
+            WriteSink::Async(worker) => {
+                let key_bytes = schema::make_key::<K, E>(key);
+                worker.enqueue(key_bytes, Some(Bytes::from(encoded)))?;
+            }
+        }
 
         Ok(weight)
     }
@@ -1307,8 +1374,8 @@ mod test {
         let key = Address::from(1u64);
         cache.put(key, cache_entity(1, "one"));
 
-        for i in 100..200 {
-            cache.put(Address::from(i as u64), cache_entity(i, "filler"));
+        for i in 100u64..200 {
+            cache.put(Address::from(i), cache_entity(i, "filler"));
         }
 
         let retrieved = cache
@@ -1362,5 +1429,175 @@ mod test {
         assert!(cache.get(&key).is_none());
         assert!(!cache.contains(&key));
         assert!(storage.get::<Address, CacheEntity>(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn writeback_put_then_flush_persists() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let cache =
+            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 64 * 1024)
+                .unwrap();
+
+        for i in 0u64..50 {
+            cache.put(Address::from(i), cache_entity(i, "entry"));
+        }
+        cache.flush().unwrap();
+
+        for i in 0u64..50 {
+            let stored = storage
+                .get::<Address, CacheEntity>(&Address::from(i))
+                .unwrap();
+            assert_eq!(stored, Some(cache_entity(i, "entry")));
+        }
+    }
+
+    #[test]
+    fn writeback_reads_survive_eviction_before_flush() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let cache =
+            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 128)
+                .unwrap();
+
+        let key = Address::from(1u64);
+        cache.put(key, cache_entity(1, "one"));
+
+        for i in 100u64..200 {
+            cache.put(Address::from(i), cache_entity(i, "filler"));
+        }
+
+        let retrieved = cache
+            .get(&key)
+            .expect("value served from pending or storage");
+        assert_eq!(*retrieved, cache_entity(1, "one"));
+    }
+
+    #[test]
+    fn writeback_remove_then_flush_clears_storage() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let cache =
+            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 64 * 1024)
+                .unwrap();
+
+        let key = Address::from(9u64);
+        cache.put(key, cache_entity(9, "nine"));
+        cache.flush().unwrap();
+        assert!(storage.get::<Address, CacheEntity>(&key).unwrap().is_some());
+
+        cache.remove(&key);
+        cache.flush().unwrap();
+
+        assert!(cache.get(&key).is_none());
+        assert!(storage.get::<Address, CacheEntity>(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn writeback_shutdown_flushes_pending() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let key = Address::from(5u64);
+
+        {
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let cache = EntityCache::<Address, CacheEntity>::with_writeback(
+                storage.clone(),
+                worker,
+                64 * 1024,
+            )
+            .unwrap();
+            cache.put(key, cache_entity(5, "five"));
+        }
+
+        let stored = storage.get::<Address, CacheEntity>(&key).unwrap();
+        assert_eq!(stored, Some(cache_entity(5, "five")));
+    }
+
+    struct FailingBulkProvider(InMemoryEntityStorage);
+
+    impl EntityStorageProvider for FailingBulkProvider {
+        fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+            self.0.get(key)
+        }
+
+        fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+        where
+            F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+        {
+            self.0.get_as(key, f)
+        }
+
+        fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+            self.0.insert(key, value)
+        }
+
+        fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+            self.0.remove(key)
+        }
+
+        fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+            self.0.contains(key)
+        }
+
+        fn iter_prefix_keys(
+            &self,
+            prefix: &[u8],
+        ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+            self.0.iter_prefix_keys(prefix)
+        }
+
+        fn iter_prefix(
+            &self,
+            prefix: &[u8],
+        ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+            self.0.iter_prefix(prefix)
+        }
+
+        fn iter_prefix_as<'a, F, T>(
+            &'a self,
+            prefix: &[u8],
+            f: F,
+        ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+        where
+            F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+            T: 'a,
+        {
+            self.0.iter_prefix_as(prefix, f)
+        }
+
+        fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+            Err(EntityStorageError::backing_with(
+                "bulk inserter unavailable",
+            ))
+        }
+
+        fn transactional_reader(
+            &self,
+        ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+            self.0.transactional_reader()
+        }
+
+        fn transactional_writer(
+            &self,
+        ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+            self.0.transactional_writer()
+        }
+    }
+
+    #[test]
+    fn writeback_commit_failure_poisons_worker() {
+        let storage = EntityStorage::new(FailingBulkProvider(InMemoryEntityStorage::new()));
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let cache = EntityCache::<Address, CacheEntity>::with_writeback(storage, worker, 64 * 1024)
+            .unwrap();
+
+        cache.put(Address::from(1u64), cache_entity(1, "one"));
+
+        assert!(cache.flush().is_err());
+        assert!(
+            cache
+                .try_put(Address::from(2u64), cache_entity(2, "two"))
+                .is_err()
+        );
     }
 }

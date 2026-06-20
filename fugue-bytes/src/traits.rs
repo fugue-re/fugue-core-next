@@ -1,12 +1,11 @@
 use std::cmp::Ordering;
 
 use byteorder::ByteOrder as _;
+pub use byteorder::{ReadBytesExt, WriteBytesExt};
 use paste::paste;
 
 use crate::endian::Endian;
 use crate::{BE, LE};
-
-pub use byteorder::{ReadBytesExt, WriteBytesExt};
 
 pub trait ByteOrder: byteorder::ByteOrder + Send + Sync + 'static {
     const ENDIAN: Endian;
