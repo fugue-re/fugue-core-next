@@ -331,10 +331,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         Ok(applied)
     }
 
-    fn apply_relocation_with(
-        &mut self,
-        handler: &RelocationHandler,
-    ) -> Result<bool, LoaderError> {
+    fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
         (handler.apply_relocation)(self)
     }
 }
