@@ -116,30 +116,36 @@ impl Mips {
     }
 }
 
-fn supports_language(language: &'static Language) -> bool {
-    language.processor() == "MIPS" && language.address_bits() == 32
-}
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "mips";
 
-fn provide_language(
-    id: &LanguageId,
-    source: &LanguageSource<'_>,
-) -> Result<Option<&'static Language>, LanguageError> {
-    if id.processor() != "MIPS" || id.bits() != 32 {
-        return Ok(None);
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "MIPS" && language.address_bits() == 32
     }
 
-    let language = match source.loader() {
-        Some(loader) => Mips::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-        None => Mips::resolve_variant(id.is_big_endian(), id.variant())?,
-    };
-
-    Ok(Some(language))
+    fn create(language: &'static Language) -> Arch {
+        Mips::new(language)
+    }
 }
 
-crate::registry::submit! {
-    ArchProvider::new("mips", supports_language, Mips::new)
-}
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "mips";
 
-crate::registry::submit! {
-    LanguageProvider::new("mips", provide_language)
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "MIPS" || id.bits() != 32 {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => Mips::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
+            None => Mips::resolve_variant(id.is_big_endian(), id.variant())?,
+        };
+
+        Ok(Some(language))
+    }
 }

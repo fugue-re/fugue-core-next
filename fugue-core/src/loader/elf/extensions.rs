@@ -113,17 +113,8 @@ type ArchResolveFn =
     fn(&ImageContext<'_>, &LanguageSource<'_>) -> Result<Option<Arch>, LoaderError>;
 
 pub struct ArchResolver {
-    name: &'static str,
-    resolve_architecture: ArchResolveFn,
-}
-
-impl ArchResolver {
-    pub const fn new(name: &'static str, resolve_architecture: ArchResolveFn) -> Self {
-        Self {
-            name,
-            resolve_architecture,
-        }
-    }
+    pub name: &'static str,
+    pub resolve_architecture: ArchResolveFn,
 }
 
 impl Registration for ArchResolver {
@@ -134,38 +125,39 @@ impl Registration for ArchResolver {
 
 registry::collect!(ArchResolver);
 
-fn resolve_builtin_architecture(
-    context: &ImageContext<'_>,
-    source: &LanguageSource<'_>,
-) -> Result<Option<Arch>, LoaderError> {
-    let is_be = context.is_big_endian();
-    let variant = match context.machine() {
-        elf::EM_AARCH64 if context.is_64() => None,
-        elf::EM_ARM => context
-            .entry()
-            .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
-        elf::EM_386 => None,
-        elf::EM_MIPS if !context.is_64() => None,
-        elf::EM_X86_64 => None,
-        _ => return Ok(None),
-    };
+#[fugue_core::extension]
+impl ArchResolver {
+    const NAME: &str = "elf-builtins";
 
-    let id = match context.machine() {
-        elf::EM_AARCH64 => LanguageId::new_with("AARCH64", is_be, 64, variant),
-        elf::EM_ARM => LanguageId::new_with("ARM", is_be, 32, variant),
-        elf::EM_386 => LanguageId::new_with("x86", false, 32, variant),
-        elf::EM_MIPS => LanguageId::new_with("MIPS", is_be, 32, variant),
-        elf::EM_X86_64 => LanguageId::new_with("x86", false, 64, variant),
-        _ => return Ok(None),
-    };
+    fn resolve_architecture(
+        context: &ImageContext<'_>,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<Arch>, LoaderError> {
+        let is_be = context.is_big_endian();
+        let variant = match context.machine() {
+            elf::EM_AARCH64 if context.is_64() => None,
+            elf::EM_ARM => context
+                .entry()
+                .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
+            elf::EM_386 => None,
+            elf::EM_MIPS if !context.is_64() => None,
+            elf::EM_X86_64 => None,
+            _ => return Ok(None),
+        };
 
-    let language = source.load(&id)?;
-    let arch = Arch::try_new(language).map_err(LoaderError::extension)?;
-    Ok(Some(arch))
-}
+        let id = match context.machine() {
+            elf::EM_AARCH64 => LanguageId::new_with("AARCH64", is_be, 64, variant),
+            elf::EM_ARM => LanguageId::new_with("ARM", is_be, 32, variant),
+            elf::EM_386 => LanguageId::new_with("x86", false, 32, variant),
+            elf::EM_MIPS => LanguageId::new_with("MIPS", is_be, 32, variant),
+            elf::EM_X86_64 => LanguageId::new_with("x86", false, 64, variant),
+            _ => return Ok(None),
+        };
 
-registry::submit! {
-    ArchResolver::new("elf-builtins", resolve_builtin_architecture)
+        let language = source.load(&id)?;
+        let arch = Arch::try_new(language).map_err(LoaderError::extension)?;
+        Ok(Some(arch))
+    }
 }
 
 pub struct AnalysisContext<'a> {
@@ -219,20 +211,8 @@ type FunctionRecoveryConfigureFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
 pub struct FunctionRecoveryHandler {
-    name: &'static str,
-    configure_function_recovery: FunctionRecoveryConfigureFn,
-}
-
-impl FunctionRecoveryHandler {
-    pub const fn new(
-        name: &'static str,
-        configure_function_recovery: FunctionRecoveryConfigureFn,
-    ) -> Self {
-        Self {
-            name,
-            configure_function_recovery,
-        }
-    }
+    pub name: &'static str,
+    pub configure_function_recovery: FunctionRecoveryConfigureFn,
 }
 
 impl Registration for FunctionRecoveryHandler {
@@ -338,17 +318,8 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
 type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
 
 pub struct RelocationHandler {
-    name: &'static str,
-    apply_relocation: RelocationApplyFn,
-}
-
-impl RelocationHandler {
-    pub const fn new(name: &'static str, apply_relocation: RelocationApplyFn) -> Self {
-        Self {
-            name,
-            apply_relocation,
-        }
-    }
+    pub name: &'static str,
+    pub apply_relocation: RelocationApplyFn,
 }
 
 impl Registration for RelocationHandler {

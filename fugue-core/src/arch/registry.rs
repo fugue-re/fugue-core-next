@@ -21,20 +21,12 @@ type LanguageProvideFn = fn(
 ) -> Result<Option<&'static Language>, LanguageError>;
 
 pub struct ArchProvider {
-    name: &'static str,
-    supports: ArchSupportsFn,
-    create: ArchCreateFn,
+    pub name: &'static str,
+    pub supports: ArchSupportsFn,
+    pub create: ArchCreateFn,
 }
 
 impl ArchProvider {
-    pub const fn new(name: &'static str, supports: ArchSupportsFn, create: ArchCreateFn) -> Self {
-        Self {
-            name,
-            supports,
-            create,
-        }
-    }
-
     pub fn supports(&self, language: &'static Language) -> bool {
         (self.supports)(language)
     }
@@ -53,15 +45,11 @@ impl Registration for ArchProvider {
 registry::collect!(ArchProvider);
 
 pub struct LanguageProvider {
-    name: &'static str,
-    provide: LanguageProvideFn,
+    pub name: &'static str,
+    pub provide: LanguageProvideFn,
 }
 
 impl LanguageProvider {
-    pub const fn new(name: &'static str, provide: LanguageProvideFn) -> Self {
-        Self { name, provide }
-    }
-
     pub fn provide(
         &self,
         id: &LanguageId,

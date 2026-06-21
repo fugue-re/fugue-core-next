@@ -196,32 +196,38 @@ impl Arm {
     }
 }
 
-fn supports_language(language: &'static Language) -> bool {
-    language.processor() == "ARM" && language.address_bits() == 32
-}
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "arm";
 
-fn provide_language(
-    id: &LanguageId,
-    source: &LanguageSource<'_>,
-) -> Result<Option<&'static Language>, LanguageError> {
-    if id.processor() != "ARM" || id.bits() != 32 {
-        return Ok(None);
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "ARM" && language.address_bits() == 32
     }
 
-    let language = match source.loader() {
-        Some(loader) => Arm::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-        None => Arm::resolve_variant(id.is_big_endian(), id.variant())?,
-    };
-
-    Ok(Some(language))
+    fn create(language: &'static Language) -> Arch {
+        Arm::new(language)
+    }
 }
 
-crate::registry::submit! {
-    ArchProvider::new("arm", supports_language, Arm::new)
-}
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "arm";
 
-crate::registry::submit! {
-    LanguageProvider::new("arm", provide_language)
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "ARM" || id.bits() != 32 {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => Arm::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
+            None => Arm::resolve_variant(id.is_big_endian(), id.variant())?,
+        };
+
+        Ok(Some(language))
+    }
 }
 
 struct ArmDisassembler {

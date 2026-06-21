@@ -108,17 +108,8 @@ type ArchResolveFn =
     fn(&ImageContext<'_>, &LanguageSource<'_>) -> Result<Option<Arch>, LoaderError>;
 
 pub struct ArchResolver {
-    name: &'static str,
-    resolve_architecture: ArchResolveFn,
-}
-
-impl ArchResolver {
-    pub const fn new(name: &'static str, resolve_architecture: ArchResolveFn) -> Self {
-        Self {
-            name,
-            resolve_architecture,
-        }
-    }
+    pub name: &'static str,
+    pub resolve_architecture: ArchResolveFn,
 }
 
 impl Registration for ArchResolver {
@@ -129,47 +120,48 @@ impl Registration for ArchResolver {
 
 registry::collect!(ArchResolver);
 
-fn resolve_builtin_architecture(
-    context: &ImageContext<'_>,
-    source: &LanguageSource<'_>,
-) -> Result<Option<Arch>, LoaderError> {
-    let variant = match context.machine() {
-        pe::IMAGE_FILE_MACHINE_ARM
-        | pe::IMAGE_FILE_MACHINE_THUMB
-        | pe::IMAGE_FILE_MACHINE_ARMNT => context
-            .entry()
-            .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
-        pe::IMAGE_FILE_MACHINE_ARM64 => None,
-        pe::IMAGE_FILE_MACHINE_I386 => None,
-        pe::IMAGE_FILE_MACHINE_AMD64 => None,
-        pe::IMAGE_FILE_MACHINE_R3000
-        | pe::IMAGE_FILE_MACHINE_R4000
-        | pe::IMAGE_FILE_MACHINE_R10000
-        | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => None,
-        _ => return Ok(None),
-    };
+#[fugue_core::extension]
+impl ArchResolver {
+    const NAME: &str = "pe-builtins";
 
-    let id = match context.machine() {
-        pe::IMAGE_FILE_MACHINE_ARM
-        | pe::IMAGE_FILE_MACHINE_THUMB
-        | pe::IMAGE_FILE_MACHINE_ARMNT => LanguageId::new_with("ARM", false, 32, variant),
-        pe::IMAGE_FILE_MACHINE_ARM64 => LanguageId::new_with("AARCH64", false, 64, variant),
-        pe::IMAGE_FILE_MACHINE_I386 => LanguageId::new_with("x86", false, 32, variant),
-        pe::IMAGE_FILE_MACHINE_AMD64 => LanguageId::new_with("x86", false, 64, variant),
-        pe::IMAGE_FILE_MACHINE_R3000
-        | pe::IMAGE_FILE_MACHINE_R4000
-        | pe::IMAGE_FILE_MACHINE_R10000
-        | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => LanguageId::new_with("MIPS", false, 32, variant),
-        _ => return Ok(None),
-    };
+    fn resolve_architecture(
+        context: &ImageContext<'_>,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<Arch>, LoaderError> {
+        let variant = match context.machine() {
+            pe::IMAGE_FILE_MACHINE_ARM
+            | pe::IMAGE_FILE_MACHINE_THUMB
+            | pe::IMAGE_FILE_MACHINE_ARMNT => context
+                .entry()
+                .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
+            pe::IMAGE_FILE_MACHINE_ARM64 => None,
+            pe::IMAGE_FILE_MACHINE_I386 => None,
+            pe::IMAGE_FILE_MACHINE_AMD64 => None,
+            pe::IMAGE_FILE_MACHINE_R3000
+            | pe::IMAGE_FILE_MACHINE_R4000
+            | pe::IMAGE_FILE_MACHINE_R10000
+            | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => None,
+            _ => return Ok(None),
+        };
 
-    let language = source.load(&id)?;
-    let arch = Arch::try_new(language).map_err(LoaderError::extension)?;
-    Ok(Some(arch))
-}
+        let id = match context.machine() {
+            pe::IMAGE_FILE_MACHINE_ARM
+            | pe::IMAGE_FILE_MACHINE_THUMB
+            | pe::IMAGE_FILE_MACHINE_ARMNT => LanguageId::new_with("ARM", false, 32, variant),
+            pe::IMAGE_FILE_MACHINE_ARM64 => LanguageId::new_with("AARCH64", false, 64, variant),
+            pe::IMAGE_FILE_MACHINE_I386 => LanguageId::new_with("x86", false, 32, variant),
+            pe::IMAGE_FILE_MACHINE_AMD64 => LanguageId::new_with("x86", false, 64, variant),
+            pe::IMAGE_FILE_MACHINE_R3000
+            | pe::IMAGE_FILE_MACHINE_R4000
+            | pe::IMAGE_FILE_MACHINE_R10000
+            | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => LanguageId::new_with("MIPS", false, 32, variant),
+            _ => return Ok(None),
+        };
 
-registry::submit! {
-    ArchResolver::new("pe-builtins", resolve_builtin_architecture)
+        let language = source.load(&id)?;
+        let arch = Arch::try_new(language).map_err(LoaderError::extension)?;
+        Ok(Some(arch))
+    }
 }
 
 pub struct AnalysisContext<'a> {
@@ -223,20 +215,8 @@ type FunctionRecoveryConfigureFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
 pub struct FunctionRecoveryHandler {
-    name: &'static str,
-    configure_function_recovery: FunctionRecoveryConfigureFn,
-}
-
-impl FunctionRecoveryHandler {
-    pub const fn new(
-        name: &'static str,
-        configure_function_recovery: FunctionRecoveryConfigureFn,
-    ) -> Self {
-        Self {
-            name,
-            configure_function_recovery,
-        }
-    }
+    pub name: &'static str,
+    pub configure_function_recovery: FunctionRecoveryConfigureFn,
 }
 
 impl Registration for FunctionRecoveryHandler {
@@ -342,17 +322,8 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
 type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
 
 pub struct RelocationHandler {
-    name: &'static str,
-    apply_relocation: RelocationApplyFn,
-}
-
-impl RelocationHandler {
-    pub const fn new(name: &'static str, apply_relocation: RelocationApplyFn) -> Self {
-        Self {
-            name,
-            apply_relocation,
-        }
-    }
+    pub name: &'static str,
+    pub apply_relocation: RelocationApplyFn,
 }
 
 impl Registration for RelocationHandler {

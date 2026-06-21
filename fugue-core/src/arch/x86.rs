@@ -148,32 +148,38 @@ impl X86 {
     }
 }
 
-fn supports_language(language: &'static Language) -> bool {
-    language.processor() == "x86" && language.address_bits() == 32
-}
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "x86";
 
-fn provide_language(
-    id: &LanguageId,
-    source: &LanguageSource<'_>,
-) -> Result<Option<&'static Language>, LanguageError> {
-    if id.processor() != "x86" || id.bits() != 32 || id.is_big_endian() {
-        return Ok(None);
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "x86" && language.address_bits() == 32
     }
 
-    let language = match source.loader() {
-        Some(loader) => X86::resolve_variant_with(loader, id.variant())?,
-        None => X86::resolve_variant(id.variant())?,
-    };
-
-    Ok(Some(language))
+    fn create(language: &'static Language) -> Arch {
+        X86::new(language)
+    }
 }
 
-crate::registry::submit! {
-    ArchProvider::new("x86", supports_language, X86::new)
-}
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "x86";
 
-crate::registry::submit! {
-    LanguageProvider::new("x86", provide_language)
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "x86" || id.bits() != 32 || id.is_big_endian() {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => X86::resolve_variant_with(loader, id.variant())?,
+            None => X86::resolve_variant(id.variant())?,
+        };
+
+        Ok(Some(language))
+    }
 }
 
 struct X86Disassembler {

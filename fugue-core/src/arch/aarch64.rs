@@ -139,32 +139,40 @@ impl AArch64 {
     }
 }
 
-fn supports_language(language: &'static Language) -> bool {
-    language.processor() == "AARCH64" && language.address_bits() == 64
-}
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "aarch64";
 
-fn provide_language(
-    id: &LanguageId,
-    source: &LanguageSource<'_>,
-) -> Result<Option<&'static Language>, LanguageError> {
-    if id.processor() != "AARCH64" || id.bits() != 64 {
-        return Ok(None);
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "AARCH64" && language.address_bits() == 64
     }
 
-    let language = match source.loader() {
-        Some(loader) => AArch64::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-        None => AArch64::resolve_variant(id.is_big_endian(), id.variant())?,
-    };
-
-    Ok(Some(language))
+    fn create(language: &'static Language) -> Arch {
+        AArch64::new(language)
+    }
 }
 
-crate::registry::submit! {
-    ArchProvider::new("aarch64", supports_language, AArch64::new)
-}
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "aarch64";
 
-crate::registry::submit! {
-    LanguageProvider::new("aarch64", provide_language)
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "AARCH64" || id.bits() != 64 {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => {
+                AArch64::resolve_variant_with(loader, id.is_big_endian(), id.variant())?
+            }
+            None => AArch64::resolve_variant(id.is_big_endian(), id.variant())?,
+        };
+
+        Ok(Some(language))
+    }
 }
 
 struct AArch64Disassembler {
