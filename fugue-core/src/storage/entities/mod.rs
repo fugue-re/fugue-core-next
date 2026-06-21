@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display};
 use std::io;
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,11 @@ impl EntityStorageError {
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
         Self::Unsupported(anyhow::Error::msg(msg))
+    }
+
+    pub(crate) fn into_fatal(self) -> ! {
+        tracing::error!("fatal entity storage failure: {self}");
+        panic!("fatal entity storage failure: {self}");
     }
 }
 
@@ -682,21 +688,23 @@ struct Cached<E> {
 #[derive(Clone, Copy)]
 struct ByteWeighter;
 
+impl ByteWeighter {
+    fn entry_weight(encoded_len: usize) -> u32 {
+        u32::try_from(encoded_len)
+            .unwrap_or(u32::MAX)
+            .saturating_add(ENTITY_CACHE_ENTRY_OVERHEAD)
+    }
+}
+
 impl<K, E: Entity> Weighter<K, Cached<E>> for ByteWeighter {
     fn weight(&self, _key: &K, value: &Cached<E>) -> u64 {
         u64::from(value.weight)
     }
 }
 
-fn entity_weight(encoded_len: usize) -> u32 {
-    u32::try_from(encoded_len)
-        .unwrap_or(u32::MAX)
-        .saturating_add(ENTITY_CACHE_ENTRY_OVERHEAD)
-}
-
 enum WriteSink {
-    Sync,
-    Async(Arc<WriteBackWorker>),
+    Worker(Arc<WriteBackWorker>),
+    WriteThrough,
 }
 
 pub struct EntityCache<K: EntityKey, E: Entity> {
@@ -707,11 +715,11 @@ pub struct EntityCache<K: EntityKey, E: Entity> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct EntityRef<E>(Arc<E>)
+pub struct EntityRef<'a, E>(Arc<E>, PhantomData<&'a E>)
 where
     E: Entity;
 
-impl<E> Display for EntityRef<E>
+impl<E> Display for EntityRef<'_, E>
 where
     E: Entity + Display,
 {
@@ -720,7 +728,7 @@ where
     }
 }
 
-impl<E> AsRef<E> for EntityRef<E>
+impl<E> AsRef<E> for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -729,7 +737,7 @@ where
     }
 }
 
-impl<E> Deref for EntityRef<E>
+impl<E> Deref for EntityRef<'_, E>
 where
     E: Entity,
 {
@@ -740,16 +748,16 @@ where
     }
 }
 
-impl<E> EntityRef<E>
+impl<'a, E> EntityRef<'a, E>
 where
     E: Entity,
 {
     pub fn new(entity: E) -> Self {
-        Self(Arc::new(entity))
+        Self(Arc::new(entity), PhantomData)
     }
 
     pub fn from_arc(entity: Arc<E>) -> Self {
-        Self(entity)
+        Self(entity, PhantomData)
     }
 
     pub fn into_arc(self) -> Arc<E> {
@@ -855,25 +863,27 @@ where
     K: EntityKey,
     E: Entity,
 {
-    pub fn new(storage: EntityStorage, capacity_bytes: usize) -> Result<Self, EntityStorageError> {
-        Ok(Self::build(storage, WriteSink::Sync, capacity_bytes))
+    pub fn new(storage: EntityStorage, capacity: usize) -> Result<Self, EntityStorageError> {
+        let sink = if storage.is_transient() {
+            WriteSink::WriteThrough
+        } else {
+            WriteSink::Worker(WriteBackWorker::new(storage.clone())?)
+        };
+
+        Ok(Self::build(storage, sink, capacity))
     }
 
-    pub fn with_writeback(
+    pub fn with_worker(
         storage: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        capacity_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::build(
-            storage,
-            WriteSink::Async(worker),
-            capacity_bytes,
-        ))
+        capacity: usize,
+    ) -> Self {
+        Self::build(storage, WriteSink::Worker(worker), capacity)
     }
 
-    fn build(storage: EntityStorage, sink: WriteSink, capacity_bytes: usize) -> Self {
-        let weight_capacity = capacity_bytes.max(1) as u64;
-        let estimated_items = (capacity_bytes / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
+    fn build(storage: EntityStorage, sink: WriteSink, capacity: usize) -> Self {
+        let weight_capacity = capacity.max(1) as u64;
+        let estimated_items = (capacity / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
         let entities = Cache::with_weighter(estimated_items, weight_capacity, ByteWeighter);
 
         Self {
@@ -883,12 +893,12 @@ where
         }
     }
 
-    pub fn try_get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
+    pub fn try_get(&self, key: &K) -> Result<Option<EntityRef<'_, E>>, EntityStorageError> {
         if let Some(cached) = self.entities.get(key) {
             return Ok(Some(EntityRef::from_arc(cached.value)));
         }
 
-        if let WriteSink::Async(worker) = &self.sink {
+        if let WriteSink::Worker(worker) = &self.sink {
             let key_bytes = schema::make_key::<K, E>(key);
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
@@ -898,7 +908,7 @@ where
                         Ok(Some(self.admit(
                             key.clone(),
                             entity,
-                            entity_weight(bytes.len()),
+                            ByteWeighter::entry_weight(bytes.len()),
                         )))
                     }
                     None => Ok(None),
@@ -906,14 +916,14 @@ where
             }
         }
 
-        let Some((entity, weight)) = self.load(key)? else {
+        let Some((entity, weight)) = self.fetch(key)? else {
             return Ok(None);
         };
 
         Ok(Some(self.admit(key.clone(), entity, weight)))
     }
 
-    fn admit(&self, key: K, entity: E, weight: u32) -> EntityRef<E> {
+    fn admit(&self, key: K, entity: E, weight: u32) -> EntityRef<'_, E> {
         let entity = Arc::new(entity);
         self.entities.insert(
             key,
@@ -926,8 +936,8 @@ where
         EntityRef::from_arc(entity)
     }
 
-    pub fn get(&self, key: &K) -> Option<EntityRef<E>> {
-        fatal(self.try_get(key))
+    pub fn get(&self, key: &K) -> Option<EntityRef<'_, E>> {
+        self.try_get(key).unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_contains(&self, key: &K) -> Result<bool, EntityStorageError> {
@@ -935,7 +945,7 @@ where
             return Ok(true);
         }
 
-        if let WriteSink::Async(worker) = &self.sink {
+        if let WriteSink::Worker(worker) = &self.sink {
             let key_bytes = schema::make_key::<K, E>(key);
             if let Some(pending) = worker.pending(&key_bytes) {
                 return Ok(pending.is_some());
@@ -946,17 +956,19 @@ where
     }
 
     pub fn contains(&self, key: &K) -> bool {
-        fatal(self.try_contains(key))
+        self.try_contains(key)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_put(&self, key: K, entity: E) -> Result<EntityRef<E>, EntityStorageError> {
-        let weight = self.store(&key, &entity)?;
+    pub fn try_put(&self, key: K, entity: E) -> Result<EntityRef<'_, E>, EntityStorageError> {
+        let weight = self.stage(&key, &entity)?;
 
         Ok(self.admit(key, entity, weight))
     }
 
-    pub fn put(&self, key: K, entity: E) -> EntityRef<E> {
-        fatal(self.try_put(key, entity))
+    pub fn put(&self, key: K, entity: E) -> EntityRef<'_, E> {
+        self.try_put(key, entity)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_modify<R>(
@@ -976,13 +988,14 @@ where
     }
 
     pub fn modify<R>(&self, key: &K, f: impl FnOnce(&mut E) -> R) -> Option<R> {
-        fatal(self.try_modify(key, f))
+        self.try_modify(key, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove(&self, key: &K) -> Result<(), EntityStorageError> {
         match &self.sink {
-            WriteSink::Sync => self.storage.remove::<K, E>(key)?,
-            WriteSink::Async(worker) => {
+            WriteSink::WriteThrough => self.storage.remove::<K, E>(key)?,
+            WriteSink::Worker(worker) => {
                 let key_bytes = schema::make_key::<K, E>(key);
                 worker.enqueue(key_bytes, None)?;
             }
@@ -994,10 +1007,11 @@ where
     }
 
     pub fn remove(&self, key: &K) {
-        fatal(self.try_remove(key))
+        self.try_remove(key)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_iter(&self) -> Result<EntityIterator<'_, K, EntityRef<E>>, EntityStorageError> {
+    pub fn try_iter(&self) -> Result<EntityIterator<'_, K, EntityRef<'_, E>>, EntityStorageError> {
         self.flush()?;
 
         let entities = self.entities.clone();
@@ -1011,11 +1025,10 @@ where
         Ok(Box::new(iter))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = EntityRef<E>> + '_ {
-        fatal(self.try_iter()).map(|result| {
-            let (_key, entity) = fatal(result);
-            entity
-        })
+    pub fn iter(&self) -> impl Iterator<Item = EntityRef<'_, E>> + '_ {
+        self.try_iter()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|result| result.unwrap_or_else(|error| error.into_fatal()).1)
     }
 
     pub fn keys(&self) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
@@ -1024,8 +1037,8 @@ where
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match &self.sink {
-            WriteSink::Sync => Ok(()),
-            WriteSink::Async(worker) => worker.flush(),
+            WriteSink::WriteThrough => Ok(()),
+            WriteSink::Worker(worker) => worker.flush(),
         }
     }
 
@@ -1059,39 +1072,31 @@ where
         &self.storage
     }
 
-    fn load(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
+    fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
         self.storage.get_as::<K, E, _, _>(key, |bytes| {
             let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes)
                 .map_err(EntityStorageError::decode)?;
-            Ok((entity, entity_weight(bytes.len())))
+            Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
     }
 
-    fn store(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
-            .map(|v| v.to_vec())
-            .map_err(EntityStorageError::encode)?;
-        let weight = entity_weight(encoded.len());
+    fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        let weight = ByteWeighter::entry_weight(encoded.len());
 
         match &self.sink {
-            WriteSink::Sync => self.storage.insert_bytes::<K, E>(key, encoded)?,
-            WriteSink::Async(worker) => {
+            WriteSink::WriteThrough => {
+                self.storage
+                    .insert_bytes::<K, E>(key, BytesOrSlice::from(encoded.as_ref()))?;
+            }
+            WriteSink::Worker(worker) => {
                 let key_bytes = schema::make_key::<K, E>(key);
-                worker.enqueue(key_bytes, Some(Bytes::from(encoded)))?;
+                worker.enqueue(key_bytes, Some(Bytes::copy_from_slice(encoded.as_ref())))?;
             }
         }
 
         Ok(weight)
-    }
-}
-
-fn fatal<T>(result: Result<T, EntityStorageError>) -> T {
-    match result {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!("fatal entity storage failure: {error}");
-            panic!("fatal entity storage failure: {error}");
-        }
     }
 }
 
@@ -1141,10 +1146,10 @@ impl EntityStorage {
     pub fn insert_bytes<K: EntityKey, E: Entity>(
         &self,
         key: &K,
-        bytes: impl Into<Vec<u8>>,
+        value: BytesOrSlice<'_>,
     ) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-        self.backing.insert(&key, BytesOrSlice::from(bytes.into()))
+        self.backing.insert(&key, value)
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
@@ -1207,9 +1212,9 @@ impl EntityStorage {
 
     pub fn cache_for<K: EntityKey, E: Entity>(
         &self,
-        capacity_bytes: usize,
+        capacity: usize,
     ) -> Result<EntityCache<K, E>, EntityStorageError> {
-        EntityCache::new(self.clone(), capacity_bytes)
+        EntityCache::new(self.clone(), capacity)
     }
 
     pub fn persistence(&self) -> StoragePersistence {
@@ -1436,8 +1441,7 @@ mod test {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache =
-            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 64 * 1024)
-                .unwrap();
+            EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
 
         for i in 0u64..50 {
             cache.put(Address::from(i), cache_entity(i, "entry"));
@@ -1456,9 +1460,7 @@ mod test {
     fn writeback_reads_survive_eviction_before_flush() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let cache =
-            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 128)
-                .unwrap();
+        let cache = EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 128);
 
         let key = Address::from(1u64);
         cache.put(key, cache_entity(1, "one"));
@@ -1478,8 +1480,7 @@ mod test {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache =
-            EntityCache::<Address, CacheEntity>::with_writeback(storage.clone(), worker, 64 * 1024)
-                .unwrap();
+            EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
 
         let key = Address::from(9u64);
         cache.put(key, cache_entity(9, "nine"));
@@ -1500,12 +1501,11 @@ mod test {
 
         {
             let worker = WriteBackWorker::new(storage.clone()).unwrap();
-            let cache = EntityCache::<Address, CacheEntity>::with_writeback(
+            let cache = EntityCache::<Address, CacheEntity>::with_worker(
                 storage.clone(),
                 worker,
                 64 * 1024,
-            )
-            .unwrap();
+            );
             cache.put(key, cache_entity(5, "five"));
         }
 
@@ -1588,8 +1588,7 @@ mod test {
     fn writeback_commit_failure_poisons_worker() {
         let storage = EntityStorage::new(FailingBulkProvider(InMemoryEntityStorage::new()));
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let cache = EntityCache::<Address, CacheEntity>::with_writeback(storage, worker, 64 * 1024)
-            .unwrap();
+        let cache = EntityCache::<Address, CacheEntity>::with_worker(storage, worker, 64 * 1024);
 
         cache.put(Address::from(1u64), cache_entity(1, "one"));
 

@@ -1,13 +1,12 @@
-use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use flume::{Receiver, RecvTimeoutError, Sender};
+use rustc_hash::FxHashSet;
 
 use crate::storage::entities::{
     EntityStorage, EntityStorageError, EntityStorageProvider, ErasedEntityStorageProvider,
@@ -23,18 +22,24 @@ struct PendingEntry {
     seq: u64,
 }
 
+struct PendingWrite {
+    key: Bytes,
+    value: Option<Bytes>,
+    seq: u64,
+}
+
 enum Message {
-    Flush(SyncSender<Result<(), EntityStorageError>>),
+    Flush(Sender<Result<(), EntityStorageError>>),
     Shutdown,
     Write(Bytes),
 }
 
 pub struct WriteBackWorker {
-    tx: SyncSender<Message>,
+    tx: Sender<Message>,
     pending: Arc<DashMap<Bytes, PendingEntry>>,
-    poison: Arc<Mutex<Option<String>>>,
+    poison: Arc<OnceLock<String>>,
     seq: AtomicU64,
-    handle: Mutex<Option<JoinHandle<()>>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl WriteBackWorker {
@@ -53,26 +58,21 @@ impl WriteBackWorker {
         max_batch: usize,
         flush_interval: Duration,
     ) -> Result<Arc<Self>, EntityStorageError> {
-        let (tx, rx) = sync_channel(channel_capacity);
+        let (tx, rx) = flume::bounded(channel_capacity);
         let pending = Arc::new(DashMap::new());
-        let poison = Arc::new(Mutex::new(None));
+        let poison = Arc::new(OnceLock::new());
 
-        let backing = storage.storage_provider();
-        let worker_pending = pending.clone();
-        let worker_poison = poison.clone();
+        let worker = Worker {
+            backing: storage.storage_provider(),
+            pending: pending.clone(),
+            poison: poison.clone(),
+            max_batch,
+            flush_interval,
+        };
 
         let handle = Builder::new()
             .name("entity-writeback".to_owned())
-            .spawn(move || {
-                run(
-                    backing,
-                    rx,
-                    worker_pending,
-                    worker_poison,
-                    max_batch,
-                    flush_interval,
-                );
-            })
+            .spawn(move || worker.run(rx))
             .map_err(EntityStorageError::backing)?;
 
         Ok(Arc::new(Self {
@@ -80,7 +80,7 @@ impl WriteBackWorker {
             pending,
             poison,
             seq: AtomicU64::new(0),
-            handle: Mutex::new(Some(handle)),
+            handle: Some(handle),
         }))
     }
 
@@ -103,7 +103,7 @@ impl WriteBackWorker {
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         self.poison_check()?;
 
-        let (reply_tx, reply_rx) = sync_channel(1);
+        let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
             .send(Message::Flush(reply_tx))
             .map_err(|_| EntityStorageError::backing_with("write-back worker stopped"))?;
@@ -114,7 +114,7 @@ impl WriteBackWorker {
     }
 
     pub fn poison_check(&self) -> Result<(), EntityStorageError> {
-        match self.poison.lock().as_ref() {
+        match self.poison.get() {
             Some(message) => Err(EntityStorageError::backing_with(format!(
                 "write-back worker poisoned: {message}"
             ))),
@@ -127,112 +127,121 @@ impl Drop for WriteBackWorker {
     fn drop(&mut self) {
         let _ = self.tx.send(Message::Shutdown);
 
-        if let Some(handle) = self.handle.lock().take() {
+        if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
 }
 
-fn run(
+struct Worker {
     backing: Arc<dyn ErasedEntityStorageProvider>,
-    rx: Receiver<Message>,
     pending: Arc<DashMap<Bytes, PendingEntry>>,
-    poison: Arc<Mutex<Option<String>>>,
+    poison: Arc<OnceLock<String>>,
     max_batch: usize,
     flush_interval: Duration,
-) {
-    let mut batch = HashSet::new();
+}
 
-    loop {
-        match rx.recv_timeout(flush_interval) {
-            Ok(Message::Write(key)) => {
-                batch.insert(key);
-                if batch.len() >= max_batch {
-                    let keys = batch.drain().collect::<Vec<_>>();
-                    let _ = commit(&backing, &pending, &poison, keys);
+impl Worker {
+    fn run(self, rx: Receiver<Message>) {
+        let mut batch = FxHashSet::default();
+        let mut snapshot = Vec::new();
+
+        loop {
+            match rx.recv_timeout(self.flush_interval) {
+                Ok(Message::Write(key)) => {
+                    batch.insert(key);
+                    if batch.len() >= self.max_batch {
+                        let _ = self.commit_batch(&mut batch, &mut snapshot);
+                    }
                 }
-            }
-            Ok(Message::Flush(reply)) => {
-                batch.clear();
-                let keys = all_keys(&pending);
-                let result = commit(&backing, &pending, &poison, keys);
-                let _ = reply.send(result);
-            }
-            Ok(Message::Shutdown) => {
-                let keys = all_keys(&pending);
-                let _ = commit(&backing, &pending, &poison, keys);
-                break;
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if !batch.is_empty() {
-                    let keys = batch.drain().collect::<Vec<_>>();
-                    let _ = commit(&backing, &pending, &poison, keys);
+                Ok(Message::Flush(reply)) => {
+                    batch.clear();
+                    let _ = reply.send(self.commit_all(&mut snapshot));
                 }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                let keys = all_keys(&pending);
-                let _ = commit(&backing, &pending, &poison, keys);
-                break;
+                Ok(Message::Shutdown) => {
+                    let _ = self.commit_all(&mut snapshot);
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if !batch.is_empty() {
+                        let _ = self.commit_batch(&mut batch, &mut snapshot);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = self.commit_all(&mut snapshot);
+                    break;
+                }
             }
         }
     }
-}
 
-fn all_keys(pending: &DashMap<Bytes, PendingEntry>) -> Vec<Bytes> {
-    pending.iter().map(|entry| entry.key().clone()).collect()
-}
+    fn commit_batch(
+        &self,
+        batch: &mut FxHashSet<Bytes>,
+        snapshot: &mut Vec<PendingWrite>,
+    ) -> Result<(), EntityStorageError> {
+        snapshot.clear();
+        snapshot.extend(batch.drain().filter_map(|key| self.snapshot_of(key)));
 
-fn commit(
-    backing: &Arc<dyn ErasedEntityStorageProvider>,
-    pending: &DashMap<Bytes, PendingEntry>,
-    poison: &Mutex<Option<String>>,
-    keys: Vec<Bytes>,
-) -> Result<(), EntityStorageError> {
-    let snapshot = keys
-        .into_iter()
-        .filter_map(|key| {
-            pending
-                .get(&key)
-                .map(|entry| (key.clone(), entry.value.clone(), entry.seq))
+        self.commit(snapshot)
+    }
+
+    fn commit_all(&self, snapshot: &mut Vec<PendingWrite>) -> Result<(), EntityStorageError> {
+        snapshot.clear();
+        snapshot.extend(self.pending.iter().map(|entry| PendingWrite {
+            key: entry.key().clone(),
+            value: entry.value.clone(),
+            seq: entry.seq,
+        }));
+
+        self.commit(snapshot)
+    }
+
+    fn snapshot_of(&self, key: Bytes) -> Option<PendingWrite> {
+        let entry = self.pending.get(&key)?;
+        Some(PendingWrite {
+            value: entry.value.clone(),
+            seq: entry.seq,
+            key,
         })
-        .collect::<Vec<_>>();
-
-    if snapshot.is_empty() {
-        return Ok(());
     }
 
-    if let Err(error) = write_batch(backing, &snapshot) {
-        *poison.lock() = Some(error.to_string());
-        return Err(error);
-    }
-
-    for (key, _, seq) in &snapshot {
-        pending.remove_if(key, |_, entry| entry.seq == *seq);
-    }
-
-    Ok(())
-}
-
-fn write_batch(
-    backing: &Arc<dyn ErasedEntityStorageProvider>,
-    snapshot: &[(Bytes, Option<Bytes>, u64)],
-) -> Result<(), EntityStorageError> {
-    let mut inserter = backing.bulk_inserter()?;
-    for (key, value, _) in snapshot {
-        if let Some(bytes) = value {
-            inserter.insert(
-                BytesOrSlice::from(key.clone()),
-                BytesOrSlice::from(bytes.clone()),
-            )?;
+    fn commit(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
+        if snapshot.is_empty() {
+            return Ok(());
         }
-    }
-    inserter.commit()?;
 
-    for (key, value, _) in snapshot {
-        if value.is_none() {
-            backing.remove(key.as_ref())?;
+        if let Err(error) = self.write_batch(snapshot) {
+            let _ = self.poison.set(error.to_string());
+            return Err(error);
         }
+
+        for write in snapshot {
+            self.pending
+                .remove_if(&write.key, |_, entry| entry.seq == write.seq);
+        }
+
+        Ok(())
     }
 
-    Ok(())
+    fn write_batch(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
+        let mut inserter = self.backing.bulk_inserter()?;
+        for write in snapshot {
+            if let Some(bytes) = &write.value {
+                inserter.insert(
+                    BytesOrSlice::from(write.key.as_ref()),
+                    BytesOrSlice::from(bytes.as_ref()),
+                )?;
+            }
+        }
+        inserter.commit()?;
+
+        for write in snapshot {
+            if write.value.is_none() {
+                self.backing.remove(write.key.as_ref())?;
+            }
+        }
+
+        Ok(())
+    }
 }

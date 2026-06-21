@@ -28,6 +28,7 @@ dashmap = "6.1"
 digest = "0.10"
 downcast-rs = "2"
 fallible-iterator = "0.3"
+flume = "0.11"
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
 fugue-lifter = { version = "0.3", path = "../fugue-lifter", default-features = false }
