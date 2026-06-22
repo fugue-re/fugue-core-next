@@ -10,8 +10,8 @@ use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity}
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    DefaultProjectStorageProvider, StorageContainer, StorageProvider, StorageProviderError,
-    TransientStorageProvider,
+    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider,
+    StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
@@ -173,19 +173,17 @@ impl Project {
 
         tracing::trace!("loading project functions");
 
-        let functions_builder = || match FunctionTable::from_entity_storage(&storage.entities)? {
-            Some(functions) => Ok(functions),
-            None => FunctionTable::default_from_entity_storage(&storage.entities)
-                .map_err(ProjectError::from),
-        };
+        let cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
+            .unwrap_or(DEFAULT_FUNCTION_CACHE_BYTES);
 
-        let functions = match functions_builder() {
-            Ok(table) => table,
-            Err(e) => {
-                tracing::error!("failed to load function table: {e}");
-                return Err(e);
+        let functions = match storage.writeback() {
+            Some(worker) => {
+                FunctionTable::new_with(storage.entities.clone(), worker.clone(), cache_bytes)
             }
-        };
+            None => FunctionTable::new(storage.entities.clone(), cache_bytes),
+        }
+        .inspect_err(|e| tracing::error!("failed to load function table: {e}"))?;
 
         tracing::trace!("loading project code blocks");
 
@@ -473,6 +471,11 @@ impl Project {
 
         tracing::debug!("persisting code block table");
         self.blocks.persist(&self.storage.entities)?;
+
+        if let Some(worker) = self.storage.writeback() {
+            tracing::debug!("draining write-back worker");
+            worker.flush()?;
+        }
 
         Ok(())
     }

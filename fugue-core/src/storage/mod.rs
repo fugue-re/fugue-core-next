@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bitflags::bitflags;
 use fugue_bytes::BE;
@@ -22,6 +23,7 @@ pub use entities::{
 };
 use entities::{
     EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
+    WriteBackWorker,
 };
 
 pub mod project;
@@ -57,7 +59,7 @@ pub const TRANSIENT: bool = false;
 pub type StoragePersistence = bool;
 
 pub const ATTRIBUTE_FUNCTION_CACHE_SIZE: &str = "storage.entities.function.cache_size";
-pub const DEFAULT_FUNCTION_CACHE_SIZE: usize = 16 * 1024;
+pub const DEFAULT_FUNCTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
@@ -130,6 +132,7 @@ impl StorageProviderError {
 pub struct StorageContainer {
     pub entities: EntityStorage,
     pub segments: SegmentStorage,
+    writeback: Option<Arc<WriteBackWorker>>,
     cleanup_handler: StorageCleanupHandlerOneShot,
 }
 
@@ -194,12 +197,22 @@ impl StorageContainer {
         P::from_storage(path, attributes)
     }
 
-    pub fn from_parts(entities: EntityStorage, segments: SegmentStorage) -> Self {
-        Self {
+    pub fn from_parts(
+        entities: EntityStorage,
+        segments: SegmentStorage,
+    ) -> Result<Self, StorageProviderError> {
+        let writeback = if entities.is_transient() {
+            None
+        } else {
+            Some(WriteBackWorker::new(entities.clone())?)
+        };
+
+        Ok(Self {
             entities,
             segments,
+            writeback,
             cleanup_handler: StorageCleanupHandlerOneShot::default(),
-        }
+        })
     }
 
     pub fn set_cleanup_handler(&mut self, handler: impl StorageCleanupHandler) {
@@ -209,6 +222,10 @@ impl StorageContainer {
     pub fn with_cleanup_handler(mut self, handler: impl StorageCleanupHandler) -> Self {
         self.set_cleanup_handler(handler);
         self
+    }
+
+    pub fn writeback(&self) -> Option<&Arc<WriteBackWorker>> {
+        self.writeback.as_ref()
     }
 
     pub fn entities(&self) -> &EntityStorage {
@@ -260,7 +277,7 @@ impl StorageProvider for TransientStorageProvider {
         let segments =
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments))
+        StorageContainer::from_parts(entities, segments)
     }
 }
 
@@ -288,7 +305,7 @@ impl StorageProvider for PersistentEntityStorageProvider {
         let segments =
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
+        Ok(StorageContainer::from_parts(entities, segments)?.with_cleanup_handler(compressed))
     }
 }
 
@@ -314,7 +331,7 @@ where
         let entities = EntityStorage::new(T::from_storage(&unpacked, attributes)?);
         let segments = SegmentStorage::from_storage(&unpacked, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
+        Ok(StorageContainer::from_parts(entities, segments)?.with_cleanup_handler(compressed))
     }
 
     fn from_loadable(
@@ -327,7 +344,7 @@ where
         let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
         let segments = SegmentStorage::from_loadable::<U>(loadable, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments).with_cleanup_handler(compressed))
+        Ok(StorageContainer::from_parts(entities, segments)?.with_cleanup_handler(compressed))
     }
 }
 

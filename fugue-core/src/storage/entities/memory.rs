@@ -139,10 +139,9 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let map = self
-            .data
-            .get(&prefix)
-            .ok_or(EntityStorageError::InvalidKeyFormat)?;
+        let Some(map) = self.data.get(&prefix) else {
+            return Ok(Box::new(std::iter::empty()));
+        };
 
         Ok(Box::new(InMemoryKeyIterator::new(map, prefix, |iter| {
             iter.keys()
@@ -157,10 +156,9 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let map = self
-            .data
-            .get(&prefix)
-            .ok_or(EntityStorageError::InvalidKeyFormat)?;
+        let Some(map) = self.data.get(&prefix) else {
+            return Ok(Box::new(std::iter::empty()));
+        };
 
         Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
             iter.iter()
@@ -183,10 +181,9 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let map = self
-            .data
-            .get(&prefix)
-            .ok_or(EntityStorageError::InvalidKeyFormat)?;
+        let Some(map) = self.data.get(&prefix) else {
+            return Ok(Box::new(std::iter::empty()));
+        };
 
         Ok(Box::new(
             InMemoryIterator::new(map, prefix, |iter| iter.iter())

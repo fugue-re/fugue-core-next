@@ -1,45 +1,35 @@
 use std::collections::BTreeMap;
-use std::mem;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, ProjectEntity};
-use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
+use crate::storage::entities::{
+    Entity, EntityCache, EntityId, EntityRef, ProjectEntity, WriteBackWorker,
+};
+use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
-// A simple function table that maps function addresses to their corresponding
-// function IDs.
-//
-// This implementation is primarily suited to project storage implementations
-// that are purely in-memory, i.e., so-called transient storage in our
-// nomenclature.
-//
-// Within the project storage layer, this implementation retreives the entire
-// table contents at once on project creation/load, and defers persisting
-// changes until the project is explicitly persisted or the owning project is
-// dropped.
-//
-#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct FunctionTable {
+const FUNCTION_TABLE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FunctionTableHeader {
+    version: u32,
+}
+
+impl Entity for FunctionTableHeader {
+    const ID: EntityId = ENTITY_FUNCTION_TABLE_ID;
+}
+
+struct FunctionIndex {
     addresses: BTreeMap<Address, Id<Function>>,
-    functions: Vec<Function>,
     free_ids: Vec<Id<Function>>,
 }
 
-impl FunctionTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            addresses: BTreeMap::new(),
-            functions: Vec::with_capacity(capacity),
-            free_ids: Vec::new(),
-        }
-    }
+pub struct FunctionTable {
+    index: FunctionIndex,
+    entries: EntityCache<Id<Function>, Function>,
 }
 
 #[derive(Debug, Error)]
@@ -68,198 +58,237 @@ impl FunctionTableError {
     }
 }
 
-pub type FunctionRef<'a> = &'a Function;
-pub type FunctionMut<'a> = &'a mut Function;
-
-pub struct FunctionIter<'a> {
-    inner: Box<dyn Iterator<Item = FunctionRef<'a>> + 'a>,
-}
-
-impl<'a> FunctionIter<'a> {
-    pub fn new(iter: impl Iterator<Item = FunctionRef<'a>> + 'a) -> Self {
-        Self {
-            inner: Box::new(iter),
-        }
-    }
-}
-
-impl<'a> Iterator for FunctionIter<'a> {
-    type Item = FunctionRef<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-pub struct FunctionIterMut<'a> {
-    inner: Box<dyn Iterator<Item = FunctionMut<'a>> + 'a>,
-}
-
-impl<'a> FunctionIterMut<'a> {
-    pub fn new(iter: impl Iterator<Item = FunctionMut<'a>> + 'a) -> Self {
-        Self {
-            inner: Box::new(iter),
-        }
-    }
-}
-
-impl<'a> Iterator for FunctionIterMut<'a> {
-    type Item = FunctionMut<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
 impl FunctionTable {
+    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+        Self::from_entries(EntityCache::new(entities, cache_bytes)?)
+    }
+
+    pub fn new_with(
+        entities: EntityStorage,
+        worker: Arc<WriteBackWorker>,
+        cache_bytes: usize,
+    ) -> Result<Self, EntityStorageError> {
+        Self::from_entries(EntityCache::with_worker(entities, worker, cache_bytes))
+    }
+
+    fn from_entries(
+        entries: EntityCache<Id<Function>, Function>,
+    ) -> Result<Self, EntityStorageError> {
+        let mut addresses = BTreeMap::new();
+        let mut free_ids = Vec::new();
+        let mut expected = 0u32;
+
+        for entry in entries.try_iter()? {
+            let (id, function) = entry?;
+            addresses.insert(function.entry(), id);
+
+            let index = id.index() as u32;
+            while expected < index {
+                free_ids.push(Id::new(expected));
+                expected += 1;
+            }
+            expected = index + 1;
+        }
+
+        Ok(Self {
+            index: FunctionIndex { addresses, free_ids },
+            entries,
+        })
+    }
+
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
     where
         F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
     {
-        if let Some(existing) = self.get_by_address_mut(addr) {
-            let nf = f(existing.id(), addr)?;
+        if let Some(&existing) = self.index.addresses.get(&addr) {
+            let function = f(existing, addr)?;
 
-            if nf.entry() != addr {
+            if function.entry() != addr {
                 return Err(FunctionTableError::AddressMismatch);
             }
 
-            *existing = nf;
+            self.entries.put(existing, function);
 
-            return Ok(existing.id());
+            return Ok(existing);
         }
 
-        let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
-            (true, free_id)
-        } else {
-            (false, Id::new(self.functions.len() as u32))
-        };
+        let reuse_id = self.index.free_ids.last().copied();
+        let id = reuse_id.unwrap_or_else(|| Id::new(self.index.addresses.len() as u32));
 
-        let nf = f(id, addr)?;
+        let function = f(id, addr)?;
 
-        if nf.entry() != addr {
+        if function.entry() != addr {
             return Err(FunctionTableError::AddressMismatch);
         }
 
-        self.addresses.insert(addr, id);
+        self.index.addresses.insert(addr, id);
 
-        if reuse {
-            self.free_ids.pop();
-            self.functions[id.index()] = nf;
-        } else {
-            self.functions.push(nf);
+        if reuse_id.is_some() {
+            self.index.free_ids.pop();
         }
+
+        self.entries.put(id, function);
 
         Ok(id)
     }
 
-    pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
-        let Some(f) = self
-            .functions
-            .get_mut(id.index())
-            .filter(|f| f.id().is_valid())
-        else {
-            return false;
+    pub fn get_by_id(&self, id: Id<Function>) -> Option<EntityRef<'_, Function>> {
+        self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_get_by_id(
+        &self,
+        id: Id<Function>,
+    ) -> Result<Option<EntityRef<'_, Function>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub fn get_by_address(&self, addr: Address) -> Option<EntityRef<'_, Function>> {
+        self.try_get_by_address(addr)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_get_by_address(
+        &self,
+        addr: Address,
+    ) -> Result<Option<EntityRef<'_, Function>>, EntityStorageError> {
+        let Some(&id) = self.index.addresses.get(&addr) else {
+            return Ok(None);
         };
 
-        self.addresses.remove(&f.entry());
-        self.free_ids.push(id);
+        self.entries.try_get(&id)
+    }
 
-        mem::take(f); // remove the function; replace with default
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: Id<Function>,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
 
-        true
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: Id<Function>,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        self.entries.try_modify(&id, f)
+    }
+
+    pub fn modify_by_address<R>(
+        &mut self,
+        addr: Address,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_address(addr, f)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_modify_by_address<R>(
+        &mut self,
+        addr: Address,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        let Some(&id) = self.index.addresses.get(&addr) else {
+            return Ok(None);
+        };
+
+        self.entries.try_modify(&id, f)
+    }
+
+    pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
+        self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_remove_by_id(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
+        let addr = match self.entries.try_get(&id)? {
+            Some(function) => function.entry(),
+            None => return Ok(false),
+        };
+
+        self.index.addresses.remove(&addr);
+        self.index.free_ids.push(id);
+        self.entries.try_remove(&id)?;
+
+        Ok(true)
     }
 
     pub fn remove_by_address(&mut self, addr: Address) -> bool {
-        let Some(id) = self.addresses.remove(&addr) else {
-            return false;
+        self.try_remove_by_address(addr)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_remove_by_address(&mut self, addr: Address) -> Result<bool, EntityStorageError> {
+        let Some(id) = self.index.addresses.remove(&addr) else {
+            return Ok(false);
         };
 
-        let _ = mem::take(&mut self.functions[id.index()]);
-        self.free_ids.push(id);
+        self.index.free_ids.push(id);
+        self.entries.try_remove(&id)?;
 
-        true
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.functions.len() - self.free_ids.len()
-    }
-
-    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef> {
-        self.functions.get(id.index()).filter(|f| f.id().is_valid())
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut> {
-        self.functions
-            .get_mut(id.index())
-            .filter(|f| f.id().is_valid())
-    }
-
-    pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef> {
-        self.addresses
-            .get(&addr)
-            .copied()
-            .and_then(|id| self.get_by_id(id))
-    }
-
-    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut> {
-        self.addresses
-            .get(&addr)
-            .copied()
-            .and_then(|id| self.get_by_id_mut(id))
+        Ok(true)
     }
 
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.addresses.keys().copied()
+        self.index.addresses.keys().copied()
     }
 
-    pub fn iter(&self) -> FunctionIter<'_> {
-        FunctionIter::new(self.functions.iter().filter(|f| f.id().is_valid()))
+    pub fn iter(&self) -> impl Iterator<Item = EntityRef<'_, Function>> + '_ {
+        self.try_iter()
+            .unwrap_or_else(|e| e.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()))
     }
 
-    pub fn iter_mut(&mut self) -> FunctionIterMut<'_> {
-        FunctionIterMut::new(self.functions.iter_mut().filter(|f| f.id().is_valid()))
-    }
-}
-
-impl Entity for FunctionTable {
-    const ID: EntityId = ENTITY_FUNCTION_TABLE_ID;
-}
-
-impl ProjectEntityFromStorage for FunctionTable {
-    fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
-        storage.get(&ProjectEntity::FunctionTable)
+    pub fn try_iter(
+        &self,
+    ) -> Result<
+        impl Iterator<Item = Result<EntityRef<'_, Function>, EntityStorageError>>,
+        EntityStorageError,
+    > {
+        Ok(self
+            .entries
+            .try_iter()?
+            .map(|entry| entry.map(|(_, function)| function)))
     }
 
-    fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
-        Ok(Self::default())
+    pub fn is_empty(&self) -> bool {
+        self.index.addresses.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.addresses.len()
     }
 }
 
 impl PersistableProjectEntity for FunctionTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        storage.insert(&ProjectEntity::FunctionTable, self)
+        storage.insert(
+            &ProjectEntity::FunctionTable,
+            &FunctionTableHeader {
+                version: FUNCTION_TABLE_VERSION,
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::storage::entities::InMemoryEntityStorage;
+
+    fn table() -> FunctionTable {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        FunctionTable::new(storage, 64 * 1024).unwrap()
+    }
 
     #[test]
     fn test_basic_operations() {
-        let mut table = FunctionTable::new();
+        let mut table = table();
 
         let addr = Address::from(0x1000);
         let func_id = table
@@ -270,6 +299,7 @@ mod test {
 
         let func = table.get_by_address(addr).unwrap();
         assert_eq!(func.id(), func_id);
+        drop(func);
 
         assert!(table.remove_by_id(func_id));
         assert_eq!(table.len(), 0);
@@ -279,7 +309,7 @@ mod test {
 
     #[test]
     fn test_removal_operations() {
-        let mut table = FunctionTable::new();
+        let mut table = table();
 
         let addr1 = Address::from(0x1000);
         let addr2 = Address::from(0x2000);
@@ -307,9 +337,8 @@ mod test {
 
         assert_eq!(table.len(), 2);
 
-        // free list
         assert_eq!(func_id1, func_id3);
-        assert!(table.free_ids.is_empty());
+        assert!(table.index.free_ids.is_empty());
 
         let func_id4 = table
             .insert(addr1, |id, entry| Ok(Function::new(id, entry)))
@@ -320,5 +349,56 @@ mod test {
 
         assert!(table.remove_by_id(func_id2));
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn test_index_rebuild_on_open() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+
+        {
+            let mut table = FunctionTable::new(storage.clone(), 64 * 1024).unwrap();
+            table
+                .insert(Address::from(0x1000), |id, entry| {
+                    Ok(Function::new(id, entry))
+                })
+                .unwrap();
+            table
+                .insert(Address::from(0x2000), |id, entry| {
+                    Ok(Function::new(id, entry))
+                })
+                .unwrap();
+        }
+
+        let table = FunctionTable::new(storage, 64 * 1024).unwrap();
+        assert_eq!(table.len(), 2);
+        assert!(table.get_by_address(Address::from(0x1000)).is_some());
+        assert!(table.get_by_address(Address::from(0x2000)).is_some());
+    }
+
+    #[test]
+    fn test_worker_round_trip() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+
+        {
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table = FunctionTable::new_with(storage.clone(), worker, 64 * 1024).unwrap();
+            table
+                .insert(Address::from(0x1000), |id, entry| {
+                    Ok(Function::new(id, entry))
+                })
+                .unwrap();
+            table
+                .insert(Address::from(0x2000), |id, entry| {
+                    Ok(Function::new(id, entry))
+                })
+                .unwrap();
+            table.flush().unwrap();
+        }
+
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+        assert_eq!(table.len(), 2);
+        assert!(table.get_by_address(Address::from(0x1000)).is_some());
+        assert!(table.get_by_address(Address::from(0x2000)).is_some());
     }
 }
