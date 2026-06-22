@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::mem;
+use std::sync::Arc;
 
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
@@ -8,22 +8,33 @@ use thiserror::Error;
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, ProjectEntity};
-use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
+use crate::storage::entities::{
+    Entity, EntityCache, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
+};
+use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
-#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct CodeBlockTable {
-    bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
-    blocks: Vec<CodeBlock>,
-    free_ids: Vec<Id<CodeBlock>>,
+const CODE_BLOCK_TABLE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CodeBlockTableHeader {
+    version: u32,
 }
 
-impl CodeBlockTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
+impl Entity for CodeBlockTableHeader {
+    const ID: EntityId = ENTITY_CODE_BLOCK_TABLE_ID;
+}
+
+struct CodeBlockIndex {
+    bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
+    free_ids: Vec<Id<CodeBlock>>,
+    count: usize,
+}
+
+pub struct CodeBlockTable {
+    index: CodeBlockIndex,
+    entries: EntityCache<Id<CodeBlock>, CodeBlock>,
 }
 
 #[derive(Debug, Error)]
@@ -52,8 +63,8 @@ impl CodeBlockTableError {
     }
 }
 
-pub type CodeBlockRef<'a> = &'a CodeBlock;
-pub type CodeBlockMut<'a> = &'a mut CodeBlock;
+pub type CodeBlockRef<'a> = EntityRef<'a, CodeBlock>;
+pub type CodeBlockMut<'a> = EntityMut<'a, Id<CodeBlock>, CodeBlock>;
 
 pub struct CodeBlockIter<'a> {
     inner: Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a>,
@@ -104,171 +115,270 @@ impl<'a> Iterator for CodeBlockIterMut<'a> {
 }
 
 impl CodeBlockTable {
+    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+        Self::from_entries(EntityCache::new(entities, cache_bytes)?)
+    }
+
+    pub fn new_with(
+        entities: EntityStorage,
+        worker: Arc<WriteBackWorker>,
+        cache_bytes: usize,
+    ) -> Result<Self, EntityStorageError> {
+        Self::from_entries(EntityCache::with_worker(entities, worker, cache_bytes))
+    }
+
+    fn from_entries(
+        entries: EntityCache<Id<CodeBlock>, CodeBlock>,
+    ) -> Result<Self, EntityStorageError> {
+        let mut bounds = BTreeMap::<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>::new();
+        let mut free_ids = Vec::new();
+        let mut count = 0;
+        let mut expected = 0u32;
+
+        for entry in entries.try_iter()? {
+            let (id, block) = entry?;
+
+            let range = block.start().address()..block.next_address().address();
+            bounds
+                .entry(block.space())
+                .or_default()
+                .entry(range)
+                .or_default()
+                .insert(id);
+
+            let index = id.index() as u32;
+            while expected < index {
+                free_ids.push(Id::new(expected));
+                expected += 1;
+            }
+            expected = index + 1;
+            count += 1;
+        }
+
+        Ok(Self {
+            index: CodeBlockIndex {
+                bounds,
+                free_ids,
+                count,
+            },
+            entries,
+        })
+    }
+
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
     where
-        F: Fn(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
+        F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
-        let (reuse, id) = if let Some(free_id) = self.free_ids.last().copied() {
-            (true, free_id)
-        } else {
-            (false, Id::new(self.blocks.len() as u32))
-        };
+        let reuse_id = self.index.free_ids.last().copied();
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.count));
 
-        let nblk = f(id, addr)?;
+        let block = f(id, addr)?;
 
-        if nblk.start() != addr {
+        if block.start() != addr {
             return Err(CodeBlockTableError::AddressMismatch);
         }
 
-        let range = nblk.start().address()..nblk.next_address().address();
-
-        self.bounds
+        let range = block.start().address()..block.next_address().address();
+        self.index
+            .bounds
             .entry(addr.space())
             .or_default()
             .entry(range)
             .or_default()
             .insert(id);
 
-        if reuse {
-            self.free_ids.pop();
-            self.blocks[id.index()] = nblk;
-        } else {
-            self.blocks.push(nblk);
+        if reuse_id.is_some() {
+            self.index.free_ids.pop();
         }
+
+        self.entries.put(id, block);
+        self.index.count += 1;
 
         Ok(id)
     }
 
+    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef<'_>> {
+        self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_get_by_id(
+        &self,
+        id: Id<CodeBlock>,
+    ) -> Result<Option<CodeBlockRef<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: Id<CodeBlock>,
+        f: impl FnOnce(&mut CodeBlock) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: Id<CodeBlock>,
+        f: impl FnOnce(&mut CodeBlock) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        self.entries.try_modify(&id, f)
+    }
+
+    pub fn get_by_id_mut(
+        &mut self,
+        id: Id<CodeBlock>,
+    ) -> Option<EntityMut<'_, Id<CodeBlock>, CodeBlock>> {
+        self.entries.get_mut(&id)
+    }
+
+    pub fn try_get_by_id_mut(
+        &mut self,
+        id: Id<CodeBlock>,
+    ) -> Result<Option<EntityMut<'_, Id<CodeBlock>, CodeBlock>>, EntityStorageError> {
+        self.entries.try_get_mut(&id)
+    }
+
     pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
-        let Some(blk) = self
-            .blocks
-            .get_mut(id.index())
-            .filter(|blk| blk.id().is_valid())
-        else {
-            return false;
+        self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
+    }
+
+    pub fn try_remove_by_id(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+        let Some(block) = self.entries.try_get(&id)? else {
+            return Ok(false);
         };
 
-        let range = blk.start().address()..blk.next_address().address();
+        let space = block.space();
+        let range = block.start().address()..block.next_address().address();
+        drop(block);
 
-        let Some(Entry::Occupied(mut entry)) =
-            self.bounds.get_mut(&blk.space()).map(|m| m.entry(range))
-        else {
-            // this should never happen
-            return false;
-        };
+        if let Some(Entry::Occupied(mut entry)) =
+            self.index.bounds.get_mut(&space).map(|m| m.entry(range))
+        {
+            let id_set = entry.get_mut();
+            id_set.remove(id);
 
-        let id_set = entry.get_mut();
-        id_set.remove(id);
-
-        if id_set.is_empty() {
-            entry.remove();
+            if id_set.is_empty() {
+                entry.remove();
+            }
         }
 
-        self.free_ids.push(id);
+        self.entries.try_remove(&id)?;
+        self.index.free_ids.push(id);
+        self.index.count -= 1;
 
-        mem::take(blk); // remove the block; replace with default
-
-        true
+        Ok(true)
     }
 
     pub fn remove_by_address(&mut self, addr: Address) -> usize {
-        let mut removed = 0;
+        self.try_remove_by_address(addr)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
 
+    pub fn try_remove_by_address(&mut self, addr: Address) -> Result<usize, EntityStorageError> {
         let space = addr.space();
-        let addr = addr.address();
+        let raw = addr.address();
 
-        let Some(bounds) = self.bounds.get_mut(&space) else {
-            return removed;
+        let Some(bounds) = self.index.bounds.get_mut(&space) else {
+            return Ok(0);
         };
 
-        let ranges_to_remove = bounds
-            .intervals_overlap(addr)
-            .filter(|iv| iv.start == addr)
+        let ranges = bounds
+            .intervals_overlap(raw)
+            .filter(|iv| iv.start == raw)
             .collect::<SmallVec<[_; 2]>>();
 
-        for range in ranges_to_remove.into_iter() {
+        let mut removed = 0;
+
+        for range in ranges {
             let Some(id_set) = bounds.remove(range) else {
-                // this should never happen
                 continue;
             };
 
-            for id in id_set.iter().filter(|id| id.is_valid()) {
-                let blk = &mut self.blocks[id.index()];
-
-                self.free_ids.push(id);
-                mem::take(blk); // remove the block; replace with default
+            for id in id_set.iter() {
+                self.entries.try_remove(&id)?;
+                self.index.free_ids.push(id);
+                self.index.count -= 1;
                 removed += 1;
             }
         }
 
-        removed
+        Ok(removed)
     }
 
     pub fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
-        let mut removed = 0;
+        self.try_remove_by_address_and_context(addr, context)
+            .unwrap_or_else(|e| e.into_fatal())
+    }
 
+    pub fn try_remove_by_address_and_context(
+        &mut self,
+        addr: Address,
+        context: &ContextSet,
+    ) -> Result<usize, EntityStorageError> {
         let space = addr.space();
-        let addr = addr.address();
+        let raw = addr.address();
 
-        let Some(bounds) = self.bounds.get_mut(&space) else {
-            return removed;
+        let Some(bounds) = self.index.bounds.get_mut(&space) else {
+            return Ok(0);
         };
 
-        let ranges_to_remove = bounds
-            .intervals_overlap(addr)
-            .filter(|iv| iv.start == addr)
+        let ranges = bounds
+            .intervals_overlap(raw)
+            .filter(|iv| iv.start == raw)
             .collect::<SmallVec<[_; 2]>>();
 
-        for range in ranges_to_remove.into_iter() {
-            let Entry::Occupied(id_set) = bounds.entry(range) else {
-                // this should never happen
+        let mut removed = 0;
+
+        for range in ranges {
+            let Entry::Occupied(mut entry) = bounds.entry(range) else {
                 continue;
             };
 
-            for id in id_set.get().iter().filter(|id| id.is_valid()) {
-                let blk = &mut self.blocks[id.index()];
-
-                if blk.context() != context {
+            let mut matching = SmallVec::<[Id<CodeBlock>; 2]>::new();
+            for id in entry.get().iter() {
+                let Some(block) = self.entries.try_get(&id)? else {
                     continue;
+                };
+                if block.context() == context {
+                    matching.push(id);
                 }
-
-                self.free_ids.push(id);
-                mem::take(blk); // remove the block; replace with default
-                removed += 1;
             }
 
-            if id_set.get().is_empty() {
-                id_set.remove();
+            for &id in &matching {
+                entry.get_mut().remove(id);
+            }
+
+            if entry.get().is_empty() {
+                entry.remove();
+            }
+
+            for id in matching {
+                self.entries.try_remove(&id)?;
+                self.index.free_ids.push(id);
+                self.index.count -= 1;
+                removed += 1;
             }
         }
 
-        removed
-    }
-
-    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef> {
-        self.blocks
-            .get(id.index())
-            .filter(|blk| blk.id().is_valid())
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut> {
-        self.blocks
-            .get_mut(id.index())
-            .filter(|blk| blk.id().is_valid())
+        Ok(removed)
     }
 
     pub fn get_by_address(&self, maddr: Address) -> CodeBlockIter<'_> {
         let space = maddr.space();
-        let addr = maddr.address();
+        let raw = maddr.address();
 
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIter::new(std::iter::empty()),
+        let Some(bounds) = self.index.bounds.get(&space) else {
+            return CodeBlockIter::new(std::iter::empty());
         };
 
-        CodeBlockIter::new(bounds.values(addr..=addr).flat_map(move |id_set| {
+        CodeBlockIter::new(bounds.values(raw..=raw).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
-                let block = &self.blocks[id.index()];
+                let block = self.entries.get(&id)?;
                 (block.start() == maddr).then_some(block)
             })
         }))
@@ -280,45 +390,59 @@ impl CodeBlockTable {
         context: &'a ContextSet,
     ) -> CodeBlockIter<'a> {
         let space = maddr.space();
-        let addr = maddr.address();
+        let raw = maddr.address();
 
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIter::new(std::iter::empty()),
+        let Some(bounds) = self.index.bounds.get(&space) else {
+            return CodeBlockIter::new(std::iter::empty());
         };
 
-        CodeBlockIter::new(bounds.values(addr..=addr).flat_map(move |id_set| {
+        CodeBlockIter::new(bounds.values(raw..=raw).flat_map(move |id_set| {
             id_set.iter().filter_map(move |id| {
-                let block = &self.blocks[id.index()];
+                let block = self.entries.get(&id)?;
                 (block.start() == maddr && block.context() == context).then_some(block)
             })
         }))
     }
 
-    pub fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut<'_> {
-        let space = maddr.space();
-        let addr = maddr.address();
+    pub fn contains(&self, addr: Address) -> bool {
+        let space = addr.space();
+        let raw = addr.address();
 
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIterMut::new(std::iter::empty()),
+        self.index
+            .bounds
+            .get(&space)
+            .is_some_and(|bounds| bounds.has_overlap(raw..=raw))
+    }
+
+    pub fn overlaps(&self, addr: Address) -> CodeBlockIter<'_> {
+        let space = addr.space();
+        let raw = addr.address();
+
+        let Some(bounds) = self.index.bounds.get(&space) else {
+            return CodeBlockIter::new(std::iter::empty());
         };
 
-        let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
-            id_set.iter().filter_map(move |id| {
-                // SAFETY:
-                //
-                // We are guaranteed not to have multiple instances of an
-                // Id<CodeBlock> within the sets iterated over.
-                //
-                // The indices are guaranteed to be valid as they were obtained
-                // from the IdSet<CodeBlock> which only contains valid indices.
-                //
-                let block = unsafe { &mut *blocks_ptr.add(id.index()) };
-                (block.start() == maddr).then_some(block)
-            })
-        }))
+        CodeBlockIter::new(
+            bounds
+                .values(raw..=raw)
+                .flat_map(move |id_set| id_set.iter().filter_map(move |id| self.entries.get(&id))),
+        )
+    }
+
+    pub fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut<'_> {
+        let space = maddr.space();
+        let raw = maddr.address();
+
+        let ids = self
+            .index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.overlap(raw))
+            .filter(move |(range, _)| range.start == raw)
+            .flat_map(|(_, id_set)| id_set.iter());
+
+        CodeBlockIterMut::new(self.entries.get_disjoint_mut(ids))
     }
 
     pub fn get_by_address_and_context_mut<'a>(
@@ -327,100 +451,64 @@ impl CodeBlockTable {
         context: &'a ContextSet,
     ) -> CodeBlockIterMut<'a> {
         let space = maddr.space();
-        let addr = maddr.address();
+        let raw = maddr.address();
 
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIterMut::new(std::iter::empty()),
-        };
-
-        let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
-            id_set.iter().filter_map(move |id| {
-                // SAFETY: see `get_by_address_mut` for justification.
-                let block = unsafe { &mut *blocks_ptr.add(id.index()) };
-                (block.start() == maddr && block.context() == context).then_some(block)
-            })
-        }))
-    }
-
-    pub fn contains(&self, addr: Address) -> bool {
-        let space = addr.space();
-        let addr = addr.address();
-
-        self.bounds
+        let ids = self
+            .index
+            .bounds
             .get(&space)
-            .map_or(false, |bounds| bounds.has_overlap(addr..=addr))
-    }
+            .into_iter()
+            .flat_map(move |bounds| bounds.overlap(raw))
+            .filter(move |(range, _)| range.start == raw)
+            .flat_map(|(_, id_set)| id_set.iter());
 
-    pub fn overlaps(&self, addr: Address) -> CodeBlockIter<'_> {
-        let space = addr.space();
-        let addr = addr.address();
-
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIter::new(std::iter::empty()),
-        };
-
-        CodeBlockIter::new(
-            bounds
-                .values(addr..=addr)
-                .flat_map(|id_set| id_set.iter().map(|id| &self.blocks[id.index()])),
+        CodeBlockIterMut::new(
+            self.entries
+                .get_disjoint_mut(ids)
+                .filter(move |block| block.context() == context),
         )
     }
 
     pub fn overlaps_mut(&mut self, addr: Address) -> CodeBlockIterMut<'_> {
         let space = addr.space();
-        let addr = addr.address();
+        let raw = addr.address();
 
-        let bounds = match self.bounds.get(&space) {
-            Some(bounds) => bounds,
-            None => return CodeBlockIterMut::new(std::iter::empty()),
-        };
+        let ids = self
+            .index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.values(raw..=raw))
+            .flat_map(|id_set| id_set.iter());
 
-        let blocks_ptr = self.blocks.as_mut_ptr();
-        CodeBlockIterMut::new(bounds.values(addr..=addr).flat_map(move |id_set| {
-            id_set.iter().map(move |id| {
-                // SAFETY: see `get_by_address_mut` for justification.
-                unsafe { &mut *blocks_ptr.add(id.index()) }
-            })
-        }))
+        CodeBlockIterMut::new(self.entries.get_disjoint_mut(ids))
     }
 
     pub fn iter(&self) -> CodeBlockIter<'_> {
-        CodeBlockIter::new(self.blocks.iter().filter(|blk| blk.id().is_valid()))
+        CodeBlockIter::new(self.entries.iter())
     }
 
     pub fn iter_mut(&mut self) -> CodeBlockIterMut<'_> {
-        CodeBlockIterMut::new(self.blocks.iter_mut().filter(|blk| blk.id().is_valid()))
+        CodeBlockIterMut::new(self.entries.iter_mut())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.index.count == 0
     }
 
     pub fn len(&self) -> usize {
-        self.blocks.len() - self.free_ids.len()
-    }
-}
-
-impl Entity for CodeBlockTable {
-    const ID: EntityId = ENTITY_CODE_BLOCK_TABLE_ID;
-}
-
-impl ProjectEntityFromStorage for CodeBlockTable {
-    fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
-        storage.get(&ProjectEntity::CodeBlockTable)
-    }
-
-    fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
-        Ok(Self::new())
+        self.index.count
     }
 }
 
 impl PersistableProjectEntity for CodeBlockTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        storage.insert(&ProjectEntity::CodeBlockTable, self)
+        storage.insert(
+            &ProjectEntity::CodeBlockTable,
+            &CodeBlockTableHeader {
+                version: CODE_BLOCK_TABLE_VERSION,
+            },
+        )
     }
 }
 
@@ -428,10 +516,16 @@ impl PersistableProjectEntity for CodeBlockTable {
 mod test {
     use super::*;
     use crate::ir::InsnList;
+    use crate::storage::entities::InMemoryEntityStorage;
+
+    fn table() -> CodeBlockTable {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        CodeBlockTable::new(storage, 64 * 1024).unwrap()
+    }
 
     #[test]
     fn test_basic_operations() {
-        let mut table = CodeBlockTable::new();
+        let mut table = table();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
 
@@ -447,16 +541,16 @@ mod test {
         let blk = table.get_by_id(blk_id).unwrap();
         assert_eq!(blk.start(), addr);
         assert_eq!(blk.len(), 0x10);
+        drop(blk);
 
-        let removed = table.remove_by_id(blk_id);
-        assert!(removed);
+        assert!(table.remove_by_id(blk_id));
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
     }
 
     #[test]
     fn test_overlapped() {
-        let mut table = CodeBlockTable::new();
+        let mut table = table();
 
         let addr1 = Address::from(0x1000);
         let addr2 = Address::from(0x1000); // overlaps with addr1
@@ -489,5 +583,208 @@ mod test {
 
         let remaining_blk = table.get_by_id(blk_id3).unwrap();
         assert_eq!(remaining_blk.start(), addr3);
+    }
+
+    #[test]
+    fn test_index_rebuild_on_open() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+
+        {
+            let mut table = CodeBlockTable::new(storage.clone(), 64 * 1024).unwrap();
+            for base in 1..=3u64 {
+                table
+                    .insert(Address::from(base * 0x1000), |id, start| {
+                        Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+                    })
+                    .unwrap();
+            }
+        }
+
+        let table = CodeBlockTable::new(storage, 64 * 1024).unwrap();
+        assert_eq!(table.len(), 3);
+        assert!(table.contains(Address::from(0x1000)));
+        assert!(table.overlaps(Address::from(0x2000)).next().is_some());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_free_id_reuse_sqlite() {
+        use crate::storage::TRANSIENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
+        let mut table = CodeBlockTable::new(storage, 64 * 1024).unwrap();
+
+        let mut ids = Vec::new();
+        for base in 1..=3u64 {
+            ids.push(
+                table
+                    .insert(Address::from(base * 0x1000), |id, start| {
+                        Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+                    })
+                    .unwrap(),
+            );
+        }
+
+        assert!(table.remove_by_id(ids[1]));
+        assert_eq!(table.index.free_ids, [ids[1]]);
+
+        let reused = table
+            .insert(Address::from(0x4000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        assert_eq!(reused, ids[1]);
+        assert!(table.index.free_ids.is_empty());
+
+        let fresh = table
+            .insert(Address::from(0x5000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        assert_eq!(fresh.index(), 3);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_free_id_rebuild_on_reopen_sqlite() {
+        use tempfile::TempDir;
+
+        use crate::storage::PERSISTENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let dir = TempDir::new().unwrap();
+
+        {
+            let storage =
+                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+            let mut ids = Vec::new();
+            for base in 1..=5u64 {
+                ids.push(
+                    table
+                        .insert(Address::from(base * 0x1000), |id, start| {
+                            Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+                        })
+                        .unwrap(),
+                );
+            }
+
+            assert!(table.remove_by_id(ids[1]));
+            assert!(table.remove_by_id(ids[3]));
+
+            table.flush().unwrap();
+        }
+
+        let storage =
+            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let mut table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+        assert_eq!(table.len(), 3);
+
+        let first = table
+            .insert(Address::from(0x6000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        let second = table
+            .insert(Address::from(0x7000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+        let third = table
+            .insert(Address::from(0x8000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        assert_eq!([first.index(), second.index(), third.index()], [3, 1, 5]);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_get_by_id_mut_persists_sqlite() {
+        use tempfile::TempDir;
+
+        use crate::storage::PERSISTENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let dir = TempDir::new().unwrap();
+        let addr = Address::from(0x1000);
+        let successor = Id::<CodeBlock>::new(7);
+
+        {
+            let storage =
+                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+            let bid = table
+                .insert(addr, |id, start| {
+                    Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+                })
+                .unwrap();
+
+            {
+                let mut block = table.get_by_id_mut(bid).expect("block exists");
+                block.add_successor(successor);
+            }
+
+            table.flush().unwrap();
+        }
+
+        let storage =
+            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+        let block = table.get_by_address(addr).next().expect("block exists");
+        assert!(block.successors().contains(successor));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_iter_mut_persists() {
+        use tempfile::TempDir;
+
+        use crate::storage::PERSISTENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let dir = TempDir::new().unwrap();
+        let successor = Id::<CodeBlock>::new(99);
+
+        {
+            let storage =
+                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+            for base in 1..=3u64 {
+                table
+                    .insert(Address::from(base * 0x1000), |id, start| {
+                        Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+                    })
+                    .unwrap();
+            }
+
+            for mut block in table.iter_mut() {
+                block.add_successor(successor);
+            }
+
+            table.flush().unwrap();
+        }
+
+        let storage =
+            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let table = CodeBlockTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+        assert_eq!(table.len(), 3);
+        for block in table.iter() {
+            assert!(block.successors().contains(successor));
+        }
     }
 }

@@ -10,7 +10,8 @@ use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity}
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE,
+    DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider,
     StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
@@ -187,19 +188,19 @@ impl Project {
 
         tracing::trace!("loading project code blocks");
 
-        let blocks_builder = || match CodeBlockTable::from_entity_storage(&storage.entities)? {
-            Some(blocks) => Ok(blocks),
-            None => CodeBlockTable::default_from_entity_storage(&storage.entities)
-                .map_err(ProjectError::from),
-        };
+        let block_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_CODE_BLOCK_CACHE_SIZE)
+            .unwrap_or(DEFAULT_CODE_BLOCK_CACHE_BYTES);
 
-        let blocks = match blocks_builder() {
-            Ok(table) => table,
-            Err(e) => {
-                tracing::error!("failed to load code block table: {e}");
-                return Err(e);
-            }
-        };
+        let blocks = match storage.writeback() {
+            Some(worker) => CodeBlockTable::new_with(
+                storage.entities.clone(),
+                worker.clone(),
+                block_cache_bytes,
+            ),
+            None => CodeBlockTable::new(storage.entities.clone(), block_cache_bytes),
+        }
+        .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?;
 
         Ok(Self {
             arch,

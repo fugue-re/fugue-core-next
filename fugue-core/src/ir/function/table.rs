@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
-    Entity, EntityCache, EntityId, EntityRef, ProjectEntity, WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
@@ -201,6 +201,39 @@ impl FunctionTable {
         self.entries.try_modify(&id, f)
     }
 
+    pub fn get_by_id_mut(
+        &mut self,
+        id: Id<Function>,
+    ) -> Option<EntityMut<'_, Id<Function>, Function>> {
+        self.entries.get_mut(&id)
+    }
+
+    pub fn try_get_by_id_mut(
+        &mut self,
+        id: Id<Function>,
+    ) -> Result<Option<EntityMut<'_, Id<Function>, Function>>, EntityStorageError> {
+        self.entries.try_get_mut(&id)
+    }
+
+    pub fn get_by_address_mut(
+        &mut self,
+        addr: Address,
+    ) -> Option<EntityMut<'_, Id<Function>, Function>> {
+        let id = *self.index.addresses.get(&addr)?;
+        self.entries.get_mut(&id)
+    }
+
+    pub fn try_get_by_address_mut(
+        &mut self,
+        addr: Address,
+    ) -> Result<Option<EntityMut<'_, Id<Function>, Function>>, EntityStorageError> {
+        let Some(&id) = self.index.addresses.get(&addr) else {
+            return Ok(None);
+        };
+
+        self.entries.try_get_mut(&id)
+    }
+
     pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
         self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
@@ -254,6 +287,10 @@ impl FunctionTable {
             .entries
             .try_iter()?
             .map(|entry| entry.map(|(_, function)| function)))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, Id<Function>, Function>> + '_ {
+        self.entries.iter_mut()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -400,5 +437,91 @@ mod test {
         assert_eq!(table.len(), 2);
         assert!(table.get_by_address(Address::from(0x1000)).is_some());
         assert!(table.get_by_address(Address::from(0x2000)).is_some());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_free_id_reuse_sqlite() {
+        use crate::storage::TRANSIENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
+        let mut table = FunctionTable::new(storage, 64 * 1024).unwrap();
+
+        let id0 = table
+            .insert(Address::from(0x1000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        let id1 = table
+            .insert(Address::from(0x2000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        let id2 = table
+            .insert(Address::from(0x3000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!([id0.index(), id1.index(), id2.index()], [0, 1, 2]);
+
+        assert!(table.remove_by_address(Address::from(0x2000)));
+        assert_eq!(table.index.free_ids, [id1]);
+
+        let reused = table
+            .insert(Address::from(0x4000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        assert_eq!(reused, id1);
+        assert!(table.index.free_ids.is_empty());
+
+        let fresh = table
+            .insert(Address::from(0x5000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        assert_eq!(fresh.index(), 3);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_free_id_rebuild_on_reopen_sqlite() {
+        use tempfile::TempDir;
+
+        use crate::storage::PERSISTENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let dir = TempDir::new().unwrap();
+
+        {
+            let storage =
+                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+            for base in 1..=5u64 {
+                table
+                    .insert(Address::from(base * 0x1000), |id, entry| {
+                        Ok(Function::new(id, entry))
+                    })
+                    .unwrap();
+            }
+
+            assert!(table.remove_by_address(Address::from(0x2000)));
+            assert!(table.remove_by_address(Address::from(0x4000)));
+
+            table.flush().unwrap();
+        }
+
+        let storage =
+            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let mut table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+
+        assert_eq!(table.len(), 3);
+
+        let first = table
+            .insert(Address::from(0x6000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        let second = table
+            .insert(Address::from(0x7000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        let third = table
+            .insert(Address::from(0x8000), |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+
+        assert_eq!([first.index(), second.index(), third.index()], [3, 1, 5]);
     }
 }

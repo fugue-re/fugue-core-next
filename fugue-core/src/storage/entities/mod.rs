@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 use std::io;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -765,6 +765,64 @@ where
     }
 }
 
+pub struct EntityMut<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    cache: &'a EntityCache<K, E>,
+    key: K,
+    shared: Arc<E>,
+    owned: Option<E>,
+}
+
+impl<K, E> Deref for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        match &self.owned {
+            Some(entity) => entity,
+            None => self.shared.as_ref(),
+        }
+    }
+}
+
+impl<K, E> DerefMut for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if self.owned.is_none() {
+            self.owned = Some(self.shared.as_ref().clone());
+        }
+
+        self.owned
+            .as_mut()
+            .expect("owned copy present after promotion")
+    }
+}
+
+impl<K, E> Drop for EntityMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+
+        if let Some(entity) = self.owned.take() {
+            self.cache.put(self.key.clone(), entity);
+        }
+    }
+}
+
 pub trait MutableEntity<K: EntityKey>: Entity {
     fn entity_key(&self) -> K;
 }
@@ -971,23 +1029,78 @@ where
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_modify<R>(
-        &self,
+    pub fn try_get_mut(
+        &mut self,
         key: &K,
-        f: impl FnOnce(&mut E) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
+    ) -> Result<Option<EntityMut<'_, K, E>>, EntityStorageError> {
         let Some(current) = self.try_get(key)? else {
             return Ok(None);
         };
 
-        let mut entity = (*current).clone();
-        let outcome = f(&mut entity);
-        self.try_put(key.clone(), entity)?;
-
-        Ok(Some(outcome))
+        Ok(Some(EntityMut {
+            cache: &*self,
+            key: key.clone(),
+            shared: current.into_arc(),
+            owned: None,
+        }))
     }
 
-    pub fn modify<R>(&self, key: &K, f: impl FnOnce(&mut E) -> R) -> Option<R> {
+    pub fn get_mut(&mut self, key: &K) -> Option<EntityMut<'_, K, E>> {
+        self.try_get_mut(key)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn get_disjoint_mut<'a>(
+        &'a mut self,
+        keys: impl IntoIterator<Item = K> + 'a,
+    ) -> impl Iterator<Item = EntityMut<'a, K, E>> + 'a {
+        let cache = &*self;
+
+        keys.into_iter().filter_map(move |key| {
+            let shared = cache
+                .try_get_uncached(&key)
+                .unwrap_or_else(|error| error.into_fatal())?;
+
+            Some(EntityMut {
+                cache,
+                key,
+                shared,
+                owned: None,
+            })
+        })
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, K, E>> + '_ {
+        let cache = &*self;
+
+        cache
+            .try_iter()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(move |entry| {
+                let (key, current) = entry.unwrap_or_else(|error| error.into_fatal());
+
+                EntityMut {
+                    cache,
+                    key,
+                    shared: current.into_arc(),
+                    owned: None,
+                }
+            })
+    }
+
+    pub fn try_modify<R>(
+        &mut self,
+        key: &K,
+        f: impl FnOnce(&mut E) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        let Some(mut entity) = self.try_get_mut(key)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(f(&mut entity)))
+    }
+
+    pub fn modify<R>(&mut self, key: &K, f: impl FnOnce(&mut E) -> R) -> Option<R> {
         self.try_modify(key, f)
             .unwrap_or_else(|error| error.into_fatal())
     }
@@ -1078,6 +1191,27 @@ where
                 .map_err(EntityStorageError::decode)?;
             Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
+    }
+
+    fn try_get_uncached(&self, key: &K) -> Result<Option<Arc<E>>, EntityStorageError> {
+        if let Some(cached) = self.entities.get(key) {
+            return Ok(Some(cached.value));
+        }
+
+        if let WriteSink::Worker(worker) = &self.sink {
+            let key_bytes = schema::make_key::<K, E>(key);
+            if let Some(pending) = worker.pending(&key_bytes) {
+                return match pending {
+                    Some(bytes) => Ok(Some(Arc::new(
+                        rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
+                            .map_err(EntityStorageError::decode)?,
+                    ))),
+                    None => Ok(None),
+                };
+            }
+        }
+
+        Ok(self.fetch(key)?.map(|(entity, _)| Arc::new(entity)))
     }
 
     fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
@@ -1392,7 +1526,7 @@ mod test {
     #[test]
     fn cache_modify_persists_through_to_storage() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        let cache = storage
+        let mut cache = storage
             .cache_for::<Address, CacheEntity>(64 * 1024)
             .unwrap();
 
@@ -1412,12 +1546,31 @@ mod test {
     #[test]
     fn cache_modify_missing_entry_returns_none() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        let cache = storage
+        let mut cache = storage
             .cache_for::<Address, CacheEntity>(64 * 1024)
             .unwrap();
 
         let outcome = cache.modify(&Address::from(11u64), |entity: &mut CacheEntity| entity.id);
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn cache_get_mut_persists_on_drop() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let mut cache = storage
+            .cache_for::<Address, CacheEntity>(64 * 1024)
+            .unwrap();
+
+        let key = Address::from(13u64);
+        cache.put(key, cache_entity(13, "before"));
+
+        {
+            let mut guard = cache.get_mut(&key).expect("entry exists");
+            guard.name = "after".to_owned();
+        }
+
+        let stored = storage.get::<Address, CacheEntity>(&key).unwrap();
+        assert_eq!(stored, Some(cache_entity(13, "after")));
     }
 
     #[test]
