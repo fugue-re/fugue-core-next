@@ -4,10 +4,12 @@ use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::Arch;
+use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
 use crate::lazy_symbol;
+use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
@@ -134,6 +136,42 @@ impl AArch64 {
         let variant = variant.or(Some("v8A"));
         let lid = LanguageId::new_with("AARCH64", is_be, 64, variant);
         Ok(loader.load(&lid)?)
+    }
+}
+
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "aarch64";
+
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "AARCH64" && language.address_bits() == 64
+    }
+
+    fn create(language: &'static Language) -> Arch {
+        AArch64::new(language)
+    }
+}
+
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "aarch64";
+
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "AARCH64" || id.bits() != 64 {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => {
+                AArch64::resolve_variant_with(loader, id.is_big_endian(), id.variant())?
+            }
+            None => AArch64::resolve_variant(id.is_big_endian(), id.variant())?,
+        };
+
+        Ok(Some(language))
     }
 }
 

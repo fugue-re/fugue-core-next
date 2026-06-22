@@ -21,7 +21,7 @@ use crate::ir::{
     SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
-use crate::loader::object::object_language;
+use crate::loader::pe::extensions::ImageContext;
 use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
@@ -34,6 +34,8 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
 pub use analysers::PeAnalysers;
+
+pub mod extensions;
 
 mod permissive;
 
@@ -94,6 +96,14 @@ macro_rules! with_pe {
 }
 
 impl<'this, 'data> PeFileRepr<'this, 'data> {
+    pub(crate) fn is_64(&self) -> bool {
+        with_pe!(self, pe | pe.is_64())
+    }
+
+    pub(crate) fn machine(&self) -> u16 {
+        with_pe!(self, pe | pe.nt_headers().file_header().machine.get(LE))
+    }
+
     fn parse(data: &'this BytesOrMapping<'data>) -> Result<Self, LoaderError> {
         let pe = match FileKind::parse(data).map_err(LoaderError::format)? {
             FileKind::Pe32 => Self::Pe32(pe::PeFile32::parse(data).map_err(LoaderError::format)?),
@@ -257,9 +267,6 @@ impl PeLoadState {
         view: &PeFileRepr<'_, '_>,
         attributes: &AttributeMap,
     ) -> Result<Self, LoaderError> {
-        let language = with_pe!(view, pe | object_language(pe))?;
-        let architecture = Arch::new(language);
-
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
         let preferred_base = with_pe!(view, pe | pe.relative_address_base());
 
@@ -280,6 +287,24 @@ impl PeLoadState {
                 ));
             }
         }
+
+        let entry = with_pe!(view, pe | pe.entry());
+        let entry = (entry != 0).then(|| {
+            Address::new(
+                base.space(),
+                entry
+                    .wrapping_sub(preferred_base)
+                    .wrapping_add(base.offset()),
+            )
+        });
+        let context = ImageContext::new(
+            view,
+            base,
+            Address::new(base.space(), preferred_base),
+            entry,
+            attributes,
+        );
+        let architecture = context.resolve_architecture()?;
 
         let symbols = with_pe!(
             view,

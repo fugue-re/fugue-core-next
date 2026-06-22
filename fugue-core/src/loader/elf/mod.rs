@@ -24,7 +24,7 @@ use crate::ir::{
     SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
-use crate::loader::object::object_language;
+use crate::loader::elf::extensions::ImageContext;
 use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoadableSegment, LoadableSegmentBounds, LoaderError,
@@ -37,6 +37,8 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
 pub use analysers::ElfAnalysers;
+
+pub mod extensions;
 
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
@@ -72,6 +74,22 @@ macro_rules! with_elf {
 }
 
 impl<'this, 'data> ElfFileRepr<'this, 'data> {
+    pub(crate) fn is_64(&self) -> bool {
+        with_elf!(self, elf | elf.is_64())
+    }
+
+    pub(crate) fn is_big_endian(&self) -> bool {
+        with_elf!(self, elf | !elf.is_little_endian())
+    }
+
+    pub(crate) fn machine(&self) -> u16 {
+        with_elf!(self, elf | elf.elf_header().e_machine(elf.endian()))
+    }
+
+    pub(crate) fn flags(&self) -> u32 {
+        with_elf!(self, elf | elf.elf_header().e_flags(elf.endian()))
+    }
+
     fn parse(data: &'this BytesOrMapping<'data>) -> Result<Self, LoaderError> {
         let elf = match FileKind::parse(data).map_err(LoaderError::format)? {
             FileKind::Elf32 => {
@@ -113,12 +131,9 @@ impl<'a> Elf<'a> {
     ) -> Result<Self, LoaderError> {
         let object = ElfInner::try_new(data.into(), |data| ElfFileRepr::parse(data))?;
 
-        let view = object.borrow_view();
-        let language = with_elf!(view, elf | object_language(elf))?;
-        let architecture = Arch::new(language);
-
         let attributes = attributes.into();
         let target_space = attributes.get_attr::<AddressSpaceId>(ATTRIBUTE_ADDRESS_SPACE);
+        let view = object.borrow_view();
 
         let preferred_base = with_elf!(
             view,
@@ -142,6 +157,24 @@ impl<'a> Elf<'a> {
                 "cannot rebase a non-relocatable ELF executable",
             ));
         }
+
+        let entry = with_elf!(view, elf | elf.entry());
+        let entry = (entry != 0).then(|| {
+            Address::new(
+                base.space(),
+                entry
+                    .wrapping_sub(preferred_base)
+                    .wrapping_add(base.offset()),
+            )
+        });
+        let context = ImageContext::new(
+            view,
+            base,
+            Address::new(base.space(), preferred_base),
+            entry,
+            &attributes,
+        );
+        let architecture = context.resolve_architecture()?;
 
         let config = ElfLoaderProperties::new(&attributes);
 
@@ -297,14 +330,18 @@ impl ElfSymbolData {
                 }
 
                 let align = sect.align().max(1);
-                let aligned_start = base.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
+                let aligned_start =
+                    base.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
 
                 if aligned_start < base {
                     tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
                     continue;
                 }
 
-                sections.insert(sect.index().0, Address::in_space(aligned_start, target_space));
+                sections.insert(
+                    sect.index().0,
+                    Address::in_space(aligned_start, target_space),
+                );
 
                 base = aligned_start
                     .checked_add(sect.size().max(1))

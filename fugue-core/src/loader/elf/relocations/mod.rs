@@ -4,6 +4,7 @@ use object::{
 };
 
 use crate::ir::{Address, SymbolIndex, SymbolTable};
+use crate::loader::elf::extensions::RelocationContext;
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
 use crate::loader::{LoadableSegment, LoaderError};
 
@@ -73,7 +74,7 @@ where
                 rel.kind()
             );
 
-            self.apply_relocation(lsegm, off, &rel, false);
+            self.apply_relocation(lsegm, off, &rel, false)?;
         }
 
         Ok(())
@@ -119,7 +120,7 @@ where
             // Compute offset in the segment
             let off = off - origin_offset;
 
-            self.apply_relocation(lsegm, off, &rel, true);
+            self.apply_relocation(lsegm, off, &rel, true)?;
         }
 
         Ok(())
@@ -131,27 +132,48 @@ where
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
-    ) {
+    ) -> Result<(), LoaderError> {
+        let patch_address = lsegm.address() + offset;
+        let relocation_type = match reloc.flags() {
+            RelocationFlags::Elf { r_type } => Some(r_type),
+            _ => None,
+        };
+        let mut context = RelocationContext::new(
+            self.elf,
+            self.base,
+            patch_address,
+            offset,
+            relocation_type,
+            is_dynamic,
+            lsegm,
+        );
+
+        if context.apply_relocation()? {
+            return Ok(());
+        }
+
         match self.elf.architecture() {
             Architecture::Aarch64 => {
-                self.apply_aarch64_relocation(lsegm, offset, reloc, is_dynamic);
+                self.apply_aarch64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             Architecture::Arm => {
-                self.apply_arm_relocation(lsegm, offset, reloc, is_dynamic);
+                self.apply_arm_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             Architecture::I386 => {
-                self.apply_x86_relocation(lsegm, offset, reloc, is_dynamic);
+                self.apply_x86_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             Architecture::Mips => {
-                self.apply_mips_relocation(lsegm, offset, reloc, is_dynamic);
+                self.apply_mips_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             Architecture::X86_64 => {
-                self.apply_x86_64_relocation(lsegm, offset, reloc, is_dynamic);
+                self.apply_x86_64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             arch => {
                 tracing::warn!("unsupported architecture {arch:?} for relocation {reloc:?}");
             }
         }
+
+        Ok(())
     }
 
     pub(crate) fn elf_relocation_type(&self, reloc: &Relocation) -> Option<u32> {

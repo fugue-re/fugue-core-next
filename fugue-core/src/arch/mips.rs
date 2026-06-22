@@ -2,9 +2,11 @@
 pub use fugue_lifter::mips::*;
 
 use crate::arch::Arch;
+use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
 use crate::ir::ExternFunctionTemplate;
+use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::{Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter};
 
 #[derive(Clone)]
@@ -111,5 +113,39 @@ impl Mips {
         }
         let lid = LanguageId::new_with("MIPS", is_be, 32, variant);
         Ok(loader.load(&lid)?)
+    }
+}
+
+#[fugue_core::extension]
+impl ArchProvider {
+    const NAME: &str = "mips";
+
+    fn supports(language: &'static Language) -> bool {
+        language.processor() == "MIPS" && language.address_bits() == 32
+    }
+
+    fn create(language: &'static Language) -> Arch {
+        Mips::new(language)
+    }
+}
+
+#[fugue_core::extension]
+impl LanguageProvider {
+    const NAME: &str = "mips";
+
+    fn provide(
+        id: &LanguageId,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<&'static Language>, LanguageError> {
+        if id.processor() != "MIPS" || id.bits() != 32 {
+            return Ok(None);
+        }
+
+        let language = match source.loader() {
+            Some(loader) => Mips::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
+            None => Mips::resolve_variant(id.is_big_endian(), id.variant())?,
+        };
+
+        Ok(Some(language))
     }
 }
