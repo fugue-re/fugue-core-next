@@ -178,13 +178,17 @@ impl Project {
             .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
             .unwrap_or(DEFAULT_FUNCTION_CACHE_BYTES);
 
-        let functions = match storage.writeback() {
-            Some(worker) => {
-                FunctionTable::new_with(storage.entities.clone(), worker.clone(), cache_bytes)
+        let functions = if storage.entities.is_transient() {
+            FunctionTable::new_transient()
+        } else {
+            match storage.writeback() {
+                Some(worker) => {
+                    FunctionTable::new_with(storage.entities.clone(), worker.clone(), cache_bytes)
+                }
+                None => FunctionTable::new(storage.entities.clone(), cache_bytes),
             }
-            None => FunctionTable::new(storage.entities.clone(), cache_bytes),
-        }
-        .inspect_err(|e| tracing::error!("failed to load function table: {e}"))?;
+            .inspect_err(|e| tracing::error!("failed to load function table: {e}"))?
+        };
 
         tracing::trace!("loading project code blocks");
 
@@ -192,15 +196,19 @@ impl Project {
             .get_attr::<usize>(ATTRIBUTE_CODE_BLOCK_CACHE_SIZE)
             .unwrap_or(DEFAULT_CODE_BLOCK_CACHE_BYTES);
 
-        let blocks = match storage.writeback() {
-            Some(worker) => CodeBlockTable::new_with(
-                storage.entities.clone(),
-                worker.clone(),
-                block_cache_bytes,
-            ),
-            None => CodeBlockTable::new(storage.entities.clone(), block_cache_bytes),
-        }
-        .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?;
+        let blocks = if storage.entities.is_transient() {
+            CodeBlockTable::new_transient()
+        } else {
+            match storage.writeback() {
+                Some(worker) => CodeBlockTable::new_with(
+                    storage.entities.clone(),
+                    worker.clone(),
+                    block_cache_bytes,
+                ),
+                None => CodeBlockTable::new(storage.entities.clone(), block_cache_bytes),
+            }
+            .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?
+        };
 
         Ok(Self {
             arch,

@@ -823,6 +823,65 @@ where
     }
 }
 
+pub enum Ref<'a, E>
+where
+    E: Entity,
+{
+    Borrowed(&'a E),
+    Shared(EntityRef<'a, E>),
+}
+
+impl<E> Deref for Ref<'_, E>
+where
+    E: Entity,
+{
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        match *self {
+            Ref::Borrowed(entity) => entity,
+            Ref::Shared(ref entity) => entity.as_ref(),
+        }
+    }
+}
+
+pub enum RefMut<'a, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    Borrowed(&'a mut E),
+    Guard(EntityMut<'a, K, E>),
+}
+
+impl<K, E> Deref for RefMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    type Target = E;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            RefMut::Borrowed(entity) => entity,
+            RefMut::Guard(guard) => guard,
+        }
+    }
+}
+
+impl<K, E> DerefMut for RefMut<'_, K, E>
+where
+    K: EntityKey,
+    E: Entity,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            RefMut::Borrowed(entity) => entity,
+            RefMut::Guard(guard) => guard,
+        }
+    }
+}
+
 pub trait MutableEntity<K: EntityKey>: Entity {
     fn entity_key(&self) -> K;
 }
