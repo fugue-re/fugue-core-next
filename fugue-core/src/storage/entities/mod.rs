@@ -765,60 +765,48 @@ where
     }
 }
 
-pub struct EntityMut<'a, K, E>
+pub struct EntityMut<'a, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
-    cache: &'a EntityCache<K, E>,
-    key: K,
-    shared: Arc<E>,
-    owned: Option<E>,
+    cache: &'a EntityCache<E::Key, E>,
+    entity: Arc<E>,
+    dirty: bool,
 }
 
-impl<K, E> Deref for EntityMut<'_, K, E>
+impl<E> Deref for EntityMut<'_, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     type Target = E;
 
     fn deref(&self) -> &Self::Target {
-        match &self.owned {
-            Some(entity) => entity,
-            None => self.shared.as_ref(),
-        }
+        self.entity.as_ref()
     }
 }
 
-impl<K, E> DerefMut for EntityMut<'_, K, E>
+impl<E> DerefMut for EntityMut<'_, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if self.owned.is_none() {
-            self.owned = Some(self.shared.as_ref().clone());
-        }
-
-        self.owned
-            .as_mut()
-            .expect("owned copy present after promotion")
+        self.dirty = true;
+        Arc::make_mut(&mut self.entity)
     }
 }
 
-impl<K, E> Drop for EntityMut<'_, K, E>
+impl<E> Drop for EntityMut<'_, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     fn drop(&mut self) {
         if std::thread::panicking() {
             return;
         }
 
-        if let Some(entity) = self.owned.take() {
-            self.cache.put(self.key.clone(), entity);
+        if self.dirty {
+            let key = self.entity.entity_key();
+            self.cache.put(key, Arc::clone(&self.entity));
         }
     }
 }
@@ -845,19 +833,17 @@ where
     }
 }
 
-pub enum RefMut<'a, K, E>
+pub enum RefMut<'a, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     Borrowed(&'a mut E),
-    Guard(EntityMut<'a, K, E>),
+    Guard(EntityMut<'a, E>),
 }
 
-impl<K, E> Deref for RefMut<'_, K, E>
+impl<E> Deref for RefMut<'_, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     type Target = E;
 
@@ -869,10 +855,9 @@ where
     }
 }
 
-impl<K, E> DerefMut for RefMut<'_, K, E>
+impl<E> DerefMut for RefMut<'_, E>
 where
-    K: EntityKey,
-    E: Entity,
+    E: MutableEntity,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
@@ -882,8 +867,10 @@ where
     }
 }
 
-pub trait MutableEntity<K: EntityKey>: Entity {
-    fn entity_key(&self) -> K;
+pub trait MutableEntity: Entity {
+    type Key: EntityKey;
+
+    fn entity_key(&self) -> Self::Key;
 }
 
 pub struct EntityTransactionalCacheWriter<'a, K, E>
@@ -1024,7 +1011,7 @@ where
                             .map_err(EntityStorageError::decode)?;
                         Ok(Some(self.admit(
                             key.clone(),
-                            entity,
+                            Arc::new(entity),
                             ByteWeighter::entry_weight(bytes.len()),
                         )))
                     }
@@ -1037,11 +1024,10 @@ where
             return Ok(None);
         };
 
-        Ok(Some(self.admit(key.clone(), entity, weight)))
+        Ok(Some(self.admit(key.clone(), Arc::new(entity), weight)))
     }
 
-    fn admit(&self, key: K, entity: E, weight: u32) -> EntityRef<'_, E> {
-        let entity = Arc::new(entity);
+    fn admit(&self, key: K, entity: Arc<E>, weight: u32) -> EntityRef<'_, E> {
         self.entities.insert(
             key,
             Cached {
@@ -1077,90 +1063,19 @@ where
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_put(&self, key: K, entity: E) -> Result<EntityRef<'_, E>, EntityStorageError> {
-        let weight = self.stage(&key, &entity)?;
+    pub fn try_put(
+        &self,
+        key: K,
+        entity: impl Into<Arc<E>>,
+    ) -> Result<EntityRef<'_, E>, EntityStorageError> {
+        let entity = entity.into();
+        let weight = self.stage(&key, entity.as_ref())?;
 
         Ok(self.admit(key, entity, weight))
     }
 
-    pub fn put(&self, key: K, entity: E) -> EntityRef<'_, E> {
+    pub fn put(&self, key: K, entity: impl Into<Arc<E>>) -> EntityRef<'_, E> {
         self.try_put(key, entity)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_mut(
-        &mut self,
-        key: &K,
-    ) -> Result<Option<EntityMut<'_, K, E>>, EntityStorageError> {
-        let Some(current) = self.try_get(key)? else {
-            return Ok(None);
-        };
-
-        Ok(Some(EntityMut {
-            cache: &*self,
-            key: key.clone(),
-            shared: current.into_arc(),
-            owned: None,
-        }))
-    }
-
-    pub fn get_mut(&mut self, key: &K) -> Option<EntityMut<'_, K, E>> {
-        self.try_get_mut(key)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn get_disjoint_mut<'a>(
-        &'a mut self,
-        keys: impl IntoIterator<Item = K> + 'a,
-    ) -> impl Iterator<Item = EntityMut<'a, K, E>> + 'a {
-        let cache = &*self;
-
-        keys.into_iter().filter_map(move |key| {
-            let shared = cache
-                .try_get_uncached(&key)
-                .unwrap_or_else(|error| error.into_fatal())?;
-
-            Some(EntityMut {
-                cache,
-                key,
-                shared,
-                owned: None,
-            })
-        })
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, K, E>> + '_ {
-        let cache = &*self;
-
-        cache
-            .try_iter()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(move |entry| {
-                let (key, current) = entry.unwrap_or_else(|error| error.into_fatal());
-
-                EntityMut {
-                    cache,
-                    key,
-                    shared: current.into_arc(),
-                    owned: None,
-                }
-            })
-    }
-
-    pub fn try_modify<R>(
-        &mut self,
-        key: &K,
-        f: impl FnOnce(&mut E) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
-        let Some(mut entity) = self.try_get_mut(key)? else {
-            return Ok(None);
-        };
-
-        Ok(Some(f(&mut entity)))
-    }
-
-    pub fn modify<R>(&mut self, key: &K, f: impl FnOnce(&mut E) -> R) -> Option<R> {
-        self.try_modify(key, f)
             .unwrap_or_else(|error| error.into_fatal())
     }
 
@@ -1290,6 +1205,85 @@ where
         }
 
         Ok(weight)
+    }
+}
+
+impl<K, E> EntityCache<K, E>
+where
+    K: EntityKey,
+    E: MutableEntity<Key = K>,
+{
+    pub fn try_get_mut(
+        &mut self,
+        key: &K,
+    ) -> Result<Option<EntityMut<'_, E>>, EntityStorageError> {
+        let Some(current) = self.try_get(key)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(EntityMut {
+            cache: &*self,
+            entity: current.into_arc(),
+            dirty: false,
+        }))
+    }
+
+    pub fn get_mut(&mut self, key: &K) -> Option<EntityMut<'_, E>> {
+        self.try_get_mut(key)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn get_disjoint_mut<'a>(
+        &'a mut self,
+        keys: impl IntoIterator<Item = K> + 'a,
+    ) -> impl Iterator<Item = EntityMut<'a, E>> + 'a {
+        let cache = &*self;
+
+        keys.into_iter().filter_map(move |key| {
+            let entity = cache
+                .try_get_uncached(&key)
+                .unwrap_or_else(|error| error.into_fatal())?;
+
+            Some(EntityMut {
+                cache,
+                entity,
+                dirty: false,
+            })
+        })
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, E>> + '_ {
+        let cache = &*self;
+
+        cache
+            .try_iter()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(move |entry| {
+                let (_, current) = entry.unwrap_or_else(|error| error.into_fatal());
+
+                EntityMut {
+                    cache,
+                    entity: current.into_arc(),
+                    dirty: false,
+                }
+            })
+    }
+
+    pub fn try_modify<R>(
+        &mut self,
+        key: &K,
+        f: impl FnOnce(&mut E) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        let Some(mut entity) = self.try_get_mut(key)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(f(&mut entity)))
+    }
+
+    pub fn modify<R>(&mut self, key: &K, f: impl FnOnce(&mut E) -> R) -> Option<R> {
+        self.try_modify(key, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 }
 
@@ -1432,20 +1426,114 @@ mod test {
     use super::*;
     use crate::ir::Address;
 
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        id: u64,
+        name: String,
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(0);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct CacheEntity {
+        id: u64,
+        name: String,
+    }
+
+    impl Entity for CacheEntity {
+        const ID: EntityId = EntityId::new(0);
+    }
+
+    impl MutableEntity for CacheEntity {
+        type Key = Address;
+
+        fn entity_key(&self) -> Address {
+            Address::from(self.id)
+        }
+    }
+
+    struct FailingBulkProvider(InMemoryEntityStorage);
+
+    impl EntityStorageProvider for FailingBulkProvider {
+        fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+            self.0.get(key)
+        }
+
+        fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+        where
+            F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+        {
+            self.0.get_as(key, f)
+        }
+
+        fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+            self.0.insert(key, value)
+        }
+
+        fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+            self.0.remove(key)
+        }
+
+        fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+            self.0.contains(key)
+        }
+
+        fn iter_prefix_keys(
+            &self,
+            prefix: &[u8],
+        ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+            self.0.iter_prefix_keys(prefix)
+        }
+
+        fn iter_prefix(
+            &self,
+            prefix: &[u8],
+        ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+            self.0.iter_prefix(prefix)
+        }
+
+        fn iter_prefix_as<'a, F, T>(
+            &'a self,
+            prefix: &[u8],
+            f: F,
+        ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+        where
+            F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+            T: 'a,
+        {
+            self.0.iter_prefix_as(prefix, f)
+        }
+
+        fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+            Err(EntityStorageError::backing_with(
+                "bulk inserter unavailable",
+            ))
+        }
+
+        fn transactional_reader(
+            &self,
+        ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+            self.0.transactional_reader()
+        }
+
+        fn transactional_writer(
+            &self,
+        ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+            self.0.transactional_writer()
+        }
+    }
+
+    fn cache_entity(id: u64, name: &str) -> CacheEntity {
+        CacheEntity {
+            id,
+            name: name.to_owned(),
+        }
+    }
+
     #[test]
     fn test_entity_storage() {
-        #[derive(
-            Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-        )]
-        struct TestEntity {
-            id: u64,
-            name: String,
-        }
-
-        impl Entity for TestEntity {
-            const ID: EntityId = EntityId::new(0);
-        }
-
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         let entity = TestEntity {
@@ -1544,23 +1632,6 @@ mod test {
                 .get::<Address, TestEntity>(&Address::from(i as u64))
                 .unwrap();
             assert!(direct.is_none());
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-    struct CacheEntity {
-        id: u64,
-        name: String,
-    }
-
-    impl Entity for CacheEntity {
-        const ID: EntityId = EntityId::new(0);
-    }
-
-    fn cache_entity(id: u64, name: &str) -> CacheEntity {
-        CacheEntity {
-            id,
-            name: name.to_owned(),
         }
     }
 
@@ -1723,77 +1794,6 @@ mod test {
 
         let stored = storage.get::<Address, CacheEntity>(&key).unwrap();
         assert_eq!(stored, Some(cache_entity(5, "five")));
-    }
-
-    struct FailingBulkProvider(InMemoryEntityStorage);
-
-    impl EntityStorageProvider for FailingBulkProvider {
-        fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-            self.0.get(key)
-        }
-
-        fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
-        where
-            F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-        {
-            self.0.get_as(key, f)
-        }
-
-        fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-            self.0.insert(key, value)
-        }
-
-        fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
-            self.0.remove(key)
-        }
-
-        fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-            self.0.contains(key)
-        }
-
-        fn iter_prefix_keys(
-            &self,
-            prefix: &[u8],
-        ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-            self.0.iter_prefix_keys(prefix)
-        }
-
-        fn iter_prefix(
-            &self,
-            prefix: &[u8],
-        ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-            self.0.iter_prefix(prefix)
-        }
-
-        fn iter_prefix_as<'a, F, T>(
-            &'a self,
-            prefix: &[u8],
-            f: F,
-        ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
-        where
-            F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
-            T: 'a,
-        {
-            self.0.iter_prefix_as(prefix, f)
-        }
-
-        fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-            Err(EntityStorageError::backing_with(
-                "bulk inserter unavailable",
-            ))
-        }
-
-        fn transactional_reader(
-            &self,
-        ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-            self.0.transactional_reader()
-        }
-
-        fn transactional_writer(
-            &self,
-        ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-            self.0.transactional_writer()
-        }
     }
 
     #[test]

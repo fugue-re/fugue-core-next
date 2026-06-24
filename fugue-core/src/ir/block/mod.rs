@@ -45,7 +45,9 @@ impl Entity for CodeBlock {
     const ID: EntityId = ENTITY_CODE_BLOCK_ID;
 }
 
-impl MutableEntity<CodeBlockId> for CodeBlock {
+impl MutableEntity for CodeBlock {
+    type Key = CodeBlockId;
+
     fn entity_key(&self) -> CodeBlockId {
         self.id
     }

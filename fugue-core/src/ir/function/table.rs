@@ -13,7 +13,7 @@ use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub type FunctionRef<'a> = Ref<'a, Function>;
-pub type FunctionMut<'a> = RefMut<'a, Id<Function>, Function>;
+pub type FunctionMut<'a> = RefMut<'a, Function>;
 
 const FUNCTION_TABLE_VERSION: u32 = 1;
 
@@ -218,21 +218,21 @@ impl PersistentFunctionTable {
     pub fn get_by_id_mut(
         &mut self,
         id: Id<Function>,
-    ) -> Option<EntityMut<'_, Id<Function>, Function>> {
+    ) -> Option<EntityMut<'_, Function>> {
         self.entries.get_mut(&id)
     }
 
     pub fn try_get_by_id_mut(
         &mut self,
         id: Id<Function>,
-    ) -> Result<Option<EntityMut<'_, Id<Function>, Function>>, EntityStorageError> {
+    ) -> Result<Option<EntityMut<'_, Function>>, EntityStorageError> {
         self.entries.try_get_mut(&id)
     }
 
     pub fn get_by_address_mut(
         &mut self,
         addr: Address,
-    ) -> Option<EntityMut<'_, Id<Function>, Function>> {
+    ) -> Option<EntityMut<'_, Function>> {
         let id = *self.index.addresses.get(&addr)?;
         self.entries.get_mut(&id)
     }
@@ -240,7 +240,7 @@ impl PersistentFunctionTable {
     pub fn try_get_by_address_mut(
         &mut self,
         addr: Address,
-    ) -> Result<Option<EntityMut<'_, Id<Function>, Function>>, EntityStorageError> {
+    ) -> Result<Option<EntityMut<'_, Function>>, EntityStorageError> {
         let Some(&id) = self.index.addresses.get(&addr) else {
             return Ok(None);
         };
@@ -303,7 +303,7 @@ impl PersistentFunctionTable {
             .map(|entry| entry.map(|(_, function)| function)))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, Id<Function>, Function>> + '_ {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = EntityMut<'_, Function>> + '_ {
         self.entries.iter_mut()
     }
 

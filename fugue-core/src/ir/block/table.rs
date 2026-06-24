@@ -30,7 +30,7 @@ impl Entity for CodeBlockTableHeader {
 struct CodeBlockIndex {
     bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     free_ids: Vec<Id<CodeBlock>>,
-    count: usize,
+    live_entries: usize,
 }
 
 pub struct PersistentCodeBlockTable {
@@ -75,10 +75,10 @@ impl CodeBlockTableError {
 }
 
 pub type CodeBlockRef<'a> = Ref<'a, CodeBlock>;
-pub type CodeBlockMut<'a> = RefMut<'a, Id<CodeBlock>, CodeBlock>;
+pub type CodeBlockMut<'a> = RefMut<'a, CodeBlock>;
 
 type PersistentRef<'a> = EntityRef<'a, CodeBlock>;
-type PersistentMut<'a> = EntityMut<'a, Id<CodeBlock>, CodeBlock>;
+type PersistentMut<'a> = EntityMut<'a, CodeBlock>;
 
 pub struct CodeBlockIter<'a> {
     inner: Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a>,
@@ -149,7 +149,7 @@ impl PersistentCodeBlockTable {
     ) -> Result<Self, EntityStorageError> {
         let mut bounds = BTreeMap::<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>::new();
         let mut free_ids = Vec::new();
-        let mut count = 0;
+        let mut live_entries = 0;
         let mut expected = 0u32;
 
         for entry in entries.try_iter()? {
@@ -169,14 +169,14 @@ impl PersistentCodeBlockTable {
                 expected += 1;
             }
             expected = index + 1;
-            count += 1;
+            live_entries += 1;
         }
 
         Ok(Self {
             index: CodeBlockIndex {
                 bounds,
                 free_ids,
-                count,
+                live_entries,
             },
             entries,
         })
@@ -191,7 +191,8 @@ impl PersistentCodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.count));
+        let id = reuse_id
+            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
 
         let block = f(id, addr)?;
 
@@ -213,7 +214,7 @@ impl PersistentCodeBlockTable {
         }
 
         self.entries.put(id, block);
-        self.index.count += 1;
+        self.index.live_entries += 1;
 
         Ok(id)
     }
@@ -249,14 +250,14 @@ impl PersistentCodeBlockTable {
     pub fn get_by_id_mut(
         &mut self,
         id: Id<CodeBlock>,
-    ) -> Option<EntityMut<'_, Id<CodeBlock>, CodeBlock>> {
+    ) -> Option<EntityMut<'_, CodeBlock>> {
         self.entries.get_mut(&id)
     }
 
     pub fn try_get_by_id_mut(
         &mut self,
         id: Id<CodeBlock>,
-    ) -> Result<Option<EntityMut<'_, Id<CodeBlock>, CodeBlock>>, EntityStorageError> {
+    ) -> Result<Option<EntityMut<'_, CodeBlock>>, EntityStorageError> {
         self.entries.try_get_mut(&id)
     }
 
@@ -286,7 +287,7 @@ impl PersistentCodeBlockTable {
 
         self.entries.try_remove(&id)?;
         self.index.free_ids.push(id);
-        self.index.count -= 1;
+        self.index.live_entries -= 1;
 
         Ok(true)
     }
@@ -319,7 +320,7 @@ impl PersistentCodeBlockTable {
             for id in id_set.iter() {
                 self.entries.try_remove(&id)?;
                 self.index.free_ids.push(id);
-                self.index.count -= 1;
+                self.index.live_entries -= 1;
                 removed += 1;
             }
         }
@@ -377,7 +378,7 @@ impl PersistentCodeBlockTable {
             for id in matching {
                 self.entries.try_remove(&id)?;
                 self.index.free_ids.push(id);
-                self.index.count -= 1;
+                self.index.live_entries -= 1;
                 removed += 1;
             }
         }
@@ -510,11 +511,11 @@ impl PersistentCodeBlockTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.count == 0
+        self.index.live_entries == 0
     }
 
     pub fn len(&self) -> usize {
-        self.index.count
+        self.index.live_entries
     }
 }
 
@@ -530,7 +531,7 @@ impl TransientCodeBlockTable {
             index: CodeBlockIndex {
                 bounds: BTreeMap::new(),
                 free_ids: Vec::new(),
-                count: 0,
+                live_entries: 0,
             },
             entries: Vec::new(),
         }
@@ -549,7 +550,8 @@ impl TransientCodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.count));
+        let id = reuse_id
+            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
 
         let block = f(id, addr)?;
 
@@ -575,7 +577,7 @@ impl TransientCodeBlockTable {
             self.entries.resize_with(index + 1, || None);
         }
         self.entries[index] = Some(block);
-        self.index.count += 1;
+        self.index.live_entries += 1;
 
         Ok(id)
     }
@@ -617,7 +619,7 @@ impl TransientCodeBlockTable {
 
         self.entries[id.index()] = None;
         self.index.free_ids.push(id);
-        self.index.count -= 1;
+        self.index.live_entries -= 1;
 
         true
     }
@@ -645,7 +647,7 @@ impl TransientCodeBlockTable {
             for id in id_set.iter() {
                 self.entries[id.index()] = None;
                 self.index.free_ids.push(id);
-                self.index.count -= 1;
+                self.index.live_entries -= 1;
                 removed += 1;
             }
         }
@@ -699,7 +701,7 @@ impl TransientCodeBlockTable {
         for id in matching {
             self.entries[id.index()] = None;
             self.index.free_ids.push(id);
-            self.index.count -= 1;
+            self.index.live_entries -= 1;
         }
 
         removed
@@ -846,11 +848,11 @@ impl TransientCodeBlockTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.count == 0
+        self.index.live_entries == 0
     }
 
     pub fn len(&self) -> usize {
-        self.index.count
+        self.index.live_entries
     }
 }
 
