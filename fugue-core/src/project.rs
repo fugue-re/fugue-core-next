@@ -10,9 +10,9 @@ use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity}
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE,
-    DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider,
-    StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES,
+    DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider, StorageContainer, StorageProvider,
+    StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{

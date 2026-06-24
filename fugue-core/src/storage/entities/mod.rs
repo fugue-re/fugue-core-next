@@ -1213,10 +1213,7 @@ where
     K: EntityKey,
     E: MutableEntity<Key = K>,
 {
-    pub fn try_get_mut(
-        &mut self,
-        key: &K,
-    ) -> Result<Option<EntityMut<'_, E>>, EntityStorageError> {
+    pub fn try_get_mut(&mut self, key: &K) -> Result<Option<EntityMut<'_, E>>, EntityStorageError> {
         let Some(current) = self.try_get(key)? else {
             return Ok(None);
         };

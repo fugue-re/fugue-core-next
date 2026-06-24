@@ -1080,9 +1080,7 @@ mod test {
 
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         table.persist(&storage).unwrap();
-        let reloaded = SymbolTable::from_entity_storage(&storage)
-            .unwrap()
-            .unwrap();
+        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
 
         assert_eq!(table, reloaded);
     }
@@ -1113,9 +1111,7 @@ mod test {
 
         let storage =
             EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
-        let reloaded = SymbolTable::from_entity_storage(&storage)
-            .unwrap()
-            .unwrap();
+        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
 
         assert_eq!(table, reloaded);
         assert_eq!(reloaded.len(), 2);
