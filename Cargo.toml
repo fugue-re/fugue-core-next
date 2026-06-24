@@ -15,6 +15,7 @@ members = [
   "fugue-lifter-packager",
   "fugue-lifter-runtime",
   "fugue-lifter-x86",
+  "fugue-python",
   "fugue-specs",
   "fugue-sleigh",
   "fugue-sleigh-language",
