@@ -3,6 +3,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
@@ -14,18 +15,22 @@ use object::pe::{
 use object::read::pe::{self, ImageNtHeaders, PeFile, PeSection, PeSectionIterator};
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
 use range_set_blaze::RangeSetBlaze;
+use smallvec::{SmallVec, smallvec};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Address, ExternSegment, RawAddress, SegmentProperties, SymbolIndex, SymbolProperties,
-    SymbolTable, SymbolTableSelector,
+    Address, ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, SymbolIndex,
+    SymbolProperties, SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
 use crate::loader::pe::extensions::ImageContext;
 use crate::loader::{
-    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
-    LoadableSegment, LoadableSegmentBounds, LoaderError,
+    DefaultBankWrites, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout,
+    ImageSegment, ImageSegmentBytes, ImageSegmentIterator, ImageSpace, ImageSpaceHandle,
+    ImageWrite, ImageWriteIterator, Loadable, LoadableAnalysers, LoadableFromBytes,
+    LoadableFromFile, LoadableMetadata, LoaderError,
 };
+use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
@@ -134,7 +139,8 @@ impl<'a> PeInner<'a> {
 
 pub struct Pe<'a> {
     object: PeInner<'a>,
-    metadata: LoadableMetadata,
+    metadata: OnceLock<LoadableMetadata>,
+    path: Option<String>,
     attributes: AttributeMap,
 }
 
@@ -169,14 +175,10 @@ impl<'a> Pe<'a> {
     }
 
     fn from_inner(object: PeInner<'a>, attributes: AttributeMap) -> Self {
-        let metadata = LoadableMetadata::new(
-            object.borrow_data(),
-            format!("Fugue v{} PE Loader", env!("CARGO_PKG_VERSION")),
-        );
-
         let mut slf = Self {
             object,
-            metadata,
+            metadata: OnceLock::new(),
+            path: None,
             attributes,
         };
 
@@ -198,7 +200,7 @@ impl<'a> Pe<'a> {
         let path = path.as_ref();
         let data = BytesOrMapping::from_file(path)?;
         let mut loaded = Self::new_with(data, attributes)?;
-        loaded.metadata.set_path(path.display().to_string());
+        loaded.path = Some(path.display().to_string());
         Ok(loaded)
     }
 
@@ -221,7 +223,7 @@ impl<'a> Pe<'a> {
         &self.object.borrow_loaded().state.mapping_hints
     }
 
-    pub fn symbols(&self) -> &SymbolTable {
+    pub fn image_symbols(&self) -> &SymbolTable<ImageAddress> {
         &self.object.borrow_loaded().state.symbols
     }
 
@@ -253,13 +255,16 @@ impl<'this, 'data> PeLoadedRepr<'this, 'data> {
 
 struct PeLoadState {
     architecture: Arch,
+    bank_base: RawAddress,
     base: Address,
     preferred_base: u64,
-    bounds: RangeInclusive<Address>,
+    entry: Option<ImageAddress>,
+    layout: ImageLayout,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: SymbolTable,
+    symbols: SymbolTable<ImageAddress>,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<Address, Address>,
+    segments: Vec<PeImageSegment>,
 }
 
 impl PeLoadState {
@@ -289,14 +294,17 @@ impl PeLoadState {
         }
 
         let entry = with_pe!(view, pe | pe.entry());
-        let entry = (entry != 0).then(|| {
-            Address::new(
-                base.space(),
+        let entry = if entry != 0 {
+            Some(
                 entry
-                    .wrapping_sub(preferred_base)
-                    .wrapping_add(base.offset()),
+                    .checked_sub(preferred_base)
+                    .and_then(|offset| base.checked_add(offset))
+                    .ok_or_else(|| LoaderError::address_overflow(base))?,
             )
-        });
+        } else {
+            None
+        };
+        let image_entry = entry.map(|entry| ImageAddress::in_default_space(entry.offset()));
         let context = ImageContext::new(
             view,
             base,
@@ -318,16 +326,87 @@ impl PeLoadState {
             extern_segm,
             import_slots,
         } = symbols;
+        let bank_base: RawAddress = (*bounds.start()).into();
+        let bank_size = bounds
+            .end()
+            .checked_offset_from(*bounds.start())
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| LoaderError::address_overflow(base))?;
+
+        let (placements, spaces) = with_pe!(
+            view,
+            pe | {
+                let mut walk =
+                    PeSegmentWalk::new(pe, base, preferred_base, bank_base, &extern_segm);
+                let mut placements = Vec::new();
+                while let Some(placement) = walk.next_segment()? {
+                    placements.push(placement);
+                }
+                let spaces = walk.into_spaces();
+                (placements, spaces)
+            }
+        );
+
+        let mut symbol_indices_by_offset =
+            BTreeMap::<RawAddress, SmallVec<[SymbolIndex; 1]>>::new();
+        for (index, symbol) in &symbols {
+            symbol_indices_by_offset
+                .entry(symbol.address.into())
+                .or_default()
+                .push(*index);
+        }
+
+        let mut space_by_index = BTreeMap::<SymbolIndex, ImageSpaceHandle>::new();
+        for placement in &placements {
+            let start = placement.address.offset();
+            let Some(last) = start.checked_add(placement.size.saturating_sub(1) as u64) else {
+                continue;
+            };
+            let covered = symbol_indices_by_offset
+                .range(start..=last)
+                .map(|(offset, _)| *offset)
+                .collect::<SmallVec<[RawAddress; 8]>>();
+            for offset in covered {
+                let Some(indices) = symbol_indices_by_offset.remove(&offset) else {
+                    continue;
+                };
+                for index in indices {
+                    space_by_index.insert(index, placement.space());
+                }
+            }
+        }
+
+        let mut image_symbols = SymbolTable::<ImageAddress>::new();
+        for (index, symbol) in symbols {
+            let space = space_by_index.get(&index).copied().unwrap_or_default();
+            image_symbols.insert(
+                index,
+                ImageAddress::new(space, symbol.address),
+                symbol.name,
+                symbol.properties,
+            );
+        }
+
+        let layout = ImageLayout::new(
+            smallvec![ImageBank::new(
+                ImageBankHandle::default(),
+                RawAddress::zero()..bank_size.into(),
+            )],
+            spaces,
+        );
 
         Ok(Self {
             architecture,
+            bank_base,
             base,
             preferred_base,
-            bounds,
+            entry: image_entry,
+            layout,
             mapping_hints,
-            symbols,
+            symbols: image_symbols,
             extern_segm,
             import_slots,
+            segments: placements,
         })
     }
 
@@ -338,10 +417,16 @@ impl PeLoadState {
     }
 }
 
+struct RawPeSymbol {
+    address: Address,
+    name: String,
+    properties: SymbolProperties,
+}
+
 struct PeSymbolData {
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: SymbolTable,
+    symbols: BTreeMap<SymbolIndex, RawPeSymbol>,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<Address, Address>,
 }
@@ -369,12 +454,11 @@ impl PeSymbolData {
                 continue;
             }
 
-            let address = Address::new(
-                target_space,
-                sect.address()
-                    .wrapping_sub(preferred_base)
-                    .wrapping_add(base.offset()),
-            );
+            let address = sect
+                .address()
+                .checked_sub(preferred_base)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| LoaderError::address_overflow(base))?;
             let last_address = address
                 .checked_add(sect.size().wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(base))?;
@@ -397,7 +481,7 @@ impl PeSymbolData {
             return Err(LoaderError::address_overflow(base));
         }
 
-        let mut symbols = SymbolTable::new();
+        let mut symbols = BTreeMap::<SymbolIndex, RawPeSymbol>::new();
         let mut extern_segm = ExternSegment::new(
             Address::new(target_space, aligned_extern_base),
             addr_align,
@@ -412,21 +496,21 @@ impl PeSymbolData {
             .into_iter()
             .enumerate()
         {
-            let address = Address::new(
-                target_space,
-                export
-                    .address()
-                    .wrapping_sub(preferred_base)
-                    .wrapping_add(base.offset()),
-            );
+            let address = export
+                .address()
+                .checked_sub(preferred_base)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| LoaderError::address_overflow(base))?;
             let properties = symbol_properties_for_address(address, &sections)
                 | SymbolProperties::LOCAL
                 | SymbolProperties::EXPORT;
             symbols.insert(
                 SymbolIndex::new(PE_EXPORT_SELECTOR, index),
-                address,
-                String::from_utf8_lossy(export.name()).into_owned(),
-                properties,
+                RawPeSymbol {
+                    address,
+                    name: String::from_utf8_lossy(export.name()).into_owned(),
+                    properties,
+                },
             );
         }
 
@@ -476,9 +560,11 @@ impl PeSymbolData {
 
                     symbols.insert(
                         SymbolIndex::new(PE_IMPORT_SELECTOR, import_index),
-                        extern_address,
-                        name,
-                        SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
+                        RawPeSymbol {
+                            address: extern_address,
+                            name,
+                            properties: SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
+                        },
                     );
 
                     let thunk_offset = (thunk_index as u64)
@@ -561,7 +647,7 @@ where
     props
 }
 
-struct PeLoadableSegments<'data, 'file, Pe, R>
+struct PeImageSegmentBytes<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
@@ -576,7 +662,7 @@ where
     extern_segm: Option<&'file ExternSegment>,
 }
 
-impl<'data, 'file, Pe, R> PeLoadableSegments<'data, 'file, Pe, R>
+impl<'data, 'file, Pe, R> PeImageSegmentBytes<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
@@ -609,7 +695,7 @@ where
         )
     }
 
-    fn extern_segment(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    fn extern_segment(&mut self) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         let Some(externs) = self
             .extern_segm
             .take()
@@ -634,19 +720,16 @@ where
         self.covered
             .ranges_insert(address.offset()..=last_address.offset());
 
-        Ok(Some(LoadableSegment {
-            name: Cow::Borrowed("EXTERN"),
+        Ok(Some(ImageSegmentBytes::new(
             address,
-            properties: SegmentProperties::EXTERNAL
+            SegmentProperties::EXTERNAL
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
-            bytes: Cow::Owned(bytes),
-            function_hints: Cow::Owned(externs.iter().collect::<BTreeSet<_>>()),
-            ..Default::default()
-        }))
+            Cow::Owned(bytes),
+        )))
     }
 
-    fn next_section(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    fn next_section(&mut self) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         let relocator = self.relocator();
 
         for sect in self.sects.by_ref() {
@@ -680,7 +763,7 @@ where
             }
 
             let data = sect.data().unwrap_or_default();
-            let bytes = if data.len() as u64 != sect.size() {
+            let contents = if data.len() as u64 != sect.size() {
                 let mut data = data.to_owned();
                 data.resize(sect.size() as usize, 0);
                 Cow::Owned(data)
@@ -688,38 +771,268 @@ where
                 Cow::Borrowed(data)
             };
 
-            let mut lsegm = LoadableSegment {
-                name: sect
-                    .name()
-                    .ok()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
-                address,
-                properties: pe_section_properties(&sect),
-                bytes,
-                ..Default::default()
-            };
+            let mut bytes = ImageSegmentBytes::new(address, pe_section_properties(&sect), contents);
 
             self.covered.ranges_insert(vrange);
-            relocator.apply(&mut lsegm)?;
+            relocator.apply(&mut bytes)?;
 
-            return Ok(Some(lsegm));
+            return Ok(Some(bytes));
         }
 
         self.extern_segment()
     }
 }
 
-impl<'data, 'file, Pe, R> FallibleIterator for PeLoadableSegments<'data, 'file, Pe, R>
+impl<'data, 'file, Pe, R> FallibleIterator for PeImageSegmentBytes<'data, 'file, Pe, R>
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
     'file: 'data,
 {
     type Error = LoaderError;
-    type Item = LoadableSegment<'data>;
+    type Item = ImageSegmentBytes<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
         self.next_section()
+    }
+}
+
+struct PeRegion<'data> {
+    name: Cow<'data, str>,
+    address: Address,
+    size: usize,
+    properties: SegmentProperties,
+    provenance: SegmentMappingProvenance,
+}
+
+struct PeImageSegment {
+    name: String,
+    address: ImageAddress,
+    backing_offset: RawAddress,
+    size: usize,
+    properties: SegmentProperties,
+    provenance: SegmentMappingProvenance,
+}
+
+impl PeImageSegment {
+    fn space(&self) -> ImageSpaceHandle {
+        self.address.space()
+    }
+}
+
+struct PeSegmentWalk<'data, 'file, Pe, R>
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    base: Address,
+    preferred_base: u64,
+    bank_base: RawAddress,
+    base_space: ImageSpaceHandle,
+    sects: PeSectionIterator<'data, 'file, Pe, R>,
+    extern_segm: Option<&'file ExternSegment>,
+    covered: RawAddressRangeSet,
+    spaces: SmallVec<[ImageSpace; 4]>,
+}
+
+impl<'data, 'file, Pe, R> PeSegmentWalk<'data, 'file, Pe, R>
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    fn new(
+        pe: &'file PeFile<'data, Pe, R>,
+        base: Address,
+        preferred_base: u64,
+        bank_base: RawAddress,
+        extern_segm: &'file ExternSegment,
+    ) -> Self {
+        let base_space = ImageSpaceHandle::default();
+        Self {
+            base,
+            preferred_base,
+            bank_base,
+            base_space,
+            sects: pe.sections(),
+            extern_segm: Some(extern_segm),
+            covered: RawAddressRangeSet::new(),
+            spaces: smallvec![ImageSpace::base(base_space, ImageBankHandle::default())],
+        }
+    }
+
+    fn into_spaces(self) -> SmallVec<[ImageSpace; 4]> {
+        self.spaces
+    }
+
+    fn next_region(&mut self) -> Result<Option<PeRegion<'data>>, LoaderError> {
+        for sect in self.sects.by_ref() {
+            if sect.size() == 0 {
+                continue;
+            }
+
+            let address = Address::new(
+                self.base.space(),
+                sect.address()
+                    .wrapping_sub(self.preferred_base)
+                    .wrapping_add(self.base.offset()),
+            );
+            let size = usize::try_from(sect.size()).map_err(LoaderError::format)?;
+            let name = sect
+                .name()
+                .ok()
+                .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed);
+
+            return Ok(Some(PeRegion {
+                name,
+                address,
+                size,
+                properties: pe_section_properties(&sect),
+                provenance: SegmentMappingProvenance::Section,
+            }));
+        }
+
+        Ok(self.next_extern_region())
+    }
+
+    fn next_extern_region(&mut self) -> Option<PeRegion<'data>> {
+        let externs = self
+            .extern_segm
+            .take()
+            .filter(|externs| !externs.is_empty())?;
+        Some(PeRegion {
+            name: Cow::Borrowed("EXTERN"),
+            address: externs.address(),
+            size: externs.size(),
+            properties: SegmentProperties::EXTERNAL
+                | SegmentProperties::PERM_READ
+                | SegmentProperties::PERM_EXECUTE,
+            provenance: SegmentMappingProvenance::Extern,
+        })
+    }
+
+    fn next_segment(&mut self) -> Result<Option<PeImageSegment>, LoaderError> {
+        let Some(region) = self.next_region()? else {
+            return Ok(None);
+        };
+        let PeRegion {
+            name,
+            address,
+            size,
+            properties,
+            provenance,
+        } = region;
+
+        let last = address
+            .checked_add(size.saturating_sub(1) as u64)
+            .ok_or_else(|| LoaderError::address_overflow(address))?;
+        let backing_offset = address
+            .checked_sub(self.bank_base)
+            .ok_or_else(|| LoaderError::address_overflow(address))?;
+        let range: RangeInclusive<RawAddress> = address.into()..=last.into();
+        let overlaps = self.covered.intersects_range(range.clone());
+
+        let space = if overlaps {
+            let handle = ImageSpaceHandle::new(self.spaces.len() as u16);
+            self.spaces
+                .push(ImageSpace::overlay(handle, self.base_space));
+            handle
+        } else {
+            self.base_space
+        };
+
+        self.covered.insert_range(range);
+
+        Ok(Some(PeImageSegment {
+            name: name.into_owned(),
+            address: ImageAddress::new(space, address),
+            backing_offset: backing_offset.into(),
+            size,
+            properties,
+            provenance,
+        }))
+    }
+}
+
+struct PeImageSegments<'a> {
+    segments: std::slice::Iter<'a, PeImageSegment>,
+    mapping_space: AddressSpaceId,
+    mapping_hints: &'a BTreeMap<Address, ContextHint>,
+    image_symbols: &'a SymbolTable<ImageAddress>,
+}
+
+impl<'a> PeImageSegments<'a> {
+    fn new(
+        segments: &'a [PeImageSegment],
+        mapping_space: AddressSpaceId,
+        mapping_hints: &'a BTreeMap<Address, ContextHint>,
+        image_symbols: &'a SymbolTable<ImageAddress>,
+    ) -> Self {
+        Self {
+            segments: segments.iter(),
+            mapping_space,
+            mapping_hints,
+            image_symbols,
+        }
+    }
+
+    fn image_segment(&self, segment: &'a PeImageSegment) -> ImageSegment<'a> {
+        let seg_start = segment.address.offset();
+        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
+
+        let (mapping_hints, function_hints) = match seg_last {
+            Some(seg_last) => {
+                let mapping_hints = self
+                    .mapping_hints
+                    .range(
+                        Address::new(self.mapping_space, seg_start)
+                            ..=Address::new(self.mapping_space, seg_last),
+                    )
+                    .map(|(addr, hint)| (addr.offset().into(), hint.clone()))
+                    .collect::<BTreeMap<RawAddress, ContextHint>>();
+
+                let space = segment.address.space();
+                let function_hints = self
+                    .image_symbols
+                    .range_by_address(
+                        ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
+                    )
+                    .filter(|(_, entry)| {
+                        entry
+                            .properties()
+                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                    })
+                    .map(|(_, entry)| entry.address().offset())
+                    .collect::<BTreeSet<RawAddress>>();
+
+                (mapping_hints, function_hints)
+            }
+            None => (BTreeMap::new(), BTreeSet::new()),
+        };
+
+        ImageSegment::new(
+            Cow::Borrowed(segment.name.as_str()),
+            segment.address,
+            segment.size,
+            segment.properties,
+        )
+        .with_backing(ImageBacking::in_default_bank(segment.backing_offset))
+        .with_provenance(segment.provenance)
+        .with_mapping_hints(Cow::Owned(mapping_hints))
+        .with_function_hints(Cow::Owned(function_hints))
+    }
+}
+
+impl<'a> FallibleIterator for PeImageSegments<'a> {
+    type Error = LoaderError;
+    type Item = ImageSegment<'a>;
+
+    fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
+        let Some(segment) = self.segments.next() else {
+            return Ok(None);
+        };
+        Ok(Some(self.image_segment(segment)))
     }
 }
 
@@ -754,43 +1067,64 @@ impl Loadable for Pe<'_> {
     }
 
     fn metadata(&self) -> &LoadableMetadata {
-        &self.metadata
+        self.metadata.get_or_init(|| {
+            LoadableMetadata::new_with(
+                self.object.borrow_data(),
+                self.path.clone(),
+                format!("Fugue v{} PE Loader", env!("CARGO_PKG_VERSION")),
+            )
+        })
     }
 
     fn architecture(&self) -> Arch {
         self.object.borrow_loaded().state.architecture.clone()
     }
 
-    fn symbols(&self) -> Option<&SymbolTable> {
+    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
         Some(&self.object.borrow_loaded().state.symbols)
     }
 
-    fn segments<'b>(
+    fn entry_point(&self) -> Option<ImageAddress> {
+        self.object.borrow_loaded().state.entry
+    }
+
+    fn image_segments<'b>(
         &'b self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'b>, Error = LoaderError> + 'b {
+    ) -> impl FallibleIterator<Item = ImageSegment<'b>, Error = LoaderError> + 'b {
+        let state = &self.object.borrow_loaded().state;
+
+        Box::new(PeImageSegments::new(
+            &state.segments,
+            state.base.space(),
+            &state.mapping_hints,
+            &state.symbols,
+        )) as ImageSegmentIterator<'b>
+    }
+
+    fn image_layout(&self) -> &ImageLayout {
+        &self.object.borrow_loaded().state.layout
+    }
+
+    fn image_writes<'b>(
+        &'b self,
+    ) -> impl FallibleIterator<Item = ImageWrite<'b>, Error = LoaderError> + 'b {
         let loaded = self.object.borrow_loaded();
         let view = &loaded.view;
         let state = &loaded.state;
 
         with_pe!(
             view,
-            pe | Box::new(PeLoadableSegments::new(
-                pe,
-                state.base,
-                state.preferred_base,
-                &state.import_slots,
-                &state.extern_segm,
-            ))
-                as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
+            pe | Box::new(DefaultBankWrites::new(
+                PeImageSegmentBytes::new(
+                    pe,
+                    state.base,
+                    state.preferred_base,
+                    &state.import_slots,
+                    &state.extern_segm,
+                ),
+                state.bank_base,
+            )) as ImageWriteIterator<'b>
         )
-    }
-
-    fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let loaded = self.object.borrow_loaded();
-        let bounds = &loaded.state.bounds;
-        let start = *bounds.start();
-        let end = bounds.end().checked_add(1u64).unwrap_or(*bounds.end());
-        LoadableSegmentBounds::new(start..end)
     }
 
     fn analysers(&self) -> impl LoadableAnalysers {
@@ -800,6 +1134,7 @@ impl Loadable for Pe<'_> {
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
     use std::convert::TryInto;
 
     use fallible_iterator::FallibleIterator;
@@ -810,25 +1145,83 @@ mod test {
 
     use super::{ATTRIBUTE_PERMISSIVE, Pe};
     use crate::attributes;
-    use crate::ir::{Address, RawAddress};
-    use crate::loader::{Loadable, LoadableSegment, LoaderError};
+    use crate::ir::{Address, RawAddress, SegmentProperties};
+    use crate::loader::{
+        ImageAddress, ImageBacking, ImageBankHandle, ImageSegmentBytes, Loadable, LoaderError,
+    };
     use crate::types::BytesOrMapping;
     use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
 
+    struct LoadedSegment {
+        address: ImageAddress,
+        backing: ImageBacking,
+        properties: SegmentProperties,
+        size: usize,
+    }
+
+    impl LoadedSegment {
+        fn resolve(
+            &self,
+            bank: ImageBankHandle,
+            offset: u64,
+        ) -> Option<(Address, SegmentProperties)> {
+            if self.backing.bank() != bank {
+                return None;
+            }
+
+            let start = self.backing.offset().offset();
+            let end = start.checked_add(self.size as u64)?;
+            if offset < start || offset >= end {
+                return None;
+            }
+
+            let delta = offset - start;
+            let address = Address::from(self.address.offset().offset().wrapping_add(delta));
+            Some((address, self.properties))
+        }
+    }
+
     fn load_segments(
         pe: &Pe<'_>,
-    ) -> Result<Vec<LoadableSegment<'static>>, Box<dyn std::error::Error>> {
-        let mut segments = pe.segments();
+    ) -> Result<Vec<ImageSegmentBytes<'static>>, Box<dyn std::error::Error>> {
+        let mut segments = Vec::new();
+        let mut image_segments = pe.image_segments();
+        while let Some(segment) = image_segments.next()? {
+            if let Some(backing) = segment.backing() {
+                segments.push(LoadedSegment {
+                    address: segment.address(),
+                    backing,
+                    properties: segment.properties(),
+                    size: segment.size(),
+                });
+            }
+        }
+
+        let mut writes = pe.image_writes();
         let mut loaded = Vec::new();
 
-        while let Some(segm) = segments.next()? {
-            loaded.push(segm.into_owned());
+        while let Some(write) = writes.next()? {
+            let (address, properties) = segments
+                .iter()
+                .find_map(|segment| segment.resolve(write.bank(), write.offset().offset()))
+                .unwrap_or_else(|| {
+                    (
+                        Address::from(write.offset().offset()),
+                        SegmentProperties::PERM_ALL,
+                    )
+                });
+
+            loaded.push(ImageSegmentBytes::new(
+                address,
+                properties,
+                Cow::Owned(write.bytes().to_owned()),
+            ));
         }
 
         Ok(loaded)
     }
 
-    fn read_u64_at(segments: &[LoadableSegment<'static>], address: Address) -> Option<u64> {
+    fn read_u64_at(segments: &[ImageSegmentBytes<'static>], address: Address) -> Option<u64> {
         segments.iter().find_map(|segment| {
             let offset = segment.offset_of(address)?;
             segment.read_value::<u64>(offset)
@@ -915,7 +1308,7 @@ mod test {
         let segments = load_segments(&pe)?;
 
         assert!(!segments.is_empty());
-        assert!(pe.symbols().iter().next().is_some());
+        assert!(pe.image_symbols().iter().next().is_some());
         assert!(!pe.extern_segment().is_empty());
 
         Ok(())
@@ -949,7 +1342,7 @@ mod test {
         let pe = Pe::new(data)?;
         let segments = load_segments(&pe)?;
         let expected = pe
-            .symbols()
+            .image_symbols()
             .iter()
             .find_map(|(_, entry)| {
                 (entry.symbol().as_str() == symbol_name).then_some(entry.address())
@@ -957,7 +1350,7 @@ mod test {
             .expect("import symbol");
         let actual = read_u64_at(&segments, Address::from(slot_address)).expect("import slot");
 
-        assert_eq!(actual, expected.offset());
+        assert_eq!(actual, expected.offset().offset());
 
         Ok(())
     }

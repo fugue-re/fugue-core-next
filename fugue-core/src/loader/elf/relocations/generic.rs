@@ -2,7 +2,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
 
 use super::ElfSegmentRelocator;
-use crate::loader::LoadableSegment;
+use crate::loader::ImageSegmentBytes;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -12,7 +12,7 @@ where
 {
     pub(crate) fn apply_generic_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         offset: u64,
         reloc: &Relocation,
         reloc_type: RelocationKind,
@@ -32,9 +32,9 @@ where
                 tracing::trace!("applying relocation {reloc_type:?} at {offset:#x}: {value:#x}");
 
                 if reloc.size() == 32 {
-                    lsegm.write_value(offset, value as u32);
+                    bytes.write_value(offset, value as u32);
                 } else {
-                    lsegm.write_value(offset, value);
+                    bytes.write_value(offset, value);
                 }
             }
             RelocationKind::Relative
@@ -47,19 +47,19 @@ where
 
                 if [RelocationKind::GotRelative, RelocationKind::PltRelative].contains(&reloc_type)
                 {
-                    self.mark_function_symbol(value, lsegm);
+                    self.mark_function_symbol(value, bytes);
                 }
 
                 let value = value
                     .wrapping_add_signed(reloc.addend())
-                    .wrapping_sub(lsegm.address().offset().wrapping_add(offset as u64));
+                    .wrapping_sub(bytes.address().offset().wrapping_add(offset as u64));
 
                 tracing::trace!("applying relocation {reloc_type:?} at {offset:#x}: {value:#x}");
 
                 if reloc.size() == 32 {
-                    lsegm.write_value(offset, value as u32);
+                    bytes.write_value(offset, value as u32);
                 } else {
-                    lsegm.write_value(offset, value);
+                    bytes.write_value(offset, value);
                 }
             }
             _ => {

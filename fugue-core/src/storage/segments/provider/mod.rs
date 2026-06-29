@@ -3,7 +3,6 @@ use std::fmt::Debug;
 use std::path::Path;
 
 use crate::ir::{Address, SegmentProperties};
-use crate::loader::Loadable;
 use crate::storage::StoragePersistence;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
@@ -155,17 +154,6 @@ pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'stat
 pub trait SegmentStorageProviderFromLoadable:
     SegmentStorageProviderFromSegmentRange + SegmentStorageProviderDescriptor
 {
-    fn from_loadable(
-        loader: &impl Loadable,
-        attributes: &mut AttributeMap,
-    ) -> Result<Self, SegmentStorageError>
-    where
-        Self: Sized,
-    {
-        let bounds = loader.segment_bounds();
-        let range = bounds.first();
-        Self::from_segment_range(range.start, range.end, attributes)
-    }
 }
 
 impl<T> SegmentStorageProviderFromLoadable for T where

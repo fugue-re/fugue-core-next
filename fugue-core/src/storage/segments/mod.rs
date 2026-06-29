@@ -3,15 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::mem;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
-use crate::loader::{Loadable, LoaderError};
+use crate::loader::{ImageResolution, ImageSpaceKind, Loadable, LoaderError};
 use crate::storage::PERSISTENT;
 use crate::storage::segments::provider::SegmentStorageProviderDescriptor;
 use crate::types::AttributeMap;
@@ -25,7 +26,7 @@ pub mod view;
 
 use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
-    SegmentMappingKind,
+    SegmentMappingKind, SegmentMappingProvenance,
 };
 use provider::SegmentStorageProviderRegistry;
 pub use provider::{
@@ -34,7 +35,7 @@ pub use provider::{
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
-use space::{AddressSpace, AddressSpaceId};
+use space::{AddressSpace, AddressSpaceId, AddressSpaceKind};
 use view::SegmentMappingView;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
@@ -42,7 +43,6 @@ pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
 pub const DEFAULT_SPACE_ID: AddressSpaceId = AddressSpaceId::new(0);
 const DEFAULT_FILL_BYTE: u8 = 0;
-const DEFAULT_PROVIDER_ID: SegmentStorageProviderId = SegmentStorageProviderId::new(0);
 
 const SEGMENT_STORAGE_FILE: &str = "segment.storage.bin";
 
@@ -94,6 +94,7 @@ struct ProviderMetadata {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct AddressSpaceMetadata {
     id: AddressSpaceId,
+    kind: AddressSpaceKind,
     mapping_ids: Vec<SegmentMappingId>,
 }
 
@@ -105,6 +106,7 @@ struct MappingMetadata {
     size: usize,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     mapping_hints: BTreeMap<Address, ContextHint>,
     function_hints: BTreeSet<Address>,
@@ -135,6 +137,32 @@ impl Default for SegmentStorage {
     }
 }
 
+pub struct LoadedSegmentStorage {
+    storage: SegmentStorage,
+    resolution: ImageResolution,
+}
+
+impl LoadedSegmentStorage {
+    fn new(storage: SegmentStorage, resolution: ImageResolution) -> Self {
+        Self {
+            storage,
+            resolution,
+        }
+    }
+
+    pub fn storage(&self) -> &SegmentStorage {
+        &self.storage
+    }
+
+    pub fn resolution(&self) -> &ImageResolution {
+        &self.resolution
+    }
+
+    pub fn into_parts(self) -> (SegmentStorage, ImageResolution) {
+        (self.storage, self.resolution)
+    }
+}
+
 impl SegmentStorage {
     pub fn empty() -> Self {
         let mut spaces = BTreeMap::new();
@@ -154,7 +182,7 @@ impl SegmentStorage {
     pub fn from_loadable<S>(
         loader: &impl Loadable,
         attributes: &mut AttributeMap,
-    ) -> Result<Self, SegmentStorageError>
+    ) -> Result<LoadedSegmentStorage, SegmentStorageError>
     where
         S: SegmentStorageProviderFromLoadable + 'static,
     {
@@ -168,64 +196,110 @@ impl SegmentStorage {
                     "segment storage already exists at {}; loading from storage",
                     meta_path.display()
                 );
-                return Self::from_storage_internal(&project_path, attributes);
+                let storage = Self::from_storage_internal(&project_path, attributes)?;
+                return Ok(LoadedSegmentStorage::new(
+                    storage,
+                    ImageResolution::default(),
+                ));
             }
         }
 
-        let bounds = loader.segment_bounds();
         let mut storage = Self::empty();
-        let mut space_providers =
-            BTreeMap::<AddressSpaceId, (AddressSpaceId, SegmentStorageProviderId)>::new();
+        let layout = loader.image_layout();
+        let mut resolution = ImageResolution::default();
 
-        for (space_idx, range) in bounds.iter() {
-            let space_id = if space_idx == 0 {
-                DEFAULT_SPACE_ID
-            } else {
-                storage.create_space()?
-            };
-
-            let provider = S::from_segment_range(range.start, range.end, attributes)?;
+        for bank in layout.banks() {
+            let range = bank.range();
+            let end = u64::from(range.end)
+                .checked_sub(1)
+                .filter(|end| *end >= u64::from(range.start))
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            let start = Address::new(DEFAULT_SPACE_ID, range.start);
+            let end = Address::new(DEFAULT_SPACE_ID, end);
+            let provider = S::from_segment_range(start, end, attributes)?;
             let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
-
-            space_providers.insert(
-                AddressSpaceId::try_from(space_idx)
-                    .expect("space index is convertable to a space identifier"),
-                (space_id, provider_id),
-            );
+            resolution.insert_bank(bank.handle(), provider_id);
         }
 
-        let mut siter = loader.segments();
+        for space in layout.spaces() {
+            let space_id = if storage.spaces.len() == 1
+                && storage
+                    .spaces
+                    .get(&DEFAULT_SPACE_ID)
+                    .map(|space| space.priority_list().is_empty())
+                    .unwrap_or_default()
+            {
+                storage.spaces.remove(&DEFAULT_SPACE_ID);
+                DEFAULT_SPACE_ID
+            } else {
+                AddressSpaceId::try_from(storage.space_ctr)?
+            };
 
-        while let Some(segm) = siter.next()? {
-            let (space_id, provider_id) = space_providers
-                .get(&segm.space())
-                .copied()
-                .unwrap_or((DEFAULT_SPACE_ID, DEFAULT_PROVIDER_ID));
+            let kind = match space.kind() {
+                ImageSpaceKind::Base { .. } => AddressSpaceKind::Base,
+                ImageSpaceKind::Overlay { base } => AddressSpaceKind::Overlay {
+                    base: resolution
+                        .resolve_space(base)
+                        .ok_or(SegmentStorageError::InvalidAddress)?,
+                },
+            };
 
-            let range = &bounds[segm.space().index()];
-            let physical_offset = segm.address().offset().wrapping_sub(range.start.offset());
+            storage
+                .spaces
+                .insert(space_id, AddressSpace::new_with(space_id, kind));
+            storage.space_ctr = storage.space_ctr.max(space_id.index() + 1);
+            resolution.insert_space(space.handle(), space_id);
+        }
 
-            tracing::debug!(
-                "loading segment {} ({}-{}) at offset {physical_offset:#x} in space {space_id}",
-                segm.name(),
-                segm.address(),
-                segm.next_address()
-            );
+        let mut writes = loader.image_writes();
 
-            storage.write_bytes_direct(provider_id, physical_offset, segm.bytes())?;
+        while let Some(write) = writes.next()? {
+            let provider_id = resolution
+                .resolve_bank(write.bank())
+                .ok_or(SegmentStorageError::InvalidAddress)?;
+            storage.write_bytes_direct(provider_id, write.offset().offset(), write.bytes())?;
+        }
 
-            let mapping_id = storage.create_mapping_with_metadata(
-                provider_id,
-                segm.address(),
-                segm.len(),
-                physical_offset,
-                segm.properties(),
-                segm.name().to_owned(),
-                segm.mapping_hints().clone(),
-                segm.function_hints().clone(),
+        let mut segments = loader.image_segments();
+
+        while let Some(segment) = segments.next()? {
+            let address = resolution
+                .resolve_address(segment.address())
+                .ok_or(SegmentStorageError::InvalidAddress)?;
+            let backing = segment
+                .backing()
+                .ok_or(SegmentStorageError::InvalidAddress)?;
+            let provider_id = resolution
+                .resolve_bank(backing.bank())
+                .ok_or(SegmentStorageError::InvalidAddress)?;
+            let size = segment.size();
+            let properties = segment.properties();
+            let provenance = segment.provenance();
+            let segment_space = address.space();
+            let (name, segment_mapping_hints, segment_function_hints) =
+                segment.into_name_and_hints();
+
+            let mapping_hints = segment_mapping_hints
+                .into_owned()
+                .into_iter()
+                .map(|(offset, hint)| (Address::new(segment_space, offset), hint))
+                .collect::<BTreeMap<_, _>>();
+            let function_hints = segment_function_hints
+                .into_owned()
+                .into_iter()
+                .map(|offset| Address::new(segment_space, offset))
+                .collect::<BTreeSet<_>>();
+
+            let mapping_id = storage.create_mapping_from_builder(
+                SegmentMappingBuilder::new(address, size, backing.offset().offset(), provider_id)
+                    .with_properties(properties)
+                    .with_name(name)
+                    .with_provenance(provenance)
+                    .with_mapping_hints(mapping_hints)
+                    .with_function_hints(function_hints),
             )?;
 
-            storage.add_mapping_to_space_top(space_id, mapping_id)?;
+            storage.add_mapping_to_space(address.space(), mapping_id)?;
         }
 
         if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
@@ -234,7 +308,7 @@ impl SegmentStorage {
             storage.persist_storage(&project_path)?;
         }
 
-        Ok(storage)
+        Ok(LoadedSegmentStorage::new(storage, resolution))
     }
 
     pub fn from_storage(
@@ -287,13 +361,29 @@ impl SegmentStorage {
         }
 
         let mut space_map = BTreeMap::new();
-        space_map.insert(DEFAULT_SPACE_ID, DEFAULT_SPACE_ID);
+        storage.spaces.clear();
 
         for space_meta in &metadata.spaces {
-            if space_meta.id != DEFAULT_SPACE_ID {
-                let new_id = storage.create_space()?;
-                space_map.insert(space_meta.id, new_id);
-            }
+            let new_id =
+                if space_meta.id == DEFAULT_SPACE_ID && !space_map.contains_key(&space_meta.id) {
+                    DEFAULT_SPACE_ID
+                } else {
+                    AddressSpaceId::try_from(storage.space_ctr)?
+                };
+            let kind = match space_meta.kind.clone() {
+                AddressSpaceKind::Base => AddressSpaceKind::Base,
+                AddressSpaceKind::Overlay { base } => AddressSpaceKind::Overlay {
+                    base: *space_map
+                        .get(&base)
+                        .ok_or(SegmentStorageError::InvalidAddress)?,
+                },
+            };
+
+            storage
+                .spaces
+                .insert(new_id, AddressSpace::new_with(new_id, kind));
+            storage.space_ctr = storage.space_ctr.max(new_id.index() + 1);
+            space_map.insert(space_meta.id, new_id);
         }
 
         for mapping_meta in &metadata.mappings {
@@ -308,19 +398,23 @@ impl SegmentStorage {
                 .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
             let start = Address::new(space_id, mapping_meta.virtual_start);
 
-            let mapping_id = storage.create_mapping_with_metadata(
-                provider_id,
-                start,
-                mapping_meta.size,
-                mapping_meta.physical_offset,
-                mapping_meta.properties,
-                mapping_meta.name.clone(),
-                mapping_meta.mapping_hints.clone(),
-                mapping_meta.function_hints.clone(),
+            let mapping_id = storage.create_mapping_from_builder(
+                SegmentMappingBuilder::new(
+                    start,
+                    mapping_meta.size,
+                    mapping_meta.physical_offset,
+                    provider_id,
+                )
+                .with_properties(mapping_meta.properties)
+                .with_name(mapping_meta.name.clone())
+                .with_kind(mapping_meta.kind)
+                .with_provenance(mapping_meta.provenance)
+                .with_flags(mapping_meta.flags)
+                .with_mapping_hints(mapping_meta.mapping_hints.clone())
+                .with_function_hints(mapping_meta.function_hints.clone()),
             )?;
 
-            storage.update_mapping_metadata(mapping_id, mapping_meta.kind, mapping_meta.flags)?;
-            storage.add_mapping_to_space_top(space_id, mapping_id)?;
+            storage.add_mapping_to_space(space_id, mapping_id)?;
         }
 
         Ok(storage)
@@ -371,6 +465,7 @@ impl SegmentStorage {
             .values()
             .map(|b| AddressSpaceMetadata {
                 id: b.id(),
+                kind: b.kind().clone(),
                 mapping_ids: b.priority_list().iter().map(|r| r.mapping_id()).collect(),
             })
             .collect::<Vec<_>>();
@@ -393,6 +488,7 @@ impl SegmentStorage {
                     size: m.size(),
                     properties: m.properties(),
                     kind: m.kind(),
+                    provenance: m.provenance(),
                     flags: m.flags(),
                     mapping_hints: m.mapping_hints().clone(),
                     function_hints: m.function_hints().clone(),
@@ -528,40 +624,6 @@ impl SegmentStorage {
         Ok(id)
     }
 
-    pub fn create_mapping_with_metadata(
-        &mut self,
-        provider_id: SegmentStorageProviderId,
-        start: impl Into<Address>,
-        size: usize,
-        offset: u64,
-        properties: SegmentProperties,
-        name: impl Into<String>,
-        mapping_hints: BTreeMap<Address, ContextHint>,
-        function_hints: BTreeSet<Address>,
-    ) -> Result<SegmentMappingId, SegmentStorageError> {
-        if !self.providers.contains_key(&provider_id) {
-            return Err(SegmentStorageError::backing_with("provider not found"));
-        }
-
-        let id = SegmentMappingId::new(self.mapping_ctr);
-        self.mapping_ctr += 1;
-
-        let mapping = SegmentMapping::new_with_metadata(
-            id,
-            start,
-            size,
-            offset,
-            provider_id,
-            properties,
-            name,
-            mapping_hints,
-            function_hints,
-        );
-        self.mappings.insert(id, mapping);
-
-        Ok(id)
-    }
-
     pub fn create_mapping_from_builder(
         &mut self,
         builder: SegmentMappingBuilder,
@@ -585,6 +647,7 @@ impl SegmentStorage {
             builder.function_hints().clone(),
         );
         mapping.set_kind(builder.kind());
+        mapping.set_provenance(builder.provenance());
         mapping.set_flags(builder.flags());
 
         self.mappings.insert(id, mapping);
@@ -660,6 +723,7 @@ impl SegmentStorage {
         &mut self,
         id: SegmentMappingId,
         kind: SegmentMappingKind,
+        provenance: SegmentMappingProvenance,
         flags: SegmentMappingFlags,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
@@ -668,6 +732,7 @@ impl SegmentStorage {
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
 
         mapping.set_kind(kind);
+        mapping.set_provenance(provenance);
         mapping.set_flags(flags);
 
         Ok(())
@@ -678,6 +743,26 @@ impl SegmentStorage {
         self.space_ctr += 1;
         self.spaces.insert(id, AddressSpace::new(id));
         Ok(id)
+    }
+
+    pub fn add_mapping_to_space(
+        &mut self,
+        space_id: AddressSpaceId,
+        mapping_id: SegmentMappingId,
+    ) -> Result<(), SegmentStorageError> {
+        let mapping = self
+            .mappings
+            .get(&mapping_id)
+            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+
+        match mapping.provenance() {
+            SegmentMappingProvenance::Segment
+            | SegmentMappingProvenance::FileResidue
+            | SegmentMappingProvenance::Synthetic => {
+                self.add_mapping_to_space_bottom(space_id, mapping_id)
+            }
+            _ => self.add_mapping_to_space_top(space_id, mapping_id),
+        }
     }
 
     pub fn add_mapping_to_space_top(
@@ -1048,6 +1133,32 @@ impl SegmentStorage {
         self.spaces.values()
     }
 
+    pub fn base_space(&self, space_id: AddressSpaceId) -> Option<AddressSpaceId> {
+        self.spaces.get(&space_id).and_then(AddressSpace::base)
+    }
+
+    pub fn is_overlay_space(&self, space_id: AddressSpaceId) -> bool {
+        self.spaces
+            .get(&space_id)
+            .is_some_and(AddressSpace::is_overlay)
+    }
+
+    pub fn overlay_spaces(
+        &self,
+        base_space_id: AddressSpaceId,
+    ) -> impl Iterator<Item = AddressSpaceId> + '_ {
+        self.spaces
+            .values()
+            .filter(move |space| space.base() == Some(base_space_id))
+            .map(AddressSpace::id)
+    }
+
+    pub fn resolve_to_base_address(&self, address: impl Into<Address>) -> Address {
+        let address = address.into();
+        self.base_space(address.space())
+            .map_or(address, |space| Address::new(space, address.offset()))
+    }
+
     pub fn resolve_to_offset(
         &self,
         addr: impl Into<Address>,
@@ -1078,6 +1189,13 @@ impl SegmentStorage {
     }
 
     pub fn view_at(
+        &self,
+        addr: impl Into<Address>,
+    ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
+        self.visible_view_at(addr)
+    }
+
+    pub fn visible_view_at(
         &self,
         addr: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
@@ -1114,6 +1232,89 @@ impl SegmentStorage {
         Ok(SegmentMappingView::new(mapping, provider, mapping_view))
     }
 
+    pub fn views_covering(
+        &self,
+        addr: impl Into<Address>,
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        let addr = addr.into();
+        self.views_covering_in_space(addr.space(), addr)
+    }
+
+    pub fn views_covering_in_space(
+        &self,
+        space_id: AddressSpaceId,
+        addr: impl Into<RawAddress>,
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        let addr = Address::new(space_id, addr.into());
+        let space = self
+            .spaces
+            .get(&space_id)
+            .ok_or(SegmentStorageError::InvalidAddress)?;
+
+        Ok(space
+            .priority_list()
+            .iter()
+            .rev()
+            .filter_map(move |mapping_ref| {
+                let mapping = self.mappings.get(&mapping_ref.mapping_id())?;
+                if !mapping_ref.is_valid(mapping) || !mapping.contains(addr) {
+                    return None;
+                }
+
+                let provider = self.providers.get(&mapping.provider_id())?;
+                let start = addr.max(mapping.start());
+                let size = usize::from(mapping.end() - start);
+
+                Some(SegmentMappingView::from_parts(
+                    mapping,
+                    provider,
+                    *mapping_ref,
+                    start,
+                    size,
+                ))
+            }))
+    }
+
+    pub fn views_covering_range(
+        &self,
+        space_id: AddressSpaceId,
+        range: Range<Address>,
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        let start = Address::new(space_id, range.start);
+        let end = Address::new(space_id, range.end);
+        let space = self
+            .spaces
+            .get(&space_id)
+            .ok_or(SegmentStorageError::InvalidAddress)?;
+
+        Ok(space
+            .priority_list()
+            .iter()
+            .rev()
+            .filter_map(move |mapping_ref| {
+                let mapping = self.mappings.get(&mapping_ref.mapping_id())?;
+                if !mapping_ref.is_valid(mapping)
+                    || mapping.end() <= start
+                    || mapping.start() >= end
+                {
+                    return None;
+                }
+
+                let provider = self.providers.get(&mapping.provider_id())?;
+                let submap_start = mapping.start().max(start);
+                let submap_end = mapping.end().min(end);
+                let size = usize::from(submap_end - submap_start);
+
+                Some(SegmentMappingView::from_parts(
+                    mapping,
+                    provider,
+                    *mapping_ref,
+                    submap_start,
+                    size,
+                ))
+            }))
+    }
+
     pub fn iter_views(
         &self,
         space_id: AddressSpaceId,
@@ -1138,5 +1339,58 @@ impl SegmentStorage {
         });
 
         Ok(views)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::storage::segments::mapping::SegmentMappingProvenance;
+
+    #[test]
+    fn test_views_covering_preserve_priority_and_provenance() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+
+        let segment_provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0x41, 0x42, 0x43, 0x44]),
+            SegmentProperties::PERM_ALL,
+        );
+        let section_provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0x51, 0x52, 0x53, 0x54]),
+            SegmentProperties::PERM_ALL,
+        );
+
+        let segment_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, segment_provider)
+                .with_properties(SegmentProperties::PERM_ALL)
+                .with_name("segment")
+                .with_provenance(SegmentMappingProvenance::Segment),
+        )?;
+        let section_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, section_provider)
+                .with_properties(SegmentProperties::PERM_ALL)
+                .with_name("section")
+                .with_provenance(SegmentMappingProvenance::Section),
+        )?;
+
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, segment_id)?;
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, section_id)?;
+
+        let visible = storage.view_at(0x1000u64)?;
+        assert_eq!(visible.name(), "section");
+        assert_eq!(visible.provenance(), SegmentMappingProvenance::Section);
+
+        let covering = storage.views_covering(0x1000u64)?.collect::<Vec<_>>();
+        assert_eq!(covering.len(), 2);
+        assert_eq!(covering[0].name(), "section");
+        assert_eq!(covering[0].provenance(), SegmentMappingProvenance::Section);
+        assert_eq!(covering[1].name(), "segment");
+        assert_eq!(covering[1].provenance(), SegmentMappingProvenance::Segment);
+
+        let mut bytes = [0u8; 4];
+        storage.read_bytes_exact(0x1000u64, &mut bytes)?;
+        assert_eq!(&bytes, &[0x51, 0x52, 0x53, 0x54]);
+
+        Ok(())
     }
 }

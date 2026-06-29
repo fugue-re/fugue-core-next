@@ -382,6 +382,10 @@ impl RawAddress {
         self.0.checked_sub(offset.0).map(Self)
     }
 
+    pub fn checked_offset_from(&self, base: RawAddress) -> Option<u64> {
+        self.0.checked_sub(base.0)
+    }
+
     pub fn align(&self, alignment: usize) -> RawAddress {
         let offset =
             (*self + alignment.wrapping_sub(1)).offset() & !(alignment as u64).wrapping_sub(1);
@@ -572,6 +576,16 @@ impl RawAddressRangeSet {
         let range = range.into();
         self.0
             .ranges_insert(range.start().offset()..=range.end().offset());
+    }
+
+    pub fn intersects_range(&self, range: impl Into<RangeInclusive<RawAddress>>) -> bool {
+        let range = range.into();
+        let start = range.start().offset();
+        let end = range.end().offset();
+
+        self.0
+            .ranges()
+            .any(|covered| *covered.start() <= end && start <= *covered.end())
     }
 
     pub fn insert_meta_range(&mut self, range: RangeInclusive<Address>) {
@@ -1042,6 +1056,13 @@ impl Address {
             space: self.space,
             address: new_address,
         })
+    }
+
+    pub fn checked_offset_from(&self, base: Address) -> Option<u64> {
+        if self.space != base.space {
+            return None;
+        }
+        self.address.checked_offset_from(base.address)
     }
 
     pub fn wrap(&self, language: &Language) -> Self {

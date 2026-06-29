@@ -5,7 +5,7 @@ use object::{Architecture, Object, ReadRef};
 
 use crate::ir::Address;
 use crate::loader::pe::extensions::RelocationContext;
-use crate::loader::{LoadableSegment, LoaderError};
+use crate::loader::{ImageSegmentBytes, LoaderError};
 
 pub mod generic;
 
@@ -46,9 +46,9 @@ where
         }
     }
 
-    pub fn apply(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
-        self.apply_base_relocations(lsegm)?;
-        self.apply_import_slots(lsegm)?;
+    pub fn apply(&self, bytes: &mut ImageSegmentBytes<'data>) -> Result<(), LoaderError> {
+        self.apply_base_relocations(bytes)?;
+        self.apply_import_slots(bytes)?;
         Ok(())
     }
 
@@ -70,7 +70,7 @@ where
 
     fn apply_base_relocations(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
     ) -> Result<(), LoaderError> {
         if self.current_base.offset() == self.preferred_base {
             return Ok(());
@@ -85,10 +85,10 @@ where
             return Ok(());
         };
 
-        let start = lsegm.address().offset();
+        let start = bytes.address().offset();
         let end = start
-            .checked_add(lsegm.len() as u64)
-            .ok_or_else(|| LoaderError::address_overflow(lsegm.address()))?;
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
 
         while let Some(block) = blocks.next().map_err(LoaderError::format)? {
             for reloc in block {
@@ -103,30 +103,30 @@ where
                 let Some(offset) = address.checked_sub(start) else {
                     continue;
                 };
-                self.apply_relocation(lsegm, offset as usize, reloc.typ)?;
+                self.apply_relocation(bytes, offset as usize, reloc.typ)?;
             }
         }
 
         Ok(())
     }
 
-    fn apply_import_slots(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
-        let start = lsegm.address();
+    fn apply_import_slots(&self, bytes: &mut ImageSegmentBytes<'data>) -> Result<(), LoaderError> {
+        let start = bytes.address();
         let end = start
-            .checked_add(lsegm.len() as u64)
+            .checked_add(bytes.len() as u64)
             .ok_or_else(|| LoaderError::address_overflow(start))?;
 
         for (slot, target) in self.import_slots.range(start..end) {
-            let Some(offset) = lsegm.offset_of(*slot) else {
+            let Some(offset) = bytes.offset_of(*slot) else {
                 continue;
             };
 
             tracing::trace!("patching PE import slot {slot} -> {target}");
 
             if self.pe.is_64() {
-                lsegm.write_value(offset, target.offset());
+                bytes.write_value(offset, target.offset());
             } else {
-                lsegm.write_value(offset, target.offset() as u32);
+                bytes.write_value(offset, target.offset() as u32);
             }
         }
 
@@ -135,11 +135,11 @@ where
 
     fn apply_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         offset: usize,
         reloc_type: u16,
     ) -> Result<(), LoaderError> {
-        let patch_address = lsegm.address() + offset;
+        let patch_address = bytes.address() + offset;
         let mut context = RelocationContext::new(
             self.pe,
             self.current_base,
@@ -147,7 +147,7 @@ where
             patch_address,
             offset,
             reloc_type,
-            lsegm,
+            bytes,
         );
 
         if context.apply_relocation()? {

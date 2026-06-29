@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use fallible_iterator::FallibleIterator;
@@ -16,10 +17,11 @@ use fugue_core::ir::{
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
-    Loadable, LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoadableSegment,
-    LoadableSegmentBounds, LoaderError,
+    ImageAddress, ImageBankHandle, ImageLayout, ImageSegment, ImageWrite, Loadable,
+    LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoaderError,
 };
 use fugue_core::project::Project;
+use fugue_core::storage::segments::mapping::SegmentMappingProvenance;
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
@@ -34,8 +36,10 @@ const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 pub struct IDABinary {
     database: Rc<IDB>,
     architecture: Arch,
-    symbols: SymbolTable,
+    symbols: SymbolTable<ImageAddress>,
     extern_segm: Option<ExternSegment>,
+    bank_base: RawAddress,
+    layout: ImageLayout,
     mark_thumb: bool,
     metadata: LoadableMetadata,
     attributes: AttributeMap,
@@ -159,7 +163,7 @@ impl IDABinary {
         &self.database
     }
 
-    pub fn symbols(&self) -> &SymbolTable {
+    pub fn symbols(&self) -> &SymbolTable<ImageAddress> {
         &self.symbols
     }
 
@@ -212,7 +216,25 @@ impl LoadableFromFile for IDABinary {
         let language = ida_language(&database)?;
         let architecture = Arch::new(language);
 
-        let (symbols, extern_segm) = ida_symbols(&architecture, &database)?;
+        let (address_symbols, extern_segm) = ida_symbols(&architecture, &database)?;
+
+        let mut bank_base = RawAddress::MAX;
+        let mut bank_end = RawAddress::zero();
+        for (_, segm) in database.segments() {
+            bank_base = bank_base.min(segm.start_address().into());
+            bank_end = bank_end.max(segm.end_address().into());
+        }
+        let layout = ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()));
+
+        let mut symbols = SymbolTable::<ImageAddress>::new();
+        for (index, _, symbol) in address_symbols.iter_by_index() {
+            symbols.insert(
+                index,
+                ImageAddress::in_default_space(symbol.address().offset()),
+                symbol.symbol(),
+                symbol.properties(),
+            );
+        }
 
         let version = idalib::version().map_err(LoaderError::other)?;
 
@@ -233,6 +255,8 @@ impl LoadableFromFile for IDABinary {
             architecture,
             symbols,
             extern_segm,
+            bank_base,
+            layout,
             mark_thumb,
             metadata,
             attributes,
@@ -257,39 +281,22 @@ impl Loadable for IDABinary {
         &self.metadata
     }
 
-    fn symbols(&self) -> Option<&SymbolTable> {
+    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
         Some(&self.symbols)
     }
 
-    fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let mut start = RawAddress::MAX;
-        let mut end = RawAddress::zero();
-
-        for (_, segm) in self.database.segments() {
-            start = start.min(segm.start_address().into());
-            end = end.max(segm.end_address().into());
-        }
-
-        LoadableSegmentBounds::new(Address::in_default_space(start)..Address::in_default_space(end))
+    fn image_layout(&self) -> &ImageLayout {
+        &self.layout
     }
 
-    fn segments<'a>(
+    fn image_segments<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
-        // NOTE: we take all segments verbatim from IDA except the extern segment; we
-        // opt to patch each entry with the architecture's "external function template",
-        // which amounts to a return instruction, and hence fits in the space available
-        // for all architectures we support.
-
-        let address_size = self.architecture.language().address_size();
+    ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
+        let bank_base = self.bank_base;
 
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
-            let start = Address::from(segm.start_address());
-            let end = Address::from(segm.end_address().wrapping_sub(1));
-            let size = (end.offset() - start.offset()) as usize + 1;
-
-            tracing::trace!("loading segment {start}-{end}");
-
+            let start = segm.start_address();
+            let size = segm.end_address().wrapping_sub(start) as usize;
             let name = segm.name().unwrap_or_else(|| String::from("LOAD"));
             let permissions = segm.permissions();
             let type_ = segm.r#type();
@@ -312,6 +319,33 @@ impl Loadable for IDABinary {
                 properties |= SegmentProperties::UNINITIALISED;
             }
 
+            if type_.is_extern() {
+                properties |= SegmentProperties::EXTERNAL;
+            }
+
+            Ok(ImageSegment::backed_in_default_bank(
+                name,
+                ImageAddress::in_default_space(start),
+                size,
+                properties,
+                SegmentMappingProvenance::Segment,
+                bank_base,
+            ))
+        }))
+    }
+
+    fn image_writes<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a {
+        let bank_base = self.bank_base.offset();
+        let address_size = self.architecture.language().address_size();
+        let template = self.architecture.external_thunk_template();
+
+        fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
+            let start = segm.start_address();
+            let size = segm.end_address().wrapping_sub(start) as usize;
+            let type_ = segm.r#type();
+
             let mut bytes = segm.bytes();
 
             if bytes.len() < size {
@@ -319,24 +353,25 @@ impl Loadable for IDABinary {
             }
 
             if type_.is_extern() {
-                properties |= SegmentProperties::EXTERNAL;
-
-                let template = self.architecture.external_thunk_template();
                 let template_len = template.len();
-                let aligned_template_len =
-                    template_len.next_multiple_of(address_size);
+                let aligned_template_len = template_len.next_multiple_of(address_size);
 
                 if aligned_template_len > address_size {
-                    tracing::warn!("external thunk template is larger than available space in extern segment; skipping");
+                    tracing::warn!(
+                        "external thunk template is larger than available space in extern segment; skipping"
+                    );
                 } else {
-                    tracing::trace!("patching extern segment with external thunk template ({aligned_template_len} bytes)");
                     for chunk in bytes.chunks_exact_mut(aligned_template_len) {
                         chunk[..template_len].copy_from_slice(template.bytes());
                     }
                 }
             }
 
-            Ok(LoadableSegment::new(name, start, properties, bytes))
+            Ok(ImageWrite::new(
+                ImageBankHandle::default(),
+                start.wrapping_sub(bank_base),
+                Cow::Owned(bytes),
+            ))
         }))
     }
 }

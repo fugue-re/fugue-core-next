@@ -79,17 +79,30 @@ impl From<AddressSpaceId> for usize {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(PartialEq, Eq))]
+pub enum AddressSpaceKind {
+    Base,
+    Overlay { base: AddressSpaceId },
+}
+
 #[derive(Debug)]
 pub struct AddressSpace {
     id: AddressSpaceId,
+    kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
 }
 
 impl AddressSpace {
     pub fn new(id: AddressSpaceId) -> Self {
+        Self::new_with(id, AddressSpaceKind::Base)
+    }
+
+    pub fn new_with(id: AddressSpaceId, kind: AddressSpaceKind) -> Self {
         Self {
             id,
+            kind,
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
         }
@@ -97,6 +110,21 @@ impl AddressSpace {
 
     pub fn id(&self) -> AddressSpaceId {
         self.id
+    }
+
+    pub fn base(&self) -> Option<AddressSpaceId> {
+        match self.kind {
+            AddressSpaceKind::Base => None,
+            AddressSpaceKind::Overlay { base } => Some(base),
+        }
+    }
+
+    pub fn is_overlay(&self) -> bool {
+        matches!(self.kind, AddressSpaceKind::Overlay { .. })
+    }
+
+    pub fn kind(&self) -> &AddressSpaceKind {
+        &self.kind
     }
 
     pub(crate) fn add_mapping_top(

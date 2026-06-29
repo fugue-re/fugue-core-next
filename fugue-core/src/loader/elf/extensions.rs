@@ -8,7 +8,7 @@ use crate::ir::Address;
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::elf::ElfFileRepr;
-use crate::loader::{Elf, LoadableSegment, LoaderError};
+use crate::loader::{Elf, ImageSegmentBytes, LoaderError};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
@@ -230,7 +230,7 @@ pub struct RelocationContext<'a, 'data> {
     offset: u64,
     relocation_type: Option<u32>,
     is_dynamic: bool,
-    segment: &'a mut LoadableSegment<'data>,
+    segment: &'a mut ImageSegmentBytes<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
@@ -241,7 +241,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         offset: u64,
         relocation_type: Option<u32>,
         is_dynamic: bool,
-        segment: &'a mut LoadableSegment<'data>,
+        segment: &'a mut ImageSegmentBytes<'data>,
     ) -> Self
     where
         Header: FileHeader,
@@ -282,11 +282,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.is_dynamic
     }
 
-    pub fn segment(&self) -> &LoadableSegment<'data> {
+    pub fn segment(&self) -> &ImageSegmentBytes<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut LoadableSegment<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentBytes<'data> {
         self.segment
     }
 

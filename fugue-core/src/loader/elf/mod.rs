@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
@@ -9,26 +10,27 @@ use object::elf::{
     FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
     STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
-use object::read::elf::{
-    self, ElfFile, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
-};
+use object::read::elf::{self, ElfFile, ElfSectionIterator, ElfSegmentIterator, FileHeader};
 use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
     SectionFlags, SectionKind, SegmentFlags, SymbolFlags,
 };
-use range_set_blaze::{IntoRangesIter, RangeSetBlaze};
+use smallvec::{SmallVec, smallvec};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Address, ExternSegment, RawAddress, SegmentProperties, SymbolIndex, SymbolProperties,
-    SymbolTable, SymbolTableSelector,
+    Address, ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, Symbol, SymbolIndex,
+    SymbolProperties, SymbolTable, SymbolTableSelector,
 };
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::ImageContext;
 use crate::loader::{
-    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
-    LoadableSegment, LoadableSegmentBounds, LoaderError,
+    DefaultBankWrites, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout,
+    ImageSegment, ImageSegmentBytes, ImageSegmentIterator, ImageSpace, ImageSpaceHandle,
+    ImageWrite, ImageWriteIterator, Loadable, LoadableAnalysers, LoadableFromBytes,
+    LoadableFromFile, LoadableMetadata, LoaderError,
 };
+use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE,
@@ -109,12 +111,16 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
 pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,
-    metadata: LoadableMetadata,
+    metadata: OnceLock<LoadableMetadata>,
+    path: Option<String>,
+    bank_base: RawAddress,
     base: Address,
     preferred_base: u64,
-    bounds: RangeInclusive<Address>,
+    entry: Option<ImageAddress>,
+    layout: ImageLayout,
+    image_symbols: SymbolTable<ImageAddress>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: SymbolTable,
+    segments: Vec<ElfImageSegment>,
     sections: ElfSectionMap,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
@@ -159,14 +165,7 @@ impl<'a> Elf<'a> {
         }
 
         let entry = with_elf!(view, elf | elf.entry());
-        let entry = (entry != 0).then(|| {
-            Address::new(
-                base.space(),
-                entry
-                    .wrapping_sub(preferred_base)
-                    .wrapping_add(base.offset()),
-            )
-        });
+        let entry = (entry != 0).then(|| base + entry.wrapping_sub(preferred_base));
         let context = ImageContext::new(
             view,
             base,
@@ -189,20 +188,97 @@ impl<'a> Elf<'a> {
             elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base, config)?
         );
 
-        let metadata = LoadableMetadata::new(
-            object.borrow_data(),
-            format!("Fugue v{} ELF Loader", env!("CARGO_PKG_VERSION")),
+        let bank_base: RawAddress = (*bounds.start()).into();
+        let bank_size = bounds
+            .end()
+            .checked_offset_from(*bounds.start())
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| LoaderError::address_overflow(base))?;
+
+        let (placements, spaces) = with_elf!(
+            view,
+            elf | {
+                let mut walk = ElfSegmentWalk::new(
+                    elf,
+                    base,
+                    preferred_base,
+                    bank_base,
+                    &sections,
+                    &extern_segm,
+                    config,
+                );
+                let mut placements = Vec::new();
+                while let Some(placement) = walk.next_segment()? {
+                    placements.push(placement);
+                }
+                let spaces = walk.into_spaces();
+                (placements, spaces)
+            }
         );
+
+        let mut symbol_indices_by_offset =
+            BTreeMap::<RawAddress, SmallVec<[SymbolIndex; 1]>>::new();
+        for (index, symbol) in &symbols {
+            symbol_indices_by_offset
+                .entry(symbol.address.into())
+                .or_default()
+                .push(*index);
+        }
+
+        let mut space_by_index = BTreeMap::<SymbolIndex, ImageSpaceHandle>::new();
+        for placement in &placements {
+            let start = placement.address.offset();
+            let Some(last) = start.checked_add(placement.size.saturating_sub(1) as u64) else {
+                continue;
+            };
+            let covered = symbol_indices_by_offset
+                .range(start..=last)
+                .map(|(offset, _)| *offset)
+                .collect::<SmallVec<[RawAddress; 8]>>();
+            for offset in covered {
+                let Some(indices) = symbol_indices_by_offset.remove(&offset) else {
+                    continue;
+                };
+                for index in indices {
+                    space_by_index.insert(index, placement.space());
+                }
+            }
+        }
+
+        let mut image_symbols = SymbolTable::<ImageAddress>::new();
+        for (index, symbol) in symbols {
+            let space = space_by_index.get(&index).copied().unwrap_or_default();
+            image_symbols.insert(
+                index,
+                ImageAddress::new(space, symbol.address),
+                symbol.symbol,
+                symbol.properties,
+            );
+        }
+
+        let layout = ImageLayout::new(
+            smallvec![ImageBank::new(
+                ImageBankHandle::default(),
+                RawAddress::zero()..bank_size.into(),
+            )],
+            spaces,
+        );
+
+        let entry = entry.map(|entry| ImageAddress::in_default_space(entry));
 
         let mut slf = Self {
             object,
             architecture,
-            metadata,
+            metadata: OnceLock::new(),
+            path: None,
+            bank_base,
             base,
             preferred_base,
-            bounds,
+            entry,
+            image_symbols,
+            layout,
             mapping_hints,
-            symbols,
+            segments: placements,
             sections,
             extern_segm,
             attributes,
@@ -217,11 +293,7 @@ impl<'a> Elf<'a> {
 
     pub fn entry(&self) -> Option<Address> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
-        (addr != 0).then_some(Address::new(
-            self.base.space(),
-            addr.wrapping_sub(self.preferred_base)
-                .wrapping_add(self.base.offset()),
-        ))
+        (addr != 0).then_some(self.base + addr.wrapping_sub(self.preferred_base))
     }
 
     pub fn convention(&self) -> Option<&'a str> {
@@ -236,8 +308,8 @@ impl<'a> Elf<'a> {
         &self.mapping_hints
     }
 
-    pub fn symbols(&self) -> &SymbolTable {
-        &self.symbols
+    pub fn image_symbols(&self) -> &SymbolTable<ImageAddress> {
+        &self.image_symbols
     }
 
     pub fn extern_segment(&self) -> &ExternSegment {
@@ -280,10 +352,309 @@ impl ElfSectionMap {
     }
 }
 
+struct ElfRegion<'data> {
+    name: Cow<'data, str>,
+    address: Address,
+    size: usize,
+    properties: SegmentProperties,
+    provenance: SegmentMappingProvenance,
+}
+
+struct ElfImageSegment {
+    name: String,
+    address: ImageAddress,
+    backing_offset: RawAddress,
+    size: usize,
+    properties: SegmentProperties,
+    provenance: SegmentMappingProvenance,
+}
+
+impl ElfImageSegment {
+    fn space(&self) -> ImageSpaceHandle {
+        self.address.space()
+    }
+}
+
+struct ElfSegmentWalk<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    base: Address,
+    preferred_base: u64,
+    bank_base: RawAddress,
+    base_space: ImageSpaceHandle,
+    sections: &'file ElfSectionMap,
+    sects: ElfSectionIterator<'data, 'file, Elf, R>,
+    segms: ElfSegmentIterator<'data, 'file, Elf, R>,
+    extern_segm: Option<&'file ExternSegment>,
+    covered: RawAddressRangeSet,
+    spaces: SmallVec<[ImageSpace; 4]>,
+    pending: Option<ElfImageSegment>,
+    config: ElfLoaderProperties,
+    is_object: bool,
+}
+
+impl<'data, 'file, Elf, R> ElfSegmentWalk<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    fn new(
+        elf: &'file ElfFile<'data, Elf, R>,
+        base: Address,
+        preferred_base: u64,
+        bank_base: RawAddress,
+        sections: &'file ElfSectionMap,
+        externs: &'file ExternSegment,
+        mut config: ElfLoaderProperties,
+    ) -> Self {
+        let is_object = elf.kind() == ObjectKind::Relocatable;
+        if is_object {
+            config.insert(ElfLoaderProperties::IS_OBJECT);
+        }
+        let base_space = ImageSpaceHandle::default();
+        Self {
+            base,
+            preferred_base,
+            bank_base,
+            base_space,
+            sections,
+            sects: elf.sections(),
+            segms: elf.segments(),
+            extern_segm: Some(externs),
+            covered: RawAddressRangeSet::new(),
+            spaces: smallvec![ImageSpace::base(base_space, ImageBankHandle::default())],
+            pending: None,
+            config,
+            is_object,
+        }
+    }
+
+    fn into_spaces(self) -> SmallVec<[ImageSpace; 4]> {
+        self.spaces
+    }
+
+    fn next_region(&mut self) -> Result<Option<ElfRegion<'data>>, LoaderError> {
+        if self.is_object {
+            for sect in self.sects.by_ref() {
+                let Some(address) = self.sections.get(sect.index().0) else {
+                    continue;
+                };
+                return Ok(Some(ElfRegion {
+                    name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
+                    address,
+                    size: usize::try_from(sect.size().max(1)).map_err(LoaderError::format)?,
+                    properties: elf_section_properties(&sect, &self.config),
+                    provenance: SegmentMappingProvenance::Section,
+                }));
+            }
+            return Ok(self.next_extern_region());
+        }
+
+        for sect in self.sects.by_ref() {
+            let SectionFlags::Elf { sh_flags } = sect.flags() else {
+                continue;
+            };
+            let size = sect.size();
+            if size == 0 || (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+                continue;
+            }
+            return Ok(Some(ElfRegion {
+                name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
+                address: self.base + sect.address().wrapping_sub(self.preferred_base),
+                size: usize::try_from(size).map_err(LoaderError::format)?,
+                properties: elf_section_properties(&sect, &self.config),
+                provenance: SegmentMappingProvenance::Section,
+            }));
+        }
+
+        for segm in self.segms.by_ref() {
+            let size = segm.size();
+            if size == 0 {
+                continue;
+            }
+            let name = match segm.name().ok().flatten() {
+                Some(name) => Cow::Owned(name.to_owned()),
+                None => Cow::Borrowed("LOAD"),
+            };
+            return Ok(Some(ElfRegion {
+                name,
+                address: self.base + segm.address().wrapping_sub(self.preferred_base),
+                size: usize::try_from(size).map_err(LoaderError::format)?,
+                properties: elf_segment_properties(&segm, &self.config),
+                provenance: SegmentMappingProvenance::Segment,
+            }));
+        }
+
+        Ok(self.next_extern_region())
+    }
+
+    fn next_extern_region(&mut self) -> Option<ElfRegion<'data>> {
+        let externs = self.extern_segm.take().filter(|e| !e.is_empty())?;
+        Some(ElfRegion {
+            name: Cow::Borrowed("EXTERN"),
+            address: externs.address(),
+            size: externs.size(),
+            properties: SegmentProperties::EXTERNAL
+                | SegmentProperties::PERM_READ
+                | SegmentProperties::PERM_EXECUTE,
+            provenance: SegmentMappingProvenance::Extern,
+        })
+    }
+
+    fn next_segment(&mut self) -> Result<Option<ElfImageSegment>, LoaderError> {
+        if let Some(buffered) = self.pending.take() {
+            return Ok(Some(buffered));
+        }
+
+        let Some(region) = self.next_region()? else {
+            return Ok(None);
+        };
+        let ElfRegion {
+            name,
+            address,
+            size,
+            properties,
+            provenance,
+        } = region;
+
+        let last = address
+            .checked_add(size.saturating_sub(1) as u64)
+            .ok_or_else(|| LoaderError::address_overflow(address))?;
+        let backing_offset = address
+            .checked_sub(self.bank_base)
+            .ok_or_else(|| LoaderError::address_overflow(address))?;
+        let range: RangeInclusive<RawAddress> = address.into()..=last.into();
+        let overlaps = self.covered.intersects_range(range.clone());
+
+        let make_segment = |space| ElfImageSegment {
+            name: name.to_string(),
+            address: ImageAddress::new(space, address),
+            backing_offset: backing_offset.into(),
+            size,
+            properties,
+            provenance,
+        };
+
+        let base_segment = (overlaps && provenance == SegmentMappingProvenance::Segment)
+            .then(|| make_segment(self.base_space));
+
+        let space = if overlaps {
+            let handle = ImageSpaceHandle::new(self.spaces.len() as u16);
+            self.spaces
+                .push(ImageSpace::overlay(handle, self.base_space));
+            handle
+        } else {
+            self.base_space
+        };
+
+        self.covered.insert_range(range);
+
+        let segment = make_segment(space);
+
+        if let Some(base_segment) = base_segment {
+            self.pending = Some(segment);
+            return Ok(Some(base_segment));
+        }
+
+        Ok(Some(segment))
+    }
+}
+
+struct ElfImageSegments<'a> {
+    segments: std::slice::Iter<'a, ElfImageSegment>,
+    mapping_space: AddressSpaceId,
+    mapping_hints: &'a BTreeMap<Address, ContextHint>,
+    image_symbols: &'a SymbolTable<ImageAddress>,
+}
+
+impl<'a> ElfImageSegments<'a> {
+    fn new(
+        segments: &'a [ElfImageSegment],
+        mapping_space: AddressSpaceId,
+        mapping_hints: &'a BTreeMap<Address, ContextHint>,
+        image_symbols: &'a SymbolTable<ImageAddress>,
+    ) -> Self {
+        Self {
+            segments: segments.iter(),
+            mapping_space,
+            mapping_hints,
+            image_symbols,
+        }
+    }
+
+    fn image_segment(&self, segment: &'a ElfImageSegment) -> ImageSegment<'a> {
+        let seg_start = segment.address.offset();
+        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
+
+        let (mapping_hints, function_hints) = match seg_last {
+            Some(seg_last) => {
+                let mapping_hints = self
+                    .mapping_hints
+                    .range(
+                        Address::new(self.mapping_space, seg_start)
+                            ..=Address::new(self.mapping_space, seg_last),
+                    )
+                    .map(|(addr, hint)| (addr.offset().into(), hint.clone()))
+                    .collect::<BTreeMap<RawAddress, ContextHint>>();
+
+                let space = segment.address.space();
+                let function_hints = self
+                    .image_symbols
+                    .range_by_address(
+                        ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
+                    )
+                    .filter(|(_, entry)| {
+                        entry
+                            .properties()
+                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                    })
+                    .map(|(_, entry)| entry.address().offset())
+                    .collect::<BTreeSet<RawAddress>>();
+
+                (mapping_hints, function_hints)
+            }
+            None => (BTreeMap::new(), BTreeSet::new()),
+        };
+
+        ImageSegment::new(
+            Cow::Borrowed(segment.name.as_str()),
+            segment.address,
+            segment.size,
+            segment.properties,
+        )
+        .with_backing(ImageBacking::in_default_bank(segment.backing_offset))
+        .with_provenance(segment.provenance)
+        .with_mapping_hints(Cow::Owned(mapping_hints))
+        .with_function_hints(Cow::Owned(function_hints))
+    }
+}
+
+impl<'a> FallibleIterator for ElfImageSegments<'a> {
+    type Error = LoaderError;
+    type Item = ImageSegment<'a>;
+
+    fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
+        let Some(segment) = self.segments.next() else {
+            return Ok(None);
+        };
+        Ok(Some(self.image_segment(segment)))
+    }
+}
+
+struct RawElfSymbol {
+    address: Address,
+    symbol: Symbol,
+    properties: SymbolProperties,
+}
+
 struct ElfSymbolData {
     bounds: RangeInclusive<Address>,
     mapping_hints: BTreeMap<Address, ContextHint>,
-    symbols: SymbolTable,
+    symbols: BTreeMap<SymbolIndex, RawElfSymbol>,
     sections: ElfSectionMap,
     extern_segm: ExternSegment,
 }
@@ -381,7 +752,7 @@ impl ElfSymbolData {
             return Err(LoaderError::address_overflow(base_addr));
         }
 
-        let mut symbols = SymbolTable::new();
+        let mut symbols = BTreeMap::<SymbolIndex, RawElfSymbol>::new();
 
         for (section, symbol) in elf
             .symbols()
@@ -457,9 +828,11 @@ impl ElfSymbolData {
 
             symbols.insert(
                 SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
-                address,
-                symbol.name().ok().unwrap_or_default(),
-                properties,
+                RawElfSymbol {
+                    address,
+                    symbol: symbol.name().ok().unwrap_or_default().into(),
+                    properties,
+                },
             );
         }
 
@@ -546,9 +919,11 @@ impl ElfSymbolData {
 
             symbols.insert(
                 SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
-                addr,
-                sym.unwrap_or_default(),
-                kind,
+                RawElfSymbol {
+                    address: addr,
+                    symbol: sym.unwrap_or_default().into(),
+                    properties: kind,
+                },
             );
         }
 
@@ -676,7 +1051,7 @@ impl ElfLoaderProperties {
     }
 }
 
-pub(crate) struct ElfLoadableSegments<'data, 'file, Elf, R>
+pub(crate) struct ElfImageSegmentBytes<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
@@ -689,17 +1064,13 @@ where
     // sections iterator
     pub(crate) sects: ElfSectionIterator<'data, 'file, Elf, R>,
     // ranges already covered
-    covered: RangeSetBlaze<u64>,
-    // split segments that span multiple unmapped ranges
-    segms_split: Option<(IntoRangesIter<u64>, ElfSegment<'data, 'file, Elf, R>)>,
+    covered: RawAddressRangeSet,
     // current base address
     pub(crate) current_base: Address,
     // the binary's preferred load address
     pub(crate) preferred_base: u64,
-    // mapping hints provided by mapping symbols
-    pub(crate) mapping_hints: &'file BTreeMap<Address, ContextHint>,
     // mapping of local and external symbols
-    pub(crate) symbols: &'file SymbolTable,
+    pub(crate) symbols: &'file SymbolTable<ImageAddress>,
     // assigned base address per section index (relocatable objects)
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
@@ -708,7 +1079,7 @@ where
     config: ElfLoaderProperties,
 }
 
-impl<'data, 'file, Elf, R> ElfLoadableSegments<'data, 'file, Elf, R>
+impl<'data, 'file, Elf, R> ElfImageSegmentBytes<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
@@ -716,8 +1087,7 @@ where
 {
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        mapping_hints: &'file BTreeMap<Address, ContextHint>,
-        symbols: &'file SymbolTable,
+        symbols: &'file SymbolTable<ImageAddress>,
         sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
         base: Address,
@@ -731,11 +1101,9 @@ where
             elf,
             sects: elf.sections(),
             segms: elf.segments(),
-            covered: RangeSetBlaze::new(),
-            segms_split: None,
+            covered: RawAddressRangeSet::new(),
             current_base: base,
             preferred_base,
-            mapping_hints,
             symbols,
             sections,
             extern_segm: Some(externs),
@@ -743,7 +1111,9 @@ where
         }
     }
 
-    pub(crate) fn extern_segment(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    pub(crate) fn extern_segment(
+        &mut self,
+    ) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         let Some(externs) = self.extern_segm.take().filter(|e| !e.is_empty()) else {
             return Ok(None);
         };
@@ -753,9 +1123,9 @@ where
         let address = externs.address();
         let last_address = externs.last_address().expect("not empty");
 
-        let mut bytes = Vec::with_capacity(extern_size);
+        let mut contents = Vec::with_capacity(extern_size);
 
-        let function_hints = self
+        let function_offsets = self
             .symbols
             .iter()
             .filter_map(|(_, sym)| {
@@ -763,40 +1133,42 @@ where
                     .properties()
                     .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
                 {
-                    Some(sym.address())
+                    Some(sym.address().offset())
                 } else {
                     None
                 }
             })
-            .collect::<BTreeSet<_>>();
+            .collect::<BTreeSet<RawAddress>>();
 
         for addr in externs.iter() {
-            if function_hints.contains(&addr) {
-                bytes.extend_from_slice(externs.template().bytes());
-                bytes.resize(bytes.len() + extern_padding, 0);
+            if function_offsets.contains(&RawAddress::from(addr.offset())) {
+                contents.extend_from_slice(externs.template().bytes());
+                contents.resize(contents.len() + extern_padding, 0);
             } else {
-                bytes.resize(bytes.len() + externs.aligned_template_size(), 0);
+                contents.resize(contents.len() + externs.aligned_template_size(), 0);
             }
         }
 
-        self.covered
-            .ranges_insert(address.offset()..=last_address.offset());
+        let extern_range: RangeInclusive<RawAddress> = address.into()..=last_address.into();
+        self.covered.insert_range(extern_range);
 
-        let lsegm = LoadableSegment {
-            name: Cow::Borrowed("EXTERN"),
-            address: externs.address(),
-            properties: SegmentProperties::EXTERNAL
+        let mut bytes = ImageSegmentBytes::new(
+            externs.address(),
+            SegmentProperties::EXTERNAL
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
-            bytes: Cow::Owned(bytes),
-            mapping_hints: Cow::Owned(BTreeMap::new()),
-            function_hints: Cow::Owned(function_hints),
-        };
+            Cow::Owned(contents),
+        );
+        for offset in function_offsets {
+            bytes.add_function_hint(Address::new(address.space(), offset));
+        }
 
-        Ok(Some(lsegm))
+        Ok(Some(bytes))
     }
 
-    pub(crate) fn next_unlinked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    pub(crate) fn next_unlinked(
+        &mut self,
+    ) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         for sect in self.sects.by_ref() {
             let Some(address) = self.sections.get(sect.index().0) else {
                 continue;
@@ -815,19 +1187,11 @@ where
             tracing::trace!("processing section {address}-{last_address}");
 
             let data = sect.data().unwrap_or_default();
-
-            let vrange = address.offset()..=last_address.offset();
-            if !self
-                .covered
-                .is_disjoint(&RangeSetBlaze::from_iter([vrange.clone()]))
-            {
-                tracing::debug!("overlapping section {address}-{last_address}; skipping");
-                continue;
-            }
+            let vrange: RangeInclusive<RawAddress> = address.into()..=last_address.into();
 
             tracing::trace!("loading section {address}-{last_address}");
 
-            let bytes = if data.len() as u64 != span {
+            let contents = if data.len() as u64 != span {
                 let mut data = data.to_owned();
                 data.resize(span as _, 0);
 
@@ -836,118 +1200,27 @@ where
                 Cow::Borrowed(data)
             };
 
-            let mut lsegm = LoadableSegment {
-                name: sect
-                    .name()
-                    .ok()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
+            let mut bytes = ImageSegmentBytes::new(
                 address,
-                properties: elf_section_properties(&sect, &self.config),
-                bytes,
-                mapping_hints: Cow::Owned(
-                    self.mapping_hints
-                        .range(address..=last_address)
-                        .map(|(k, v)| (*k, v.clone()))
-                        .collect(),
-                ),
-                ..Default::default()
-            };
+                elf_section_properties(&sect, &self.config),
+                contents,
+            );
 
-            self.covered.ranges_insert(vrange);
+            self.covered.insert_range(vrange);
 
             let relocator =
                 ElfSegmentRelocator::new(self.elf, self.symbols, self.config.is_object(), address);
 
-            relocator.apply(address, &mut lsegm, &sect)?;
+            relocator.apply(address, &mut bytes, &sect)?;
 
-            return Ok(Some(lsegm));
+            return Ok(Some(bytes));
         }
 
         self.extern_segment()
     }
-
-    pub(crate) fn next_linked_split(
-        &mut self,
-    ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        let Some((covered, segm)) = self.segms_split.as_mut() else {
-            return Ok(None);
-        };
-
-        let relocator = ElfSegmentRelocator::new(
-            self.elf,
-            self.symbols,
-            self.config.is_object(),
-            Address::new(
-                self.current_base.space(),
-                self.current_base.offset().wrapping_sub(self.preferred_base),
-            ),
-        );
-
-        if let Some(range) = covered.next() {
-            let data = segm.data().unwrap_or_default();
-
-            let loaded_segm_start = segm
-                .address()
-                .wrapping_sub(self.preferred_base)
-                .wrapping_add(self.current_base.offset());
-            let rvsize = (*range.end() - *range.start() + 1) as usize;
-            let rvstart = (*range.start() - loaded_segm_start) as usize;
-            let rvend = rvsize + rvstart;
-
-            let bytes = if data.len() < rvend {
-                let mut bytes = Vec::with_capacity(rvsize);
-
-                if rvstart < data.len() {
-                    bytes.extend_from_slice(&data[rvstart..]);
-                }
-
-                bytes.resize(rvsize, 0u8);
-
-                Cow::Owned(bytes)
-            } else {
-                Cow::Borrowed(&data[rvstart..rvend])
-            };
-
-            let address = Address::new(self.current_base.space(), *range.start());
-            let last_address = address
-                .checked_add((bytes.len() as u64).wrapping_sub(1))
-                .ok_or_else(|| LoaderError::address_overflow(address))?;
-
-            tracing::trace!("loading segment {address}-{last_address}");
-
-            let mut lsegm = LoadableSegment {
-                name: segm
-                    .name()
-                    .ok()
-                    .flatten()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
-                address,
-                properties: elf_segment_properties(&*segm, &self.config),
-                bytes,
-                mapping_hints: Cow::Owned(
-                    self.mapping_hints
-                        .range(address..=last_address)
-                        .map(|(k, v)| (*k, v.clone()))
-                        .collect(),
-                ),
-                ..Default::default()
-            };
-
-            self.covered.ranges_insert(range);
-
-            relocator.apply_dynamic_relocations(address, &mut lsegm)?;
-
-            return Ok(Some(lsegm));
-        }
-
-        self.segms_split = None;
-
-        Ok(None)
-    }
-
     pub(crate) fn next_linked_section(
         &mut self,
-    ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    ) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
             self.elf,
             self.symbols,
@@ -985,22 +1258,19 @@ where
                 continue;
             }
 
+            let vrange: RangeInclusive<RawAddress> = address.into()..=last_address.into();
+            if self.covered.intersects_range(vrange.clone()) {
+                tracing::debug!("section {address}-{last_address} already covered; skipping");
+                continue;
+            }
+
             tracing::trace!("processing section {address}-{last_address}");
 
             let data = sect.data().unwrap_or_default();
 
-            let vrange = address.offset()..=last_address.offset();
-            if !self
-                .covered
-                .is_disjoint(&RangeSetBlaze::from_iter([vrange.clone()]))
-            {
-                tracing::debug!("overlapping section {address}-{last_address}; skipping");
-                continue;
-            }
-
             tracing::trace!("loading section {address}-{last_address}");
 
-            let bytes = if data.len() as u64 != sect.size() {
+            let contents = if data.len() as u64 != sect.size() {
                 let mut data = data.to_owned();
                 data.resize(sect.size() as _, 0);
 
@@ -1009,28 +1279,17 @@ where
                 Cow::Borrowed(data)
             };
 
-            let mut lsegm = LoadableSegment {
-                name: sect
-                    .name()
-                    .ok()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), Cow::Borrowed),
+            let mut bytes = ImageSegmentBytes::new(
                 address,
-                properties: elf_section_properties(&sect, &self.config),
-                bytes,
-                mapping_hints: Cow::Owned(
-                    self.mapping_hints
-                        .range(address..=last_address)
-                        .map(|(k, v)| (*k, v.clone()))
-                        .collect(),
-                ),
-                ..Default::default()
-            };
+                elf_section_properties(&sect, &self.config),
+                contents,
+            );
 
-            self.covered.ranges_insert(vrange);
+            self.covered.insert_range(vrange);
 
-            relocator.apply(address, &mut lsegm, &sect)?;
+            relocator.apply(address, &mut bytes, &sect)?;
 
-            return Ok(Some(lsegm));
+            return Ok(Some(bytes));
         }
 
         Ok(None)
@@ -1038,7 +1297,7 @@ where
 
     pub(crate) fn next_linked_segment(
         &mut self,
-    ) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
+    ) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
             self.elf,
             self.symbols,
@@ -1073,98 +1332,46 @@ where
                 continue;
             }
 
+            let vrange: RangeInclusive<RawAddress> = address.into()..=last_address.into();
+            self.covered.insert_range(vrange);
+
             tracing::trace!("processing segment {address}-{last_address}");
 
             let data = segm.data().unwrap_or_default();
 
-            let vrange = address.offset()..=last_address.offset();
+            tracing::trace!("loading segment {address}-{last_address}");
 
-            let covered = RangeSetBlaze::from_iter([vrange.clone()]) - &self.covered;
+            let contents = if data.len() < size as usize {
+                let mut bytes = Vec::with_capacity(size as usize);
 
-            if covered.is_empty() {
-                tracing::trace!("segment range {address}-{last_address} already covered");
-                continue;
-            }
-
-            let should_split = covered.ranges_len() > 1;
-
-            if should_split {
-                tracing::trace!(
-                    "segment range {address}-{last_address} spans multiple unmapped ranges; splitting"
-                );
-            }
-
-            let mut ranges = covered.into_ranges();
-            let range = ranges.next().expect("not empty");
-
-            let rvsize = (*range.end() - *range.start() + 1) as usize;
-            let rvstart = (*range.start() - *vrange.start()) as usize;
-            let rvend = rvsize + rvstart;
-
-            let bytes = if data.len() < rvend {
-                let mut bytes = Vec::with_capacity(rvsize);
-
-                if rvstart < data.len() {
-                    bytes.extend_from_slice(&data[rvstart..]);
-                }
-
-                bytes.resize(rvsize, 0u8);
+                bytes.extend_from_slice(data);
+                bytes.resize(size as usize, 0u8);
 
                 Cow::Owned(bytes)
             } else {
-                Cow::Borrowed(&data[rvstart..rvend])
+                Cow::Borrowed(&data[..size as usize])
             };
 
-            let address = Address::new(space, *range.start());
-            let last_address = address
-                .checked_add((bytes.len() as u64).wrapping_sub(1))
-                .ok_or_else(|| LoaderError::address_overflow(address))?;
-
-            tracing::trace!("loading segment {address}-{last_address}");
-
-            let mut lsegm = LoadableSegment {
-                name: segm
-                    .name()
-                    .ok()
-                    .flatten()
-                    .map_or_else(|| Cow::Borrowed("LOAD"), |name| Cow::Owned(name.to_owned())),
+            let mut bytes = ImageSegmentBytes::new(
                 address,
-                properties: elf_segment_properties(&segm, &self.config),
-                bytes,
-                mapping_hints: Cow::Owned(
-                    self.mapping_hints
-                        .range(address..=last_address)
-                        .map(|(k, v)| (*k, v.clone()))
-                        .collect(),
-                ),
-                ..Default::default()
-            };
+                elf_segment_properties(&segm, &self.config),
+                contents,
+            );
 
-            if should_split {
-                self.segms_split = Some((ranges, segm));
-            }
+            relocator.apply_dynamic_relocations(address, &mut bytes)?;
 
-            self.covered.ranges_insert(range);
-
-            relocator.apply_dynamic_relocations(address, &mut lsegm)?;
-
-            return Ok(Some(lsegm));
+            return Ok(Some(bytes));
         }
 
         Ok(None)
     }
 
-    pub(crate) fn next_linked(&mut self) -> Result<Option<LoadableSegment<'data>>, LoaderError> {
-        if let Some(v) = self.next_linked_split()? {
+    pub(crate) fn next_linked(&mut self) -> Result<Option<ImageSegmentBytes<'data>>, LoaderError> {
+        if let Some(v) = self.next_linked_segment()? {
             return Ok(Some(v));
         }
 
         if let Some(v) = self.next_linked_section()? {
-            self.config.insert(ElfLoaderProperties::HAS_LOADED_SECTIONS);
-            return Ok(Some(v));
-        }
-
-        if let Some(v) = self.next_linked_segment()? {
             return Ok(Some(v));
         }
 
@@ -1172,14 +1379,14 @@ where
     }
 }
 
-impl<'data, 'file, Elf, R> FallibleIterator for ElfLoadableSegments<'data, 'file, Elf, R>
+impl<'data, 'file, Elf, R> FallibleIterator for ElfImageSegmentBytes<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
     'file: 'data,
 {
     type Error = LoaderError;
-    type Item = LoadableSegment<'data>;
+    type Item = ImageSegmentBytes<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
         if self.config.is_object() {
@@ -1192,12 +1399,7 @@ where
     fn size_hint(&self) -> (usize, Option<usize>) {
         let sects_bound = self.sects.size_hint().0;
         let segms_bound = self.segms.size_hint().0;
-        let splits = self
-            .segms_split
-            .as_ref()
-            .map(|(it, _)| it.size_hint().0)
-            .unwrap_or(0);
-        (sects_bound + segms_bound + splits, None)
+        (sects_bound + segms_bound, None)
     }
 }
 
@@ -1225,7 +1427,7 @@ impl LoadableFromFile for Elf<'_> {
 
         let mut loaded = Self::new_with(BytesOrMapping::from_file(path)?, attributes)?;
 
-        loaded.metadata.set_path(path.display().to_string());
+        loaded.path = Some(path.display().to_string());
 
         Ok(loaded)
     }
@@ -1241,43 +1443,63 @@ impl Loadable for Elf<'_> {
     }
 
     fn metadata(&self) -> &LoadableMetadata {
-        &self.metadata
+        self.metadata.get_or_init(|| {
+            LoadableMetadata::new_with(
+                self.object.borrow_data(),
+                self.path.clone(),
+                format!("Fugue v{} ELF Loader", env!("CARGO_PKG_VERSION")),
+            )
+        })
     }
 
     fn architecture(&self) -> Arch {
         self.architecture.clone()
     }
 
-    fn symbols(&self) -> Option<&SymbolTable> {
-        Some(&self.symbols)
+    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+        Some(&self.image_symbols)
     }
 
-    fn segments<'b>(
+    fn entry_point(&self) -> Option<ImageAddress> {
+        self.entry
+    }
+
+    fn image_segments<'b>(
         &'b self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'b>, Error = LoaderError> + 'b {
+    ) -> impl FallibleIterator<Item = ImageSegment<'b>, Error = LoaderError> + 'b {
+        Box::new(ElfImageSegments::new(
+            &self.segments,
+            self.base.space(),
+            &self.mapping_hints,
+            &self.image_symbols,
+        )) as ImageSegmentIterator<'b>
+    }
+
+    fn image_layout(&self) -> &ImageLayout {
+        &self.layout
+    }
+
+    fn image_writes<'b>(
+        &'b self,
+    ) -> impl FallibleIterator<Item = ImageWrite<'b>, Error = LoaderError> + 'b {
         let view = self.object.borrow_view();
         let props = ElfLoaderProperties::new(self.attributes());
 
         with_elf!(
             view,
-            elf | Box::new(ElfLoadableSegments::new(
-                elf,
-                &self.mapping_hints,
-                &self.symbols,
-                &self.sections,
-                &self.extern_segm,
-                self.base,
-                self.preferred_base,
-                props,
-            ))
-                as Box<dyn FallibleIterator<Item = LoadableSegment, Error = LoaderError>>
+            elf | Box::new(DefaultBankWrites::new(
+                ElfImageSegmentBytes::new(
+                    elf,
+                    &self.image_symbols,
+                    &self.sections,
+                    &self.extern_segm,
+                    self.base,
+                    self.preferred_base,
+                    props,
+                ),
+                self.bank_base,
+            )) as ImageWriteIterator<'b>
         )
-    }
-
-    fn segment_bounds(&self) -> LoadableSegmentBounds {
-        let start = *self.bounds.start();
-        let end = *self.bounds.end() + 1usize;
-        LoadableSegmentBounds::new(start..end)
     }
 
     fn analysers(&self) -> impl LoadableAnalysers {
@@ -1287,15 +1509,74 @@ impl Loadable for Elf<'_> {
 
 #[cfg(test)]
 mod test {
+    use std::borrow::Cow;
+
     use fallible_iterator::FallibleIterator;
     use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
     use object::{Object, RelocationFlags, RelocationTarget};
 
     use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
-    use crate::ir::{Address, RawAddress, SymbolIndex};
-    use crate::loader::Loadable;
+    use crate::ir::{Address, RawAddress, SegmentProperties, SymbolIndex};
+    use crate::loader::{ImageSegmentBytes, Loadable};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
+
+    fn load_image_bytes(
+        loadable: &impl Loadable,
+    ) -> Result<Vec<ImageSegmentBytes<'static>>, Box<dyn std::error::Error>> {
+        let mut segments = Vec::new();
+        let mut image_segments = loadable.image_segments();
+
+        while let Some(segment) = image_segments.next()? {
+            if let Some(backing) = segment.backing() {
+                segments.push((
+                    segment.address(),
+                    backing,
+                    segment.properties(),
+                    segment.size(),
+                ));
+            }
+        }
+
+        let mut writes = loadable.image_writes();
+        let mut loaded = Vec::new();
+
+        while let Some(write) = writes.next()? {
+            let address = segments
+                .iter()
+                .find_map(|(address, backing, properties, size)| {
+                    if backing.bank() != write.bank() {
+                        return None;
+                    }
+
+                    let start = backing.offset().offset();
+                    let end = start.checked_add(*size as u64)?;
+                    if write.offset().offset() < start || write.offset().offset() >= end {
+                        return None;
+                    }
+
+                    let delta = write.offset().offset().wrapping_sub(start);
+                    Some((
+                        Address::from(address.offset().offset().wrapping_add(delta)),
+                        *properties,
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    (
+                        Address::from(write.offset().offset()),
+                        SegmentProperties::PERM_ALL,
+                    )
+                });
+
+            loaded.push(ImageSegmentBytes::new(
+                address.0,
+                address.1,
+                Cow::Owned(write.bytes().to_owned()),
+            ));
+        }
+
+        Ok(loaded)
+    }
 
     #[test]
     fn test_elf_exe() -> Result<(), Box<dyn std::error::Error>> {
@@ -1308,18 +1589,18 @@ mod test {
 
         tracing::subscriber::with_default(subscriber, || {
             let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
-            let mut segments = elf.segments();
-            while let Some(segm) = segments.next()? {
+            let mut segments = elf.image_segments();
+            while let Some(segment) = segments.next()? {
                 tracing::info!(
-                    "{}-{} ({:?})",
-                    segm.address(),
-                    segm.last_address(),
-                    segm.name()
+                    "{}+{:#x} ({})",
+                    segment.address().offset(),
+                    segment.size(),
+                    segment.name()
                 );
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for (_, sym) in elf.symbols().iter() {
+            for (_, sym) in elf.image_symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
 
@@ -1338,18 +1619,18 @@ mod test {
 
         tracing::subscriber::with_default(subscriber, || {
             let elf = Elf::new(BytesOrMapping::from_file("tests/libipmi.so")?)?;
-            let mut segments = elf.segments();
-            while let Some(segm) = segments.next()? {
+            let mut segments = elf.image_segments();
+            while let Some(segment) = segments.next()? {
                 tracing::info!(
-                    "{}-{} ({:?})",
-                    segm.address(),
-                    segm.address() + segm.len(),
-                    segm.name()
+                    "{}+{:#x} ({})",
+                    segment.address().offset(),
+                    segment.size(),
+                    segment.name()
                 );
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for (_, sym) in elf.symbols().iter() {
+            for (_, sym) in elf.image_symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
 
@@ -1372,18 +1653,18 @@ mod test {
 
         tracing::subscriber::with_default(subscriber, || {
             let elf = Elf::new(BytesOrMapping::from_file("tests/liblzma_la-crc64-fast.o")?)?;
-            let mut segments = elf.segments();
-            while let Some(segm) = segments.next()? {
+            let mut segments = elf.image_segments();
+            while let Some(segment) = segments.next()? {
                 tracing::info!(
-                    "{}-{} ({:?})",
-                    segm.address(),
-                    segm.address() + segm.len(),
-                    segm.name()
+                    "{}+{:#x} ({})",
+                    segment.address().offset(),
+                    segment.size(),
+                    segment.name()
                 );
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for (_, sym) in elf.symbols().iter() {
+            for (_, sym) in elf.image_symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
 
@@ -1402,18 +1683,18 @@ mod test {
 
         tracing::subscriber::with_default(subscriber, || {
             let elf = Elf::new(BytesOrMapping::from_file("tests/inv-icm42600.ko")?)?;
-            let mut segments = elf.segments();
-            while let Some(segm) = segments.next()? {
+            let mut segments = elf.image_segments();
+            while let Some(segment) = segments.next()? {
                 tracing::info!(
-                    "{}-{} ({:?})",
-                    segm.address(),
-                    segm.address() + segm.len(),
-                    segm.name()
+                    "{}+{:#x} ({})",
+                    segment.address().offset(),
+                    segment.size(),
+                    segment.name()
                 );
             }
             tracing::info!("architecture: {}", elf.architecture());
 
-            for (_, sym) in elf.symbols().iter() {
+            for (_, sym) in elf.image_symbols().iter() {
                 tracing::info!("symbol {sym}");
             }
 
@@ -1440,9 +1721,9 @@ mod test {
             .expect("valid relocation value");
 
         let mut relocated_value = None;
-        let mut segments = elf.segments();
+        let segments = load_image_bytes(&elf)?;
 
-        while let Some(segm) = segments.next()? {
+        for segm in &segments {
             if !segm.contains_address(relocation_address) {
                 continue;
             }
@@ -1490,9 +1771,9 @@ mod test {
         let expected_value = image_base.offset().wrapping_add_signed(relocation_value);
 
         let mut relocated_value = None;
-        let mut segments = elf.segments();
+        let segments = load_image_bytes(&elf)?;
 
-        while let Some(segm) = segments.next()? {
+        for segm in &segments {
             if !segm.contains_address(relocation_address) {
                 continue;
             }
@@ -1529,9 +1810,9 @@ mod test {
                         return None;
                     };
 
-                    elf.symbols()
+                    elf.image_symbols()
                         .get_by_index(SymbolIndex::new(ELF_DYNSYM_SELECTOR, index.0))
-                        .map(|(_, entry)| (offset, entry.address().offset()))
+                        .map(|(_, entry)| (offset, entry.address().offset().offset()))
                 })
             })()
         )
@@ -1543,9 +1824,9 @@ mod test {
             .expect("ARM jump slot address");
 
         let mut relocated_value = None;
-        let mut segments = elf.segments();
+        let segments = load_image_bytes(&elf)?;
 
-        while let Some(segm) = segments.next()? {
+        for segm in &segments {
             if !segm.contains_address(relocation_address) {
                 continue;
             }
@@ -1570,6 +1851,128 @@ mod test {
         let result = Elf::new_with(BytesOrMapping::from_file("tests/executable")?, attributes);
 
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_overlapping_segments() -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::BTreeSet;
+
+        use crate::loader::{ImageBankHandle, ImageSpaceHandle, ImageSpaceKind};
+
+        let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
+
+        let layout = elf.image_layout();
+        let base_space = ImageSpaceHandle::default();
+
+        let handles = layout
+            .spaces()
+            .iter()
+            .map(|space| space.handle())
+            .collect::<BTreeSet<_>>();
+        assert!(handles.contains(&base_space));
+        assert_eq!(
+            handles.len(),
+            layout.spaces().len(),
+            "duplicate space handle"
+        );
+
+        let mut base_spaces = 0usize;
+        let mut overlay_spaces = 0usize;
+        for space in layout.spaces() {
+            match space.kind() {
+                ImageSpaceKind::Base { .. } => base_spaces += 1,
+                ImageSpaceKind::Overlay { base } => {
+                    assert_eq!(
+                        base, base_space,
+                        "overlay must be anchored to the base space"
+                    );
+                    overlay_spaces += 1;
+                }
+            }
+        }
+        assert_eq!(base_spaces, 1, "expected exactly one base space");
+        assert!(overlay_spaces > 0, "sample is expected to overlap");
+
+        let mut overlay_segments = 0usize;
+        let mut segments = elf.image_segments();
+        while let Some(segment) = segments.next()? {
+            assert!(
+                handles.contains(&segment.address().space()),
+                "segment references an undeclared space"
+            );
+            let backing = segment.backing().expect("segment is backed");
+            assert_eq!(
+                backing.bank(),
+                ImageBankHandle::default(),
+                "overlapping segments alias the shared default bank"
+            );
+            if segment.address().space() != base_space {
+                overlay_segments += 1;
+            }
+        }
+        assert!(overlay_segments > 0, "expected overlay-spaced segments");
+
+        let mut symbols = 0usize;
+        for (_, entry) in elf.image_symbols().iter() {
+            assert!(
+                handles.contains(&entry.address().space()),
+                "symbol resolved into an undeclared space"
+            );
+            symbols += 1;
+        }
+        assert!(symbols > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_image_writes_no_double_emit() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ir::RawAddressRangeSet;
+
+        let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
+
+        let mut covered = RawAddressRangeSet::new();
+        let mut writes = elf.image_writes();
+        let mut count = 0usize;
+
+        while let Some(write) = writes.next()? {
+            let len = write.bytes().len();
+            if len == 0 {
+                continue;
+            }
+
+            let start = write.offset();
+            let range = start..=start + (len as u64 - 1);
+
+            assert!(
+                !covered.intersects_range(range.clone()),
+                "image_writes emitted an overlapping bank range at {start:?}"
+            );
+
+            covered.insert_range(range);
+            count += 1;
+        }
+
+        assert!(count > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_metadata_lazy() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::loader::{LoadableFromFile, LoadableMetadata};
+
+        let elf = Elf::from_file_with("tests/ls.elf", AttributeMap::new())?;
+        let meta = elf.metadata();
+
+        assert_eq!(meta.path(), Some("tests/ls.elf"));
+
+        let bytes = std::fs::read("tests/ls.elf")?;
+        let eager = LoadableMetadata::new(&bytes, "probe");
+        assert_eq!(meta.md5(), eager.md5());
+        assert_eq!(meta.sha256(), eager.sha256());
 
         Ok(())
     }

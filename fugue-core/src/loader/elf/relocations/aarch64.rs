@@ -6,7 +6,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationEncoding, RelocationKind};
 
 use super::ElfSegmentRelocator;
-use crate::loader::LoadableSegment;
+use crate::loader::ImageSegmentBytes;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -16,20 +16,20 @@ where
 {
     fn apply_aarch64_call_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         offset: usize,
         reloc: &Relocation,
         reloc_type: u32,
         is_dynamic: bool,
     ) {
-        let target = lsegm.address().offset().wrapping_add(offset as u64);
+        let target = bytes.address().offset().wrapping_add(offset as u64);
 
         let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
             tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
             return;
         };
 
-        self.mark_function_symbol(value, lsegm);
+        self.mark_function_symbol(value, bytes);
 
         let value = i128::from(value) + i128::from(reloc.addend()) - i128::from(target);
 
@@ -47,12 +47,12 @@ where
         tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
         let imm26 = (shifted as i64 as u32) & 0x03ff_ffff;
-        lsegm.update_value::<u32>(offset, |insn| (insn & !0x03ff_ffff) | imm26);
+        bytes.update_value::<u32>(offset, |insn| (insn & !0x03ff_ffff) | imm26);
     }
 
     pub(crate) fn apply_aarch64_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
@@ -60,7 +60,7 @@ where
         match (reloc.kind(), reloc.encoding()) {
             (RelocationKind::PltRelative, RelocationEncoding::AArch64Call) => {
                 self.apply_aarch64_call_relocation(
-                    lsegm,
+                    bytes,
                     offset as usize,
                     reloc,
                     R_AARCH64_CALL26,
@@ -69,7 +69,7 @@ where
                 return;
             }
             (kind, _) if kind != RelocationKind::Unknown => {
-                self.apply_generic_relocation(lsegm, offset, reloc, kind, is_dynamic);
+                self.apply_generic_relocation(bytes, offset, reloc, kind, is_dynamic);
                 return;
             }
             _ => {}
@@ -86,7 +86,7 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value);
+                bytes.write_value(offset, value);
             }
             R_AARCH64_P32_RELATIVE => {
                 let offset = offset as usize;
@@ -99,7 +99,7 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT => {
                 let offset = offset as usize;
@@ -110,16 +110,16 @@ where
                 };
 
                 if reloc_type == R_AARCH64_JUMP_SLOT {
-                    self.mark_function_symbol(value, lsegm);
+                    self.mark_function_symbol(value, bytes);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value);
+                bytes.write_value(offset, value);
             }
             R_AARCH64_CALL26 | R_AARCH64_JUMP26 => {
                 self.apply_aarch64_call_relocation(
-                    lsegm,
+                    bytes,
                     offset as usize,
                     reloc,
                     reloc_type,
@@ -140,12 +140,12 @@ where
                 }
 
                 if reloc_type == R_AARCH64_P32_JUMP_SLOT {
-                    self.mark_function_symbol(value, lsegm);
+                    self.mark_function_symbol(value, bytes);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             _ => {
                 tracing::warn!("unsupported relocation type {reloc:?}");

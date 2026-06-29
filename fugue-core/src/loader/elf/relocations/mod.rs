@@ -6,7 +6,7 @@ use object::{
 use crate::ir::{Address, SymbolIndex, SymbolTable};
 use crate::loader::elf::extensions::RelocationContext;
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
-use crate::loader::{LoadableSegment, LoaderError};
+use crate::loader::{ImageAddress, ImageSegmentBytes, LoaderError};
 
 pub mod generic;
 
@@ -24,7 +24,7 @@ where
 {
     elf: &'file ElfFile<'data, Elf, R>,
     base: Address,
-    symbols: &'file SymbolTable,
+    symbols: &'file SymbolTable<ImageAddress>,
     is_object: bool,
 }
 
@@ -36,7 +36,7 @@ where
 {
     pub fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        symbols: &'file SymbolTable,
+        symbols: &'file SymbolTable<ImageAddress>,
         is_object: bool,
         base: Address,
     ) -> Self {
@@ -51,30 +51,30 @@ where
     pub fn apply(
         &self,
         origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
         let origin = origin.into();
-        self.apply_relocations(origin, lsegm, sect)?;
-        self.apply_dynamic_relocations(origin, lsegm)?;
+        self.apply_relocations(origin, bytes, sect)?;
+        self.apply_dynamic_relocations(origin, bytes)?;
         Ok(())
     }
 
     pub fn apply_relocations(
         &self,
         _origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
         let _origin = _origin.into();
         for (off, rel) in sect.relocations() {
             tracing::trace!(
                 "applying relocation {}+{off:#x} {:?} {rel:?}",
-                lsegm.address(),
+                bytes.address(),
                 rel.kind()
             );
 
-            self.apply_relocation(lsegm, off, &rel, false)?;
+            self.apply_relocation(bytes, off, &rel, false)?;
         }
 
         Ok(())
@@ -83,7 +83,7 @@ where
     pub fn apply_dynamic_relocations(
         &self,
         origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
     ) -> Result<(), LoaderError> {
         let Some(drels) = self.elf.dynamic_relocations() else {
             tracing::trace!("no dynamic relocations");
@@ -107,7 +107,7 @@ where
             return Ok(());
         };
         let Some(origin_last_offset) =
-            origin_offset.checked_add(lsegm.len().saturating_sub(1) as u64)
+            origin_offset.checked_add(bytes.len().saturating_sub(1) as u64)
         else {
             return Err(LoaderError::address_overflow(origin));
         };
@@ -120,7 +120,7 @@ where
             // Compute offset in the segment
             let off = off - origin_offset;
 
-            self.apply_relocation(lsegm, off, &rel, true)?;
+            self.apply_relocation(bytes, off, &rel, true)?;
         }
 
         Ok(())
@@ -128,12 +128,12 @@ where
 
     pub(crate) fn apply_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
     ) -> Result<(), LoaderError> {
-        let patch_address = lsegm.address() + offset;
+        let patch_address = bytes.address() + offset;
         let relocation_type = match reloc.flags() {
             RelocationFlags::Elf { r_type } => Some(r_type),
             _ => None,
@@ -145,7 +145,7 @@ where
             offset,
             relocation_type,
             is_dynamic,
-            lsegm,
+            bytes,
         );
 
         if context.apply_relocation()? {
@@ -208,7 +208,7 @@ where
         {
             let address = entry.address();
             tracing::trace!("found external symbol {id:?} at {address}");
-            return Some(address.offset());
+            return Some(address.offset().offset());
         }
 
         if !is_dynamic && // let Some(target) = self.symbols.get_address(index.0) {
@@ -216,7 +216,7 @@ where
         {
             let address = entry.address();
             tracing::trace!("found symbol {id:?} at {address}");
-            return Some(address.offset());
+            return Some(address.offset().offset());
         }
 
         tracing::warn!(
@@ -246,13 +246,13 @@ where
     pub(crate) fn mark_function_symbol(
         &self,
         address: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentBytes<'data>,
     ) {
         let address = address.into();
 
         tracing::trace!("marking symbol {address} as function");
 
-        lsegm.add_function_hint(address);
+        bytes.add_function_hint(address);
 
         /*
         if self.externs.as_ref().map_or(false, |externs| {
@@ -261,7 +261,8 @@ where
             return;
         }
 
-        let Some(entries) = self.symbols.get_by_address_mut(address) else {
+        let image_address = ImageAddress::in_default_space(address.offset());
+        let Some(entries) = self.symbols.get_by_address(image_address) else {
             tracing::warn!("attempting to mark non-existing symbol {address} as function");
             return;
         };

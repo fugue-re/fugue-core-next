@@ -9,7 +9,7 @@ use crate::ir::{Address, Endian};
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{LoadableSegment, LoaderError, Pe};
+use crate::loader::{ImageSegmentBytes, LoaderError, Pe};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
@@ -234,7 +234,7 @@ pub struct RelocationContext<'a, 'data> {
     patch_address: Address,
     offset: usize,
     relocation_type: u16,
-    segment: &'a mut LoadableSegment<'data>,
+    segment: &'a mut ImageSegmentBytes<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
@@ -245,7 +245,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         patch_address: Address,
         offset: usize,
         relocation_type: u16,
-        segment: &'a mut LoadableSegment<'data>,
+        segment: &'a mut ImageSegmentBytes<'data>,
     ) -> Self
     where
         Headers: ImageNtHeaders,
@@ -286,11 +286,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.relocation_type
     }
 
-    pub fn segment(&self) -> &LoadableSegment<'data> {
+    pub fn segment(&self) -> &ImageSegmentBytes<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut LoadableSegment<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentBytes<'data> {
         self.segment
     }
 
@@ -311,10 +311,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         Ok(applied)
     }
 
-    fn apply_relocation_with(
-        &mut self,
-        handler: &RelocationHandler,
-    ) -> Result<bool, LoaderError> {
+    fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
         (handler.apply_relocation)(self)
     }
 }

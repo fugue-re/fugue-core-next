@@ -4,4 +4,4 @@ pub mod endian;
 pub use endian::Endian;
 
 pub mod traits;
-pub use traits::{ByteOrder, ByteCast};
+pub use traits::{ByteCast, ByteOrder};

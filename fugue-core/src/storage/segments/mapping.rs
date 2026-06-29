@@ -79,6 +79,29 @@ pub enum SegmentMappingKind {
     PageTable,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub enum SegmentMappingProvenance {
+    #[default]
+    Generic,
+    Extern,
+    FileResidue,
+    Section,
+    Segment,
+    Synthetic,
+    Uninitialised,
+}
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub struct SegmentMappingFlags: u32 {
@@ -148,6 +171,7 @@ pub struct SegmentMapping {
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     overlay: OverlayTree,
     version: u64,
@@ -173,6 +197,7 @@ impl SegmentMapping {
             provider_id,
             properties,
             kind: SegmentMappingKind::None,
+            provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
             version: 0,
@@ -201,6 +226,7 @@ impl SegmentMapping {
             provider_id,
             properties,
             kind: SegmentMappingKind::None,
+            provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
             version: 0,
@@ -261,6 +287,15 @@ impl SegmentMapping {
 
     pub fn set_kind(&mut self, kind: SegmentMappingKind) {
         self.kind = kind;
+        self.touch();
+    }
+
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.provenance
+    }
+
+    pub fn set_provenance(&mut self, provenance: SegmentMappingProvenance) {
+        self.provenance = provenance;
         self.touch();
     }
 
@@ -529,6 +564,7 @@ pub struct SegmentMappingBuilder {
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     name: String,
     mapping_hints: BTreeMap<Address, ContextHint>,
@@ -549,6 +585,7 @@ impl SegmentMappingBuilder {
             provider_id,
             properties: SegmentProperties::default(),
             kind: SegmentMappingKind::default(),
+            provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::default(),
             name: Uuid::now_v7().to_string(),
             mapping_hints: BTreeMap::new(),
@@ -631,6 +668,19 @@ impl SegmentMappingBuilder {
 
     pub fn with_kind(mut self, kind: impl Into<SegmentMappingKind>) -> Self {
         self.set_kind(kind);
+        self
+    }
+
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.provenance
+    }
+
+    pub fn set_provenance(&mut self, provenance: impl Into<SegmentMappingProvenance>) {
+        self.provenance = provenance.into();
+    }
+
+    pub fn with_provenance(mut self, provenance: impl Into<SegmentMappingProvenance>) -> Self {
+        self.set_provenance(provenance);
         self
     }
 

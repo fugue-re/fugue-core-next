@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
@@ -9,16 +10,19 @@ use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::resolve_language;
 use crate::loader::{
-    Loadable, LoadableMetadata, LoadableSegment, LoadableSegmentBounds, LoaderError,
+    ImageAddress, ImageBankHandle, ImageLayout, ImageSegment, ImageWrite, Loadable,
+    LoadableMetadata, LoaderError,
 };
-use crate::types::attributes::ATTRIBUTE_ENTRY_POINT;
+use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub struct Shellcode<'a> {
     address: Address,
     bytes: BytesOrMapping<'a>,
     arch: Arch,
-    metadata: LoadableMetadata,
+    layout: ImageLayout,
+    metadata: OnceLock<LoadableMetadata>,
+    path: Option<String>,
     attributes: AttributeMap,
 }
 
@@ -72,20 +76,16 @@ impl<'a> Shellcode<'a> {
             )));
         }
 
-        let metadata = LoadableMetadata::new(
-            &bytes,
-            format!("Fugue v{} Shellcode Loader", env!("CARGO_PKG_VERSION")),
-        );
-
-        let mut attributes = attributes.into();
-
-        attributes.set_attr(ATTRIBUTE_ENTRY_POINT, address);
+        let attributes = attributes.into();
+        let layout = ImageLayout::single_bank(size as u64);
 
         Ok(Self {
             address,
             bytes,
             arch,
-            metadata,
+            layout,
+            metadata: OnceLock::new(),
+            path: None,
             attributes,
         })
     }
@@ -108,7 +108,7 @@ impl<'a> Shellcode<'a> {
         let bytes = BytesOrMapping::from_file(path)?;
 
         let mut loaded = Self::new_with(language, address, bytes, attributes)?;
-        loaded.metadata.set_path(path.display().to_string());
+        loaded.path = Some(path.display().to_string());
 
         Ok(loaded)
     }
@@ -127,20 +127,37 @@ impl Loadable for Shellcode<'_> {
         self.arch.clone()
     }
 
-    fn segments<'a>(
-        &'a self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
-        fallible_iterator::once(LoadableSegment {
-            name: Cow::Borrowed("LOAD"),
-            address: self.address,
-            properties: SegmentProperties::PERM_ALL,
-            bytes: Cow::Borrowed(self.bytes()),
-            ..Default::default()
-        })
+    fn entry_point(&self) -> Option<ImageAddress> {
+        Some(ImageAddress::in_default_space(self.address.offset()))
     }
 
-    fn segment_bounds(&self) -> LoadableSegmentBounds {
-        LoadableSegmentBounds::new(self.address..self.address + self.bytes.len())
+    fn image_segments<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
+        Box::new(fallible_iterator::once(
+            ImageSegment::backed_in_default_bank(
+                Cow::Borrowed("LOAD"),
+                ImageAddress::in_default_space(self.address.offset()),
+                self.bytes.len(),
+                SegmentProperties::PERM_ALL,
+                SegmentMappingProvenance::Segment,
+                self.address.offset().into(),
+            ),
+        ))
+    }
+
+    fn image_layout(&self) -> &ImageLayout {
+        &self.layout
+    }
+
+    fn image_writes<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a {
+        Box::new(fallible_iterator::once(ImageWrite::new(
+            ImageBankHandle::default(),
+            0u64,
+            Cow::Borrowed(self.bytes()),
+        )))
     }
 
     fn attributes(&self) -> &AttributeMap {
@@ -152,7 +169,13 @@ impl Loadable for Shellcode<'_> {
     }
 
     fn metadata(&self) -> &LoadableMetadata {
-        &self.metadata
+        self.metadata.get_or_init(|| {
+            LoadableMetadata::new_with(
+                &self.bytes,
+                self.path.clone(),
+                format!("Fugue v{} Shellcode Loader", env!("CARGO_PKG_VERSION")),
+            )
+        })
     }
 }
 
@@ -161,7 +184,7 @@ mod test {
     use fallible_iterator::FallibleIterator;
 
     use crate::attributes;
-    use crate::ir::Address;
+    use crate::ir::RawAddress;
     use crate::loader::Loadable;
     use crate::loader::shellcode::Shellcode;
 
@@ -179,11 +202,11 @@ mod test {
             ],
         )?;
 
-        let regions = shellcode.segments().collect::<Vec<_>>()?;
+        let regions = shellcode.image_segments().collect::<Vec<_>>()?;
         assert_eq!(regions.len(), 1);
 
         let region = &regions[0];
-        assert_eq!(region.address, Address::from(0x1000u32));
+        assert_eq!(region.address().offset(), RawAddress::from(0x1000u32));
 
         let mut lifter = shellcode.architecture().lifter();
         let mut offset = 0usize;
