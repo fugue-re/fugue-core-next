@@ -6,8 +6,9 @@ use std::path::Path;
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::elf::{
-    FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, STB_GLOBAL,
-    STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT, STT_TLS,
+    FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE,
+    STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT,
+    STT_TLS,
 };
 use object::read::elf::{
     self, ElfFile, ElfSectionIterator, ElfSegment, ElfSegmentIterator, FileHeader,
@@ -966,6 +967,14 @@ where
             let size = sect.size();
 
             if size == 0 || (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+                continue;
+            }
+
+            if (sh_flags as u32 & SHF_TLS) == SHF_TLS {
+                tracing::debug!(
+                    "skipping TLS section {}",
+                    sect.name().unwrap_or("<unnamed>")
+                );
                 continue;
             }
 
