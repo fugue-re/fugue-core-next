@@ -121,6 +121,12 @@ struct SegmentStorageMetadata {
     mappings: Vec<MappingMetadata>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpacePriority {
+    Top,
+    Bottom,
+}
+
 pub struct SegmentStorage {
     providers: BTreeMap<SegmentStorageProviderId, SegmentStorageDescriptor>,
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
@@ -370,7 +376,7 @@ impl SegmentStorage {
                 } else {
                     AddressSpaceId::try_from(storage.space_ctr)?
                 };
-            let kind = match space_meta.kind.clone() {
+            let kind = match space_meta.kind {
                 AddressSpaceKind::Base => AddressSpaceKind::Base,
                 AddressSpaceKind::Overlay { base } => AddressSpaceKind::Overlay {
                     base: *space_map
@@ -465,20 +471,27 @@ impl SegmentStorage {
             .values()
             .map(|b| AddressSpaceMetadata {
                 id: b.id(),
-                kind: b.kind().clone(),
+                kind: b.kind(),
                 mapping_ids: b.priority_list().iter().map(|r| r.mapping_id()).collect(),
             })
             .collect::<Vec<_>>();
+
+        let mut space_by_mapping = BTreeMap::<SegmentMappingId, AddressSpaceId>::new();
+        for (&space_id, space) in &self.spaces {
+            for mapping_ref in space.priority_list() {
+                space_by_mapping
+                    .entry(mapping_ref.mapping_id())
+                    .or_insert(space_id);
+            }
+        }
 
         let mappings = self
             .mappings
             .values()
             .map(|m| {
-                let space_id = self
-                    .spaces
-                    .iter()
-                    .find(|(_, b)| b.priority_list().iter().any(|r| r.mapping_id() == m.id()))
-                    .map(|(id, _)| *id)
+                let space_id = space_by_mapping
+                    .get(&m.id())
+                    .copied()
                     .unwrap_or(DEFAULT_SPACE_ID);
 
                 MappingMetadata {
@@ -635,22 +648,7 @@ impl SegmentStorage {
         let id = SegmentMappingId::new(self.mapping_ctr);
         self.mapping_ctr += 1;
 
-        let mut mapping = SegmentMapping::new_with_metadata(
-            id,
-            builder.start(),
-            builder.size(),
-            builder.offset(),
-            builder.provider_id(),
-            builder.properties(),
-            builder.name(),
-            builder.mapping_hints().clone(),
-            builder.function_hints().clone(),
-        );
-        mapping.set_kind(builder.kind());
-        mapping.set_provenance(builder.provenance());
-        mapping.set_flags(builder.flags());
-
-        self.mappings.insert(id, mapping);
+        self.mappings.insert(id, SegmentMapping::from_builder(id, builder));
 
         Ok(id)
     }
@@ -770,29 +768,22 @@ impl SegmentStorage {
         space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
-        let mapping = self
-            .mappings
-            .get(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
-
-        let mapping_ref = mapping.make_ref();
-        let start = mapping.start();
-        let size = mapping.size();
-
-        let space = self
-            .spaces
-            .get_mut(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
-
-        space.add_mapping_top(mapping_ref, start, size, mapping.properties());
-
-        Ok(())
+        self.add_mapping_to_space_at(space_id, mapping_id, SpacePriority::Top)
     }
 
     pub fn add_mapping_to_space_bottom(
         &mut self,
         space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
+    ) -> Result<(), SegmentStorageError> {
+        self.add_mapping_to_space_at(space_id, mapping_id, SpacePriority::Bottom)
+    }
+
+    fn add_mapping_to_space_at(
+        &mut self,
+        space_id: AddressSpaceId,
+        mapping_id: SegmentMappingId,
+        priority: SpacePriority,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
             .mappings
@@ -802,13 +793,17 @@ impl SegmentStorage {
         let mapping_ref = mapping.make_ref();
         let start = mapping.start();
         let size = mapping.size();
+        let properties = mapping.properties();
 
         let space = self
             .spaces
             .get_mut(&space_id)
             .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
-        space.add_mapping_bottom(mapping_ref, start, size, mapping.properties());
+        match priority {
+            SpacePriority::Top => space.add_mapping_top(mapping_ref, start, size, properties),
+            SpacePriority::Bottom => space.add_mapping_bottom(mapping_ref, start, size, properties),
+        }
 
         Ok(())
     }
@@ -818,14 +813,7 @@ impl SegmentStorage {
         space_id: AddressSpaceId,
         mapping_id: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
-        let space = self
-            .spaces
-            .get_mut(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
-
-        space.prioritise(mapping_id);
-
-        self.rebuild_submaps_for_mapping(space_id, mapping_id)
+        self.add_mapping_to_space_at(space_id, mapping_id, SpacePriority::Top)
     }
 
     pub fn deprioritise_mapping(
@@ -918,8 +906,9 @@ impl SegmentStorage {
             let view = match space.find_containing(current_addr) {
                 Some(v) => v,
                 None => {
-                    current_addr += 1usize;
-                    remaining -= 1;
+                    let skip = space.gap_len_at(current_addr, remaining);
+                    current_addr += skip;
+                    remaining -= skip;
                     continue;
                 }
             };
@@ -1022,9 +1011,10 @@ impl SegmentStorage {
                 match space.find_containing(current_addr) {
                     Some(v) => v,
                     None => {
-                        current_addr += 1usize;
-                        remaining -= 1;
-                        write_offset += 1;
+                        let skip = space.gap_len_at(current_addr, remaining);
+                        current_addr += skip;
+                        remaining -= skip;
+                        write_offset += skip;
                         continue;
                     }
                 }
@@ -1390,6 +1380,87 @@ mod test {
         let mut bytes = [0u8; 4];
         storage.read_bytes_exact(0x1000u64, &mut bytes)?;
         assert_eq!(&bytes, &[0x51, 0x52, 0x53, 0x54]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_write_across_large_gap() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+
+        let low = storage.open_provider(
+            InMemorySegmentStorage::with_size(4),
+            SegmentProperties::PERM_ALL,
+        );
+        let high = storage.open_provider(
+            InMemorySegmentStorage::with_size(4),
+            SegmentProperties::PERM_ALL,
+        );
+
+        let low_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, low)
+                .with_properties(SegmentProperties::PERM_ALL),
+        )?;
+        let high_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x8000u64, 4, 0, high)
+                .with_properties(SegmentProperties::PERM_ALL),
+        )?;
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, low_id)?;
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, high_id)?;
+
+        let payload = [0xAA, 0xAA, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB];
+        let mut src = vec![0u8; 0x7004];
+        src[..4].copy_from_slice(&payload[..4]);
+        src[0x7000..].copy_from_slice(&payload[4..]);
+        assert_eq!(storage.write_bytes(0x1000u64, &src)?, 8);
+
+        let mut buf = vec![0x77u8; 0x7004];
+        let read = storage.read_bytes(0x1000u64, &mut buf)?;
+        assert_eq!(read, 8);
+        assert_eq!(&buf[..4], &[0xAA; 4]);
+        assert!(
+            buf[4..0x7000].iter().all(|byte| *byte == 0),
+            "the gap reads back as the fill byte"
+        );
+        assert_eq!(&buf[0x7000..], &[0xBB; 4]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prioritise_brings_mapping_to_top() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+
+        let a = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0xAA; 4]),
+            SegmentProperties::PERM_ALL,
+        );
+        let b = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0xBB; 4]),
+            SegmentProperties::PERM_ALL,
+        );
+
+        let a_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, a)
+                .with_properties(SegmentProperties::PERM_ALL)
+                .with_name("a"),
+        )?;
+        let b_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, b)
+                .with_properties(SegmentProperties::PERM_ALL)
+                .with_name("b"),
+        )?;
+        storage.add_mapping_to_space_top(DEFAULT_SPACE_ID, a_id)?;
+        storage.add_mapping_to_space_top(DEFAULT_SPACE_ID, b_id)?;
+
+        assert_eq!(storage.view_at(0x1000u64)?.name(), "b");
+
+        storage.prioritise_mapping(DEFAULT_SPACE_ID, a_id)?;
+
+        assert_eq!(storage.view_at(0x1000u64)?.name(), "a");
+        let mut buf = [0u8; 4];
+        storage.read_bytes_exact(0x1000u64, &mut buf)?;
+        assert_eq!(&buf, &[0xAA; 4]);
 
         Ok(())
     }

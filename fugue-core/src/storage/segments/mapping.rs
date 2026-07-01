@@ -207,32 +207,22 @@ impl SegmentMapping {
         }
     }
 
-    pub fn new_with_metadata(
-        id: SegmentMappingId,
-        start: impl Into<Address>,
-        size: usize,
-        offset: u64,
-        provider_id: SegmentStorageProviderId,
-        properties: SegmentProperties,
-        name: impl Into<String>,
-        mapping_hints: BTreeMap<Address, ContextHint>,
-        function_hints: BTreeSet<Address>,
-    ) -> Self {
+    pub(crate) fn from_builder(id: SegmentMappingId, builder: SegmentMappingBuilder) -> Self {
         Self {
             id,
-            start: start.into(),
-            size,
-            offset,
-            provider_id,
-            properties,
-            kind: SegmentMappingKind::None,
-            provenance: SegmentMappingProvenance::default(),
-            flags: SegmentMappingFlags::NONE,
+            start: builder.start,
+            size: builder.size,
+            offset: builder.offset,
+            provider_id: builder.provider_id,
+            properties: builder.properties,
+            kind: builder.kind,
+            provenance: builder.provenance,
+            flags: builder.flags,
             overlay: OverlayTree::new(),
             version: 0,
-            name: name.into(),
-            mapping_hints,
-            function_hints,
+            name: builder.name,
+            mapping_hints: builder.mapping_hints,
+            function_hints: builder.function_hints,
         }
     }
 
@@ -526,7 +516,7 @@ impl SegmentSubMapping {
             return (Some(self.clone()), None);
         }
 
-        let left_size = usize::from(addr - self.start().offset());
+        let left_size = usize::from(addr - self.start());
         let right_size = usize::from(self.end() - addr);
 
         let left = Self::new(self.mapping_ref, self.start, left_size, self.properties);

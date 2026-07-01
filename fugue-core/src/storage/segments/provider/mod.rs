@@ -242,13 +242,13 @@ impl<'a> SegmentView<'a> {
     }
 
     pub fn as_contiguous(&self) -> Option<&[u8]> {
-        match self.chunks.as_slice() {
-            [] if self.len == 0 => Some(&[]),
-            [chunk] if chunk.offset == 0 && chunk.bytes.len() as u64 == self.len => {
-                Some(&chunk.bytes)
-            }
-            _ => None,
+        if self.len == 0 {
+            return Some(&[]);
         }
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.offset == 0)
+            .map(SegmentChunk::bytes)
     }
 
     pub fn read_into(&self, buf: &mut [u8]) {
@@ -338,5 +338,31 @@ pub trait SegmentStorageProviderDescriptor: SegmentStorageProvider {
 
     fn persistence(&self) -> StoragePersistence {
         Self::PERSISTENCE
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_as_contiguous_yields_leading_run() {
+        assert_eq!(SegmentView::new(0).as_contiguous(), Some(&[][..]));
+
+        let mut padded = SegmentView::new(8);
+        padded.push(0, &b"CODE"[..]);
+        assert_eq!(
+            padded.as_contiguous(),
+            Some(&b"CODE"[..]),
+            "a leading run followed by padding is contiguous up to the padding"
+        );
+
+        let mut front_gap = SegmentView::new(8);
+        front_gap.push(4, &b"DATA"[..]);
+        assert_eq!(
+            front_gap.as_contiguous(),
+            None,
+            "a gap at the front has no leading run"
+        );
     }
 }

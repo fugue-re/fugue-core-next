@@ -275,9 +275,10 @@ mod test {
 
         let view = store.view_bytes(0, 12)?;
         assert_eq!(view.len(), 12);
-        assert!(
-            view.as_contiguous().is_none(),
-            "spanning a gap is not contiguous"
+        assert_eq!(
+            view.as_contiguous(),
+            Some(&b"AAAA"[..]),
+            "as_contiguous yields the leading run up to the gap"
         );
 
         let mut buf = [0xffu8; 12];

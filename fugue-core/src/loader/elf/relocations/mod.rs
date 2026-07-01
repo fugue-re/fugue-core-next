@@ -208,7 +208,7 @@ where
         {
             let address = entry.address();
             tracing::trace!("found external symbol {id:?} at {address}");
-            return Some(address.offset().offset());
+            return Some(address.raw_offset());
         }
 
         if !is_dynamic && // let Some(target) = self.symbols.get_address(index.0) {
@@ -216,7 +216,7 @@ where
         {
             let address = entry.address();
             tracing::trace!("found symbol {id:?} at {address}");
-            return Some(address.offset().offset());
+            return Some(address.raw_offset());
         }
 
         tracing::warn!(

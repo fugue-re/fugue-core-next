@@ -14,7 +14,6 @@ use object::pe::{
 };
 use object::read::pe::{self, ImageNtHeaders, PeFile, PeSection, PeSectionIterator};
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
-use range_set_blaze::RangeSetBlaze;
 use smallvec::{SmallVec, smallvec};
 
 use crate::arch::Arch;
@@ -655,7 +654,7 @@ where
 {
     pe: &'file PeFile<'data, Pe, R>,
     sects: PeSectionIterator<'data, 'file, Pe, R>,
-    covered: RangeSetBlaze<u64>,
+    covered: RawAddressRangeSet,
     current_base: Address,
     preferred_base: u64,
     import_slots: &'file BTreeMap<Address, Address>,
@@ -678,7 +677,7 @@ where
         Self {
             pe,
             sects: pe.sections(),
-            covered: RangeSetBlaze::new(),
+            covered: RawAddressRangeSet::new(),
             current_base,
             preferred_base,
             import_slots,
@@ -717,8 +716,8 @@ where
             })
             .collect::<Vec<_>>();
 
-        self.covered
-            .ranges_insert(address.offset()..=last_address.offset());
+        let range: RangeInclusive<RawAddress> = address.into()..=last_address.into();
+        self.covered.insert_range(range);
 
         Ok(Some(ImageSegmentBytes::new(
             address,
@@ -752,12 +751,9 @@ where
                 continue;
             }
 
-            let vrange = address.offset()..=last_address.offset();
+            let vrange: RangeInclusive<RawAddress> = address.into()..=last_address.into();
 
-            if !self
-                .covered
-                .is_disjoint(&RangeSetBlaze::from_iter([vrange.clone()]))
-            {
+            if self.covered.intersects_range(vrange.clone()) {
                 tracing::debug!("overlapping PE section {address}-{last_address}; skipping");
                 continue;
             }
@@ -768,7 +764,7 @@ where
             let mut bytes =
                 ImageSegmentBytes::new(address, pe_section_properties(&sect), &data[..emit]);
 
-            self.covered.ranges_insert(vrange);
+            self.covered.insert_range(vrange);
             relocator.apply(&mut bytes)?;
 
             return Ok(Some(bytes));

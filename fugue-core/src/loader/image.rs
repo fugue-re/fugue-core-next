@@ -185,6 +185,10 @@ impl ImageAddress {
     pub fn offset(&self) -> RawAddress {
         self.offset
     }
+
+    pub fn raw_offset(&self) -> u64 {
+        self.offset.offset()
+    }
 }
 
 impl fmt::Display for ImageAddress {

@@ -31,7 +31,7 @@ pub enum AddressSpaceError {
 )]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
-pub struct AddressSpaceId(u8);
+pub struct AddressSpaceId(u16);
 
 impl fmt::Display for AddressSpaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -41,17 +41,17 @@ impl fmt::Display for AddressSpaceId {
 
 impl AddressSpaceId {
     pub fn try_new(index: usize) -> Result<Self, AddressSpaceError> {
-        u8::try_from(index)
+        u16::try_from(index)
             .map(Self)
             .map_err(|_| AddressSpaceError::IndexOutOfRange(index))
     }
 
     pub const fn new(index: usize) -> Self {
         assert!(
-            index <= u8::MAX as usize,
+            index <= u16::MAX as usize,
             "address space index out of range"
         );
-        Self(index as u8)
+        Self(index as u16)
     }
 
     pub const fn index(&self) -> usize {
@@ -69,6 +69,12 @@ impl TryFrom<usize> for AddressSpaceId {
 
 impl From<u8> for AddressSpaceId {
     fn from(id: u8) -> Self {
+        Self(id as u16)
+    }
+}
+
+impl From<u16> for AddressSpaceId {
+    fn from(id: u16) -> Self {
         Self(id)
     }
 }
@@ -79,7 +85,7 @@ impl From<AddressSpaceId> for usize {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(PartialEq, Eq))]
 pub enum AddressSpaceKind {
     Base,
@@ -123,8 +129,8 @@ impl AddressSpace {
         matches!(self.kind, AddressSpaceKind::Overlay { .. })
     }
 
-    pub fn kind(&self) -> &AddressSpaceKind {
-        &self.kind
+    pub fn kind(&self) -> AddressSpaceKind {
+        self.kind
     }
 
     pub(crate) fn add_mapping_top(
@@ -227,23 +233,22 @@ impl AddressSpace {
         self.submaps.values(addr..(addr + 1usize)).next()
     }
 
+    pub fn gap_len_at(&self, addr: impl Into<Address>, max: usize) -> usize {
+        let addr = Address::new(self.id, addr.into());
+        let end = Address::new(self.id, RawAddress::MAX);
+        self.submaps
+            .values(addr..=end)
+            .map(SegmentSubMapping::start)
+            .find(|start| *start > addr)
+            .map_or(max, |next| usize::from(next - addr).min(max))
+    }
+
     pub fn find_containing_mut(
         &mut self,
         addr: impl Into<Address>,
     ) -> Option<&mut SegmentSubMapping> {
         let addr = Address::new(self.id, addr.into());
         self.submaps.values_mut(addr..(addr + 1usize)).next()
-    }
-
-    pub(crate) fn prioritise(&mut self, mapping_id: SegmentMappingId) {
-        if let Some(pos) = self
-            .priority_list
-            .iter()
-            .position(|r| r.mapping_id() == mapping_id)
-        {
-            let mapping_ref = self.priority_list.remove(pos);
-            self.priority_list.push(mapping_ref);
-        }
     }
 
     pub(crate) fn deprioritise(&mut self, mapping_id: SegmentMappingId) {
