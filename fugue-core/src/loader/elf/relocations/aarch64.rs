@@ -17,12 +17,12 @@ where
     fn apply_aarch64_call_relocation(
         &self,
         bytes: &mut ImageSegmentBytes<'data>,
-        offset: usize,
+        offset: u64,
         reloc: &Relocation,
         reloc_type: u32,
         is_dynamic: bool,
     ) {
-        let target = bytes.address().offset().wrapping_add(offset as u64);
+        let target = bytes.address().offset().wrapping_add(offset);
 
         let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
             tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
@@ -61,7 +61,7 @@ where
             (RelocationKind::PltRelative, RelocationEncoding::AArch64Call) => {
                 self.apply_aarch64_call_relocation(
                     bytes,
-                    offset as usize,
+                    offset,
                     reloc,
                     R_AARCH64_CALL26,
                     is_dynamic,
@@ -81,7 +81,6 @@ where
 
         match reloc_type {
             R_AARCH64_RELATIVE => {
-                let offset = offset as usize;
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
@@ -89,7 +88,6 @@ where
                 bytes.write_value(offset, value);
             }
             R_AARCH64_P32_RELATIVE => {
-                let offset = offset as usize;
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 if value > u32::MAX as u64 {
@@ -102,8 +100,6 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -118,17 +114,9 @@ where
                 bytes.write_value(offset, value);
             }
             R_AARCH64_CALL26 | R_AARCH64_JUMP26 => {
-                self.apply_aarch64_call_relocation(
-                    bytes,
-                    offset as usize,
-                    reloc,
-                    reloc_type,
-                    is_dynamic,
-                );
+                self.apply_aarch64_call_relocation(bytes, offset, reloc, reloc_type, is_dynamic);
             }
             R_AARCH64_P32_GLOB_DAT | R_AARCH64_P32_JUMP_SLOT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;

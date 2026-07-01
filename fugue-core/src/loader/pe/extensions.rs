@@ -232,7 +232,7 @@ pub struct RelocationContext<'a, 'data> {
     base: Address,
     preferred_base: Address,
     patch_address: Address,
-    offset: usize,
+    offset: u64,
     relocation_type: u16,
     segment: &'a mut ImageSegmentBytes<'data>,
 }
@@ -243,7 +243,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         base: Address,
         preferred_base: Address,
         patch_address: Address,
-        offset: usize,
+        offset: u64,
         relocation_type: u16,
         segment: &'a mut ImageSegmentBytes<'data>,
     ) -> Self
@@ -278,7 +278,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.patch_address
     }
 
-    pub fn offset(&self) -> usize {
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 

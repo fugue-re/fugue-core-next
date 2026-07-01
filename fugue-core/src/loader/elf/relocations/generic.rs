@@ -18,8 +18,6 @@ where
         reloc_type: RelocationKind,
         is_dynamic: bool,
     ) {
-        let offset = offset as usize;
-
         match reloc_type {
             RelocationKind::Absolute => {
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -52,7 +50,7 @@ where
 
                 let value = value
                     .wrapping_add_signed(reloc.addend())
-                    .wrapping_sub(bytes.address().offset().wrapping_add(offset as u64));
+                    .wrapping_sub(bytes.address().offset().wrapping_add(offset));
 
                 tracing::trace!("applying relocation {reloc_type:?} at {offset:#x}: {value:#x}");
 

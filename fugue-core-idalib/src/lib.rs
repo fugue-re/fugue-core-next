@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use fallible_iterator::FallibleIterator;
@@ -370,7 +369,7 @@ impl Loadable for IDABinary {
             Ok(ImageWrite::new(
                 ImageBankHandle::default(),
                 start.wrapping_sub(bank_base),
-                Cow::Owned(bytes),
+                bytes,
             ))
         }))
     }

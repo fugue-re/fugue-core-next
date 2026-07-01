@@ -87,7 +87,7 @@ where
 
         let start = bytes.address().offset();
         let end = start
-            .checked_add(bytes.len() as u64)
+            .checked_add(bytes.len())
             .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
 
         while let Some(block) = blocks.next().map_err(LoaderError::format)? {
@@ -103,7 +103,7 @@ where
                 let Some(offset) = address.checked_sub(start) else {
                     continue;
                 };
-                self.apply_relocation(bytes, offset as usize, reloc.typ)?;
+                self.apply_relocation(bytes, offset, reloc.typ)?;
             }
         }
 
@@ -113,7 +113,7 @@ where
     fn apply_import_slots(&self, bytes: &mut ImageSegmentBytes<'data>) -> Result<(), LoaderError> {
         let start = bytes.address();
         let end = start
-            .checked_add(bytes.len() as u64)
+            .checked_add(bytes.len())
             .ok_or_else(|| LoaderError::address_overflow(start))?;
 
         for (slot, target) in self.import_slots.range(start..end) {
@@ -136,7 +136,7 @@ where
     fn apply_relocation(
         &self,
         bytes: &mut ImageSegmentBytes<'data>,
-        offset: usize,
+        offset: u64,
         reloc_type: u16,
     ) -> Result<(), LoaderError> {
         let patch_address = bytes.address() + offset;

@@ -27,7 +27,7 @@ where
             return;
         };
 
-        let offset_usize = offset as usize;
+        let offset_usize = offset;
 
         match reloc_type {
             R_MIPS_NONE | R_MIPS_JALR => {}
@@ -214,7 +214,7 @@ where
     fn mips_implicit_addend<T: ByteCast + Default>(
         &self,
         bytes: &ImageSegmentBytes<'data>,
-        offset: usize,
+        offset: u64,
         reloc: &Relocation,
     ) -> T {
         if reloc.has_implicit_addend() {

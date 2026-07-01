@@ -13,7 +13,7 @@ where
     pub(crate) fn apply_arm_relocation(
         &self,
         bytes: &mut ImageSegmentBytes<'data>,
-        offset: usize,
+        offset: u64,
         reloc_type: u16,
     ) {
         self.apply_generic_relocation(bytes, offset, reloc_type);

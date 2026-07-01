@@ -1191,19 +1191,13 @@ where
 
             tracing::trace!("loading section {address}-{last_address}");
 
-            let contents = if data.len() as u64 != span {
-                let mut data = data.to_owned();
-                data.resize(span as _, 0);
+            let emit = (data.len() as u64).min(span) as usize;
 
-                Cow::Owned(data)
-            } else {
-                Cow::Borrowed(data)
-            };
-
-            let mut bytes = ImageSegmentBytes::new(
+            let mut bytes = ImageSegmentBytes::new_sparse(
                 address,
                 elf_section_properties(&sect, &self.config),
-                contents,
+                &data[..emit],
+                span,
             );
 
             self.covered.insert_range(vrange);
@@ -1270,19 +1264,13 @@ where
 
             tracing::trace!("loading section {address}-{last_address}");
 
-            let contents = if data.len() as u64 != sect.size() {
-                let mut data = data.to_owned();
-                data.resize(sect.size() as _, 0);
+            let emit = (data.len() as u64).min(sect.size()) as usize;
 
-                Cow::Owned(data)
-            } else {
-                Cow::Borrowed(data)
-            };
-
-            let mut bytes = ImageSegmentBytes::new(
+            let mut bytes = ImageSegmentBytes::new_sparse(
                 address,
                 elf_section_properties(&sect, &self.config),
-                contents,
+                &data[..emit],
+                sect.size(),
             );
 
             self.covered.insert_range(vrange);
@@ -1341,21 +1329,13 @@ where
 
             tracing::trace!("loading segment {address}-{last_address}");
 
-            let contents = if data.len() < size as usize {
-                let mut bytes = Vec::with_capacity(size as usize);
+            let emit = data.len().min(size as usize);
 
-                bytes.extend_from_slice(data);
-                bytes.resize(size as usize, 0u8);
-
-                Cow::Owned(bytes)
-            } else {
-                Cow::Borrowed(&data[..size as usize])
-            };
-
-            let mut bytes = ImageSegmentBytes::new(
+            let mut bytes = ImageSegmentBytes::new_sparse(
                 address,
                 elf_segment_properties(&segm, &self.config),
-                contents,
+                &data[..emit],
+                size,
             );
 
             relocator.apply_dynamic_relocations(address, &mut bytes)?;
@@ -1509,7 +1489,6 @@ impl Loadable for Elf<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::borrow::Cow;
 
     use fallible_iterator::FallibleIterator;
     use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
@@ -1520,6 +1499,11 @@ mod test {
     use crate::loader::{ImageSegmentBytes, Loadable};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
+
+    struct Placement {
+        address: Address,
+        properties: SegmentProperties,
+    }
 
     fn load_image_bytes(
         loadable: &impl Loadable,
@@ -1542,7 +1526,7 @@ mod test {
         let mut loaded = Vec::new();
 
         while let Some(write) = writes.next()? {
-            let address = segments
+            let placement = segments
                 .iter()
                 .find_map(|(address, backing, properties, size)| {
                     if backing.bank() != write.bank() {
@@ -1556,22 +1540,20 @@ mod test {
                     }
 
                     let delta = write.offset().offset().wrapping_sub(start);
-                    Some((
-                        Address::from(address.offset().offset().wrapping_add(delta)),
-                        *properties,
-                    ))
+                    Some(Placement {
+                        address: Address::from(address.offset().offset().wrapping_add(delta)),
+                        properties: *properties,
+                    })
                 })
-                .unwrap_or_else(|| {
-                    (
-                        Address::from(write.offset().offset()),
-                        SegmentProperties::PERM_ALL,
-                    )
+                .unwrap_or_else(|| Placement {
+                    address: Address::from(write.offset().offset()),
+                    properties: SegmentProperties::PERM_ALL,
                 });
 
             loaded.push(ImageSegmentBytes::new(
-                address.0,
-                address.1,
-                Cow::Owned(write.bytes().to_owned()),
+                placement.address,
+                placement.properties,
+                write.bytes().to_owned(),
             ));
         }
 
@@ -1973,6 +1955,24 @@ mod test {
         let eager = LoadableMetadata::new(&bytes, "probe");
         assert_eq!(meta.md5(), eager.md5());
         assert_eq!(meta.sha256(), eager.sha256());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_sparse_uninitialised() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
+
+        let mut writes = elf.image_writes();
+        let mut materialised = 0usize;
+        while let Some(write) = writes.next()? {
+            materialised += write.bytes().len();
+        }
+
+        assert!(
+            materialised < 64 * 1024 * 1024,
+            "image_writes must not materialise the uninitialised .bss (got {materialised} bytes)"
+        );
 
         Ok(())
     }

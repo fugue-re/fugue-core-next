@@ -125,11 +125,14 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
+            let Some(window) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
                 break;
             };
+            let Some(bytes) = window.as_contiguous() else {
+                continue;
+            };
 
-            f(range, &bytes);
+            f(range, bytes);
         }
     }
 

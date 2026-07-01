@@ -17,7 +17,7 @@ where
     pub(crate) fn apply_generic_relocation(
         &self,
         bytes: &mut ImageSegmentBytes<'data>,
-        offset: usize,
+        offset: u64,
         reloc_type: u16,
     ) {
         match reloc_type {

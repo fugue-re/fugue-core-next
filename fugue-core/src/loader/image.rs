@@ -1,8 +1,9 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
 use std::ops::{Add, Range};
 
+use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
@@ -13,6 +14,81 @@ use crate::loader::LoaderError;
 use crate::storage::segments::SegmentStorageProviderId;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
+
+const MAX_PATCH_LEN: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImageSegmentChunk<'a> {
+    Data(Cow<'a, [u8]>),
+    Patch(ArrayVec<u8, MAX_PATCH_LEN>),
+}
+
+impl<'a> ImageSegmentChunk<'a> {
+    fn new(bytes: impl Into<Cow<'a, [u8]>>) -> Self {
+        ImageSegmentChunk::Data(bytes.into())
+    }
+
+    fn patch(bytes: &[u8]) -> Self {
+        let mut patch = ArrayVec::new();
+        patch
+            .try_extend_from_slice(bytes)
+            .expect("patch exceeds MAX_PATCH_LEN bytes");
+        ImageSegmentChunk::Patch(patch)
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            ImageSegmentChunk::Data(data) => data.len(),
+            ImageSegmentChunk::Patch(patch) => patch.len(),
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            ImageSegmentChunk::Data(data) => data,
+            ImageSegmentChunk::Patch(patch) => patch,
+        }
+    }
+
+    fn slice(self, from: usize, to: usize) -> ImageSegmentChunk<'a> {
+        match self {
+            ImageSegmentChunk::Data(Cow::Borrowed(slice)) => {
+                ImageSegmentChunk::new(&slice[from..to])
+            }
+            ImageSegmentChunk::Data(Cow::Owned(mut owned)) => {
+                owned.truncate(to);
+                owned.drain(..from);
+                ImageSegmentChunk::Data(Cow::Owned(owned))
+            }
+            ImageSegmentChunk::Patch(patch) => ImageSegmentChunk::patch(&patch[from..to]),
+        }
+    }
+
+    fn split(
+        self,
+        head_to: usize,
+        tail_from: usize,
+    ) -> (ImageSegmentChunk<'a>, ImageSegmentChunk<'a>) {
+        match self {
+            ImageSegmentChunk::Data(Cow::Borrowed(slice)) => (
+                ImageSegmentChunk::new(&slice[..head_to]),
+                ImageSegmentChunk::new(&slice[tail_from..]),
+            ),
+            ImageSegmentChunk::Data(Cow::Owned(mut owned)) => {
+                let tail = owned.split_off(tail_from);
+                owned.truncate(head_to);
+                (
+                    ImageSegmentChunk::Data(Cow::Owned(owned)),
+                    ImageSegmentChunk::new(tail),
+                )
+            }
+            ImageSegmentChunk::Patch(patch) => (
+                ImageSegmentChunk::patch(&patch[..head_to]),
+                ImageSegmentChunk::patch(&patch[tail_from..]),
+            ),
+        }
+    }
+}
 
 #[derive(
     Debug,
@@ -257,7 +333,7 @@ impl ImageBacking {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageWrite<'a> {
     bank: ImageBankHandle,
-    bytes: Cow<'a, [u8]>,
+    bytes: ImageSegmentChunk<'a>,
     offset: RawAddress,
 }
 
@@ -269,7 +345,19 @@ impl<'a> ImageWrite<'a> {
     ) -> Self {
         Self {
             bank,
-            bytes: bytes.into(),
+            bytes: ImageSegmentChunk::new(bytes),
+            offset: offset.into(),
+        }
+    }
+
+    fn patch(
+        bank: ImageBankHandle,
+        offset: impl Into<RawAddress>,
+        patch: ArrayVec<u8, MAX_PATCH_LEN>,
+    ) -> Self {
+        Self {
+            bank,
+            bytes: ImageSegmentChunk::Patch(patch),
             offset: offset.into(),
         }
     }
@@ -279,19 +367,11 @@ impl<'a> ImageWrite<'a> {
     }
 
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.bytes()
     }
 
     pub fn offset(&self) -> RawAddress {
         self.offset
-    }
-
-    pub fn into_owned(self) -> ImageWrite<'static> {
-        ImageWrite {
-            bank: self.bank,
-            bytes: Cow::Owned(self.bytes.into_owned()),
-            offset: self.offset,
-        }
     }
 }
 
@@ -334,8 +414,12 @@ impl<'a> ImageSegment<'a> {
         provenance: impl Into<SegmentMappingProvenance>,
         bank_base: RawAddress,
     ) -> Self {
+        let bank_offset = address
+            .offset()
+            .checked_sub(bank_base)
+            .expect("segment address is below its bank base");
         Self::new(name, address, size, properties)
-            .with_backing(ImageBacking::in_default_bank(address.offset() - bank_base))
+            .with_backing(ImageBacking::in_default_bank(bank_offset))
             .with_provenance(provenance)
     }
 
@@ -431,7 +515,8 @@ impl<'a> ImageSegment<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageSegmentBytes<'a> {
     address: Address,
-    bytes: Cow<'a, [u8]>,
+    len: u64,
+    chunks: BTreeMap<usize, ImageSegmentChunk<'a>>,
     function_hints: BTreeSet<Address>,
     properties: SegmentProperties,
 }
@@ -442,9 +527,34 @@ impl<'a> ImageSegmentBytes<'a> {
         properties: SegmentProperties,
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> Self {
+        let data = bytes.into();
+        let len = data.len() as u64;
+        Self::from_data(address, properties, data, len)
+    }
+
+    pub fn new_sparse(
+        address: Address,
+        properties: SegmentProperties,
+        bytes: impl Into<Cow<'a, [u8]>>,
+        len: u64,
+    ) -> Self {
+        Self::from_data(address, properties, bytes.into(), len)
+    }
+
+    fn from_data(
+        address: Address,
+        properties: SegmentProperties,
+        data: Cow<'a, [u8]>,
+        len: u64,
+    ) -> Self {
+        let mut chunks = BTreeMap::new();
+        if !data.is_empty() {
+            chunks.insert(0, ImageSegmentChunk::new(data));
+        }
         Self {
             address,
-            bytes: bytes.into(),
+            len,
+            chunks,
             function_hints: BTreeSet::new(),
             properties,
         }
@@ -458,37 +568,30 @@ impl<'a> ImageSegmentBytes<'a> {
         self.address
     }
 
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn into_bytes(self) -> Cow<'a, [u8]> {
-        self.bytes
-    }
-
-    pub fn into_owned(self) -> ImageSegmentBytes<'static> {
-        ImageSegmentBytes {
-            address: self.address,
-            bytes: Cow::Owned(self.bytes.into_owned()),
-            function_hints: self.function_hints,
-            properties: self.properties,
-        }
-    }
-
-    pub fn into_write_at(
+    pub fn into_writes(
         self,
         bank: ImageBankHandle,
-        offset: impl Into<RawAddress>,
-    ) -> ImageWrite<'a> {
-        ImageWrite::new(bank, offset, self.bytes)
+        bank_base: RawAddress,
+    ) -> Result<ImageSegmentChunkWrites<'a>, LoaderError> {
+        let segment_offset = self
+            .address
+            .address()
+            .checked_sub(bank_base)
+            .ok_or_else(|| LoaderError::address_overflow(self.address))?;
+
+        Ok(ImageSegmentChunkWrites {
+            bank,
+            segment_offset,
+            chunks: self.chunks.into_iter(),
+        })
     }
 
     pub fn function_hints(&self) -> &BTreeSet<Address> {
         &self.function_hints
     }
 
-    pub fn len(&self) -> usize {
-        self.bytes.len()
+    pub fn len(&self) -> u64 {
+        self.len
     }
 
     pub fn contains_address(&self, address: Address) -> bool {
@@ -496,65 +599,121 @@ impl<'a> ImageSegmentBytes<'a> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.len == 0
     }
 
     pub fn properties(&self) -> SegmentProperties {
         self.properties
     }
 
-    pub fn offset_of(&self, address: Address) -> Option<usize> {
+    pub fn offset_of(&self, address: Address) -> Option<u64> {
         let delta = address.checked_offset_from(self.address)?;
-        (delta < self.bytes.len() as u64).then_some(delta as usize)
+        (delta < self.len).then_some(delta)
     }
 
-    pub fn read_value<T: ByteCast>(&self, offset: usize) -> Option<T> {
-        let range = self.view_bytes_at(offset, T::SIZEOF)?;
+    pub fn read_value<T: ByteCast>(&self, offset: u64) -> Option<T> {
+        if offset.checked_add(T::SIZEOF as u64)? > self.len {
+            return None;
+        }
+        let offset = usize::try_from(offset).ok()?;
+
+        let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
+        self.read_into(offset, &mut buf);
+
         Some(if self.properties.is_big_endian() {
-            T::from_bytes::<BE>(range)
+            T::from_bytes::<BE>(&buf)
         } else {
-            T::from_bytes::<LE>(range)
+            T::from_bytes::<LE>(&buf)
         })
     }
 
-    pub fn update_value<T: ByteCast>(
-        &mut self,
-        offset: usize,
-        f: impl FnOnce(T) -> T,
-    ) -> Option<()> {
-        let is_be = self.properties.is_big_endian();
-        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
+    pub fn update_value<T: ByteCast>(&mut self, offset: u64, f: impl FnOnce(T) -> T) -> Option<()> {
+        let value = self.read_value::<T>(offset)?;
+        self.write_value(offset, f(value))
+    }
 
-        if is_be {
-            f(T::from_bytes::<BE>(range)).into_bytes::<BE>(range);
+    pub fn write_value<T: ByteCast>(&mut self, offset: u64, value: T) -> Option<()> {
+        if offset.checked_add(T::SIZEOF as u64)? > self.len {
+            return None;
+        }
+        let offset = usize::try_from(offset).ok()?;
+
+        let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
+        if self.properties.is_big_endian() {
+            value.into_bytes::<BE>(&mut buf);
         } else {
-            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range);
+            value.into_bytes::<LE>(&mut buf);
         }
 
+        for (i, chunk) in buf.chunks(MAX_PATCH_LEN).enumerate() {
+            self.write_at(offset + i * MAX_PATCH_LEN, chunk);
+        }
         Some(())
     }
 
-    pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
-        let is_be = self.properties.is_big_endian();
-        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
+    fn read_into(&self, offset: usize, out: &mut [u8]) {
+        out.fill(0);
+        let end = offset + out.len();
+        let lower = self
+            .chunks
+            .range(..=offset)
+            .next_back()
+            .map(|(&start, _)| start)
+            .unwrap_or(offset);
 
-        if is_be {
-            value.into_bytes::<BE>(range);
-        } else {
-            value.into_bytes::<LE>(range);
+        for (&start, chunk) in self.chunks.range(lower..end) {
+            let chunk_end = start + chunk.len();
+            if chunk_end <= offset {
+                continue;
+            }
+            let overlap_start = offset.max(start);
+            let overlap_end = end.min(chunk_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let src = &chunk.bytes()[overlap_start - start..overlap_end - start];
+            out[overlap_start - offset..overlap_end - offset].copy_from_slice(src);
+        }
+    }
+
+    fn write_at(&mut self, offset: usize, data: &[u8]) {
+        let end = offset + data.len();
+        let lower = self
+            .chunks
+            .range(..=offset)
+            .next_back()
+            .map(|(&start, _)| start)
+            .unwrap_or(offset);
+
+        let overlapping = self
+            .chunks
+            .range(lower..end)
+            .filter(|(start, chunk)| **start + chunk.len() > offset)
+            .map(|(&start, _)| start)
+            .collect::<SmallVec<[usize; 4]>>();
+
+        let mut remainders = SmallVec::<[(usize, ImageSegmentChunk<'a>); 2]>::new();
+        for start in overlapping {
+            let chunk = self.chunks.remove(&start).unwrap();
+            let chunk_end = start + chunk.len();
+            match (start < offset, chunk_end > end) {
+                (true, true) => {
+                    let (head, tail) = chunk.split(offset - start, end - start);
+                    remainders.push((start, head));
+                    remainders.push((end, tail));
+                }
+                (true, false) => remainders.push((start, chunk.slice(0, offset - start))),
+                (false, true) => {
+                    remainders.push((end, chunk.slice(end - start, chunk_end - start)))
+                }
+                (false, false) => {}
+            }
         }
 
-        Some(())
-    }
-
-    pub fn view_bytes_at(&self, offset: usize, count: usize) -> Option<&[u8]> {
-        let end = offset.checked_add(count)?;
-        (end <= self.bytes.len()).then_some(&self.bytes[offset..end])
-    }
-
-    pub fn view_bytes_at_mut(&mut self, offset: usize, count: usize) -> Option<&mut [u8]> {
-        let end = offset.checked_add(count)?;
-        (end <= self.bytes.len()).then_some(&mut self.bytes.to_mut()[offset..end])
+        self.chunks.insert(offset, ImageSegmentChunk::patch(data));
+        for (start, chunk) in remainders {
+            self.chunks.insert(start, chunk);
+        }
     }
 }
 
@@ -563,21 +722,42 @@ pub type ImageSegmentIterator<'a> =
 pub type ImageWriteIterator<'a> =
     Box<dyn FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a>;
 
-pub struct DefaultBankWrites<I> {
-    inner: I,
-    bank_base: RawAddress,
+pub struct ImageSegmentChunkWrites<'a> {
+    bank: ImageBankHandle,
+    segment_offset: RawAddress,
+    chunks: btree_map::IntoIter<usize, ImageSegmentChunk<'a>>,
 }
 
-impl<I> DefaultBankWrites<I> {
+impl<'a> Iterator for ImageSegmentChunkWrites<'a> {
+    type Item = ImageWrite<'a>;
+
+    fn next(&mut self) -> Option<ImageWrite<'a>> {
+        let (offset, chunk) = self.chunks.next()?;
+        let offset = self.segment_offset + offset;
+        Some(match chunk {
+            ImageSegmentChunk::Data(data) => ImageWrite::new(self.bank, offset, data),
+            ImageSegmentChunk::Patch(patch) => ImageWrite::patch(self.bank, offset, patch),
+        })
+    }
+}
+
+pub struct DefaultBankWrites<'a, I> {
+    inner: I,
+    bank_base: RawAddress,
+    pending: Option<ImageSegmentChunkWrites<'a>>,
+}
+
+impl<'a, I> DefaultBankWrites<'a, I> {
     pub fn new(inner: I, bank_base: impl Into<RawAddress>) -> Self {
         Self {
             inner,
             bank_base: bank_base.into(),
+            pending: None,
         }
     }
 }
 
-impl<'a, I> FallibleIterator for DefaultBankWrites<I>
+impl<'a, I> FallibleIterator for DefaultBankWrites<'a, I>
 where
     I: FallibleIterator<Item = ImageSegmentBytes<'a>, Error = LoaderError>,
 {
@@ -585,19 +765,17 @@ where
     type Error = LoaderError;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        let Some(bytes) = self.inner.next()? else {
-            return Ok(None);
-        };
+        loop {
+            if let Some(write) = self.pending.as_mut().and_then(Iterator::next) {
+                return Ok(Some(write));
+            }
 
-        let offset = bytes
-            .address()
-            .offset()
-            .checked_sub(self.bank_base.offset())
-            .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
+            let Some(segment) = self.inner.next()? else {
+                return Ok(None);
+            };
 
-        Ok(Some(
-            bytes.into_write_at(ImageBankHandle::default(), offset),
-        ))
+            self.pending = Some(segment.into_writes(ImageBankHandle::default(), self.bank_base)?);
+        }
     }
 }
 

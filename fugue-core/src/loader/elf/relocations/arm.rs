@@ -29,7 +29,6 @@ where
 
         match reloc_type {
             R_ARM_RELATIVE => {
-                let offset = offset as usize;
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 if value > u32::MAX as u64 {
@@ -42,8 +41,6 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_ARM_GLOB_DAT | R_ARM_JUMP_SLOT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -63,8 +60,7 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_ARM_REL32 => {
-                let offset = offset as usize;
-                let target = bytes.address().offset().wrapping_add(offset as u64);
+                let target = bytes.address().offset().wrapping_add(offset);
 
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");

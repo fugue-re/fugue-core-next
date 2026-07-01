@@ -169,13 +169,23 @@ impl OverlayTree {
         self.chunks.iter().map(|(&k, v)| (k, v))
     }
 
+    pub fn chunk_covering(&self, addr: impl Into<Address>) -> Option<(Address, &OverlayChunk)> {
+        let addr = addr.into();
+        self.chunks
+            .range(..=addr)
+            .next_back()
+            .and_then(|(&start, chunk)| {
+                (addr.checked_offset_from(start)? < chunk.len() as u64).then_some((start, chunk))
+            })
+    }
+
     pub fn total_size(&self) -> usize {
         self.chunks.values().map(|c| c.len()).sum()
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
 
     #[test]

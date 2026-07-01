@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{Address, SegmentProperties};
@@ -8,7 +7,7 @@ use crate::storage::segments::mapping::{
     SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
     SegmentSubMapping,
 };
-use crate::storage::segments::provider::SegmentStorageDescriptor;
+use crate::storage::segments::provider::{SegmentStorageDescriptor, SegmentView};
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Clone)]
@@ -107,7 +106,7 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.function_hints()
     }
 
-    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<SegmentView<'a>> {
         let addr = addr.into();
         if !self.contains(addr) {
             return None;
@@ -116,7 +115,7 @@ impl<'a> SegmentMappingView<'a> {
         self.provider.provider().view_bytes_from(phys_offset).ok()
     }
 
-    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<SegmentView<'a>> {
         let addr = addr.into();
         if !self.contains(addr) {
             return None;

@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 use std::fmt::Debug;
+use std::ops::Range;
 use std::path::Path;
+
+use smallvec::SmallVec;
 
 use crate::ir::{Address, SegmentProperties};
 use crate::storage::StoragePersistence;
@@ -170,6 +173,127 @@ pub trait SegmentStorageProviderFromStorage: SegmentStorageProviderFromLoadable 
         Self: Sized;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentChunk<'a> {
+    offset: u64,
+    bytes: Cow<'a, [u8]>,
+}
+
+impl<'a> SegmentChunk<'a> {
+    pub fn new(offset: u64, bytes: impl Into<Cow<'a, [u8]>>) -> Self {
+        Self {
+            offset,
+            bytes: bytes.into(),
+        }
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SegmentView<'a> {
+    chunks: SmallVec<[SegmentChunk<'a>; 1]>,
+    len: u64,
+}
+
+impl<'a> SegmentView<'a> {
+    pub fn new(len: u64) -> Self {
+        Self {
+            chunks: SmallVec::new(),
+            len,
+        }
+    }
+
+    pub fn contiguous(bytes: impl Into<Cow<'a, [u8]>>) -> Self {
+        let bytes = bytes.into();
+        let len = bytes.len() as u64;
+        let mut view = Self::new(len);
+        view.push(0, bytes);
+        view
+    }
+
+    pub fn push(&mut self, offset: u64, bytes: impl Into<Cow<'a, [u8]>>) {
+        let bytes = bytes.into();
+        if !bytes.is_empty() {
+            self.chunks.push(SegmentChunk::new(offset, bytes));
+        }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn set_len(&mut self, len: u64) {
+        self.len = len;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn chunks(&self) -> &[SegmentChunk<'a>] {
+        &self.chunks
+    }
+
+    pub fn as_contiguous(&self) -> Option<&[u8]> {
+        match self.chunks.as_slice() {
+            [] if self.len == 0 => Some(&[]),
+            [chunk] if chunk.offset == 0 && chunk.bytes.len() as u64 == self.len => {
+                Some(&chunk.bytes)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn read_into(&self, buf: &mut [u8]) {
+        buf.fill(0);
+        for chunk in &self.chunks {
+            let start = chunk.offset as usize;
+            if start >= buf.len() {
+                continue;
+            }
+            let end = (start + chunk.bytes.len()).min(buf.len());
+            buf[start..end].copy_from_slice(&chunk.bytes[..end - start]);
+        }
+    }
+}
+
+pub(super) struct SegmentRangeOverlap {
+    window_offset: usize,
+    run_offset: usize,
+    len: usize,
+}
+
+impl SegmentRangeOverlap {
+    pub(super) fn new(run_start: usize, run_len: usize, offset: usize, end: usize) -> Option<Self> {
+        let from = offset.max(run_start);
+        let to = end.min(run_start + run_len);
+        (from < to).then(|| Self {
+            window_offset: from - offset,
+            run_offset: from - run_start,
+            len: to - from,
+        })
+    }
+
+    pub(super) fn window_offset(&self) -> usize {
+        self.window_offset
+    }
+
+    pub(super) fn window(&self) -> Range<usize> {
+        self.window_offset..self.window_offset + self.len
+    }
+
+    pub(super) fn source(&self) -> Range<usize> {
+        self.run_offset..self.run_offset + self.len
+    }
+}
+
 pub trait SegmentStorageProvider {
     fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError>;
 
@@ -189,9 +313,9 @@ pub trait SegmentStorageProvider {
         Ok(())
     }
 
-    fn view_bytes(&self, offset: u64, n: usize) -> Result<Cow<'_, [u8]>, SegmentStorageError>;
+    fn view_bytes(&self, offset: u64, n: usize) -> Result<SegmentView<'_>, SegmentStorageError>;
 
-    fn view_bytes_from(&self, offset: u64) -> Result<Cow<'_, [u8]>, SegmentStorageError>;
+    fn view_bytes_from(&self, offset: u64) -> Result<SegmentView<'_>, SegmentStorageError>;
 
     fn size(&self) -> u64;
 

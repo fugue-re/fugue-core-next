@@ -239,9 +239,12 @@ impl PartialFunction {
 
         let start = block.address();
         let segment = segments.view_at(start)?;
-        let bytes = segment
+        let window = segment
             .bytes_from(start)
             .expect("block start must be in segment");
+        let Some(bytes) = window.as_contiguous() else {
+            return Ok(());
+        };
 
         for insn_id in block.insns().iter().copied() {
             let insn = &mut self.insns[insn_id];
@@ -250,7 +253,11 @@ impl PartialFunction {
                 continue;
             }
 
-            let offset = (insn.address().offset() - start.offset()) as usize;
+            let offset = insn
+                .address()
+                .checked_offset_from(start)
+                .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?
+                as usize;
 
             let view = bytes
                 .get(offset..)
@@ -274,9 +281,12 @@ impl PartialFunction {
                 segment = segments.view_at(block.address())?;
             }
 
-            let bytes = segment
+            let window = segment
                 .bytes_from(block.address())
                 .expect("block start must be in segment");
+            let Some(bytes) = window.as_contiguous() else {
+                continue;
+            };
 
             for insn_id in block.insns().iter().copied() {
                 let insn = &mut self.insns[insn_id];
@@ -285,7 +295,11 @@ impl PartialFunction {
                     continue;
                 }
 
-                let offset = (insn.address().offset() - block.address().offset()) as usize;
+                let offset = insn
+                    .address()
+                    .checked_offset_from(block.address())
+                    .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?
+                    as usize;
 
                 let view = bytes
                     .get(offset..)

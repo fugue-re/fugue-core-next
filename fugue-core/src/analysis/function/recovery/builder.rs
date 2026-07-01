@@ -312,7 +312,7 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                let Some(bytes) = view.bytes_from(address) else {
+                let Some(window) = view.bytes_from(address) else {
                     // NOTE: we should not reach this point if we're following a local flow, since
                     // we check segment membership when adding local targets.
                     tracing::trace!("skipping {address}: not mapped in segment");
@@ -323,6 +323,11 @@ impl FunctionBuilderContext {
                     tracing::trace!("skipping {address}: in avoidance set");
                     continue 'outer;
                 }
+
+                let Some(bytes) = window.as_contiguous() else {
+                    tracing::trace!("skipping {address}: not contiguously mapped");
+                    continue 'outer;
+                };
 
                 let size = bytes.len();
 

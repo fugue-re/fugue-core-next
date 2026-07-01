@@ -33,7 +33,6 @@ where
 
         match reloc_type {
             R_X86_64_RELATIVE | R_X86_64_RELATIVE64 => {
-                let offset = offset as usize;
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}",);
@@ -41,8 +40,6 @@ where
                 bytes.write_value(offset, value);
             }
             R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -57,8 +54,6 @@ where
                 bytes.write_value(offset, value);
             }
             R_X86_64_64 | R_X86_64_GOT64 => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -75,8 +70,6 @@ where
                 bytes.write_value(offset, value);
             }
             R_X86_64_32 => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -94,8 +87,6 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_X86_64_32S => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -117,8 +108,7 @@ where
             | R_X86_64_GOTPCREL
             | R_X86_64_GOTPCRELX
             | R_X86_64_REX_GOTPCRELX => {
-                let offset = offset as usize;
-                let target = bytes.address().offset() + offset as u64;
+                let target = bytes.address().offset() + offset;
 
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");

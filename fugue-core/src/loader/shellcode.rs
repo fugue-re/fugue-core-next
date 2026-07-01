@@ -156,7 +156,7 @@ impl Loadable for Shellcode<'_> {
         Box::new(fallible_iterator::once(ImageWrite::new(
             ImageBankHandle::default(),
             0u64,
-            Cow::Borrowed(self.bytes()),
+            self.bytes(),
         )))
     }
 

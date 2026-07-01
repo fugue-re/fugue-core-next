@@ -763,15 +763,10 @@ where
             }
 
             let data = sect.data().unwrap_or_default();
-            let contents = if data.len() as u64 != sect.size() {
-                let mut data = data.to_owned();
-                data.resize(sect.size() as usize, 0);
-                Cow::Owned(data)
-            } else {
-                Cow::Borrowed(data)
-            };
+            let emit = (data.len() as u64).min(sect.size()) as usize;
 
-            let mut bytes = ImageSegmentBytes::new(address, pe_section_properties(&sect), contents);
+            let mut bytes =
+                ImageSegmentBytes::new(address, pe_section_properties(&sect), &data[..emit]);
 
             self.covered.ranges_insert(vrange);
             relocator.apply(&mut bytes)?;
@@ -1134,7 +1129,6 @@ impl Loadable for Pe<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::borrow::Cow;
     use std::convert::TryInto;
 
     use fallible_iterator::FallibleIterator;
@@ -1159,12 +1153,13 @@ mod test {
         size: usize,
     }
 
+    struct Placement {
+        address: Address,
+        properties: SegmentProperties,
+    }
+
     impl LoadedSegment {
-        fn resolve(
-            &self,
-            bank: ImageBankHandle,
-            offset: u64,
-        ) -> Option<(Address, SegmentProperties)> {
+        fn resolve(&self, bank: ImageBankHandle, offset: u64) -> Option<Placement> {
             if self.backing.bank() != bank {
                 return None;
             }
@@ -1177,7 +1172,10 @@ mod test {
 
             let delta = offset - start;
             let address = Address::from(self.address.offset().offset().wrapping_add(delta));
-            Some((address, self.properties))
+            Some(Placement {
+                address,
+                properties: self.properties,
+            })
         }
     }
 
@@ -1201,20 +1199,18 @@ mod test {
         let mut loaded = Vec::new();
 
         while let Some(write) = writes.next()? {
-            let (address, properties) = segments
+            let placement = segments
                 .iter()
                 .find_map(|segment| segment.resolve(write.bank(), write.offset().offset()))
-                .unwrap_or_else(|| {
-                    (
-                        Address::from(write.offset().offset()),
-                        SegmentProperties::PERM_ALL,
-                    )
+                .unwrap_or_else(|| Placement {
+                    address: Address::from(write.offset().offset()),
+                    properties: SegmentProperties::PERM_ALL,
                 });
 
             loaded.push(ImageSegmentBytes::new(
-                address,
-                properties,
-                Cow::Owned(write.bytes().to_owned()),
+                placement.address,
+                placement.properties,
+                write.bytes().to_owned(),
             ));
         }
 
