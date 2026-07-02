@@ -127,6 +127,18 @@ impl PartialEq<RawAddress> for u64 {
     }
 }
 
+impl PartialEq<RawAddress> for usize {
+    fn eq(&self, other: &RawAddress) -> bool {
+        *self as u64 == other.0
+    }
+}
+
+impl From<usize> for RawAddress {
+    fn from(v: usize) -> Self {
+        Self(v as u64)
+    }
+}
+
 impl From<i32> for RawAddress {
     fn from(v: i32) -> Self {
         Self(v as u64)
@@ -1030,7 +1042,7 @@ impl Address {
         }
     }
 
-    pub fn address(&self) -> RawAddress {
+    pub fn raw_address(&self) -> RawAddress {
         self.address
     }
 
@@ -1044,7 +1056,7 @@ impl Address {
 
     pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
         let offset = offset.into();
-        self.address().checked_add(offset).map(|new_address| Self {
+        self.raw_address().checked_add(offset).map(|new_address| Self {
             space: self.space,
             address: new_address,
         })
@@ -1052,7 +1064,7 @@ impl Address {
 
     pub fn checked_sub(&self, offset: impl Into<RawAddress>) -> Option<Self> {
         let offset = offset.into();
-        self.address().checked_sub(offset).map(|new_address| Self {
+        self.raw_address().checked_sub(offset).map(|new_address| Self {
             space: self.space,
             address: new_address,
         })

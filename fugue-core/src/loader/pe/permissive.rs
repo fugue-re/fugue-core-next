@@ -8,9 +8,8 @@ use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
 use object::{FileKind, pod};
 use thiserror::Error;
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::loader::LoaderError;
-use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrMapping;
 
 #[derive(Debug, Error)]
@@ -23,19 +22,16 @@ enum SectionTableRepairError {
 
 pub(super) fn try_repair<'data>(
     data: BytesOrMapping<'data>,
-    space: Option<AddressSpaceId>,
 ) -> Result<Option<BytesOrMapping<'data>>, LoaderError> {
     match FileKind::parse(data.as_ref()).map_err(LoaderError::format)? {
         FileKind::Pe32 => {
-            let Some(plan) = SectionTableRepairPlan::<ImageNtHeaders32>::try_new(&data, space)?
-            else {
+            let Some(plan) = SectionTableRepairPlan::<ImageNtHeaders32>::try_new(&data)? else {
                 return Ok(None);
             };
             plan.apply(data)
         }
         FileKind::Pe64 => {
-            let Some(plan) = SectionTableRepairPlan::<ImageNtHeaders64>::try_new(&data, space)?
-            else {
+            let Some(plan) = SectionTableRepairPlan::<ImageNtHeaders64>::try_new(&data)? else {
                 return Ok(None);
             };
             plan.apply(data)
@@ -54,7 +50,6 @@ where
     table_range: Range<usize>,
     section_count: usize,
     input_len: u64,
-    space: Option<AddressSpaceId>,
     _marker: PhantomData<Pe>,
 }
 
@@ -62,7 +57,7 @@ impl<Pe> SectionTableRepairPlan<Pe>
 where
     Pe: ImageNtHeaders,
 {
-    fn try_new(data: &[u8], space: Option<AddressSpaceId>) -> Result<Option<Self>, LoaderError> {
+    fn try_new(data: &[u8]) -> Result<Option<Self>, LoaderError> {
         let dos = ImageDosHeader::parse(data).map_err(LoaderError::format)?;
         let mut offset = dos.nt_headers_offset() as u64;
         let (nt, _) = Pe::parse(data, &mut offset).map_err(LoaderError::format)?;
@@ -92,15 +87,14 @@ where
 
             if virtual_size > 0 {
                 let section_end = virtual_address.checked_add(virtual_size).ok_or_else(|| {
-                    LoaderError::address_overflow(Address::in_space(virtual_address, space))
+                    LoaderError::address_overflow(RawAddress::from(virtual_address))
                 })?;
 
                 let align_mask = section_alignment.wrapping_sub(1);
                 let end = section_end.wrapping_add(align_mask) & !align_mask;
                 if end < section_end {
-                    return Err(LoaderError::address_overflow(Address::in_space(
+                    return Err(LoaderError::address_overflow(RawAddress::from(
                         virtual_address,
-                        space,
                     )));
                 }
 
@@ -112,7 +106,7 @@ where
                 let end = pointer_to_raw_data
                     .checked_add(size_of_raw_data)
                     .ok_or_else(|| {
-                        LoaderError::address_overflow(Address::in_space(pointer_to_raw_data, space))
+                        LoaderError::address_overflow(RawAddress::from(pointer_to_raw_data))
                     })?;
 
                 raw_extent = raw_extent.max(end);
@@ -128,7 +122,6 @@ where
             table_range,
             section_count: sections.len(),
             input_len,
-            space,
             _marker: PhantomData,
         }))
     }
@@ -162,9 +155,7 @@ where
 
             let section_end = (virtual_address as u64)
                 .checked_add(virtual_size as u64)
-                .ok_or_else(|| {
-                    LoaderError::address_overflow(Address::in_space(virtual_address, self.space))
-                })?;
+                .ok_or_else(|| LoaderError::address_overflow(RawAddress::from(virtual_address)))?;
 
             if section_end > self.input_len {
                 tracing::trace!("virtual range exceeds input length; skipping");

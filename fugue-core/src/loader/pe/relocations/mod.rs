@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{Architecture, Object, ReadRef};
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::loader::pe::extensions::RelocationContext;
-use crate::loader::{ImageSegmentBytes, LoaderError};
+use crate::loader::{ImageSegmentContents, LoaderError};
 
 pub mod generic;
 
@@ -21,9 +21,9 @@ where
     'file: 'data,
 {
     pe: &'file PeFile<'data, Pe, R>,
-    preferred_base: u64,
-    current_base: Address,
-    import_slots: &'file BTreeMap<Address, Address>,
+    preferred_base: RawAddress,
+    current_base: RawAddress,
+    import_slots: &'file BTreeMap<RawAddress, RawAddress>,
 }
 
 impl<'data, 'file, Pe, R> PeSegmentRelocator<'data, 'file, Pe, R>
@@ -34,9 +34,9 @@ where
 {
     pub fn new(
         pe: &'file PeFile<'data, Pe, R>,
-        preferred_base: u64,
-        current_base: Address,
-        import_slots: &'file BTreeMap<Address, Address>,
+        preferred_base: RawAddress,
+        current_base: RawAddress,
+        import_slots: &'file BTreeMap<RawAddress, RawAddress>,
     ) -> Self {
         Self {
             pe,
@@ -46,14 +46,16 @@ where
         }
     }
 
-    pub fn apply(&self, bytes: &mut ImageSegmentBytes<'data>) -> Result<(), LoaderError> {
+    pub fn apply(&self, bytes: &mut ImageSegmentContents<'data>) -> Result<(), LoaderError> {
         self.apply_base_relocations(bytes)?;
         self.apply_import_slots(bytes)?;
         Ok(())
     }
 
     pub(crate) fn base_delta_u64(&self) -> u64 {
-        self.current_base.offset().wrapping_sub(self.preferred_base)
+        self.current_base
+            .offset()
+            .wrapping_sub(self.preferred_base.offset())
     }
 
     pub(crate) fn base_delta_u32(&self) -> u32 {
@@ -70,7 +72,7 @@ where
 
     fn apply_base_relocations(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
         if self.current_base.offset() == self.preferred_base {
             return Ok(());
@@ -110,7 +112,10 @@ where
         Ok(())
     }
 
-    fn apply_import_slots(&self, bytes: &mut ImageSegmentBytes<'data>) -> Result<(), LoaderError> {
+    fn apply_import_slots(
+        &self,
+        bytes: &mut ImageSegmentContents<'data>,
+    ) -> Result<(), LoaderError> {
         let start = bytes.address();
         let end = start
             .checked_add(bytes.len())
@@ -135,7 +140,7 @@ where
 
     fn apply_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc_type: u16,
     ) -> Result<(), LoaderError> {
@@ -143,7 +148,7 @@ where
         let mut context = RelocationContext::new(
             self.pe,
             self.current_base,
-            Address::new(self.current_base.space(), self.preferred_base),
+            self.preferred_base,
             patch_address,
             offset,
             reloc_type,

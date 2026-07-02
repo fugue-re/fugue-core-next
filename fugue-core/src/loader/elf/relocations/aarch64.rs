@@ -6,7 +6,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationEncoding, RelocationKind};
 
 use super::ElfSegmentRelocator;
-use crate::loader::ImageSegmentBytes;
+use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -16,7 +16,7 @@ where
 {
     fn apply_aarch64_call_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         reloc_type: u32,
@@ -52,7 +52,7 @@ where
 
     pub(crate) fn apply_aarch64_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
@@ -107,6 +107,8 @@ where
 
                 if reloc_type == R_AARCH64_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);
+                } else {
+                    self.mark_data_symbol(reloc, is_dynamic, bytes);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
@@ -129,6 +131,8 @@ where
 
                 if reloc_type == R_AARCH64_P32_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);
+                } else {
+                    self.mark_data_symbol(reloc, is_dynamic, bytes);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");

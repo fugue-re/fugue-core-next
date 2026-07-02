@@ -2,7 +2,7 @@ use object::ReadRef;
 use object::read::pe::ImageNtHeaders;
 
 use super::PeSegmentRelocator;
-use crate::loader::ImageSegmentBytes;
+use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Pe, R> PeSegmentRelocator<'data, 'file, Pe, R>
 where
@@ -12,7 +12,7 @@ where
 {
     pub(crate) fn apply_x86_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc_type: u16,
     ) {

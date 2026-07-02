@@ -4,11 +4,11 @@ use object::{ReadRef, elf};
 use crate::analysis::AnalysisError;
 use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::elf::ElfFileRepr;
-use crate::loader::{Elf, ImageSegmentBytes, LoaderError};
+use crate::loader::{Elf, ImageSegmentContents, LoaderError};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
@@ -17,18 +17,18 @@ pub struct ImageContext<'a> {
     is_be: bool,
     machine: u16,
     flags: u32,
-    base: Address,
-    preferred_base: Address,
-    entry: Option<Address>,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    entry: Option<RawAddress>,
     attributes: &'a AttributeMap,
 }
 
 impl<'a> ImageContext<'a> {
     pub(crate) fn new(
         view: &ElfFileRepr<'_, '_>,
-        base: Address,
-        preferred_base: Address,
-        entry: Option<Address>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        entry: Option<RawAddress>,
         attributes: &'a AttributeMap,
     ) -> Self {
         Self {
@@ -59,15 +59,15 @@ impl<'a> ImageContext<'a> {
         self.flags
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry(&self) -> Option<RawAddress> {
         self.entry
     }
 
@@ -225,23 +225,23 @@ registry::collect!(FunctionRecoveryHandler);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
-    base: Address,
-    patch_address: Address,
+    base: RawAddress,
+    patch_address: RawAddress,
     offset: u64,
     relocation_type: Option<u32>,
     is_dynamic: bool,
-    segment: &'a mut ImageSegmentBytes<'data>,
+    segment: &'a mut ImageSegmentContents<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
     pub(crate) fn new<Header, R>(
         elf: &ElfFile<'data, Header, R>,
-        base: Address,
-        patch_address: Address,
+        base: RawAddress,
+        patch_address: RawAddress,
         offset: u64,
         relocation_type: Option<u32>,
         is_dynamic: bool,
-        segment: &'a mut ImageSegmentBytes<'data>,
+        segment: &'a mut ImageSegmentContents<'data>,
     ) -> Self
     where
         Header: FileHeader,
@@ -262,11 +262,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.machine
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn patch_address(&self) -> Address {
+    pub fn patch_address(&self) -> RawAddress {
         self.patch_address
     }
 
@@ -282,11 +282,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.is_dynamic
     }
 
-    pub fn segment(&self) -> &ImageSegmentBytes<'data> {
+    pub fn segment(&self) -> &ImageSegmentContents<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut ImageSegmentBytes<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentContents<'data> {
         self.segment
     }
 

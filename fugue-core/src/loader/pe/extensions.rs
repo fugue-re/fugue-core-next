@@ -5,11 +5,11 @@ use object::{ReadRef, pe};
 use crate::analysis::AnalysisError;
 use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
-use crate::ir::{Address, Endian};
+use crate::ir::{Endian, RawAddress};
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{ImageSegmentBytes, LoaderError, Pe};
+use crate::loader::{ImageSegmentContents, LoaderError, Pe};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
@@ -17,18 +17,18 @@ pub struct ImageContext<'a> {
     machine: u16,
     endian: Endian,
     is_64: bool,
-    base: Address,
-    preferred_base: Address,
-    entry: Option<Address>,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    entry: Option<RawAddress>,
     attributes: &'a AttributeMap,
 }
 
 impl<'a> ImageContext<'a> {
     pub(crate) fn new(
         view: &PeFileRepr<'_, '_>,
-        base: Address,
-        preferred_base: Address,
-        entry: Option<Address>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        entry: Option<RawAddress>,
         attributes: &'a AttributeMap,
     ) -> Self {
         Self {
@@ -54,15 +54,15 @@ impl<'a> ImageContext<'a> {
         self.is_64
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry(&self) -> Option<RawAddress> {
         self.entry
     }
 
@@ -229,23 +229,23 @@ registry::collect!(FunctionRecoveryHandler);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
-    base: Address,
-    preferred_base: Address,
-    patch_address: Address,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    patch_address: RawAddress,
     offset: u64,
     relocation_type: u16,
-    segment: &'a mut ImageSegmentBytes<'data>,
+    segment: &'a mut ImageSegmentContents<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
     pub(crate) fn new<Headers, R>(
         pe: &PeFile<'data, Headers, R>,
-        base: Address,
-        preferred_base: Address,
-        patch_address: Address,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        patch_address: RawAddress,
         offset: u64,
         relocation_type: u16,
-        segment: &'a mut ImageSegmentBytes<'data>,
+        segment: &'a mut ImageSegmentContents<'data>,
     ) -> Self
     where
         Headers: ImageNtHeaders,
@@ -266,15 +266,15 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.machine
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn patch_address(&self) -> Address {
+    pub fn patch_address(&self) -> RawAddress {
         self.patch_address
     }
 
@@ -286,11 +286,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.relocation_type
     }
 
-    pub fn segment(&self) -> &ImageSegmentBytes<'data> {
+    pub fn segment(&self) -> &ImageSegmentContents<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut ImageSegmentBytes<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentContents<'data> {
         self.segment
     }
 

@@ -2,7 +2,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
 
 use super::ElfSegmentRelocator;
-use crate::loader::ImageSegmentBytes;
+use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -12,7 +12,7 @@ where
 {
     pub(crate) fn apply_generic_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         reloc_type: RelocationKind,

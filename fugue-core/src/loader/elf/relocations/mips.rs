@@ -8,7 +8,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationTarget};
 
 use super::ElfSegmentRelocator;
-use crate::loader::ImageSegmentBytes;
+use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -18,7 +18,7 @@ where
 {
     pub(crate) fn apply_mips_relocation(
         &self,
-        bytes: &mut ImageSegmentBytes<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
@@ -175,6 +175,8 @@ where
                     return;
                 }
 
+                self.mark_data_symbol(reloc, is_dynamic, bytes);
+
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
                 bytes.write_value(offset_usize, value as u32);
@@ -213,7 +215,7 @@ where
 
     fn mips_implicit_addend<T: ByteCast + Default>(
         &self,
-        bytes: &ImageSegmentBytes<'data>,
+        bytes: &ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
     ) -> T {

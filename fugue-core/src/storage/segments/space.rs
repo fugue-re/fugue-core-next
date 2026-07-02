@@ -298,8 +298,8 @@ impl AddressSpace {
         for (mapping_ref, start, size, properties) in mappings {
             let end = start + size;
 
-            let range_start = range_start.address();
-            let range_end = range_end.address();
+            let range_start = range_start.raw_address();
+            let range_end = range_end.raw_address();
 
             if end <= range_start || start >= range_end {
                 continue;

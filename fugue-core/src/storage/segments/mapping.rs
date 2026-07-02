@@ -5,7 +5,7 @@ use std::ops::{Range, RangeInclusive};
 use bitflags::bitflags;
 use uuid::Uuid;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
@@ -176,8 +176,8 @@ pub struct SegmentMapping {
     overlay: OverlayTree,
     version: u64,
     name: String,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
 }
 
 impl SegmentMapping {
@@ -349,20 +349,33 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
+        let space = self.space();
+        self.mapping_hints
+            .iter()
+            .map(move |(&offset, hint)| (Address::new(space, offset), hint))
+    }
+
+    pub(crate) fn mapping_hint_offsets(&self) -> &BTreeMap<RawAddress, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
-        &mut self.mapping_hints
+    pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
+        let addr = addr.into();
+        (addr.space() == self.space())
+            .then(|| self.mapping_hints.get(&addr.raw_address()))
+            .flatten()
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
+        let space = self.space();
+        self.function_hints
+            .iter()
+            .map(move |&offset| Address::new(space, offset))
+    }
+
+    pub(crate) fn function_hint_offsets(&self) -> &BTreeSet<RawAddress> {
         &self.function_hints
-    }
-
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
-        &mut self.function_hints
     }
 
     pub fn make_ref(&self) -> SegmentMappingRef {
@@ -557,8 +570,8 @@ pub struct SegmentMappingBuilder {
     provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     name: String,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
 }
 
 impl SegmentMappingBuilder {
@@ -700,52 +713,55 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn set_mapping_hints(&mut self, mapping_hints: impl Into<BTreeMap<Address, ContextHint>>) {
+    pub fn set_mapping_hints(
+        &mut self,
+        mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
+    ) {
         self.mapping_hints = mapping_hints.into();
     }
 
     pub fn extend_mapping_hints(
         &mut self,
-        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
     ) {
         self.mapping_hints.extend(mapping_hints);
     }
 
-    pub fn add_mapping_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
-        self.mapping_hints.insert(address.into(), hint);
+    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
+        self.mapping_hints.insert(offset.into(), hint);
     }
 
     pub fn with_mapping_hints(
         mut self,
-        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
     ) -> Self {
         self.extend_mapping_hints(mapping_hints);
         self
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
         &self.function_hints
     }
 
-    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<Address>>) {
+    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<RawAddress>>) {
         self.function_hints = function_hints.into();
     }
 
-    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = Address>) {
+    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = RawAddress>) {
         self.function_hints.extend(function_hints);
     }
 
-    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
-        self.function_hints.insert(address.into());
+    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
+        self.function_hints.insert(offset.into());
     }
 
     pub fn with_function_hints(
         mut self,
-        function_hints: impl IntoIterator<Item = Address>,
+        function_hints: impl IntoIterator<Item = RawAddress>,
     ) -> Self {
         self.extend_function_hints(function_hints);
         self

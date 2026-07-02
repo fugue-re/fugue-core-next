@@ -8,7 +8,7 @@ use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, RawAddress, SegmentProperties};
+use crate::ir::{Address, Endian, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
 use crate::storage::segments::SegmentStorageProviderId;
@@ -118,6 +118,12 @@ impl ImageBankHandle {
     }
 }
 
+impl fmt::Display for ImageBankHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -143,6 +149,12 @@ impl ImageSpaceHandle {
 
     pub const fn index(&self) -> usize {
         self.0 as usize
+    }
+}
+
+impl fmt::Display for ImageSpaceHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -517,37 +529,39 @@ impl<'a> ImageSegment<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageSegmentBytes<'a> {
-    address: Address,
+pub struct ImageSegmentContents<'a> {
+    address: RawAddress,
     len: u64,
     chunks: BTreeMap<usize, ImageSegmentChunk<'a>>,
-    function_hints: BTreeSet<Address>,
-    properties: SegmentProperties,
+    function_hints: BTreeSet<RawAddress>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    endian: Endian,
+    bank: ImageBankHandle,
 }
 
-impl<'a> ImageSegmentBytes<'a> {
+impl<'a> ImageSegmentContents<'a> {
     pub fn new(
-        address: Address,
-        properties: SegmentProperties,
+        address: impl Into<RawAddress>,
+        endian: Endian,
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> Self {
         let data = bytes.into();
         let len = data.len() as u64;
-        Self::from_data(address, properties, data, len)
+        Self::from_data(address.into(), endian, data, len)
     }
 
     pub fn new_sparse(
-        address: Address,
-        properties: SegmentProperties,
+        address: impl Into<RawAddress>,
+        endian: Endian,
         bytes: impl Into<Cow<'a, [u8]>>,
         len: u64,
     ) -> Self {
-        Self::from_data(address, properties, bytes.into(), len)
+        Self::from_data(address.into(), endian, bytes.into(), len)
     }
 
     fn from_data(
-        address: Address,
-        properties: SegmentProperties,
+        address: RawAddress,
+        endian: Endian,
         data: Cow<'a, [u8]>,
         len: u64,
     ) -> Self {
@@ -560,45 +574,70 @@ impl<'a> ImageSegmentBytes<'a> {
             len,
             chunks,
             function_hints: BTreeSet::new(),
-            properties,
+            mapping_hints: BTreeMap::new(),
+            endian,
+            bank: ImageBankHandle::default(),
         }
     }
 
-    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
-        self.function_hints.insert(address.into());
+    pub fn with_bank(mut self, bank: ImageBankHandle) -> Self {
+        self.bank = bank;
+        self
     }
 
-    pub fn address(&self) -> Address {
+    pub fn bank(&self) -> ImageBankHandle {
+        self.bank
+    }
+
+    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
+        self.function_hints.insert(offset.into());
+    }
+
+    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
+        self.mapping_hints.insert(offset.into(), hint);
+    }
+
+    pub fn address(&self) -> RawAddress {
         self.address
     }
 
     pub fn into_writes(
         self,
-        bank: ImageBankHandle,
         bank_base: RawAddress,
     ) -> Result<ImageSegmentChunkWrites<'a>, LoaderError> {
         let segment_offset = self
             .address
-            .address()
             .checked_sub(bank_base)
             .ok_or_else(|| LoaderError::address_overflow(self.address))?;
 
         Ok(ImageSegmentChunkWrites {
-            bank,
+            bank: self.bank,
             segment_offset,
             chunks: self.chunks.into_iter(),
         })
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
         &self.function_hints
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn take_function_hints(&mut self) -> BTreeSet<RawAddress> {
+        std::mem::take(&mut self.function_hints)
+    }
+
+    pub fn take_mapping_hints(&mut self) -> BTreeMap<RawAddress, ContextHint> {
+        std::mem::take(&mut self.mapping_hints)
     }
 
     pub fn len(&self) -> u64 {
         self.len
     }
 
-    pub fn contains_address(&self, address: Address) -> bool {
+    pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
         self.offset_of(address).is_some()
     }
 
@@ -606,12 +645,12 @@ impl<'a> ImageSegmentBytes<'a> {
         self.len == 0
     }
 
-    pub fn properties(&self) -> SegmentProperties {
-        self.properties
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
-    pub fn offset_of(&self, address: Address) -> Option<u64> {
-        let delta = address.checked_offset_from(self.address)?;
+    pub fn offset_of(&self, address: impl Into<RawAddress>) -> Option<u64> {
+        let delta = address.into().checked_offset_from(self.address)?;
         (delta < self.len).then_some(delta)
     }
 
@@ -624,7 +663,7 @@ impl<'a> ImageSegmentBytes<'a> {
         let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
         self.read_into(offset, &mut buf);
 
-        Some(if self.properties.is_big_endian() {
+        Some(if self.endian.is_big() {
             T::from_bytes::<BE>(&buf)
         } else {
             T::from_bytes::<LE>(&buf)
@@ -643,7 +682,7 @@ impl<'a> ImageSegmentBytes<'a> {
         let offset = usize::try_from(offset).ok()?;
 
         let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
-        if self.properties.is_big_endian() {
+        if self.endian.is_big() {
             value.into_bytes::<BE>(&mut buf);
         } else {
             value.into_bytes::<LE>(&mut buf);
@@ -723,8 +762,8 @@ impl<'a> ImageSegmentBytes<'a> {
 
 pub type ImageSegmentIterator<'a> =
     Box<dyn FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a>;
-pub type ImageWriteIterator<'a> =
-    Box<dyn FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a>;
+pub type ImageSegmentContentsIterator<'a> =
+    Box<dyn FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a>;
 
 pub struct ImageSegmentChunkWrites<'a> {
     bank: ImageBankHandle,
@@ -742,44 +781,6 @@ impl<'a> Iterator for ImageSegmentChunkWrites<'a> {
             ImageSegmentChunk::Data(data) => ImageWrite::new(self.bank, offset, data),
             ImageSegmentChunk::Patch(patch) => ImageWrite::patch(self.bank, offset, patch),
         })
-    }
-}
-
-pub struct DefaultBankWrites<'a, I> {
-    inner: I,
-    bank_base: RawAddress,
-    pending: Option<ImageSegmentChunkWrites<'a>>,
-}
-
-impl<'a, I> DefaultBankWrites<'a, I> {
-    pub fn new(inner: I, bank_base: impl Into<RawAddress>) -> Self {
-        Self {
-            inner,
-            bank_base: bank_base.into(),
-            pending: None,
-        }
-    }
-}
-
-impl<'a, I> FallibleIterator for DefaultBankWrites<'a, I>
-where
-    I: FallibleIterator<Item = ImageSegmentBytes<'a>, Error = LoaderError>,
-{
-    type Item = ImageWrite<'a>;
-    type Error = LoaderError;
-
-    fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        loop {
-            if let Some(write) = self.pending.as_mut().and_then(Iterator::next) {
-                return Ok(Some(write));
-            }
-
-            let Some(segment) = self.inner.next()? else {
-                return Ok(None);
-            };
-
-            self.pending = Some(segment.into_writes(ImageBankHandle::default(), self.bank_base)?);
-        }
     }
 }
 

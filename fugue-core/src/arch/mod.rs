@@ -6,7 +6,7 @@ use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, resolve_language,
 };
@@ -153,15 +153,15 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+    pub fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
         self.0.canonicalise_address(addr)
     }
 
     pub fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: RawAddress,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
+    ) -> Option<(RawAddress, ContextSet)> {
         self.0.canonicalise_address_with(addr, context)
     }
 

@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::lifter::ContextSet;
 
 bitflags! {
@@ -139,7 +139,7 @@ impl ExternFunctionTemplate {
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ExternSegment {
-    address: Address,
+    address: RawAddress,
     alignment: usize,
     symbols: usize,
     template: ExternFunctionTemplate,
@@ -148,14 +148,14 @@ pub struct ExternSegment {
 #[derive(Debug, Error)]
 pub enum ExternSegmentError {
     #[error("extern address {0} out of bounds")]
-    AddressOutOfBounds(Address),
+    AddressOutOfBounds(RawAddress),
     #[error("extern address {0} is misaligned")]
-    AddressMisaligned(Address),
+    AddressMisaligned(RawAddress),
 }
 
 impl ExternSegment {
     pub fn new(
-        address: impl Into<Address>,
+        address: impl Into<RawAddress>,
         alignment: usize,
         template: ExternFunctionTemplate,
     ) -> Self {
@@ -167,7 +167,7 @@ impl ExternSegment {
         }
     }
 
-    pub fn add_extern(&mut self) -> Option<Address> {
+    pub fn add_extern(&mut self) -> Option<RawAddress> {
         let addr = self.address() + self.size();
         if addr < self.address() {
             return None;
@@ -176,7 +176,10 @@ impl ExternSegment {
         Some(addr)
     }
 
-    pub fn add_extern_at(&mut self, address: impl Into<Address>) -> Result<(), ExternSegmentError> {
+    pub fn add_extern_at(
+        &mut self,
+        address: impl Into<RawAddress>,
+    ) -> Result<(), ExternSegmentError> {
         let address = address.into();
         if address < self.address() {
             return Err(ExternSegmentError::AddressOutOfBounds(address));
@@ -200,20 +203,20 @@ impl ExternSegment {
         Ok(())
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> RawAddress {
         self.address
     }
 
-    pub fn last_address(&self) -> Option<Address> {
+    pub fn last_address(&self) -> Option<RawAddress> {
         (self.symbols != 0).then(|| self.address() + self.size() - 1usize)
     }
 
-    pub fn range(&self) -> Option<std::ops::Range<Address>> {
+    pub fn range(&self) -> Option<std::ops::Range<RawAddress>> {
         self.last_address()
             .map(|last| self.address()..(last + 1usize))
     }
 
-    pub fn range_inclusive(&self) -> Option<RangeInclusive<Address>> {
+    pub fn range_inclusive(&self) -> Option<RangeInclusive<RawAddress>> {
         self.last_address().map(|last| self.address()..=last)
     }
 
@@ -238,7 +241,7 @@ impl ExternSegment {
         (template_size + self.alignment.wrapping_sub(1)) & !self.alignment.wrapping_sub(1)
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = Address> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = RawAddress> {
         let start = self.address();
         let step = self.aligned_template_size();
         (0..self.symbols).map(move |i| start + i * step)

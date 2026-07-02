@@ -90,7 +90,7 @@ impl FunctionRecoveryPatternMatcher {
         let mut current_start = *gap.start();
 
         let calculate_end = |segm: &SegmentMappingView| -> RawAddress {
-            let segm_end = segm.last().address();
+            let segm_end = segm.last().raw_address();
             if segm_end <= gap_end {
                 segm_end
             } else {
@@ -164,7 +164,7 @@ impl FunctionRecoveryPatternMatcher {
                     for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = Address::new(space_id, *gap.start() + range.start);
 
-                        if arch.canonicalise_address(start).is_none() {
+                        if arch.canonicalise_address(start.into()).is_none() {
                             continue;
                         }
 

@@ -18,9 +18,9 @@ pub use elf::Elf;
 
 pub mod image;
 pub use image::{
-    DefaultBankWrites, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout,
-    ImageResolution, ImageSegment, ImageSegmentBytes, ImageSegmentIterator, ImageSpace,
-    ImageSpaceHandle, ImageSpaceKind, ImageWrite, ImageWriteIterator,
+    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageResolution,
+    ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator,
+    ImageSpace, ImageSpaceHandle, ImageSpaceKind, ImageWrite,
 };
 
 // pub mod macho
@@ -262,9 +262,9 @@ pub trait Loadable {
 
     fn image_layout(&self) -> &ImageLayout;
 
-    fn image_writes<'a>(
+    fn image_contents<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a;
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a;
 
     fn analysers(&self) -> impl LoadableAnalysers {
         DefaultLoadableAnalysers
@@ -446,12 +446,16 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn image_writes<'a>(
+    fn image_contents<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a {
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
         match self {
-            Self::Elf(elf) => Box::new(elf.image_writes()) as ImageWriteIterator<'a>,
-            Self::Pe(pe) => Box::new(pe.image_writes()) as ImageWriteIterator<'a>,
+            Self::Elf(elf) => {
+                Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>
+            }
+            Self::Pe(pe) => {
+                Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>
+            }
         }
     }
 

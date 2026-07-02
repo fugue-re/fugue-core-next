@@ -258,12 +258,14 @@ impl FunctionBuilderContext {
             // This ensures correct alignment, to address is correctly wrapped with respect to
             // the address space, and also extracts context updates indicated by the address,
             // e.g., if we are in Thumb context or not for ARM.
+            let block_space = block.space();
             let Some((block, ncontext)) =
                 arch.canonicalise_address_with(block.into(), translator.context())
             else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
             };
+            let block = Address::new(block_space, block);
 
             if !view.contains(block) {
                 if let Ok(nview) = segments.view_at(block) {
@@ -346,13 +348,17 @@ impl FunctionBuilderContext {
                             // relative jumps; these constructs will be handled in post lifting
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
-                                let Some((addr, context)) = arch.canonicalise_address(addr) else {
+                                let addr_space = addr.space();
+                                let Some((addr, context)) =
+                                    arch.canonicalise_address(addr.into())
+                                else {
                                     tracing::trace!(
                                         "skipping target {target} of instruction at {address}: \
                                          not a viable target address"
                                     );
                                     continue;
                                 };
+                                let addr = Address::new(addr_space, addr);
 
                                 if kind.is_local() && view.contains(addr) {
                                     let Some(target) =
@@ -472,7 +478,7 @@ impl FunctionBuilderContext {
             // point under normal usage.
             let view = project.segments().view_at(self.entry).expect("valid entry");
 
-            if let Some(hint) = view.mapping_hints().get(&self.entry) {
+            if let Some(hint) = view.mapping_hint_at(self.entry) {
                 if hint.is_data() {
                     tracing::debug!(
                         "entry {candidate} is marked as data in segment mapping hints; skipping"

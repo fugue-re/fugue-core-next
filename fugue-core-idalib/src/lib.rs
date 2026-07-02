@@ -16,8 +16,8 @@ use fugue_core::ir::{
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
-    ImageAddress, ImageBankHandle, ImageLayout, ImageSegment, ImageWrite, Loadable,
-    LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoaderError,
+    ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable, LoadableAnalysers,
+    LoadableFromFile, LoadableMetadata, LoaderError,
 };
 use fugue_core::project::Project;
 use fugue_core::storage::segments::mapping::SegmentMappingProvenance;
@@ -333,10 +333,11 @@ impl Loadable for IDABinary {
         }))
     }
 
-    fn image_writes<'a>(
+    fn image_contents<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a {
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
         let bank_base = self.bank_base.offset();
+        let endian = self.architecture.endian();
         let address_size = self.architecture.language().address_size();
         let template = self.architecture.external_thunk_template();
 
@@ -366,9 +367,9 @@ impl Loadable for IDABinary {
                 }
             }
 
-            Ok(ImageWrite::new(
-                ImageBankHandle::default(),
+            Ok(ImageSegmentContents::new(
                 start.wrapping_sub(bank_base),
+                endian,
                 bytes,
             ))
         }))

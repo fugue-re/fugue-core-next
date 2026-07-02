@@ -10,8 +10,8 @@ use crate::arch::Arch;
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::resolve_language;
 use crate::loader::{
-    ImageAddress, ImageBankHandle, ImageLayout, ImageSegment, ImageWrite, Loadable,
-    LoadableMetadata, LoaderError,
+    ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable, LoadableMetadata,
+    LoaderError,
 };
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::{AttributeMap, BytesOrMapping};
@@ -150,12 +150,12 @@ impl Loadable for Shellcode<'_> {
         &self.layout
     }
 
-    fn image_writes<'a>(
+    fn image_contents<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = ImageWrite<'a>, Error = LoaderError> + 'a {
-        Box::new(fallible_iterator::once(ImageWrite::new(
-            ImageBankHandle::default(),
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
+        Box::new(fallible_iterator::once(ImageSegmentContents::new(
             0u64,
+            self.arch.endian(),
             self.bytes(),
         )))
     }

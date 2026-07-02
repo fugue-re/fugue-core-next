@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::SegmentStorageError;
@@ -98,11 +96,15 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.name()
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
         self.mapping.mapping_hints()
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
+        self.mapping.mapping_hint_at(addr)
+    }
+
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
         self.mapping.function_hints()
     }
 
