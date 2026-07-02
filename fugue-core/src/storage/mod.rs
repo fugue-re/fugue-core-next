@@ -135,7 +135,7 @@ impl StorageProviderError {
 pub struct StorageContainer {
     pub entities: EntityStorage,
     pub segments: SegmentStorage,
-    writeback: Option<Arc<WriteBackWorker>>,
+    write_back: Option<Arc<WriteBackWorker>>,
     cleanup_handler: StorageCleanupHandlerOneShot,
 }
 
@@ -204,7 +204,7 @@ impl StorageContainer {
         entities: EntityStorage,
         segments: SegmentStorage,
     ) -> Result<Self, StorageProviderError> {
-        let writeback = if entities.is_transient() {
+        let write_back = if entities.is_transient() {
             None
         } else {
             Some(WriteBackWorker::new(entities.clone())?)
@@ -213,7 +213,7 @@ impl StorageContainer {
         Ok(Self {
             entities,
             segments,
-            writeback,
+            write_back,
             cleanup_handler: StorageCleanupHandlerOneShot::default(),
         })
     }
@@ -227,8 +227,8 @@ impl StorageContainer {
         self
     }
 
-    pub fn writeback(&self) -> Option<&Arc<WriteBackWorker>> {
-        self.writeback.as_ref()
+    pub fn write_back(&self) -> Option<&Arc<WriteBackWorker>> {
+        self.write_back.as_ref()
     }
 
     pub fn entities(&self) -> &EntityStorage {

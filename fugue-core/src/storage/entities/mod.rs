@@ -36,13 +36,13 @@ pub use rocksdb::RocksDbEntityStorage;
 pub mod schema;
 pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
 
-pub mod writeback;
-pub use writeback::WriteBackWorker;
-
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
+
+pub mod writer;
+pub use writer::{WriteBackAction, WriteBackWorker};
 
 #[cfg(feature = "sqlite")]
 pub type DefaultPersistentEntityStorage = SqliteEntityStorage<PERSISTENT>;
@@ -1006,7 +1006,7 @@ where
             let key_bytes = schema::make_key::<K, E>(key);
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
-                    Some(bytes) => {
+                    WriteBackAction::Insert(bytes) => {
                         let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
                             .map_err(EntityStorageError::decode)?;
                         Ok(Some(self.admit(
@@ -1015,7 +1015,7 @@ where
                             ByteWeighter::entry_weight(bytes.len()),
                         )))
                     }
-                    None => Ok(None),
+                    WriteBackAction::Remove => Ok(None),
                 };
             }
         }
@@ -1051,7 +1051,7 @@ where
         if let WriteSink::Worker(worker) = &self.sink {
             let key_bytes = schema::make_key::<K, E>(key);
             if let Some(pending) = worker.pending(&key_bytes) {
-                return Ok(pending.is_some());
+                return Ok(matches!(pending, WriteBackAction::Insert(_)));
             }
         }
 
@@ -1176,11 +1176,11 @@ where
             let key_bytes = schema::make_key::<K, E>(key);
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
-                    Some(bytes) => Ok(Some(Arc::new(
+                    WriteBackAction::Insert(bytes) => Ok(Some(Arc::new(
                         rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
                             .map_err(EntityStorageError::decode)?,
                     ))),
-                    None => Ok(None),
+                    WriteBackAction::Remove => Ok(None),
                 };
             }
         }
@@ -1717,7 +1717,7 @@ mod test {
     }
 
     #[test]
-    fn writeback_put_then_flush_persists() {
+    fn write_back_put_then_flush_persists() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache =
@@ -1737,7 +1737,7 @@ mod test {
     }
 
     #[test]
-    fn writeback_reads_survive_eviction_before_flush() {
+    fn write_back_reads_survive_eviction_before_flush() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache = EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 128);
@@ -1756,7 +1756,7 @@ mod test {
     }
 
     #[test]
-    fn writeback_remove_then_flush_clears_storage() {
+    fn write_back_remove_then_flush_clears_storage() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache =
@@ -1775,7 +1775,7 @@ mod test {
     }
 
     #[test]
-    fn writeback_shutdown_flushes_pending() {
+    fn write_back_shutdown_flushes_pending() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let key = Address::from(5u64);
 
@@ -1794,7 +1794,7 @@ mod test {
     }
 
     #[test]
-    fn writeback_commit_failure_poisons_worker() {
+    fn write_back_commit_failure_poisons_worker() {
         let storage = EntityStorage::new(FailingBulkProvider(InMemoryEntityStorage::new()));
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache = EntityCache::<Address, CacheEntity>::with_worker(storage, worker, 64 * 1024);

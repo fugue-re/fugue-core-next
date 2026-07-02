@@ -181,7 +181,7 @@ impl Project {
         let functions = if storage.entities.is_transient() {
             FunctionTable::new_transient()
         } else {
-            match storage.writeback() {
+            match storage.write_back() {
                 Some(worker) => {
                     FunctionTable::new_with(storage.entities.clone(), worker.clone(), cache_bytes)
                 }
@@ -199,7 +199,7 @@ impl Project {
         let blocks = if storage.entities.is_transient() {
             CodeBlockTable::new_transient()
         } else {
-            match storage.writeback() {
+            match storage.write_back() {
                 Some(worker) => CodeBlockTable::new_with(
                     storage.entities.clone(),
                     worker.clone(),
@@ -481,7 +481,7 @@ impl Project {
         tracing::debug!("persisting code block table");
         self.blocks.persist(&self.storage.entities)?;
 
-        if let Some(worker) = self.storage.writeback() {
+        if let Some(worker) = self.storage.write_back() {
             tracing::debug!("draining write-back worker");
             worker.flush()?;
         }

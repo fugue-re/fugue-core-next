@@ -34,6 +34,11 @@ enum Message {
     Write(Bytes),
 }
 
+pub enum WriteBackAction {
+    Insert(Bytes),
+    Remove,
+}
+
 pub struct WriteBackWorker {
     tx: Sender<Message>,
     pending: Arc<DashMap<Bytes, PendingEntry>>,
@@ -71,7 +76,7 @@ impl WriteBackWorker {
         };
 
         let handle = Builder::new()
-            .name("entity-writeback".to_owned())
+            .name("entity-write-back".to_owned())
             .spawn(move || worker.run(rx))
             .map_err(EntityStorageError::backing)?;
 
@@ -96,8 +101,11 @@ impl WriteBackWorker {
             .map_err(|_| EntityStorageError::backing_with("write-back worker stopped"))
     }
 
-    pub fn pending(&self, key: &Bytes) -> Option<Option<Bytes>> {
-        self.pending.get(key).map(|entry| entry.value.clone())
+    pub fn pending(&self, key: &Bytes) -> Option<WriteBackAction> {
+        self.pending.get(key).map(|entry| match &entry.value {
+            Some(bytes) => WriteBackAction::Insert(bytes.clone()),
+            None => WriteBackAction::Remove,
+        })
     }
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
