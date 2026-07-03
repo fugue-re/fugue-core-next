@@ -29,6 +29,6 @@ impl StorageProvider for SqliteProvider<TRANSIENT> {
         let segments =
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments))
+        StorageContainer::from_parts(entities, segments)
     }
 }

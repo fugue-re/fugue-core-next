@@ -1,13 +1,10 @@
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use std::io;
-use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
-use quick_cache::sync::Cache;
 use thiserror::Error;
 
 use crate::loader::Loadable;
@@ -38,6 +35,13 @@ pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, Proj
 pub mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
+
+pub mod writer;
+pub use writer::{WriteBackAction, WriteBackWorker};
+
+pub mod cache;
+pub(crate) use cache::{CachedMut, CachedRef, EntityCache};
+pub use cache::{EntityMut, EntityRef, MutableEntity};
 
 #[cfg(feature = "sqlite")]
 pub type DefaultPersistentEntityStorage = SqliteEntityStorage<PERSISTENT>;
@@ -106,6 +110,11 @@ impl EntityStorageError {
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
         Self::Unsupported(anyhow::Error::msg(msg))
+    }
+
+    pub(crate) fn into_fatal(self) -> ! {
+        tracing::error!("fatal entity storage failure: {self}");
+        panic!("fatal entity storage failure: {self}");
     }
 }
 
@@ -664,465 +673,6 @@ impl<'a> OutMapper2<'a> {
     }
 }
 
-pub struct EntityCache<K: EntityKey, E: Entity> {
-    entities: Arc<Cache<K, Arc<E>>>,
-    storage: EntityStorage,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct EntityRef<'a, E>(Arc<E>, PhantomData<&'a E>)
-where
-    E: Entity;
-
-impl<E> Display for EntityRef<'_, E>
-where
-    E: Entity + Display,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl<E> AsRef<E> for EntityRef<'_, E>
-where
-    E: Entity,
-{
-    fn as_ref(&self) -> &E {
-        &self.0
-    }
-}
-
-impl<E> Deref for EntityRef<'_, E>
-where
-    E: Entity,
-{
-    type Target = E;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'a, E> EntityRef<'a, E>
-where
-    E: Entity,
-{
-    pub fn new(entity: E) -> Self {
-        Self(Arc::new(entity), PhantomData)
-    }
-
-    pub fn from_arc(entity: Arc<E>) -> Self {
-        Self(entity, PhantomData)
-    }
-}
-
-pub trait MutableEntity<K: EntityKey>: Entity {
-    fn entity_key(&self) -> K;
-}
-
-bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct EntityMutFlags: u8 {
-        const NONE    = 0b0000_0000;
-        const CHANGED = 0b0000_0001;
-        const DROPPED = 0b0000_0010;
-    }
-}
-
-pub struct EntityMut<'a, K: EntityKey, E: Entity + MutableEntity<K>> {
-    entity: ManuallyDrop<Arc<E>>,
-    flags: EntityMutFlags,
-    cache: &'a EntityCache<K, E>,
-}
-
-impl<K, E> Debug for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K> + Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EntityMut")
-            .field("entity", &self.entity)
-            .field("flags", &self.flags)
-            .finish()
-    }
-}
-
-impl<K, E> Display for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K> + Display,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.entity.fmt(f)
-    }
-}
-
-impl<K, E> PartialEq<E> for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K> + PartialEq,
-{
-    fn eq(&self, other: &E) -> bool {
-        **self.entity == *other
-    }
-}
-
-impl<K, E> PartialEq for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K> + PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.entity == other.entity
-    }
-}
-
-impl<K, E> Clone for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            entity: self.entity.clone(),
-            flags: EntityMutFlags::NONE,
-            cache: self.cache,
-        }
-    }
-}
-
-impl<K, E> Deref for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    type Target = E;
-
-    fn deref(&self) -> &Self::Target {
-        &self.entity
-    }
-}
-
-impl<K, E> AsMut<E> for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    fn as_mut(&mut self) -> &mut E {
-        self.flags |= EntityMutFlags::CHANGED;
-        Arc::make_mut(&mut self.entity)
-    }
-}
-
-impl<K, E> AsRef<E> for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    fn as_ref(&self) -> &E {
-        &self.entity
-    }
-}
-
-impl<'a, K, E> EntityMut<'a, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    pub fn new(entity: Arc<E>, cache: &'a EntityCache<K, E>) -> Self {
-        Self {
-            entity: ManuallyDrop::new(entity),
-            flags: EntityMutFlags::NONE,
-            cache,
-        }
-    }
-
-    pub fn make_mut(entity: EntityRef<'a, E>, cache: &'a EntityCache<K, E>) -> Self {
-        Self {
-            entity: ManuallyDrop::new(entity.0),
-            flags: EntityMutFlags::NONE,
-            cache,
-        }
-    }
-
-    /// SAFETY: Use of the entity after calling this method will lead to undefined behaviour.
-    ///
-    /// This method is used to persist the entity to the cache and mark it as dropped, it is
-    /// a separate method so we can reuse the logic for `EntityMut::drop` and
-    /// EntityCache::persist`.
-    unsafe fn persist(&mut self) -> Result<(), EntityStorageError> {
-        if self.flags.contains(EntityMutFlags::DROPPED) {
-            // If the entity was already dropped, we do not persist it again.
-            return Ok(());
-        }
-
-        // NOTE: if we were not the last reference to the entity, we do not persist it under the
-        // assumption that the final version of the entity's modifications will be take
-        // prescedence. It's unclear if we should even allow this possibility, as is, we do
-        // since EntityMut is clonable.
-        let entity_ref = unsafe { ManuallyDrop::take(&mut self.entity) };
-
-        // NOTE: we mark the entity as dropped to avoid persisting it again and potential undefined
-        // behaviour if we try to access the entity after this point.
-        self.flags.insert(EntityMutFlags::DROPPED);
-
-        if self.flags.contains(EntityMutFlags::CHANGED)
-            && let Some(entity) = Arc::into_inner(entity_ref)
-        {
-            let key = entity.entity_key();
-            self.cache.insert(key, entity)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<K, E> EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    pub fn changed(&self) -> bool {
-        self.flags.contains(EntityMutFlags::CHANGED)
-    }
-
-    pub fn mark_changed(&mut self) {
-        self.flags.insert(EntityMutFlags::CHANGED);
-    }
-
-    pub fn clear_changed(&mut self) {
-        self.flags.remove(EntityMutFlags::CHANGED);
-    }
-}
-
-impl<K, E> Drop for EntityMut<'_, K, E>
-where
-    K: EntityKey,
-    E: Entity + MutableEntity<K>,
-{
-    fn drop(&mut self) {
-        if let Err(err) = unsafe { self.persist() } {
-            tracing::error!("failed to persist entity: {err}");
-        }
-    }
-}
-
-pub struct EntityTransactionalCacheWriter<'a, K, E>
-where
-    K: EntityKey,
-    E: Entity,
-{
-    inner: ManuallyDrop<EntityTransactionalWriter<'a>>,
-    cache: Arc<Cache<K, Arc<E>>>,
-    dropped: bool,
-}
-
-impl<'a, K, E> EntityTransactionalCacheWriter<'a, K, E>
-where
-    K: EntityKey,
-    E: Entity,
-{
-    fn new(inner: EntityTransactionalWriter<'a>, cache: Arc<Cache<K, Arc<E>>>) -> Self {
-        Self {
-            inner: ManuallyDrop::new(inner),
-            cache,
-            dropped: false,
-        }
-    }
-
-    pub fn get(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        self.inner.get::<K, E>(key)
-    }
-
-    pub fn get_as<F, T>(&self, key: &K, f: F) -> Result<Option<T>, EntityStorageError>
-    where
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
-        self.inner.get_as::<K, E, F, T>(key, f)
-    }
-
-    pub fn contains(&self, key: &K) -> Result<bool, EntityStorageError> {
-        self.inner.contains::<K, E>(key)
-    }
-
-    pub fn insert(&self, key: &K, entity: &E) -> Result<(), EntityStorageError> {
-        self.inner.insert(key, entity)
-    }
-
-    pub fn remove(&self, key: &K) -> Result<(), EntityStorageError> {
-        self.inner.remove::<K, E>(key)
-    }
-
-    pub fn enable_auto_commit(&mut self) {
-        self.inner.enable_auto_commit();
-    }
-
-    pub fn disable_auto_commit(&mut self) {
-        self.inner.disable_auto_commit();
-    }
-
-    pub fn commit(mut self) -> Result<(), EntityStorageError> {
-        self.cache.clear();
-        self.dropped = true;
-
-        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
-
-        inner.commit()?;
-
-        Ok(())
-    }
-}
-
-impl<'a, K, E> Drop for EntityTransactionalCacheWriter<'a, K, E>
-where
-    K: EntityKey,
-    E: Entity,
-{
-    fn drop(&mut self) {
-        if self.dropped {
-            return;
-        }
-
-        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
-
-        // if we didn't drop, then we haven't committed (yet), check if we should clear
-        // the cache due to an auto-commit
-        if inner
-            .flags
-            .contains(EntityTransactionalWriterFlags::AUTO_COMMIT)
-        {
-            self.cache.clear();
-        }
-    }
-}
-
-impl<K, E> EntityCache<K, E>
-where
-    K: EntityKey,
-    E: Entity,
-{
-    pub fn new(storage: EntityStorage, size: usize) -> Result<Self, EntityStorageError> {
-        Ok(Self {
-            entities: Arc::new(Cache::new(size)),
-            storage,
-        })
-    }
-
-    pub fn get(&self, key: &K) -> Result<Option<EntityRef<E>>, EntityStorageError> {
-        if let Some(entity) = self.entities.get(key) {
-            return Ok(Some(EntityRef::from_arc(entity)));
-        }
-
-        if let Some(entity) = self.storage.get::<K, E>(key)? {
-            let entity = Arc::new(entity);
-            self.entities.insert(key.to_owned(), entity.to_owned());
-            return Ok(Some(EntityRef::from_arc(entity)));
-        }
-
-        Ok(None)
-    }
-
-    pub fn get_mut(&self, key: &K) -> Result<Option<EntityMut<'_, K, E>>, EntityStorageError>
-    where
-        E: MutableEntity<K>,
-    {
-        Ok(self.get(key)?.map(|e| EntityMut::new(e.0, self)))
-    }
-
-    pub fn persist(&self, mut entity: EntityMut<'_, K, E>) -> Result<(), EntityStorageError>
-    where
-        E: MutableEntity<K>,
-    {
-        unsafe { entity.persist() }
-    }
-
-    pub fn contains(&self, key: &K) -> Result<bool, EntityStorageError> {
-        if self.entities.contains_key(key) {
-            return Ok(true);
-        }
-
-        self.storage.contains::<K, E>(key)
-    }
-
-    pub fn insert(&self, key: K, entity: E) -> Result<EntityRef<E>, EntityStorageError> {
-        // NOTE: we could check if the entity already exists in the cache and if it is the same,
-        // then we exit early. Similarly, we could check if the entity exists in the storage
-        // backing and if it is the same, then avoid inserting it again.
-
-        self.storage.insert(&key, &entity)?;
-
-        let entity = Arc::new(entity);
-
-        self.entities.insert(key, entity.clone());
-
-        Ok(EntityRef::from_arc(entity))
-    }
-
-    pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
-        // NOTE: this will bypass the cache and directly insert into the storage backing
-        // we therefore clear the cache to avoid inconsistencies
-
-        self.entities.clear();
-        self.storage.bulk_inserter()
-    }
-
-    pub fn remove(&self, key: &K) -> Result<(), EntityStorageError> {
-        self.storage.remove::<K, E>(key)?;
-        self.entities.remove(key);
-
-        Ok(())
-    }
-
-    pub fn keys(&self) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
-        self.storage.keys::<K, E>()
-    }
-
-    pub fn iter(&self) -> Result<EntityIterator<'_, K, EntityRef<'_, E>>, EntityStorageError> {
-        // TODO: should we cache the elements in the iterator if the cache has capacity?
-        let pfx = schema::make_prefix::<K, E>();
-        Ok(self.storage.backing.iter_prefix_as(&pfx, |k, v| {
-            let key = schema::extract_key::<K, E>(k.into())
-                .ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-            if let Some(val) = self.entities.get(&key) {
-                return Ok((key, EntityRef::from_arc(val)));
-            }
-
-            let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(v)
-                .map_err(EntityStorageError::decode)?;
-
-            Ok((key, EntityRef::new(val)))
-        })? as EntityIterator<'_, K, EntityRef<E>>)
-    }
-
-    pub fn transactional_reader(
-        &self,
-    ) -> Result<EntityTransactionalReader<'_>, EntityStorageError> {
-        self.storage.transactional_reader()
-    }
-
-    pub fn transactional_writer(
-        &self,
-    ) -> Result<EntityTransactionalCacheWriter<'_, K, E>, EntityStorageError> {
-        let writer = self.storage.transactional_writer()?;
-        Ok(EntityTransactionalCacheWriter::new(
-            writer,
-            self.entities.clone(),
-        ))
-    }
-
-    pub fn clear(&mut self) -> Result<(), EntityStorageError> {
-        self.entities.clear();
-        Ok(())
-    }
-
-    pub fn storage(&self) -> &EntityStorage {
-        &self.storage
-    }
-}
-
 #[derive(Clone)]
 pub struct EntityStorage {
     backing: Arc<dyn ErasedEntityStorageProvider>,
@@ -1142,6 +692,16 @@ impl EntityStorage {
         })
     }
 
+    pub fn get_as<K, E, F, T>(&self, key: &K, f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        let key = schema::make_key::<K, E>(key);
+        self.backing.get_as(&key, f)
+    }
+
     pub fn insert<K: EntityKey, E: Entity>(
         &self,
         key: &K,
@@ -1154,6 +714,15 @@ impl EntityStorage {
         let encoded = BytesOrSlice::from(encoded);
 
         self.backing.insert(&key, encoded)
+    }
+
+    pub fn insert_bytes<K: EntityKey, E: Entity>(
+        &self,
+        key: &K,
+        value: BytesOrSlice<'_>,
+    ) -> Result<(), EntityStorageError> {
+        let key = schema::make_key::<K, E>(key);
+        self.backing.insert(&key, value)
     }
 
     pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
@@ -1214,13 +783,6 @@ impl EntityStorage {
         Ok(EntityTransactionalWriter::new(writer))
     }
 
-    pub fn cache_for<K: EntityKey, E: Entity>(
-        &self,
-        size: usize,
-    ) -> Result<EntityCache<K, E>, EntityStorageError> {
-        EntityCache::new(self.clone(), size)
-    }
-
     pub fn persistence(&self) -> StoragePersistence {
         self.backing.persistence()
     }
@@ -1243,20 +805,18 @@ mod test {
     use super::*;
     use crate::ir::Address;
 
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        id: u64,
+        name: String,
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(0);
+    }
+
     #[test]
     fn test_entity_storage() {
-        #[derive(
-            Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-        )]
-        struct TestEntity {
-            id: u64,
-            name: String,
-        }
-
-        impl Entity for TestEntity {
-            const ID: EntityId = EntityId::new(0);
-        }
-
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         let entity = TestEntity {
@@ -1313,31 +873,29 @@ mod test {
         }
 
         // test a cache
-        let cache = storage.cache_for::<Address, TestEntity>(5).unwrap();
+        let cache = EntityCache::<Address, TestEntity>::new(storage.clone(), 64 * 1024).unwrap();
 
         for i in 0..5 {
             let entity = TestEntity {
                 id: i,
                 name: format!("Entity {i}"),
             };
-            let cached = cache.get(&Address::from(i as u64)).unwrap();
+            let cached = cache.get(&Address::from(i as u64));
 
             assert!(cached.is_some());
             assert_eq!(*cached.unwrap(), entity);
         }
 
-        // test cache insertion
         for i in 50..100 {
             let entity = TestEntity {
                 id: i,
                 name: format!("New Cached Entity {i}"),
             };
-            cache.insert(Address::from(i as u64), entity).unwrap();
+            cache.put(Address::from(i as u64), entity);
         }
 
-        // verify cache contains new entities
         for i in 50..100 {
-            let cached = cache.get(&Address::from(i as u64)).unwrap();
+            let cached = cache.get(&Address::from(i as u64));
             assert!(cached.is_some());
             assert_eq!(
                 *cached.unwrap(),
@@ -1348,10 +906,9 @@ mod test {
             );
         }
 
-        // verify cache does not contain old entities
         for i in 50..60 {
-            cache.remove(&Address::from(i as u64)).unwrap();
-            let cached = cache.get(&Address::from(i as u64)).unwrap();
+            cache.try_remove(&Address::from(i as u64)).unwrap();
+            let cached = cache.get(&Address::from(i as u64));
             assert!(cached.is_none());
 
             let direct = storage

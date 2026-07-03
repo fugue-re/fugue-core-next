@@ -42,15 +42,11 @@ impl Entity for Function {
     const ID: EntityId = ENTITY_FUNCTION_ID;
 }
 
-impl MutableEntity<FunctionId> for Function {
+impl MutableEntity for Function {
+    type Key = FunctionId;
+
     fn entity_key(&self) -> FunctionId {
         self.id
-    }
-}
-
-impl MutableEntity<Address> for Function {
-    fn entity_key(&self) -> Address {
-        self.entry
     }
 }
 
