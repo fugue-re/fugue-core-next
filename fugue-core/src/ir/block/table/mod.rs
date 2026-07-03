@@ -7,7 +7,9 @@ use thiserror::Error;
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, ProjectEntity, Ref, RefMut, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
+};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
@@ -66,8 +68,8 @@ impl CodeBlockTableError {
     }
 }
 
-pub type CodeBlockRef<'a> = Ref<'a, CodeBlock>;
-pub type CodeBlockMut<'a> = RefMut<'a, CodeBlock>;
+pub type CodeBlockRef<'a> = EntityRef<'a, CodeBlock>;
+pub type CodeBlockMut<'a> = EntityMut<'a, CodeBlock>;
 
 pub struct CodeBlockIter<'a> {
     inner: Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a>,
@@ -160,8 +162,8 @@ impl CodeBlockTable {
 
     pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_id(id).map(Ref::Shared),
-            Self::Transient(t) => t.get_by_id(id).map(Ref::Borrowed),
+            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
+            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
         }
     }
 
@@ -170,8 +172,8 @@ impl CodeBlockTable {
         id: Id<CodeBlock>,
     ) -> Result<Option<CodeBlockRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(Ref::Shared)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(Ref::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
@@ -199,8 +201,8 @@ impl CodeBlockTable {
 
     pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_id_mut(id).map(RefMut::Guard),
-            Self::Transient(t) => t.get_by_id_mut(id).map(RefMut::Borrowed),
+            Self::Persistent(p) => p.get_by_id_mut(id).map(EntityMut::cached),
+            Self::Transient(t) => t.get_by_id_mut(id).map(EntityMut::borrowed),
         }
     }
 
@@ -209,8 +211,8 @@ impl CodeBlockTable {
         id: Id<CodeBlock>,
     ) -> Result<Option<CodeBlockMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(RefMut::Guard)),
-            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(RefMut::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(EntityMut::borrowed)),
         }
     }
 
@@ -262,8 +264,12 @@ impl CodeBlockTable {
 
     pub fn get_by_address(&self, maddr: Address) -> CodeBlockIter<'_> {
         match self {
-            Self::Persistent(p) => CodeBlockIter::new(p.get_by_address(maddr).map(Ref::Shared)),
-            Self::Transient(t) => CodeBlockIter::new(t.get_by_address(maddr).map(Ref::Borrowed)),
+            Self::Persistent(p) => {
+                CodeBlockIter::new(p.get_by_address(maddr).map(EntityRef::cached))
+            }
+            Self::Transient(t) => {
+                CodeBlockIter::new(t.get_by_address(maddr).map(EntityRef::borrowed))
+            }
         }
     }
 
@@ -275,11 +281,11 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(p) => CodeBlockIter::new(
                 p.get_by_address_and_context(maddr, context)
-                    .map(Ref::Shared),
+                    .map(EntityRef::cached),
             ),
             Self::Transient(t) => CodeBlockIter::new(
                 t.get_by_address_and_context(maddr, context)
-                    .map(Ref::Borrowed),
+                    .map(EntityRef::borrowed),
             ),
         }
     }
@@ -293,18 +299,18 @@ impl CodeBlockTable {
 
     pub fn overlaps(&self, addr: Address) -> CodeBlockIter<'_> {
         match self {
-            Self::Persistent(p) => CodeBlockIter::new(p.overlaps(addr).map(Ref::Shared)),
-            Self::Transient(t) => CodeBlockIter::new(t.overlaps(addr).map(Ref::Borrowed)),
+            Self::Persistent(p) => CodeBlockIter::new(p.overlaps(addr).map(EntityRef::cached)),
+            Self::Transient(t) => CodeBlockIter::new(t.overlaps(addr).map(EntityRef::borrowed)),
         }
     }
 
     pub fn get_by_address_mut(&mut self, maddr: Address) -> CodeBlockIterMut<'_> {
         match self {
             Self::Persistent(p) => {
-                CodeBlockIterMut::new(p.get_by_address_mut(maddr).map(RefMut::Guard))
+                CodeBlockIterMut::new(p.get_by_address_mut(maddr).map(EntityMut::cached))
             }
             Self::Transient(t) => {
-                CodeBlockIterMut::new(t.get_by_address_mut(maddr).map(RefMut::Borrowed))
+                CodeBlockIterMut::new(t.get_by_address_mut(maddr).map(EntityMut::borrowed))
             }
         }
     }
@@ -317,33 +323,37 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(p) => CodeBlockIterMut::new(
                 p.get_by_address_and_context_mut(maddr, context)
-                    .map(RefMut::Guard),
+                    .map(EntityMut::cached),
             ),
             Self::Transient(t) => CodeBlockIterMut::new(
                 t.get_by_address_and_context_mut(maddr, context)
-                    .map(RefMut::Borrowed),
+                    .map(EntityMut::borrowed),
             ),
         }
     }
 
     pub fn overlaps_mut(&mut self, addr: Address) -> CodeBlockIterMut<'_> {
         match self {
-            Self::Persistent(p) => CodeBlockIterMut::new(p.overlaps_mut(addr).map(RefMut::Guard)),
-            Self::Transient(t) => CodeBlockIterMut::new(t.overlaps_mut(addr).map(RefMut::Borrowed)),
+            Self::Persistent(p) => {
+                CodeBlockIterMut::new(p.overlaps_mut(addr).map(EntityMut::cached))
+            }
+            Self::Transient(t) => {
+                CodeBlockIterMut::new(t.overlaps_mut(addr).map(EntityMut::borrowed))
+            }
         }
     }
 
     pub fn iter(&self) -> CodeBlockIter<'_> {
         match self {
-            Self::Persistent(p) => CodeBlockIter::new(p.iter().map(Ref::Shared)),
-            Self::Transient(t) => CodeBlockIter::new(t.iter().map(Ref::Borrowed)),
+            Self::Persistent(p) => CodeBlockIter::new(p.iter().map(EntityRef::cached)),
+            Self::Transient(t) => CodeBlockIter::new(t.iter().map(EntityRef::borrowed)),
         }
     }
 
     pub fn iter_mut(&mut self) -> CodeBlockIterMut<'_> {
         match self {
-            Self::Persistent(p) => CodeBlockIterMut::new(p.iter_mut().map(RefMut::Guard)),
-            Self::Transient(t) => CodeBlockIterMut::new(t.iter_mut().map(RefMut::Borrowed)),
+            Self::Persistent(p) => CodeBlockIterMut::new(p.iter_mut().map(EntityMut::cached)),
+            Self::Transient(t) => CodeBlockIterMut::new(t.iter_mut().map(EntityMut::borrowed)),
         }
     }
 

@@ -7,12 +7,12 @@ use smallvec::SmallVec;
 use super::{CodeBlockIndex, CodeBlockTableError};
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
-use crate::storage::entities::{EntityCache, EntityMut, EntityRef, WriteBackWorker};
+use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
-type Ref<'a> = EntityRef<'a, CodeBlock>;
-type RefMut<'a> = EntityMut<'a, CodeBlock>;
+type Ref<'a> = CachedRef<'a, CodeBlock>;
+type RefMut<'a> = CachedMut<'a, CodeBlock>;
 type Iter<'a> = Box<dyn Iterator<Item = Ref<'a>> + 'a>;
 type IterMut<'a> = Box<dyn Iterator<Item = RefMut<'a>> + 'a>;
 
@@ -22,11 +22,14 @@ pub struct CodeBlockTable {
 }
 
 impl CodeBlockTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+    pub(crate) fn new(
+        entities: EntityStorage,
+        cache_bytes: usize,
+    ) -> Result<Self, EntityStorageError> {
         Self::from_entries(EntityCache::new(entities, cache_bytes)?)
     }
 
-    pub fn new_with(
+    pub(crate) fn new_with(
         entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
@@ -73,11 +76,15 @@ impl CodeBlockTable {
         })
     }
 
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
     }
 
-    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
+    pub(crate) fn insert<F>(
+        &mut self,
+        addr: Address,
+        f: F,
+    ) -> Result<Id<CodeBlock>, CodeBlockTableError>
     where
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
@@ -110,15 +117,18 @@ impl CodeBlockTable {
         Ok(id)
     }
 
-    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<Ref<'_>> {
+    pub(crate) fn get_by_id(&self, id: Id<CodeBlock>) -> Option<Ref<'_>> {
         self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
 
-    pub fn try_get_by_id(&self, id: Id<CodeBlock>) -> Result<Option<Ref<'_>>, EntityStorageError> {
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: Id<CodeBlock>,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
         self.entries.try_get(&id)
     }
 
-    pub fn modify_by_id<R>(
+    pub(crate) fn modify_by_id<R>(
         &mut self,
         id: Id<CodeBlock>,
         f: impl FnOnce(&mut CodeBlock) -> R,
@@ -127,7 +137,7 @@ impl CodeBlockTable {
             .unwrap_or_else(|e| e.into_fatal())
     }
 
-    pub fn try_modify_by_id<R>(
+    pub(crate) fn try_modify_by_id<R>(
         &mut self,
         id: Id<CodeBlock>,
         f: impl FnOnce(&mut CodeBlock) -> R,
@@ -135,22 +145,25 @@ impl CodeBlockTable {
         self.entries.try_modify(&id, f)
     }
 
-    pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<RefMut<'_>> {
+    pub(crate) fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<RefMut<'_>> {
         self.entries.get_mut(&id)
     }
 
-    pub fn try_get_by_id_mut(
+    pub(crate) fn try_get_by_id_mut(
         &mut self,
         id: Id<CodeBlock>,
     ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
         self.entries.try_get_mut(&id)
     }
 
-    pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
+    pub(crate) fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
         self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
 
-    pub fn try_remove_by_id(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+    pub(crate) fn try_remove_by_id(
+        &mut self,
+        id: Id<CodeBlock>,
+    ) -> Result<bool, EntityStorageError> {
         let Some(block) = self.entries.try_get(&id)? else {
             return Ok(false);
         };
@@ -177,12 +190,15 @@ impl CodeBlockTable {
         Ok(true)
     }
 
-    pub fn remove_by_address(&mut self, addr: Address) -> usize {
+    pub(crate) fn remove_by_address(&mut self, addr: Address) -> usize {
         self.try_remove_by_address(addr)
             .unwrap_or_else(|e| e.into_fatal())
     }
 
-    pub fn try_remove_by_address(&mut self, addr: Address) -> Result<usize, EntityStorageError> {
+    pub(crate) fn try_remove_by_address(
+        &mut self,
+        addr: Address,
+    ) -> Result<usize, EntityStorageError> {
         let space = addr.space();
         let raw = addr.address();
 
@@ -213,12 +229,16 @@ impl CodeBlockTable {
         Ok(removed)
     }
 
-    pub fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
+    pub(crate) fn remove_by_address_and_context(
+        &mut self,
+        addr: Address,
+        context: &ContextSet,
+    ) -> usize {
         self.try_remove_by_address_and_context(addr, context)
             .unwrap_or_else(|e| e.into_fatal())
     }
 
-    pub fn try_remove_by_address_and_context(
+    pub(crate) fn try_remove_by_address_and_context(
         &mut self,
         addr: Address,
         context: &ContextSet,
@@ -271,7 +291,7 @@ impl CodeBlockTable {
         Ok(removed)
     }
 
-    pub fn get_by_address(&self, maddr: Address) -> Iter<'_> {
+    pub(crate) fn get_by_address(&self, maddr: Address) -> Iter<'_> {
         let space = maddr.space();
         let raw = maddr.address();
 
@@ -287,7 +307,7 @@ impl CodeBlockTable {
         }))
     }
 
-    pub fn get_by_address_and_context<'a>(
+    pub(crate) fn get_by_address_and_context<'a>(
         &'a self,
         maddr: Address,
         context: &'a ContextSet,
@@ -307,7 +327,7 @@ impl CodeBlockTable {
         }))
     }
 
-    pub fn contains(&self, addr: Address) -> bool {
+    pub(crate) fn contains(&self, addr: Address) -> bool {
         let space = addr.space();
         let raw = addr.address();
 
@@ -317,7 +337,7 @@ impl CodeBlockTable {
             .is_some_and(|bounds| bounds.has_overlap(raw..=raw))
     }
 
-    pub fn overlaps(&self, addr: Address) -> Iter<'_> {
+    pub(crate) fn overlaps(&self, addr: Address) -> Iter<'_> {
         let space = addr.space();
         let raw = addr.address();
 
@@ -332,7 +352,7 @@ impl CodeBlockTable {
         )
     }
 
-    pub fn get_by_address_mut(&mut self, maddr: Address) -> IterMut<'_> {
+    pub(crate) fn get_by_address_mut(&mut self, maddr: Address) -> IterMut<'_> {
         let space = maddr.space();
         let raw = maddr.address();
 
@@ -348,7 +368,7 @@ impl CodeBlockTable {
         Box::new(self.entries.get_disjoint_mut(ids))
     }
 
-    pub fn get_by_address_and_context_mut<'a>(
+    pub(crate) fn get_by_address_and_context_mut<'a>(
         &'a mut self,
         maddr: Address,
         context: &'a ContextSet,
@@ -372,7 +392,7 @@ impl CodeBlockTable {
         )
     }
 
-    pub fn overlaps_mut(&mut self, addr: Address) -> IterMut<'_> {
+    pub(crate) fn overlaps_mut(&mut self, addr: Address) -> IterMut<'_> {
         let space = addr.space();
         let raw = addr.address();
 
@@ -387,19 +407,19 @@ impl CodeBlockTable {
         Box::new(self.entries.get_disjoint_mut(ids))
     }
 
-    pub fn iter(&self) -> Iter<'_> {
+    pub(crate) fn iter(&self) -> Iter<'_> {
         Box::new(self.entries.iter())
     }
 
-    pub fn iter_mut(&mut self) -> IterMut<'_> {
+    pub(crate) fn iter_mut(&mut self) -> IterMut<'_> {
         Box::new(self.entries.iter_mut())
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.index.live_entries == 0
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.index.live_entries
     }
 }

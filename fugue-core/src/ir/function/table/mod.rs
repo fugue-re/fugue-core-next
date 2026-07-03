@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::ir::{Address, Function, Id};
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, ProjectEntity, Ref, RefMut, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
+};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
@@ -15,8 +17,8 @@ mod transient;
 pub use persistent::FunctionTable as PersistentFunctionTable;
 pub use transient::FunctionTable as TransientFunctionTable;
 
-pub type FunctionRef<'a> = Ref<'a, Function>;
-pub type FunctionMut<'a> = RefMut<'a, Function>;
+pub type FunctionRef<'a> = EntityRef<'a, Function>;
+pub type FunctionMut<'a> = EntityMut<'a, Function>;
 
 const FUNCTION_TABLE_VERSION: u32 = 1;
 
@@ -44,24 +46,24 @@ pub enum FunctionTableError {
     #[error("function to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Custom(anyhow::Error),
+    Other(anyhow::Error),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
 
 impl FunctionTableError {
-    pub fn custom<E>(error: E) -> Self
+    pub fn other<E>(error: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        Self::Custom(anyhow::Error::new(error))
+        Self::Other(anyhow::Error::new(error))
     }
 
-    pub fn custom_with<M>(msg: M) -> Self
+    pub fn other_with<M>(msg: M) -> Self
     where
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
-        Self::Custom(anyhow::Error::msg(msg))
+        Self::Other(anyhow::Error::msg(msg))
     }
 }
 
@@ -108,8 +110,8 @@ impl FunctionTable {
 
     pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_id(id).map(Ref::Shared),
-            Self::Transient(t) => t.get_by_id(id).map(Ref::Borrowed),
+            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
+            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
         }
     }
 
@@ -118,15 +120,15 @@ impl FunctionTable {
         id: Id<Function>,
     ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(Ref::Shared)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(Ref::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
     pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_address(addr).map(Ref::Shared),
-            Self::Transient(t) => t.get_by_address(addr).map(Ref::Borrowed),
+            Self::Persistent(p) => p.get_by_address(addr).map(EntityRef::cached),
+            Self::Transient(t) => t.get_by_address(addr).map(EntityRef::borrowed),
         }
     }
 
@@ -135,15 +137,15 @@ impl FunctionTable {
         addr: Address,
     ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_address(addr)?.map(Ref::Shared)),
-            Self::Transient(t) => Ok(t.get_by_address(addr).map(Ref::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_address(addr)?.map(EntityRef::cached)),
+            Self::Transient(t) => Ok(t.get_by_address(addr).map(EntityRef::borrowed)),
         }
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_id_mut(id).map(RefMut::Guard),
-            Self::Transient(t) => t.get_by_id_mut(id).map(RefMut::Borrowed),
+            Self::Persistent(p) => p.get_by_id_mut(id).map(EntityMut::cached),
+            Self::Transient(t) => t.get_by_id_mut(id).map(EntityMut::borrowed),
         }
     }
 
@@ -152,15 +154,15 @@ impl FunctionTable {
         id: Id<Function>,
     ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(RefMut::Guard)),
-            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(RefMut::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(EntityMut::borrowed)),
         }
     }
 
     pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
         match self {
-            Self::Persistent(p) => p.get_by_address_mut(addr).map(RefMut::Guard),
-            Self::Transient(t) => t.get_by_address_mut(addr).map(RefMut::Borrowed),
+            Self::Persistent(p) => p.get_by_address_mut(addr).map(EntityMut::cached),
+            Self::Transient(t) => t.get_by_address_mut(addr).map(EntityMut::borrowed),
         }
     }
 
@@ -169,8 +171,8 @@ impl FunctionTable {
         addr: Address,
     ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_address_mut(addr)?.map(RefMut::Guard)),
-            Self::Transient(t) => Ok(t.get_by_address_mut(addr).map(RefMut::Borrowed)),
+            Self::Persistent(p) => Ok(p.try_get_by_address_mut(addr)?.map(EntityMut::cached)),
+            Self::Transient(t) => Ok(t.get_by_address_mut(addr).map(EntityMut::borrowed)),
         }
     }
 
@@ -255,15 +257,15 @@ impl FunctionTable {
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter().map(Ref::Shared)),
-            Self::Transient(t) => Box::new(t.iter().map(Ref::Borrowed)),
+            Self::Persistent(p) => Box::new(p.iter().map(EntityRef::cached)),
+            Self::Transient(t) => Box::new(t.iter().map(EntityRef::borrowed)),
         }
     }
 
     pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter_mut().map(RefMut::Guard)),
-            Self::Transient(t) => Box::new(t.iter_mut().map(RefMut::Borrowed)),
+            Self::Persistent(p) => Box::new(p.iter_mut().map(EntityMut::cached)),
+            Self::Transient(t) => Box::new(t.iter_mut().map(EntityMut::borrowed)),
         }
     }
 
