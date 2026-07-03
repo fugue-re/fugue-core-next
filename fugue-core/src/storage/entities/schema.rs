@@ -3,6 +3,7 @@ use std::mem;
 
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::ir::symbol::Symbol;
 use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
@@ -63,6 +64,7 @@ pub const ENTITY_KEY_FUNCTION_ENTITY_ID: EntityKeyId = EntityKeyId::new(2);
 pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = EntityKeyId::new(3);
 pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = EntityKeyId::new(4);
 pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(5);
+pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -74,6 +76,7 @@ pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = EntityId::new(4);
 pub const ENTITY_FUNCTION_ID: EntityId = EntityId::new(5);
 pub const ENTITY_CODE_BLOCK_ID: EntityId = EntityId::new(6);
 pub const ENTITY_INSN_ID: EntityId = EntityId::new(7);
+pub const ENTITY_SYMBOL_ID: EntityId = EntityId::new(8);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -191,6 +194,18 @@ impl EntityKey for Id<Insn> {
 
     fn encode(&self, buf: &mut BytesMut) {
         Id::<Insn>::encode_as_key(self, buf);
+    }
+}
+
+impl EntityKey for Id<Symbol> {
+    const ID: EntityKeyId = ENTITY_KEY_SYMBOL_ENTITY_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<Symbol>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<Symbol>::encode_as_key(self, buf);
     }
 }
 

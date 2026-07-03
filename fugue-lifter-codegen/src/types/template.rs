@@ -87,7 +87,8 @@ impl<'a, 'b> TplAdaptor<'a, 'b, HandleTpl> {
 
 impl<'a, 'b> TplAdaptor<'a, 'b, ConstTpl> {
     pub(crate) fn tokens(&mut self) -> u16 {
-        use {ConstTpl as C, HandleKind as H};
+        use ConstTpl as C;
+        use HandleKind as H;
 
         self.tables.push_const_tpl(
             self.tpl,

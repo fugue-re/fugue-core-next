@@ -9,7 +9,7 @@ pub use ustr::{
 };
 
 use crate::ir::{Address, Id};
-use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
+use crate::storage::entities::schema::{ENTITY_SYMBOL_ID, ENTITY_SYMBOL_TABLE_ID};
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::{EntityStorage, EntityStorageError};
@@ -205,6 +205,10 @@ where
     }
 }
 
+impl Entity for SymbolEntry {
+    const ID: EntityId = ENTITY_SYMBOL_ID;
+}
+
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SymbolProperties: u8 {
@@ -382,9 +386,18 @@ impl SymbolIndex {
     }
 }
 
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
+const SYMBOL_TABLE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct SymbolTableHeader {
+    version: u32,
+}
+
+impl Entity for SymbolTableHeader {
+    const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable<A = Address> {
     // all known symbols
     symbols: Vec<SymbolEntry<A>>,
@@ -398,14 +411,59 @@ pub struct SymbolTable<A = Address> {
     free_ids: Vec<Id<Symbol>>,
 }
 
-impl Entity for SymbolTable {
-    const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
+impl SymbolTable {
+    fn load_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry) {
+        let index = id.index();
+
+        while self.symbols.len() < index {
+            self.free_ids.push(Id::from_index(self.symbols.len()));
+            self.symbols.push(SymbolEntry::default());
+        }
+
+        self.names.entry(entry.symbol()).or_default().push(id);
+        self.addresses.entry(entry.address()).or_default().push(id);
+
+        for &symbol_index in entry.indices() {
+            self.indices.insert(symbol_index, id);
+        }
+
+        self.symbols.push(entry);
+    }
+
+    fn write_entries<P, D>(&self, mut put: P, mut delete: D) -> Result<(), EntityStorageError>
+    where
+        P: FnMut(&Id<Symbol>, &SymbolEntry) -> Result<(), EntityStorageError>,
+        D: FnMut(&Id<Symbol>) -> Result<(), EntityStorageError>,
+    {
+        for (index, entry) in self.symbols.iter().enumerate() {
+            let id = Id::<Symbol>::from_index(index);
+            if entry.is_valid() {
+                put(&id, entry)?;
+            } else {
+                delete(&id)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl ProjectEntityFromStorage for SymbolTable {
     fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
         tracing::trace!("loading symbol table from entity storage");
-        storage.get(&ProjectEntity::SymbolTable)
+
+        if !storage.contains::<ProjectEntity, SymbolTableHeader>(&ProjectEntity::SymbolTable)? {
+            return Ok(None);
+        }
+
+        let mut table = SymbolTable::new();
+
+        for entry in storage.iter::<Id<Symbol>, SymbolEntry>()? {
+            let (id, entry) = entry?;
+            table.load_entry(id, entry);
+        }
+
+        Ok(Some(table))
     }
 
     fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
@@ -417,7 +475,26 @@ impl ProjectEntityFromStorage for SymbolTable {
 impl PersistableProjectEntity for SymbolTable {
     fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
         tracing::trace!("persisting symbol table with {} entries", self.len());
-        storage.insert(&ProjectEntity::SymbolTable, self)
+
+        let header = SymbolTableHeader {
+            version: SYMBOL_TABLE_VERSION,
+        };
+
+        if storage.is_transient() {
+            storage.insert(&ProjectEntity::SymbolTable, &header)?;
+            return self.write_entries(
+                |id, entry| storage.insert(id, entry),
+                |id| storage.remove::<Id<Symbol>, SymbolEntry>(id),
+            );
+        }
+
+        let writer = storage.transactional_writer()?;
+        writer.insert(&ProjectEntity::SymbolTable, &header)?;
+        self.write_entries(
+            |id, entry| writer.insert(id, entry),
+            |id| writer.remove::<Id<Symbol>, SymbolEntry>(id),
+        )?;
+        writer.commit()
     }
 }
 
@@ -933,6 +1010,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::storage::entities::InMemoryEntityStorage;
 
     #[test]
     #[should_panic(expected = "invalid selector bits")]
@@ -1023,10 +1101,44 @@ mod test {
         assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
         assert_eq!(ntable.len(), 1);
 
-        // check the roundtrip for encode/decode
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&table).unwrap();
-        let decoded = rkyv::from_bytes::<SymbolTable, rkyv::rancor::Error>(&encoded).unwrap();
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        table.persist(&storage).unwrap();
+        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
 
-        assert_eq!(table, decoded);
+        assert_eq!(table, reloaded);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_symbol_persist_reopen_sqlite() {
+        use tempfile::TempDir;
+
+        use crate::storage::PERSISTENT;
+        use crate::storage::entities::SqliteEntityStorage;
+
+        let sel = SymbolTableSelector::new(0);
+        let dir = TempDir::new().unwrap();
+
+        let mut table = SymbolTable::new();
+        let (_, hole) =
+            table.insert_local(SymbolIndex::new(sel, 1), Address::from(0x1000u32), "alpha");
+        table.insert_local(SymbolIndex::new(sel, 2), Address::from(0x2000u32), "beta");
+        table.insert_local(SymbolIndex::new(sel, 3), Address::from(0x3000u32), "gamma");
+        assert!(table.remove_by_id(hole));
+
+        {
+            let storage =
+                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+            table.persist(&storage).unwrap();
+        }
+
+        let storage =
+            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
+        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
+
+        assert_eq!(table, reloaded);
+        assert_eq!(reloaded.len(), 2);
+        assert!(reloaded.get_first("beta").is_some());
+        assert!(reloaded.get_first("alpha").is_none());
     }
 }
