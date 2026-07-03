@@ -220,6 +220,10 @@ impl Worker {
         }
 
         if let Err(error) = self.write_batch(snapshot) {
+            tracing::error!(
+                "write-back commit of {} entries failed, poisoning worker: {error}",
+                snapshot.len()
+            );
             let _ = self.poison.set(error.to_string());
             return Err(error);
         }
