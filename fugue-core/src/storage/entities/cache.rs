@@ -7,13 +7,11 @@ use bytes::Bytes;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 
-use crate::types::BytesOrSlice;
-
-use super::schema;
 use super::{
     Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
-    WriteBackWorker,
+    WriteBackWorker, schema,
 };
+use crate::types::BytesOrSlice;
 
 const ENTITY_CACHE_ENTRY_OVERHEAD: u32 = 64;
 const ENTITY_CACHE_ESTIMATED_ENTRY_SIZE: usize = 256;

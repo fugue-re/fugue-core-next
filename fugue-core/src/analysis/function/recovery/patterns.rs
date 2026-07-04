@@ -164,7 +164,7 @@ impl FunctionRecoveryPatternMatcher {
                     for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = Address::new(space_id, *gap.start() + range.start);
 
-                        if arch.canonicalise_address(start.into()).is_none() {
+                        if arch.canonicalise_address(start).is_none() {
                             continue;
                         }
 

@@ -334,7 +334,10 @@ mod test {
             .expect("4-aligned arm pointer canonicalises");
         assert_eq!(arm_entry, RawAddress::from(0x1000u64));
 
-        assert_ne!(thumb_ctx, arm_ctx, "thumb and arm modes carry distinct context");
+        assert_ne!(
+            thumb_ctx, arm_ctx,
+            "thumb and arm modes carry distinct context"
+        );
 
         assert!(
             arch.canonicalise_address(RawAddress::from(0x1002u64))

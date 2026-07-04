@@ -64,26 +64,13 @@ impl OverlayTree {
             let mut chunk = self.chunks.remove(&start).unwrap();
             let chunk_end = start + chunk.len();
 
-            match (start < addr, chunk_end > write_end) {
-                (true, true) => {
-                    let left_len = usize::from(addr - start);
-                    let right_start = usize::from(write_end - start);
-                    let right = chunk.data.split_off(right_start);
-                    chunk.data.truncate(left_len);
-                    self.chunks.insert(start, chunk);
-                    self.chunks.insert(write_end, OverlayChunk::new(right));
-                }
-                (true, false) => {
-                    let left_len = usize::from(addr - start);
-                    chunk.data.truncate(left_len);
-                    self.chunks.insert(start, chunk);
-                }
-                (false, true) => {
-                    let right_start = usize::from(write_end - start);
-                    chunk.data.drain(..right_start);
-                    self.chunks.insert(write_end, chunk);
-                }
-                (false, false) => {}
+            if chunk_end > write_end {
+                let right = chunk.data.split_off(usize::from(write_end - start));
+                self.chunks.insert(write_end, OverlayChunk::new(right));
+            }
+            if start < addr {
+                chunk.data.truncate(usize::from(addr - start));
+                self.chunks.insert(start, chunk);
             }
         }
 

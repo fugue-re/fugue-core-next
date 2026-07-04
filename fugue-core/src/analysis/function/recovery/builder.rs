@@ -260,7 +260,7 @@ impl FunctionBuilderContext {
             // e.g., if we are in Thumb context or not for ARM.
             let block_space = block.space();
             let Some((block, ncontext)) =
-                arch.canonicalise_address_with(block.into(), translator.context())
+                arch.canonicalise_address_with(block, translator.context())
             else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
@@ -349,9 +349,7 @@ impl FunctionBuilderContext {
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
                                 let addr_space = addr.space();
-                                let Some((addr, context)) =
-                                    arch.canonicalise_address(addr.into())
-                                else {
+                                let Some((addr, context)) = arch.canonicalise_address(addr) else {
                                     tracing::trace!(
                                         "skipping target {target} of instruction at {address}: \
                                          not a viable target address"

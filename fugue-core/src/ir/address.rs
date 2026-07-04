@@ -1056,18 +1056,22 @@ impl Address {
 
     pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
         let offset = offset.into();
-        self.raw_address().checked_add(offset).map(|new_address| Self {
-            space: self.space,
-            address: new_address,
-        })
+        self.raw_address()
+            .checked_add(offset)
+            .map(|new_address| Self {
+                space: self.space,
+                address: new_address,
+            })
     }
 
     pub fn checked_sub(&self, offset: impl Into<RawAddress>) -> Option<Self> {
         let offset = offset.into();
-        self.raw_address().checked_sub(offset).map(|new_address| Self {
-            space: self.space,
-            address: new_address,
-        })
+        self.raw_address()
+            .checked_sub(offset)
+            .map(|new_address| Self {
+                space: self.space,
+                address: new_address,
+            })
     }
 
     pub fn checked_offset_from(&self, base: Address) -> Option<u64> {

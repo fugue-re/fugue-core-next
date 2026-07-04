@@ -29,6 +29,7 @@ impl StorageProvider for SqliteProvider<TRANSIENT> {
         let (segments, image_resolution) =
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
 
-        Ok(StorageContainer::from_parts(entities, segments)?.with_image_resolution(image_resolution))
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution))
     }
 }

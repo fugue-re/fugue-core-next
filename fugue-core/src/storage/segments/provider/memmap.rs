@@ -88,28 +88,28 @@ pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
 
 #[derive(Debug, Error)]
 pub enum MemoryMappedSegmentStorageError {
-    #[error("failed to create project: {0}")]
-    CreateProject(io::Error),
     #[error("failed to create memory mapping: {0}")]
     CreateMapping(io::Error),
-    #[error("failed to flush memory mapping: {0}")]
-    FlushMapping(io::Error),
-    #[error("failed to pack segment data: {0}")]
-    PackSegment(io::Error),
-    #[error("failed to unpack segment data: {0}")]
-    UnpackSegment(io::Error),
-    #[error("failed to encode packed segment metadata: {0}")]
-    EncodeMetadata(anyhow::Error),
+    #[error("failed to create project: {0}")]
+    CreateProject(io::Error),
     #[error("failed to decode packed segment metadata: {0}")]
     DecodeMetadata(anyhow::Error),
+    #[error("failed to encode packed segment metadata: {0}")]
+    EncodeMetadata(anyhow::Error),
+    #[error("failed to flush memory mapping: {0}")]
+    FlushMapping(io::Error),
     #[error("invalid address")]
     InvalidAddress,
     #[error("invalid size")]
     InvalidSize,
-    #[error("no project path specified")]
-    NoProjectPath,
     #[error("failed to read project data from `{0}`")]
     NoProjectData(PathBuf),
+    #[error("no project path specified")]
+    NoProjectPath,
+    #[error("failed to pack segment data: {0}")]
+    PackSegment(io::Error),
+    #[error("failed to unpack segment data: {0}")]
+    UnpackSegment(io::Error),
 }
 
 impl MemoryMappedSegmentStorageError {
@@ -186,7 +186,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             Ok(file) => file,
             Err(e) => {
                 tracing::error!(
-                    "memory-mapped storage data file unavailable at {}: {e}",
+                    "memory-mapped storage data file at {} unavailable: {e}",
                     data_path.display()
                 );
                 return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());

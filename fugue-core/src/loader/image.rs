@@ -15,12 +15,12 @@ use crate::storage::segments::SegmentStorageProviderId;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
 
-const MAX_PATCH_LEN: usize = 8;
+const MAX_PATCH_SIZE: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ImageSegmentChunk<'a> {
     Data(Cow<'a, [u8]>),
-    Patch(ArrayVec<u8, MAX_PATCH_LEN>),
+    Patch(ArrayVec<u8, MAX_PATCH_SIZE>),
 }
 
 impl<'a> ImageSegmentChunk<'a> {
@@ -32,7 +32,7 @@ impl<'a> ImageSegmentChunk<'a> {
         let mut patch = ArrayVec::new();
         patch
             .try_extend_from_slice(bytes)
-            .expect("patch exceeds MAX_PATCH_LEN bytes");
+            .expect("patch exceeds MAX_PATCH_SIZE bytes");
         ImageSegmentChunk::Patch(patch)
     }
 
@@ -120,7 +120,7 @@ impl ImageBankHandle {
 
 impl fmt::Display for ImageBankHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        self.0.fmt(f)
     }
 }
 
@@ -154,7 +154,7 @@ impl ImageSpaceHandle {
 
 impl fmt::Display for ImageSpaceHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        self.0.fmt(f)
     }
 }
 
@@ -369,7 +369,7 @@ impl<'a> ImageWrite<'a> {
     fn patch(
         bank: ImageBankHandle,
         offset: impl Into<RawAddress>,
-        patch: ArrayVec<u8, MAX_PATCH_LEN>,
+        patch: ArrayVec<u8, MAX_PATCH_SIZE>,
     ) -> Self {
         Self {
             bank,
@@ -471,15 +471,15 @@ impl<'a> ImageSegment<'a> {
         self.backing = backing.into();
     }
 
-    pub fn set_function_hints(&mut self, function_hints: impl Into<Cow<'a, BTreeSet<RawAddress>>>) {
-        self.function_hints = function_hints.into();
+    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<RawAddress>>) {
+        self.function_hints = Cow::Owned(function_hints.into());
     }
 
     pub fn set_mapping_hints(
         &mut self,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<RawAddress, ContextHint>>>,
+        mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
     ) {
-        self.mapping_hints = mapping_hints.into();
+        self.mapping_hints = Cow::Owned(mapping_hints.into());
     }
 
     pub fn set_provenance(&mut self, provenance: impl Into<SegmentMappingProvenance>) {
@@ -506,17 +506,14 @@ impl<'a> ImageSegment<'a> {
         self
     }
 
-    pub fn with_function_hints(
-        mut self,
-        function_hints: impl Into<Cow<'a, BTreeSet<RawAddress>>>,
-    ) -> Self {
+    pub fn with_function_hints(mut self, function_hints: impl Into<BTreeSet<RawAddress>>) -> Self {
         self.set_function_hints(function_hints);
         self
     }
 
     pub fn with_mapping_hints(
         mut self,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<RawAddress, ContextHint>>>,
+        mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
     ) -> Self {
         self.set_mapping_hints(mapping_hints);
         self
@@ -559,12 +556,7 @@ impl<'a> ImageSegmentContents<'a> {
         Self::from_data(address.into(), endian, bytes.into(), len)
     }
 
-    fn from_data(
-        address: RawAddress,
-        endian: Endian,
-        data: Cow<'a, [u8]>,
-        len: u64,
-    ) -> Self {
+    fn from_data(address: RawAddress, endian: Endian, data: Cow<'a, [u8]>, len: u64) -> Self {
         let mut chunks = BTreeMap::new();
         if !data.is_empty() {
             chunks.insert(0, ImageSegmentChunk::new(data));
@@ -660,7 +652,7 @@ impl<'a> ImageSegmentContents<'a> {
         }
         let offset = usize::try_from(offset).ok()?;
 
-        let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
+        let mut buf = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
         self.read_into(offset, &mut buf);
 
         Some(if self.endian.is_big() {
@@ -681,15 +673,15 @@ impl<'a> ImageSegmentContents<'a> {
         }
         let offset = usize::try_from(offset).ok()?;
 
-        let mut buf = SmallVec::<[u8; MAX_PATCH_LEN]>::from_elem(0, T::SIZEOF);
+        let mut buf = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
         if self.endian.is_big() {
             value.into_bytes::<BE>(&mut buf);
         } else {
             value.into_bytes::<LE>(&mut buf);
         }
 
-        for (i, chunk) in buf.chunks(MAX_PATCH_LEN).enumerate() {
-            self.write_at(offset + i * MAX_PATCH_LEN, chunk);
+        for (i, chunk) in buf.chunks(MAX_PATCH_SIZE).enumerate() {
+            self.write_at(offset + i * MAX_PATCH_SIZE, chunk);
         }
         Some(())
     }

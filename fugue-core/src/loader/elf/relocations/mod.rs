@@ -216,16 +216,18 @@ where
         };
 
         if (is_dynamic || self.is_object)
-            && let Some((id, entry)) =
-                self.symbols.get_by_index(SymbolIndex::new(extern_selector, index.0))
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(extern_selector, index.0))
         {
             tracing::trace!("found external symbol {id:?} at {}", entry.address());
             return Some(entry);
         }
 
         if !is_dynamic
-            && let Some((id, entry)) =
-                self.symbols.get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
         {
             tracing::trace!("found symbol {id:?} at {}", entry.address());
             return Some(entry);
