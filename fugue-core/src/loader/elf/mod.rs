@@ -409,7 +409,7 @@ where
             segms: elf.segments(),
             extern_segm: Some(externs),
             covered: RawAddressRangeSet::new(),
-            spaces: smallvec![ImageSpace::base(base_space, ImageBankHandle::default())],
+            spaces: smallvec![ImageSpace::base(base_space)],
             pending: None,
             config,
             is_object,
