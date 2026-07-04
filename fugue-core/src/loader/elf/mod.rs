@@ -159,7 +159,7 @@ impl<'a> Elf<'a> {
         }
 
         let entry = with_elf!(view, elf | elf.entry());
-        let entry = (entry != 0).then(|| base + entry.wrapping_sub(preferred_base.offset()));
+        let entry = (entry != 0).then(|| (base - preferred_base) + entry);
         let context = ImageContext::new(view, base, preferred_base, entry, &attributes);
         let architecture = context.resolve_architecture()?;
 
@@ -280,7 +280,7 @@ impl<'a> Elf<'a> {
 
     pub fn entry(&self) -> Option<RawAddress> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
-        (addr != 0).then(|| self.base + addr.wrapping_sub(self.preferred_base.offset()))
+        (addr != 0).then(|| (self.base - self.preferred_base) + addr)
     }
 
     pub fn convention(&self) -> Option<&'a str> {
@@ -434,7 +434,7 @@ where
                     provenance: SegmentMappingProvenance::Section,
                 }));
             }
-            return Ok(self.next_extern_region());
+            return Ok(self.extern_region());
         }
 
         for sect in self.sects.by_ref() {
@@ -446,12 +446,15 @@ where
                 continue;
             }
             if (sh_flags as u32 & SHF_TLS) == SHF_TLS {
-                tracing::debug!("skipping TLS section {}", sect.name().unwrap_or("<unnamed>"));
+                tracing::debug!(
+                    "skipping TLS section {}",
+                    sect.name().unwrap_or("<unnamed>")
+                );
                 continue;
             }
             return Ok(Some(ElfRegion {
                 name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
-                address: self.base + sect.address().wrapping_sub(self.preferred_base.offset()),
+                address: (self.base - self.preferred_base) + sect.address(),
                 size: usize::try_from(size).map_err(LoaderError::format)?,
                 properties: elf_section_properties(&sect, &self.config),
                 provenance: SegmentMappingProvenance::Section,
@@ -469,17 +472,17 @@ where
             };
             return Ok(Some(ElfRegion {
                 name,
-                address: self.base + segm.address().wrapping_sub(self.preferred_base.offset()),
+                address: (self.base - self.preferred_base) + segm.address(),
                 size: usize::try_from(size).map_err(LoaderError::format)?,
                 properties: elf_segment_properties(&segm, &self.config),
                 provenance: SegmentMappingProvenance::Segment,
             }));
         }
 
-        Ok(self.next_extern_region())
+        Ok(self.extern_region())
     }
 
-    fn next_extern_region(&mut self) -> Option<ElfRegion<'data>> {
+    fn extern_region(&mut self) -> Option<ElfRegion<'data>> {
         let externs = self.extern_segm.take().filter(|e| !e.is_empty())?;
         Some(ElfRegion {
             name: Cow::Borrowed("EXTERN"),
@@ -560,8 +563,8 @@ struct ElfImageSegments<'a> {
 impl<'a> ElfImageSegments<'a> {
     fn new(
         segments: &'a [ElfImageSegment],
-        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
         image_symbols: &'a SymbolTable<ImageAddress>,
+        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
     ) -> Self {
         Self {
             segments: segments.iter(),
@@ -574,8 +577,8 @@ impl<'a> ElfImageSegments<'a> {
         let seg_start = segment.address.offset();
         let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
 
-        let (mapping_hints, function_hints) = match seg_last {
-            Some(seg_last) => {
+        let (mapping_hints, function_hints) = seg_last
+            .map(|seg_last| {
                 let mapping_hints = self
                     .mapping_hints
                     .range(RawAddress::from(seg_start)..=RawAddress::from(seg_last))
@@ -588,29 +591,28 @@ impl<'a> ElfImageSegments<'a> {
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
                     )
-                    .filter(|(_, entry)| {
+                    .filter_map(|(_, entry)| {
                         entry
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                            .then(|| entry.address().offset())
                     })
-                    .map(|(_, entry)| entry.address().offset())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
-            }
-            None => (BTreeMap::new(), BTreeSet::new()),
-        };
+            })
+            .unwrap_or_default();
 
         ImageSegment::new(
-            Cow::Borrowed(segment.name.as_str()),
+            segment.name.as_str(),
             segment.address,
             segment.size,
             segment.properties,
         )
         .with_backing(ImageBacking::in_default_bank(segment.backing_offset))
         .with_provenance(segment.provenance)
-        .with_mapping_hints(Cow::Owned(mapping_hints))
-        .with_function_hints(Cow::Owned(function_hints))
+        .with_mapping_hints(mapping_hints)
+        .with_function_hints(function_hints)
     }
 }
 
@@ -739,9 +741,9 @@ impl ElfSymbolData {
                 let Some(section_start) = sections.get(section.0) else {
                     continue;
                 };
-                RawAddress::from(symbol.address()) + section_start.offset()
+                RawAddress::from(symbol.address()) + section_start
             } else {
-                RawAddress::from(symbol.address()) - preferred_base.offset() + base_addr.offset()
+                RawAddress::from(symbol.address()) - preferred_base + base_addr
             };
 
             tracing::trace!(
@@ -822,7 +824,7 @@ impl ElfSymbolData {
 
         // TODO: refactor the inner logic so we avoid duplication between the two loops.
 
-        for (index, sym, kind) in syms.enumerate().filter_map(|(index, sym)| {
+        for (index, sym, properties) in syms.enumerate().filter_map(|(index, sym)| {
             let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
                 return None;
             };
@@ -860,7 +862,7 @@ impl ElfSymbolData {
                 None
             }
         }) {
-            let addr = if kind.is_extern() {
+            let address = if properties.is_extern() {
                 extern_segm
                     .add_extern()
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?
@@ -871,21 +873,18 @@ impl ElfSymbolData {
                 else {
                     continue;
                 };
-                sym.address().wrapping_add(section_start.offset()).into()
+                section_start + sym.address()
             } else {
-                sym.address()
-                    .wrapping_sub(preferred_base.offset())
-                    .wrapping_add(base_addr.offset())
-                    .into()
+                (base_addr - preferred_base) + sym.address()
             };
-            let sym = sym.name().ok();
+            let symbol = sym.name().ok().unwrap_or_default().into();
 
             symbols.insert(
                 SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
                 RawElfSymbol {
-                    address: addr,
-                    symbol: sym.unwrap_or_default().into(),
-                    properties: kind,
+                    address,
+                    symbol,
+                    properties,
                 },
             );
         }
@@ -1020,6 +1019,8 @@ where
 {
     // reference to the ELF
     pub(crate) elf: &'file ElfFile<'data, Elf, R>,
+    // architecture for canonicalisation
+    pub(crate) arch: &'file Arch,
     // segments iterator
     pub(crate) segms: ElfSegmentIterator<'data, 'file, Elf, R>,
     // sections iterator
@@ -1036,7 +1037,6 @@ where
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
     pub(crate) extern_segm: Option<&'file ExternSegment>,
-    pub(crate) arch: &'file Arch,
     // loader config
     config: ElfLoaderProperties,
 }
@@ -1049,12 +1049,12 @@ where
 {
     pub(crate) fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        symbols: &'file SymbolTable<ImageAddress>,
-        sections: &'file ElfSectionMap,
-        externs: &'file ExternSegment,
         arch: &'file Arch,
         base: RawAddress,
         preferred_base: RawAddress,
+        symbols: &'file SymbolTable<ImageAddress>,
+        sections: &'file ElfSectionMap,
+        externs: &'file ExternSegment,
         mut config: ElfLoaderProperties,
     ) -> Self {
         if elf.kind() == ObjectKind::Relocatable {
@@ -1194,15 +1194,15 @@ where
                 continue;
             }
 
-            // Segment-backed loop: rely on segments for TLS (#40). Not applied to the
-            // is_object paths, which have no segments to fall back on.
             if (sh_flags as u32 & SHF_TLS) == SHF_TLS {
-                tracing::debug!("skipping TLS section {}", sect.name().unwrap_or("<unnamed>"));
+                tracing::debug!(
+                    "skipping TLS section {}",
+                    sect.name().unwrap_or("<unnamed>")
+                );
                 continue;
             }
 
-            let address =
-                self.current_base + sect.address().wrapping_sub(self.preferred_base.offset());
+            let address = (self.current_base - self.preferred_base) + sect.address();
 
             let last_address = address
                 .checked_add(size.wrapping_sub(1))
@@ -1262,8 +1262,7 @@ where
                 continue;
             }
 
-            let address =
-                self.current_base + segm.address().wrapping_sub(self.preferred_base.offset());
+            let address = (self.current_base - self.preferred_base) + segm.address();
 
             let last_address = address
                 .checked_add(size.wrapping_sub(1))
@@ -1401,8 +1400,8 @@ impl Loadable for Elf<'_> {
     ) -> impl FallibleIterator<Item = ImageSegment<'b>, Error = LoaderError> + 'b {
         Box::new(ElfImageSegments::new(
             &self.segments,
-            &self.mapping_hints,
             &self.image_symbols,
+            &self.mapping_hints,
         )) as ImageSegmentIterator<'b>
     }
 
@@ -1420,12 +1419,12 @@ impl Loadable for Elf<'_> {
             view,
             elf | Box::new(ElfImageSegmentContents::new(
                 elf,
-                &self.image_symbols,
-                &self.sections,
-                &self.extern_segm,
                 &self.architecture,
                 self.base,
                 self.preferred_base,
+                &self.image_symbols,
+                &self.sections,
+                &self.extern_segm,
                 props,
             )) as ImageSegmentContentsIterator<'b>
         )
@@ -1963,7 +1962,11 @@ mod test {
             .image_layout()
             .spaces()
             .iter()
-            .map(|space| resolution.resolve_space(space.handle()).expect("space resolved"))
+            .map(|space| {
+                resolution
+                    .resolve_space(space.handle())
+                    .expect("space resolved")
+            })
             .collect::<BTreeSet<_>>();
 
         assert!(

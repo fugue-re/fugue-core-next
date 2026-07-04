@@ -292,7 +292,8 @@ impl StorageProvider for TransientStorageProvider {
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?
                 .into_parts();
 
-        Ok(StorageContainer::from_parts(entities, segments)?.with_image_resolution(image_resolution))
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution))
     }
 }
 

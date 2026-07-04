@@ -51,30 +51,30 @@ const SEGMENT_STORAGE_FILE: &str = "segment.storage.bin";
 
 #[derive(Debug, Error)]
 pub enum SegmentStorageError {
+    #[error("address space overflow: {0}")]
+    AddressSpaceOverflow(#[from] space::AddressSpaceError),
     #[error("storage error: {0}")]
     Backing(anyhow::Error),
-    #[error("invalid address range")]
-    InvalidAddressRange,
     #[error("invalid address")]
     InvalidAddress,
+    #[error("invalid address range")]
+    InvalidAddressRange,
+    #[error("bank {0} has an empty or inverted address range")]
+    InvalidBankRange(ImageBankHandle),
     #[error("invalid size")]
     InvalidSize,
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
+    #[error("persisted overlay references unknown base space {0}")]
+    MissingOverlayBase(AddressSpaceId),
+    #[error("failed to load project data from `{0}`: {1}")]
+    ProjectData(PathBuf, io::ErrorKind),
+    #[error("image segment at {0} has no backing")]
+    UnbackedSegment(ImageAddress),
     #[error("image references undeclared bank {0}")]
     UnknownBank(ImageBankHandle),
     #[error("image references undeclared space {0}")]
     UnknownSpace(ImageSpaceHandle),
-    #[error("bank {0} has an empty or inverted address range")]
-    InvalidBankRange(ImageBankHandle),
-    #[error("image segment at {0} has no backing")]
-    UnbackedSegment(ImageAddress),
-    #[error("persisted overlay references unknown base space {0}")]
-    MissingOverlayBase(AddressSpaceId),
-    #[error(transparent)]
-    Loader(#[from] LoaderError),
-    #[error("failed to load project data from `{0}`: {1}")]
-    ProjectData(PathBuf, io::ErrorKind),
-    #[error("address space overflow: {0}")]
-    AddressSpaceOverflow(#[from] space::AddressSpaceError),
 }
 
 impl SegmentStorageError {
@@ -1222,13 +1222,6 @@ impl SegmentStorage {
     }
 
     pub fn view_at(
-        &self,
-        addr: impl Into<Address>,
-    ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
-        self.visible_view_at(addr)
-    }
-
-    pub fn visible_view_at(
         &self,
         addr: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {

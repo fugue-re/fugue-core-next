@@ -450,12 +450,8 @@ impl Loadable for Loader<'_> {
         &'a self,
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
         match self {
-            Self::Elf(elf) => {
-                Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>
-            }
-            Self::Pe(pe) => {
-                Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>
-            }
+            Self::Elf(elf) => Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>,
+            Self::Pe(pe) => Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>,
         }
     }
 

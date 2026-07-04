@@ -34,8 +34,8 @@ where
 {
     pub fn new(
         pe: &'file PeFile<'data, Pe, R>,
-        preferred_base: RawAddress,
         current_base: RawAddress,
+        preferred_base: RawAddress,
         import_slots: &'file BTreeMap<RawAddress, RawAddress>,
     ) -> Self {
         Self {
@@ -53,9 +53,7 @@ where
     }
 
     pub(crate) fn base_delta_u64(&self) -> u64 {
-        self.current_base
-            .offset()
-            .wrapping_sub(self.preferred_base.offset())
+        (self.current_base - self.preferred_base).offset()
     }
 
     pub(crate) fn base_delta_u32(&self) -> u32 {
@@ -74,7 +72,7 @@ where
         &self,
         bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
-        if self.current_base.offset() == self.preferred_base {
+        if self.current_base == self.preferred_base {
             return Ok(());
         }
 

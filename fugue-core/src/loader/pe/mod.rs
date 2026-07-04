@@ -392,9 +392,9 @@ impl PeLoadState {
     }
 
     fn rebase_offset(&self, address: u64) -> u64 {
-        address
-            .wrapping_sub(self.preferred_base.offset())
-            .wrapping_add(self.base.offset())
+        (self.base - self.preferred_base)
+            .offset()
+            .wrapping_add(address)
     }
 }
 
@@ -672,8 +672,8 @@ where
     fn relocator(&self) -> PeSegmentRelocator<'data, 'file, Pe, R> {
         PeSegmentRelocator::new(
             self.pe,
-            self.preferred_base,
             self.current_base,
+            self.preferred_base,
             self.import_slots,
         )
     }
@@ -718,8 +718,7 @@ where
                 continue;
             }
 
-            let address =
-                self.current_base + sect.address().wrapping_sub(self.preferred_base.offset());
+            let address = (self.current_base - self.preferred_base) + sect.address();
             let last_address = address
                 .checked_add(sect.size().wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
@@ -840,7 +839,7 @@ where
                 continue;
             }
 
-            let address = self.base + sect.address().wrapping_sub(self.preferred_base.offset());
+            let address = (self.base - self.preferred_base) + sect.address();
             let size = usize::try_from(sect.size()).map_err(LoaderError::format)?;
             let name = sect
                 .name()
@@ -856,10 +855,10 @@ where
             }));
         }
 
-        Ok(self.next_extern_region())
+        Ok(self.extern_region())
     }
 
-    fn next_extern_region(&mut self) -> Option<PeRegion<'data>> {
+    fn extern_region(&mut self) -> Option<PeRegion<'data>> {
         let externs = self
             .extern_segm
             .take()
@@ -941,8 +940,8 @@ impl<'a> PeImageSegments<'a> {
         let seg_start = segment.address.offset();
         let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
 
-        let (mapping_hints, function_hints) = match seg_last {
-            Some(seg_last) => {
+        let (mapping_hints, function_hints) = seg_last
+            .map(|seg_last| {
                 let mapping_hints = self
                     .mapping_hints
                     .range(RawAddress::from(seg_start)..=RawAddress::from(seg_last))
@@ -955,29 +954,28 @@ impl<'a> PeImageSegments<'a> {
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
                     )
-                    .filter(|(_, entry)| {
+                    .filter_map(|(_, entry)| {
                         entry
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                            .then(|| entry.address().offset())
                     })
-                    .map(|(_, entry)| entry.address().offset())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
-            }
-            None => (BTreeMap::new(), BTreeSet::new()),
-        };
+            })
+            .unwrap_or_default();
 
         ImageSegment::new(
-            Cow::Borrowed(segment.name.as_str()),
+            segment.name.as_str(),
             segment.address,
             segment.size,
             segment.properties,
         )
         .with_backing(ImageBacking::in_default_bank(segment.backing_offset))
         .with_provenance(segment.provenance)
-        .with_mapping_hints(Cow::Owned(mapping_hints))
-        .with_function_hints(Cow::Owned(function_hints))
+        .with_mapping_hints(mapping_hints)
+        .with_function_hints(function_hints)
     }
 }
 

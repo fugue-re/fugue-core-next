@@ -153,16 +153,19 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
-        self.0.canonicalise_address(addr)
+    pub fn canonicalise_address(
+        &self,
+        addr: impl Into<RawAddress>,
+    ) -> Option<(RawAddress, ContextSet)> {
+        self.0.canonicalise_address(addr.into())
     }
 
     pub fn canonicalise_address_with(
         &self,
-        addr: RawAddress,
+        addr: impl Into<RawAddress>,
         context: &LiftingContext,
     ) -> Option<(RawAddress, ContextSet)> {
-        self.0.canonicalise_address_with(addr, context)
+        self.0.canonicalise_address_with(addr.into(), context)
     }
 
     pub fn external_thunk_template(&self) -> ExternFunctionTemplate {
