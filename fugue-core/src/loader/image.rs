@@ -229,8 +229,22 @@ impl Add<usize> for ImageAddress {
 )]
 #[rkyv(derive(PartialEq, Eq, Hash))]
 pub enum ImageSpaceKind {
-    Base { bank: ImageBankHandle },
+    Base { bank: Option<ImageBankHandle> },
     Overlay { base: ImageSpaceHandle },
+}
+
+impl ImageSpaceKind {
+    pub fn base() -> Self {
+        Self::Base { bank: None }
+    }
+
+    pub fn base_with(bank: ImageBankHandle) -> Self {
+        Self::Base { bank: Some(bank) }
+    }
+
+    pub fn overlay(base: ImageSpaceHandle) -> Self {
+        Self::Overlay { base }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,12 +278,16 @@ impl ImageSpace {
         Self { handle, kind }
     }
 
-    pub fn base(handle: ImageSpaceHandle, bank: ImageBankHandle) -> Self {
-        Self::new(handle, ImageSpaceKind::Base { bank })
+    pub fn base(handle: ImageSpaceHandle) -> Self {
+        Self::new(handle, ImageSpaceKind::base())
+    }
+
+    pub fn base_with(handle: ImageSpaceHandle, bank: ImageBankHandle) -> Self {
+        Self::new(handle, ImageSpaceKind::base_with(bank))
     }
 
     pub fn overlay(handle: ImageSpaceHandle, base: ImageSpaceHandle) -> Self {
-        Self::new(handle, ImageSpaceKind::Overlay { base })
+        Self::new(handle, ImageSpaceKind::overlay(base))
     }
 
     pub fn handle(&self) -> ImageSpaceHandle {
@@ -303,7 +321,7 @@ impl ImageLayout {
         let space = ImageSpaceHandle::default();
         Self::new(
             smallvec![ImageBank::new(bank, RawAddress::zero()..size.into())],
-            smallvec![ImageSpace::base(space, bank)],
+            smallvec![ImageSpace::base(space)],
         )
     }
 

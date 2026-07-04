@@ -825,7 +825,7 @@ where
             sects: pe.sections(),
             extern_segm: Some(extern_segm),
             covered: RawAddressRangeSet::new(),
-            spaces: smallvec![ImageSpace::base(base_space, ImageBankHandle::default())],
+            spaces: smallvec![ImageSpace::base(base_space)],
         }
     }
 

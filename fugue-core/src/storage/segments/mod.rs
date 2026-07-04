@@ -281,6 +281,15 @@ impl SegmentStorage {
             .map(|bank| (bank.handle(), bank.range().start))
             .collect::<BTreeMap<ImageBankHandle, RawAddress>>();
 
+        let space_banks = layout
+            .spaces()
+            .iter()
+            .filter_map(|space| match space.kind() {
+                ImageSpaceKind::Base { bank: Some(bank) } => Some((space.handle(), bank)),
+                _ => None,
+            })
+            .collect::<BTreeMap<ImageSpaceHandle, ImageBankHandle>>();
+
         let mut discovered_hints = BTreeSet::<RawAddress>::new();
         let mut discovered_mapping_hints = BTreeMap::<RawAddress, ContextHint>::new();
 
@@ -308,12 +317,22 @@ impl SegmentStorage {
             let address = resolution
                 .resolve_address(segment.address())
                 .ok_or(SegmentStorageError::UnknownSpace(segment.address().space()))?;
-            let backing = segment
-                .backing()
-                .ok_or(SegmentStorageError::UnbackedSegment(segment.address()))?;
+            let (provider_bank, backing_offset) = match segment.backing() {
+                Some(backing) => (backing.bank(), backing.offset().offset()),
+                None => {
+                    let bank = space_banks
+                        .get(&segment.address().space())
+                        .copied()
+                        .ok_or(SegmentStorageError::UnbackedSegment(segment.address()))?;
+                    let bank_base = *bank_bases
+                        .get(&bank)
+                        .ok_or(SegmentStorageError::UnknownBank(bank))?;
+                    (bank, (address.raw_address() - bank_base).offset())
+                }
+            };
             let provider_id = resolution
-                .resolve_bank(backing.bank())
-                .ok_or(SegmentStorageError::UnknownBank(backing.bank()))?;
+                .resolve_bank(provider_bank)
+                .ok_or(SegmentStorageError::UnknownBank(provider_bank))?;
             let size = segment.size();
             let properties = segment.properties();
             let provenance = segment.provenance();
@@ -329,7 +348,7 @@ impl SegmentStorage {
                 .map(|(offset, hint)| (*offset, hint.clone()));
 
             let mapping_id = storage.create_mapping_from_builder(
-                SegmentMappingBuilder::new(address, size, backing.offset().offset(), provider_id)
+                SegmentMappingBuilder::new(address, size, backing_offset, provider_id)
                     .with_properties(properties)
                     .with_name(name)
                     .with_provenance(provenance)
@@ -1464,6 +1483,67 @@ mod test {
         }
     }
 
+    struct UnbackedLoader {
+        layout: ImageLayout,
+        seg_space: ImageSpaceHandle,
+        seg_addr: u64,
+        seg_size: usize,
+        content: Option<(u64, ImageBankHandle, u8, usize)>,
+        metadata: LoadableMetadata,
+        attributes: AttributeMap,
+    }
+
+    impl Loadable for UnbackedLoader {
+        fn attributes(&self) -> &AttributeMap {
+            &self.attributes
+        }
+
+        fn attributes_mut(&mut self) -> &mut AttributeMap {
+            &mut self.attributes
+        }
+
+        fn metadata(&self) -> &LoadableMetadata {
+            &self.metadata
+        }
+
+        fn architecture(&self) -> Arch {
+            unimplemented!("not exercised by from_loadable")
+        }
+
+        fn image_layout(&self) -> &ImageLayout {
+            &self.layout
+        }
+
+        fn image_segments<'a>(
+            &'a self,
+        ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
+            let segment = ImageSegment::new(
+                "seg",
+                ImageAddress::new(self.seg_space, self.seg_addr),
+                self.seg_size,
+                SegmentProperties::PERM_ALL,
+            );
+            Box::new(fallible_iterator::convert(std::iter::once(Ok(segment))))
+                as ImageSegmentIterator<'a>
+        }
+
+        fn image_contents<'a>(
+            &'a self,
+        ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a
+        {
+            let contents = self
+                .content
+                .map(|(addr, bank, fill, size)| {
+                    ImageSegmentContents::new(addr, Endian::Little, vec![fill; size]).with_bank(bank)
+                })
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<_>>();
+            Box::new(fallible_iterator::convert(contents.into_iter()))
+                as ImageSegmentContentsIterator<'a>
+        }
+    }
+
     #[test]
     fn test_views_covering_preserve_priority_and_provenance() -> Result<(), SegmentStorageError> {
         let mut storage = SegmentStorage::empty();
@@ -1654,10 +1734,7 @@ mod test {
                 ImageBankHandle::default(),
                 RawAddress::from(0x1000u64)..RawAddress::from(0x1100u64),
             )],
-            vec![ImageSpace::base(
-                ImageSpaceHandle::default(),
-                ImageBankHandle::default(),
-            )],
+            vec![ImageSpace::base(ImageSpaceHandle::default())],
         );
 
         let loader = FakeLoader {
@@ -1704,7 +1781,7 @@ mod test {
                     ImageBank::new(BANK_B, range),
                 ],
                 vec![
-                    ImageSpace::base(SPACE_A, BANK_A),
+                    ImageSpace::base(SPACE_A),
                     ImageSpace::overlay(SPACE_B, SPACE_A),
                 ],
             ),
@@ -1795,7 +1872,7 @@ mod test {
                     DECLARED,
                     RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
                 )],
-                vec![ImageSpace::base(SPACE, DECLARED)],
+                vec![ImageSpace::base(SPACE)],
             ),
             segments: vec![SegSpec {
                 name: "s",
@@ -1820,6 +1897,78 @@ mod test {
         assert!(
             matches!(result, Err(SegmentStorageError::UnknownBank(bank)) if bank == UNDECLARED),
             "content tagged with an undeclared bank must fail with UnknownBank",
+        );
+    }
+
+    #[test]
+    fn test_from_loadable_base_with_bank_backs_unbacked_segment()
+    -> Result<(), SegmentStorageError> {
+        const BANK: ImageBankHandle = ImageBankHandle::new(0);
+        const SPACE: ImageSpaceHandle = ImageSpaceHandle::new(0);
+        const BASE: u64 = 0x2000;
+        const SIZE: usize = 0x10;
+
+        let loader = UnbackedLoader {
+            layout: ImageLayout::new(
+                vec![ImageBank::new(
+                    BANK,
+                    RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
+                )],
+                vec![ImageSpace::base_with(SPACE, BANK)],
+            ),
+            seg_space: SPACE,
+            seg_addr: BASE,
+            seg_size: SIZE,
+            content: Some((BASE, BANK, 0xEE, SIZE)),
+            metadata: LoadableMetadata::new(b"", "test"),
+            attributes: AttributeMap::new(),
+        };
+
+        let mut attributes = AttributeMap::new();
+        let (storage, resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes)?
+                .into_parts();
+
+        let space = resolution.resolve_space(SPACE).expect("space resolved");
+        let mut buf = [0u8; SIZE];
+        storage.read_bytes(Address::new(space, BASE), &mut buf)?;
+        assert_eq!(
+            buf, [0xEEu8; SIZE],
+            "an unbacked segment inherits the bank bound to its base space",
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_loadable_none_base_rejects_unbacked_segment() {
+        const BANK: ImageBankHandle = ImageBankHandle::new(0);
+        const SPACE: ImageSpaceHandle = ImageSpaceHandle::new(0);
+        const BASE: u64 = 0x2000;
+        const SIZE: usize = 0x10;
+
+        let loader = UnbackedLoader {
+            layout: ImageLayout::new(
+                vec![ImageBank::new(
+                    BANK,
+                    RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
+                )],
+                vec![ImageSpace::base(SPACE)],
+            ),
+            seg_space: SPACE,
+            seg_addr: BASE,
+            seg_size: SIZE,
+            content: None,
+            metadata: LoadableMetadata::new(b"", "test"),
+            attributes: AttributeMap::new(),
+        };
+
+        let mut attributes = AttributeMap::new();
+        let result =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes);
+        assert!(
+            matches!(result, Err(SegmentStorageError::UnbackedSegment(_))),
+            "an unbacked segment in a bankless base space must fail with UnbackedSegment",
         );
     }
 }
