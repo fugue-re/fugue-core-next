@@ -128,7 +128,7 @@ impl Loadable for Shellcode<'_> {
     }
 
     fn entry_point(&self) -> Option<ImageAddress> {
-        Some(ImageAddress::in_default_space(self.address.offset()))
+        Some(ImageAddress::in_default_space(self.address))
     }
 
     fn image_segments<'a>(
@@ -137,11 +137,11 @@ impl Loadable for Shellcode<'_> {
         Box::new(fallible_iterator::once(
             ImageSegment::backed_in_default_bank(
                 Cow::Borrowed("LOAD"),
-                ImageAddress::in_default_space(self.address.offset()),
-                self.bytes.len(),
+                ImageAddress::in_default_space(self.address),
+                self.bytes.len() as u64,
                 SegmentProperties::PERM_ALL,
                 SegmentMappingProvenance::Segment,
-                self.address.offset().into(),
+                self.address,
             ),
         ))
     }

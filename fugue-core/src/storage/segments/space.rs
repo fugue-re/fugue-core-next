@@ -137,7 +137,7 @@ impl AddressSpace {
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = addr.into();
@@ -152,7 +152,7 @@ impl AddressSpace {
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = Address::new(self.id, addr.into());
@@ -188,7 +188,7 @@ impl AddressSpace {
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = Address::new(self.id, addr.into());
@@ -218,7 +218,7 @@ impl AddressSpace {
         }
 
         for gap in gaps {
-            let gap_size = usize::from(gap.end - gap.start);
+            let gap_size = u64::from(gap.end - gap.start);
             let view = SegmentSubMapping::new(mapping_ref, gap.start, gap_size, properties);
             self.submaps.insert(gap, view);
         }
@@ -266,7 +266,7 @@ impl AddressSpace {
         &mut self,
         range_start: RawAddress,
         range_end: RawAddress,
-        mappings: impl IntoIterator<Item = (SegmentMappingRef, RawAddress, usize, SegmentProperties)>,
+        mappings: impl IntoIterator<Item = (SegmentMappingRef, RawAddress, u64, SegmentProperties)>,
     ) {
         let range_start = Address::new(self.id, range_start);
         let range_end = Address::new(self.id, range_end);
@@ -307,7 +307,7 @@ impl AddressSpace {
 
             let clamped_start = start.max(range_start);
             let clamped_end = end.min(range_end);
-            let clamped_size = usize::from(clamped_end - clamped_start);
+            let clamped_size = u64::from(clamped_end - clamped_start);
 
             self.insert_submap_top(mapping_ref, clamped_start, clamped_size, properties);
         }
@@ -426,8 +426,8 @@ mod test {
         // Rebuild the range where mapping 2 exists (0x1500-0x2500)
         // Mappings in priority order (lowest first): mapping 2, then mapping 1
         let mappings = vec![
-            (make_ref(2), RawAddress::from(0x1500u64), 0x1000usize, props),
-            (make_ref(1), RawAddress::from(0x1000u64), 0x1000usize, props),
+            (make_ref(2), RawAddress::from(0x1500u64), 0x1000u64, props),
+            (make_ref(1), RawAddress::from(0x1000u64), 0x1000u64, props),
         ];
         space.rebuild_range(
             RawAddress::from(0x1500u64),
@@ -475,7 +475,7 @@ mod test {
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
 
         // Rebuild only 0x1500-0x2000 with a new mapping
-        let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000usize, props)];
+        let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000u64, props)];
         space.rebuild_range(
             RawAddress::from(0x1500u64),
             RawAddress::from(0x2000u64),

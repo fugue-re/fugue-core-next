@@ -14,7 +14,7 @@ pub struct SegmentMappingView<'a> {
     provider: &'a SegmentStorageDescriptor,
     mapping_ref: SegmentMappingRef,
     start: Address,
-    size: usize,
+    size: u64,
     mapping_version: u64,
 }
 
@@ -39,7 +39,7 @@ impl<'a> SegmentMappingView<'a> {
         provider: &'a SegmentStorageDescriptor,
         mapping_ref: SegmentMappingRef,
         start: Address,
-        size: usize,
+        size: u64,
     ) -> Self {
         Self {
             mapping,
@@ -67,7 +67,7 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.space()
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 

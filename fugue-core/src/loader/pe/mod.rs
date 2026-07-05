@@ -767,7 +767,7 @@ where
 struct PeRegion<'data> {
     name: Cow<'data, str>,
     address: RawAddress,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
 }
@@ -776,7 +776,7 @@ struct PeImageSegment {
     name: String,
     address: ImageAddress,
     backing_offset: RawAddress,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
 }
@@ -840,7 +840,7 @@ where
             }
 
             let address = (self.base - self.preferred_base) + sect.address();
-            let size = usize::try_from(sect.size()).map_err(LoaderError::format)?;
+            let size = sect.size();
             let name = sect
                 .name()
                 .ok()
@@ -866,7 +866,7 @@ where
         Some(PeRegion {
             name: Cow::Borrowed("EXTERN"),
             address: externs.address(),
-            size: externs.size(),
+            size: externs.size() as u64,
             properties: SegmentProperties::EXTERNAL
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
@@ -887,7 +887,7 @@ where
         } = region;
 
         let last = address
-            .checked_add(size.saturating_sub(1) as u64)
+            .checked_add(size.saturating_sub(1))
             .ok_or_else(|| LoaderError::address_overflow(address))?;
         let backing_offset = address
             .checked_sub(self.bank_base)
@@ -1106,7 +1106,7 @@ mod test {
     struct LoadedSegment {
         address: ImageAddress,
         backing: ImageBacking,
-        size: usize,
+        size: u64,
     }
 
     struct Placement {
@@ -1120,7 +1120,7 @@ mod test {
             }
 
             let start = self.backing.offset().offset();
-            let end = start.checked_add(self.size as u64)?;
+            let end = start.checked_add(self.size)?;
             if offset < start || offset >= end {
                 return None;
             }

@@ -295,7 +295,7 @@ impl Loadable for IDABinary {
 
         fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
             let start = segm.start_address();
-            let size = segm.end_address().wrapping_sub(start) as usize;
+            let size = segm.end_address().wrapping_sub(start);
             let name = segm.name().unwrap_or_else(|| String::from("LOAD"));
             let permissions = segm.permissions();
             let type_ = segm.r#type();

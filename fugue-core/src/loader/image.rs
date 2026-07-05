@@ -418,14 +418,14 @@ pub struct ImageSegment<'a> {
     name: Cow<'a, str>,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
-    size: usize,
+    size: u64,
 }
 
 impl<'a> ImageSegment<'a> {
     pub fn new(
         name: impl Into<Cow<'a, str>>,
         address: ImageAddress,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) -> Self {
         Self {
@@ -443,7 +443,7 @@ impl<'a> ImageSegment<'a> {
     pub fn backed_in_default_bank(
         name: impl Into<Cow<'a, str>>,
         address: ImageAddress,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
         provenance: impl Into<SegmentMappingProvenance>,
         bank_base: RawAddress,
@@ -504,12 +504,12 @@ impl<'a> ImageSegment<'a> {
         self.provenance = provenance.into();
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn into_name_and_hints(
+    pub(crate) fn into_name_and_hints(
         self,
     ) -> (
         Cow<'a, str>,

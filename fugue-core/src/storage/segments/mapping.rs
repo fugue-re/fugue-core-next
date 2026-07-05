@@ -166,7 +166,7 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SegmentMappingFlags, 
 pub struct SegmentMapping {
     id: SegmentMappingId,
     start: Address,
-    size: usize,
+    size: u64,
     offset: u64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
@@ -184,7 +184,7 @@ impl SegmentMapping {
     pub fn new(
         id: SegmentMappingId,
         start: impl Into<Address>,
-        size: usize,
+        size: u64,
         offset: u64,
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
@@ -234,7 +234,7 @@ impl SegmentMapping {
         self.start
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
@@ -335,7 +335,7 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn set_size(&mut self, size: usize) {
+    pub fn set_size(&mut self, size: u64) {
         self.size = size;
         self.touch();
     }
@@ -417,7 +417,7 @@ impl SegmentMappingRef {
 pub struct SegmentSubMapping {
     mapping_ref: SegmentMappingRef,
     start: Address,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
 }
 
@@ -425,7 +425,7 @@ impl SegmentSubMapping {
     pub fn new(
         mapping_ref: SegmentMappingRef,
         start: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) -> Self {
         Self {
@@ -444,7 +444,7 @@ impl SegmentSubMapping {
         self.start
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
@@ -487,7 +487,7 @@ impl SegmentSubMapping {
             return None;
         }
 
-        let new_size = usize::from(self.end() - new_start);
+        let new_size = u64::from(self.end() - new_start);
         Some(Self::new(
             self.mapping_ref,
             new_start,
@@ -506,7 +506,7 @@ impl SegmentSubMapping {
             return None;
         }
 
-        let new_size = usize::from(new_end - self.start);
+        let new_size = u64::from(new_end - self.start);
         Some(Self::new(
             self.mapping_ref,
             self.start,
@@ -529,8 +529,8 @@ impl SegmentSubMapping {
             return (Some(self.clone()), None);
         }
 
-        let left_size = usize::from(addr - self.start());
-        let right_size = usize::from(self.end() - addr);
+        let left_size = u64::from(addr - self.start());
+        let right_size = u64::from(self.end() - addr);
 
         let left = Self::new(self.mapping_ref, self.start, left_size, self.properties);
         let right = Self::new(self.mapping_ref, addr, right_size, self.properties);
@@ -562,7 +562,7 @@ impl Ord for SegmentSubMapping {
 #[derive(Debug)]
 pub struct SegmentMappingBuilder {
     start: Address,
-    size: usize,
+    size: u64,
     offset: u64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
@@ -577,7 +577,7 @@ pub struct SegmentMappingBuilder {
 impl SegmentMappingBuilder {
     pub fn new(
         start: impl Into<Address>,
-        size: usize,
+        size: u64,
         offset: u64,
         provider_id: SegmentStorageProviderId,
     ) -> Self {
@@ -609,15 +609,15 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
-    pub fn set_size(&mut self, size: usize) {
+    pub fn set_size(&mut self, size: u64) {
         self.size = size;
     }
 
-    pub fn with_size(mut self, size: usize) -> Self {
+    pub fn with_size(mut self, size: u64) -> Self {
         self.set_size(size);
         self
     }

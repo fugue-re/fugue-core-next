@@ -3,7 +3,7 @@ use std::ops::Bound;
 
 use smallvec::SmallVec;
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 
 #[derive(Debug, Clone)]
 pub struct OverlayChunk {
@@ -30,7 +30,7 @@ impl OverlayChunk {
 
 #[derive(Debug, Clone, Default)]
 pub struct OverlayTree {
-    chunks: BTreeMap<Address, OverlayChunk>,
+    chunks: BTreeMap<RawAddress, OverlayChunk>,
 }
 
 impl OverlayTree {
@@ -42,7 +42,7 @@ impl OverlayTree {
         self.chunks.is_empty()
     }
 
-    pub fn write(&mut self, addr: impl Into<Address>, data: impl Into<Vec<u8>>) {
+    pub fn write(&mut self, addr: impl Into<RawAddress>, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if data.is_empty() {
             return;
@@ -78,7 +78,7 @@ impl OverlayTree {
         self.merge_adjacent(addr);
     }
 
-    fn merge_adjacent(&mut self, addr: Address) {
+    fn merge_adjacent(&mut self, addr: RawAddress) {
         let Some(chunk) = self.chunks.get(&addr) else {
             return;
         };
@@ -108,7 +108,7 @@ impl OverlayTree {
         }
     }
 
-    pub fn read(&self, addr: impl Into<Address>, buf: &mut [u8]) -> usize {
+    pub fn read(&self, addr: impl Into<RawAddress>, buf: &mut [u8]) -> usize {
         if buf.is_empty() {
             return 0;
         }
@@ -144,11 +144,14 @@ impl OverlayTree {
         self.chunks.clear();
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Address, &OverlayChunk)> {
+    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &OverlayChunk)> {
         self.chunks.iter().map(|(&k, v)| (k, v))
     }
 
-    pub fn chunk_covering(&self, addr: impl Into<Address>) -> Option<(Address, &OverlayChunk)> {
+    pub fn chunk_covering(
+        &self,
+        addr: impl Into<RawAddress>,
+    ) -> Option<(RawAddress, &OverlayChunk)> {
         let addr = addr.into();
         self.chunks
             .range(..=addr)
@@ -229,7 +232,7 @@ mod test {
 
         assert_eq!(tree.iter().count(), 1, "adjacent chunks coalesce");
         let (start, chunk) = tree.chunk_covering(0x100u64).unwrap();
-        assert_eq!(start, Address::from(0x100u64));
+        assert_eq!(start, RawAddress::from(0x100u64));
         assert_eq!(chunk.data(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 }
