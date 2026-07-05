@@ -338,7 +338,7 @@ impl ElfSectionMap {
 struct ElfRegion<'data> {
     name: Cow<'data, str>,
     address: RawAddress,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
 }
@@ -347,7 +347,7 @@ struct ElfImageSegment {
     name: String,
     address: ImageAddress,
     backing_offset: RawAddress,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
 }
@@ -429,7 +429,7 @@ where
                 return Ok(Some(ElfRegion {
                     name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
                     address,
-                    size: usize::try_from(sect.size().max(1)).map_err(LoaderError::format)?,
+                    size: sect.size().max(1),
                     properties: elf_section_properties(&sect, &self.config),
                     provenance: SegmentMappingProvenance::Section,
                 }));
@@ -455,7 +455,7 @@ where
             return Ok(Some(ElfRegion {
                 name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
                 address: (self.base - self.preferred_base) + sect.address(),
-                size: usize::try_from(size).map_err(LoaderError::format)?,
+                size,
                 properties: elf_section_properties(&sect, &self.config),
                 provenance: SegmentMappingProvenance::Section,
             }));
@@ -473,7 +473,7 @@ where
             return Ok(Some(ElfRegion {
                 name,
                 address: (self.base - self.preferred_base) + segm.address(),
-                size: usize::try_from(size).map_err(LoaderError::format)?,
+                size,
                 properties: elf_segment_properties(&segm, &self.config),
                 provenance: SegmentMappingProvenance::Segment,
             }));
@@ -487,7 +487,7 @@ where
         Some(ElfRegion {
             name: Cow::Borrowed("EXTERN"),
             address: externs.address(),
-            size: externs.size(),
+            size: externs.size() as u64,
             properties: SegmentProperties::EXTERNAL
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
@@ -512,7 +512,7 @@ where
         } = region;
 
         let last = address
-            .checked_add(size.saturating_sub(1) as u64)
+            .checked_add(size.saturating_sub(1))
             .ok_or_else(|| LoaderError::address_overflow(address))?;
         let backing_offset = address
             .checked_sub(self.bank_base)
@@ -1159,10 +1159,10 @@ where
 
             let relocator = ElfSegmentRelocator::new(
                 self.elf,
-                self.symbols,
                 self.arch,
-                self.config.is_object(),
                 address,
+                self.symbols,
+                self.config.is_object(),
             );
 
             relocator.apply(address, &mut bytes, &sect)?;
@@ -1177,10 +1177,10 @@ where
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
             self.elf,
-            self.symbols,
             self.arch,
-            self.config.is_object(),
             self.current_base - self.preferred_base,
+            self.symbols,
+            self.config.is_object(),
         );
 
         for sect in self.sects.by_ref() {
@@ -1249,10 +1249,10 @@ where
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
             self.elf,
-            self.symbols,
             self.arch,
-            self.config.is_object(),
             self.current_base - self.preferred_base,
+            self.symbols,
+            self.config.is_object(),
         );
 
         for segm in self.segms.by_ref() {

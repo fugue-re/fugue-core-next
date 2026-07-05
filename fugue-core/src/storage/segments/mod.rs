@@ -116,7 +116,7 @@ struct MappingMetadata {
     name: String,
     virtual_start: u64,
     physical_offset: u64,
-    size: usize,
+    size: u64,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
     provenance: SegmentMappingProvenance,
@@ -681,7 +681,7 @@ impl SegmentStorage {
         &mut self,
         provider_id: SegmentStorageProviderId,
         start: impl Into<Address>,
-        size: usize,
+        size: u64,
         offset: u64,
         properties: SegmentProperties,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
@@ -757,7 +757,7 @@ impl SegmentStorage {
     pub fn resize_mapping(
         &mut self,
         id: SegmentMappingId,
-        new_size: usize,
+        new_size: u64,
     ) -> Result<(), SegmentStorageError> {
         let mapping = self
             .mappings
@@ -1308,7 +1308,7 @@ impl SegmentStorage {
 
                 let provider = self.providers.get(&mapping.provider_id())?;
                 let start = addr.max(mapping.start());
-                let size = usize::from(mapping.end() - start);
+                let size = u64::from(mapping.end() - start);
 
                 Some(SegmentMappingView::from_parts(
                     mapping,
@@ -1348,7 +1348,7 @@ impl SegmentStorage {
                 let provider = self.providers.get(&mapping.provider_id())?;
                 let submap_start = mapping.start().max(start);
                 let submap_end = mapping.end().min(end);
-                let size = usize::from(submap_end - submap_start);
+                let size = u64::from(submap_end - submap_start);
 
                 Some(SegmentMappingView::from_parts(
                     mapping,
@@ -1403,7 +1403,7 @@ mod test {
         name: &'static str,
         space: ImageSpaceHandle,
         addr: u64,
-        size: usize,
+        size: u64,
         bank: ImageBankHandle,
     }
 
@@ -1487,7 +1487,7 @@ mod test {
         layout: ImageLayout,
         seg_space: ImageSpaceHandle,
         seg_addr: u64,
-        seg_size: usize,
+        seg_size: u64,
         content: Option<(u64, ImageBankHandle, u8, usize)>,
         metadata: LoadableMetadata,
         attributes: AttributeMap,
@@ -1534,7 +1534,8 @@ mod test {
             let contents = self
                 .content
                 .map(|(addr, bank, fill, size)| {
-                    ImageSegmentContents::new(addr, Endian::Little, vec![fill; size]).with_bank(bank)
+                    ImageSegmentContents::new(addr, Endian::Little, vec![fill; size])
+                        .with_bank(bank)
                 })
                 .into_iter()
                 .map(Ok)
@@ -1790,14 +1791,14 @@ mod test {
                     name: "a",
                     space: SPACE_A,
                     addr: BASE,
-                    size: SIZE,
+                    size: SIZE as u64,
                     bank: BANK_A,
                 },
                 SegSpec {
                     name: "b",
                     space: SPACE_B,
                     addr: BASE,
-                    size: SIZE,
+                    size: SIZE as u64,
                     bank: BANK_B,
                 },
             ],
@@ -1878,7 +1879,7 @@ mod test {
                 name: "s",
                 space: SPACE,
                 addr: BASE,
-                size: SIZE,
+                size: SIZE as u64,
                 bank: DECLARED,
             }],
             contents: vec![ContentSpec {
@@ -1901,8 +1902,8 @@ mod test {
     }
 
     #[test]
-    fn test_from_loadable_base_with_bank_backs_unbacked_segment()
-    -> Result<(), SegmentStorageError> {
+    fn test_from_loadable_base_with_bank_backs_unbacked_segment() -> Result<(), SegmentStorageError>
+    {
         const BANK: ImageBankHandle = ImageBankHandle::new(0);
         const SPACE: ImageSpaceHandle = ImageSpaceHandle::new(0);
         const BASE: u64 = 0x2000;
@@ -1918,7 +1919,7 @@ mod test {
             ),
             seg_space: SPACE,
             seg_addr: BASE,
-            seg_size: SIZE,
+            seg_size: SIZE as u64,
             content: Some((BASE, BANK, 0xEE, SIZE)),
             metadata: LoadableMetadata::new(b"", "test"),
             attributes: AttributeMap::new(),
@@ -1957,7 +1958,7 @@ mod test {
             ),
             seg_space: SPACE,
             seg_addr: BASE,
-            seg_size: SIZE,
+            seg_size: SIZE as u64,
             content: None,
             metadata: LoadableMetadata::new(b"", "test"),
             attributes: AttributeMap::new(),

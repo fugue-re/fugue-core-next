@@ -66,7 +66,7 @@ pub(crate) fn loadable_segments_from_loader(
             continue;
         };
 
-        let mut bytes = vec![0u8; segment.size()];
+        let mut bytes = vec![0u8; segment.size() as usize];
         storage
             .read_bytes(address, &mut bytes)
             .map_err(storage_error)?;
@@ -83,15 +83,13 @@ pub(crate) fn loadable_segments_from_loader(
         let function_hints = segment
             .function_hints()
             .iter()
-            .map(|hint_offset| {
-                Address::from_core(CoreAddress::new(address.space(), *hint_offset))
-            })
+            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), *hint_offset)))
             .collect();
 
         segments.push(LoadableSegment {
             name: segment.name().to_owned(),
             address: Address::from_core(address),
-            size: segment.size(),
+            size: segment.size() as usize,
             properties: SegmentProperties::from_core(segment.properties()),
             bytes,
             mapping_hints,
@@ -350,7 +348,7 @@ impl SegmentStorage {
         let mapping_id = self
             .inner
             .create_mapping_from_builder(
-                SegmentMappingBuilder::new(start, bytes.len(), 0, provider_id)
+                SegmentMappingBuilder::new(start, bytes.len() as u64, 0, provider_id)
                     .with_properties(properties)
                     .with_name(name),
             )

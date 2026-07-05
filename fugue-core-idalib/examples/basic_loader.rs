@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(
                 "{}-{} ({:?})",
                 claim.address(),
-                claim.address() + claim.size(),
+                claim.address() + claim.size() as usize,
                 claim.name()
             );
         }

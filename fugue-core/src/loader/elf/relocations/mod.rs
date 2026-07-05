@@ -25,9 +25,9 @@ where
     'file: 'data,
 {
     elf: &'file ElfFile<'data, Elf, R>,
+    arch: &'file Arch,
     base: RawAddress,
     symbols: &'file SymbolTable<ImageAddress>,
-    arch: &'file Arch,
     is_object: bool,
 }
 
@@ -39,16 +39,16 @@ where
 {
     pub fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        symbols: &'file SymbolTable<ImageAddress>,
         arch: &'file Arch,
-        is_object: bool,
         base: RawAddress,
+        symbols: &'file SymbolTable<ImageAddress>,
+        is_object: bool,
     ) -> Self {
         Self {
             elf,
+            arch,
             base,
             symbols,
-            arch,
             is_object,
         }
     }
