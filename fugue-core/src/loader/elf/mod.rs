@@ -50,6 +50,8 @@ pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1)
 
 pub const ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS: &str = "loader.elf.override_segment_permissions";
 pub const ATTRIBUTE_SKIP_NOTE_SECTIONS: &str = "loader.elf.skip_note_sections";
+pub const ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES: &str =
+    "loader.elf.preserve_relocatable_section_addresses";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -656,6 +658,7 @@ impl ElfSymbolData {
 
         let is_object = elf.kind() == ObjectKind::Relocatable;
         let addr_size = arch.language().address_size();
+        let address_upper_bound = RawAddress::from(arch.language().address_upper_bound());
 
         // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
         // which is only applicable for Thumb.
@@ -668,37 +671,19 @@ impl ElfSymbolData {
         let mut max_addr = base_addr;
 
         let extern_base = if is_object {
-            let mut base = base_addr.offset();
-            for sect in elf.sections() {
-                let SectionFlags::Elf { sh_flags } = sect.flags() else {
-                    continue;
-                };
+            let base = if config.preserve_relocatable_section_addresses() {
+                Self::place_object_sections_preserving_addresses(
+                    elf,
+                    base_addr,
+                    address_upper_bound,
+                    &mut sections,
+                    &config,
+                )?
+            } else {
+                Self::place_object_sections(elf, base_addr, &mut sections, &config)?
+            };
 
-                if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
-                    continue;
-                }
-
-                if config.skip_note_sections() && sect.kind() == SectionKind::Note {
-                    continue;
-                }
-
-                let align = sect.align().max(1);
-                let aligned_start =
-                    base.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
-
-                if aligned_start < base {
-                    tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
-                    continue;
-                }
-
-                sections.insert(sect.index().0, aligned_start.into());
-
-                base = aligned_start
-                    .checked_add(sect.size().max(1))
-                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
-            }
-
-            max_addr = base.into();
+            max_addr = base;
             base
         } else {
             for (addr, size) in elf
@@ -719,13 +704,11 @@ impl ElfSymbolData {
                 min_addr = min_addr.min(curr_min);
             }
             max_addr
-                .offset()
                 .checked_add(addr_size as u64)
                 .ok_or_else(|| LoaderError::address_overflow(base_addr))?
         };
 
-        let aligned_extern_base = extern_base.wrapping_add(addr_align.wrapping_sub(1) as u64)
-            & !(addr_align as u64).wrapping_sub(1);
+        let aligned_extern_base = extern_base.align(addr_align);
 
         if aligned_extern_base < extern_base {
             return Err(LoaderError::address_overflow(base_addr));
@@ -900,6 +883,114 @@ impl ElfSymbolData {
             extern_segm,
         })
     }
+
+    fn is_placeable_object_section<'a>(
+        sect: &impl ObjectSection<'a>,
+        config: &ElfLoaderProperties,
+    ) -> bool {
+        let SectionFlags::Elf { sh_flags } = sect.flags() else {
+            return false;
+        };
+
+        if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+            return false;
+        }
+
+        !(config.skip_note_sections() && sect.kind() == SectionKind::Note)
+    }
+
+    fn place_object_sections<'a>(
+        elf: &'a impl Object<'a>,
+        base_addr: RawAddress,
+        sections: &mut ElfSectionMap,
+        config: &ElfLoaderProperties,
+    ) -> Result<RawAddress, LoaderError> {
+        let mut base = base_addr;
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) {
+                continue;
+            }
+
+            let aligned_start = base.align(sect.align().max(1) as usize);
+
+            if aligned_start < base {
+                tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
+                continue;
+            }
+
+            sections.insert(sect.index().0, aligned_start);
+
+            base = aligned_start
+                .checked_add(sect.size().max(1))
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+        }
+        Ok(base)
+    }
+
+    // Preserves non-zero relocatable section addresses while packing the remaining
+    // allocatable sections after the pinned range.
+    fn place_object_sections_preserving_addresses<'a>(
+        elf: &'a impl Object<'a>,
+        base_addr: RawAddress,
+        address_upper_bound: RawAddress,
+        sections: &mut ElfSectionMap,
+        config: &ElfLoaderProperties,
+    ) -> Result<RawAddress, LoaderError> {
+        let mut pinned_end = RawAddress::zero();
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) || sect.size() == 0 {
+                continue;
+            }
+
+            if sect.address() != 0 {
+                let end = RawAddress::from(sect.address())
+                    .checked_add(sect.size())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+                pinned_end = pinned_end.max(end);
+            }
+        }
+
+        if pinned_end.offset() > address_upper_bound.offset() >> 1 {
+            pinned_end = RawAddress::zero();
+        }
+
+        let mut base = base_addr
+            .checked_add(pinned_end)
+            .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) || sect.size() == 0 {
+                continue;
+            }
+
+            if sect.address() != 0 {
+                let pinned_start = base_addr
+                    .checked_add(sect.address())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+                sections.insert(sect.index().0, pinned_start);
+                continue;
+            }
+
+            let aligned_start = base.align(sect.align().max(1) as usize);
+
+            if aligned_start < base {
+                tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
+                continue;
+            }
+
+            sections.insert(sect.index().0, aligned_start);
+
+            base = aligned_start
+                .checked_add(sect.size())
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+        }
+
+        Ok(base.max(
+            base_addr
+                .checked_add(pinned_end)
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?,
+        ))
+    }
 }
 
 fn elf_section_properties<'a>(
@@ -966,6 +1057,7 @@ bitflags! {
         // user configuration
         const OVERRIDE_SEGMENT_PERMISSIONS = 0b0000_0001;
         const SKIP_NOTE_SECTIONS = 0b0000_0010;
+        const PRESERVE_RELOCATABLE_SECTION_ADDRESSES = 0b0000_0100;
 
         // loader state tracking
         const HAS_LOADED_SECTIONS = 0b0001_0000;
@@ -995,6 +1087,13 @@ impl ElfLoaderProperties {
             config.insert(Self::SKIP_NOTE_SECTIONS);
         }
 
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES)
+            .unwrap_or_default()
+        {
+            config.insert(Self::PRESERVE_RELOCATABLE_SECTION_ADDRESSES);
+        }
+
         config
     }
 
@@ -1004,6 +1103,10 @@ impl ElfLoaderProperties {
 
     pub(crate) fn skip_note_sections(&self) -> bool {
         self.contains(Self::SKIP_NOTE_SECTIONS)
+    }
+
+    pub(crate) fn preserve_relocatable_section_addresses(&self) -> bool {
+        self.contains(Self::PRESERVE_RELOCATABLE_SECTION_ADDRESSES)
     }
 
     pub(crate) fn ignore_segment_exec_permission(&self) -> bool {
@@ -1437,14 +1540,17 @@ impl Loadable for Elf<'_> {
 
 #[cfg(test)]
 mod test {
-
     use fallible_iterator::FallibleIterator;
     use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
     use object::{Object, RelocationFlags, RelocationTarget};
 
-    use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
+    use super::{
+        ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES, ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr,
+        ElfLoaderProperties, ElfSectionMap, ElfSymbolData,
+    };
     use crate::ir::{Address, RawAddress, SymbolIndex};
     use crate::loader::{ImageBankHandle, ImageSegmentContents, Loadable};
+    use crate::loader::{LoadableFromFile, LoadableMetadata};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
 
@@ -2011,8 +2117,6 @@ mod test {
 
     #[test]
     fn test_elf_metadata_lazy() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::loader::{LoadableFromFile, LoadableMetadata};
-
         let elf = Elf::from_file_with("tests/ls.elf", AttributeMap::new())?;
         let meta = elf.metadata();
 
