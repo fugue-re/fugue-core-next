@@ -7,7 +7,8 @@ use rkyv::{Archive, Place, Serialize};
 
 pub mod address;
 pub use address::{
-    Address, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
+    Address, AddressRange, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet,
+    ToRawAddress,
 };
 
 pub mod block;

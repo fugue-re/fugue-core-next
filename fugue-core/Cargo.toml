@@ -37,7 +37,7 @@ fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["rkyv"] }
 hex-display = "0.3"
 indexmap = "2"
 inventory = "0.3"
-iset = { version = "0.3", package = "fugue-iset", features = ["rkyv"] }
+iset = { git = "https://github.com/fugue-re/fugue-iset", branch = "feature/inclusive-intervals", package = "fugue-iset", features = ["rkyv"] }
 itertools = "0.14"
 libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"

@@ -1,5 +1,5 @@
 use std::num::NonZeroUsize;
-use std::ops::{Range, RangeInclusive};
+use std::ops::RangeInclusive;
 
 use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
@@ -197,11 +197,7 @@ impl CodeBlock {
         self.len == 0
     }
 
-    pub fn range(&self) -> Range<Address> {
-        self.address()..self.next_address()
-    }
-
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+    pub fn range(&self) -> RangeInclusive<Address> {
         self.address()..=self.last_address()
     }
 

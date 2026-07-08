@@ -24,10 +24,10 @@ use crate::ir::{
 use crate::lifter::ContextHint;
 use crate::loader::pe::extensions::ImageContext;
 use crate::loader::{
-    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
-    ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
-    ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile,
-    LoadableMetadata, LoaderError,
+    ImageAddress, ImageBacking, ImageBank, ImageLayout, ImageSegment, ImageSegmentContents,
+    ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaces,
+    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
+    LoaderError,
 };
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
@@ -309,10 +309,10 @@ impl PeLoadState {
             import_slots,
         } = symbols;
         let bank_base = *bounds.start();
-        let bank_size = bounds
+        let bank_last = bounds
             .end()
             .checked_offset_from(*bounds.start())
-            .and_then(|size| size.checked_add(1))
+            .and_then(|size| bank_base.checked_add(size))
             .ok_or_else(|| LoaderError::address_overflow(base))?;
 
         let (placements, spaces) = with_pe!(
@@ -370,10 +370,7 @@ impl PeLoadState {
         }
 
         let layout = ImageLayout::new(
-            smallvec![ImageBank::new(
-                ImageBankHandle::default(),
-                bank_base..(bank_base + bank_size),
-            )],
+            smallvec![ImageBank::new_in_default(bank_base..=bank_last)],
             spaces,
         );
 
@@ -426,8 +423,8 @@ impl PeSymbolData {
         let addr_size = arch.language().address_size();
         let addr_align = arch.language().address_alignment().max(addr_size);
 
-        let mut bounds = None::<(RawAddress, RawAddress)>;
         let mut sections = Vec::new();
+        let mut bounds = None::<(RawAddress, RawAddress)>;
 
         for sect in pe.sections() {
             if sect.size() == 0 {
@@ -443,7 +440,7 @@ impl PeSymbolData {
                 .checked_add(sect.size().wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(base))?;
             bounds = Some(match bounds {
-                Some((start, end)) => (start.min(address), end.max(last_address)),
+                Some((min, max)) => (min.min(address), max.max(last_address)),
                 None => (address, last_address),
             });
             sections.push((address, last_address, pe_section_properties(&sect)));
@@ -782,6 +779,17 @@ struct PeImageSegment {
 }
 
 impl PeImageSegment {
+    fn new(region: &PeRegion, space: ImageSpaceHandle, backing_offset: RawAddress) -> Self {
+        Self {
+            name: region.name.as_ref().to_owned(),
+            address: ImageAddress::new(space, region.address),
+            backing_offset,
+            size: region.size,
+            properties: region.properties,
+            provenance: region.provenance,
+        }
+    }
+
     fn space(&self) -> ImageSpaceHandle {
         self.address.space()
     }
@@ -800,7 +808,7 @@ where
     sects: PeSectionIterator<'data, 'file, Pe, R>,
     extern_segm: Option<&'file ExternSegment>,
     covered: RawAddressRangeSet,
-    spaces: SmallVec<[ImageSpace; 4]>,
+    spaces: ImageSpaces,
 }
 
 impl<'data, 'file, Pe, R> PeSegmentWalk<'data, 'file, Pe, R>
@@ -829,7 +837,7 @@ where
         }
     }
 
-    fn into_spaces(self) -> SmallVec<[ImageSpace; 4]> {
+    fn into_spaces(self) -> ImageSpaces {
         self.spaces
     }
 
@@ -878,25 +886,22 @@ where
         let Some(region) = self.next_region()? else {
             return Ok(None);
         };
-        let PeRegion {
-            name,
-            address,
-            size,
-            properties,
-            provenance,
-        } = region;
 
-        let last = address
-            .checked_add(size.saturating_sub(1))
-            .ok_or_else(|| LoaderError::address_overflow(address))?;
-        let backing_offset = address
+        let last = region
+            .address
+            .checked_add(region.size.saturating_sub(1))
+            .ok_or_else(|| LoaderError::address_overflow(region.address))?;
+        let backing_offset = region
+            .address
             .checked_sub(self.bank_base)
-            .ok_or_else(|| LoaderError::address_overflow(address))?;
-        let range = address..=last;
+            .ok_or_else(|| LoaderError::address_overflow(region.address))?;
+        let range = region.address..=last;
         let overlaps = self.covered.intersects_range(range.clone());
 
         let space = if overlaps {
-            let handle = ImageSpaceHandle::new(self.spaces.len() as u16);
+            let handle = ImageSpaceHandle::new(
+                u16::try_from(self.spaces.len()).expect("space count must fit in u16"),
+            );
             self.spaces
                 .push(ImageSpace::overlay(handle, self.base_space));
             handle
@@ -906,14 +911,7 @@ where
 
         self.covered.insert_range(range);
 
-        Ok(Some(PeImageSegment {
-            name: name.into_owned(),
-            address: ImageAddress::new(space, address),
-            backing_offset: backing_offset.into(),
-            size,
-            properties,
-            provenance,
-        }))
+        Ok(Some(PeImageSegment::new(&region, space, backing_offset)))
     }
 }
 
@@ -1152,7 +1150,7 @@ mod test {
             .banks()
             .iter()
             .find(|entry| entry.handle() == bank)
-            .map(|entry| entry.range().start)
+            .map(|entry| *entry.range().start())
             .expect("default bank");
 
         let mut contents = pe.image_contents();

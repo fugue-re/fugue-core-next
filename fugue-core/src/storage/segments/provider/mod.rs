@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::fmt::Debug;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
 use smallvec::SmallVec;
@@ -146,8 +146,7 @@ impl SegmentStorageDescriptor {
 
 pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'static {
     fn from_segment_range(
-        start: Address,
-        end: Address,
+        range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
     where

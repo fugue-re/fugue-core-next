@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::num::ParseIntError;
-use std::ops::{Add, AddAssign, RangeBounds, RangeInclusive, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
@@ -1101,5 +1101,158 @@ impl Address {
 
     pub fn range_in_space_bounds(&self, language: &Language, size: usize) -> bool {
         self.address.range_in_space_bounds(language, size)
+    }
+}
+
+pub trait AddressRange<T> {
+    fn first(&self) -> T;
+
+    fn last(&self) -> T;
+
+    fn size(&self) -> Option<u64>;
+
+    fn contains_address(&self, address: T) -> bool;
+
+    fn is_empty(&self) -> bool;
+
+    fn as_inclusive(&self) -> RangeInclusive<T>;
+}
+
+trait RangeAddress: Copy + Ord + Sub<usize, Output = Self> {
+    fn checked_offset_from(self, base: Self) -> Option<u64>;
+}
+
+impl RangeAddress for RawAddress {
+    fn checked_offset_from(self, base: Self) -> Option<u64> {
+        RawAddress::checked_offset_from(&self, base)
+    }
+}
+
+impl RangeAddress for Address {
+    fn checked_offset_from(self, base: Self) -> Option<u64> {
+        Address::checked_offset_from(&self, base)
+    }
+}
+
+impl<T: RangeAddress> AddressRange<T> for RangeInclusive<T> {
+    fn first(&self) -> T {
+        *self.start()
+    }
+
+    fn last(&self) -> T {
+        *self.end()
+    }
+
+    fn size(&self) -> Option<u64> {
+        if RangeInclusive::is_empty(self) {
+            return Some(0);
+        }
+        (*self.end())
+            .checked_offset_from(*self.start())
+            .and_then(|span| span.checked_add(1))
+    }
+
+    fn contains_address(&self, address: T) -> bool {
+        self.contains(&address)
+    }
+
+    fn is_empty(&self) -> bool {
+        RangeInclusive::is_empty(self)
+    }
+
+    fn as_inclusive(&self) -> RangeInclusive<T> {
+        self.clone()
+    }
+}
+
+impl<T: RangeAddress> AddressRange<T> for Range<T> {
+    fn first(&self) -> T {
+        self.start
+    }
+
+    fn last(&self) -> T {
+        self.end - 1usize
+    }
+
+    fn size(&self) -> Option<u64> {
+        if Range::is_empty(self) {
+            return Some(0);
+        }
+        self.end.checked_offset_from(self.start)
+    }
+
+    fn contains_address(&self, address: T) -> bool {
+        self.contains(&address)
+    }
+
+    fn is_empty(&self) -> bool {
+        Range::is_empty(self)
+    }
+
+    fn as_inclusive(&self) -> RangeInclusive<T> {
+        self.start..=(self.end - 1usize)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn inclusive_size() {
+        assert_eq!(
+            (RawAddress::from(0u64)..=RawAddress::from(9u64)).size(),
+            Some(10)
+        );
+        assert_eq!(
+            (RawAddress::from(5u64)..=RawAddress::from(5u64)).size(),
+            Some(1)
+        );
+        assert_eq!((RawAddress::zero()..=RawAddress::MAX).size(), None);
+        assert_eq!(
+            (RawAddress::from(5u64)..=RawAddress::from(3u64)).size(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn inclusive_bounds() {
+        let range = RawAddress::from(4u64)..=RawAddress::from(8u64);
+        assert_eq!(range.first(), RawAddress::from(4u64));
+        assert_eq!(range.last(), RawAddress::from(8u64));
+        assert!(!range.is_empty());
+        assert!(range.contains_address(RawAddress::from(4u64)));
+        assert!(range.contains_address(RawAddress::from(8u64)));
+        assert!(!range.contains_address(RawAddress::from(9u64)));
+        assert_eq!(
+            range.as_inclusive(),
+            RawAddress::from(4u64)..=RawAddress::from(8u64)
+        );
+    }
+
+    #[test]
+    fn exclusive_size() {
+        assert_eq!(
+            (RawAddress::from(0u64)..RawAddress::from(10u64)).size(),
+            Some(10)
+        );
+        assert_eq!(
+            (RawAddress::from(5u64)..RawAddress::from(5u64)).size(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn exclusive_bounds() {
+        let range = RawAddress::from(4u64)..RawAddress::from(9u64);
+        assert_eq!(range.first(), RawAddress::from(4u64));
+        assert_eq!(range.last(), RawAddress::from(8u64));
+        assert!(!range.is_empty());
+        assert!(range.contains_address(RawAddress::from(4u64)));
+        assert!(!range.contains_address(RawAddress::from(9u64)));
+        assert_eq!(
+            range.as_inclusive(),
+            RawAddress::from(4u64)..=RawAddress::from(8u64)
+        );
     }
 }

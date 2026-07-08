@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
-use std::ops::{Add, Range};
+use std::ops::{Add, RangeInclusive};
 
 use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
@@ -250,19 +250,23 @@ impl ImageSpaceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBank {
     handle: ImageBankHandle,
-    range: Range<RawAddress>,
+    range: RangeInclusive<RawAddress>,
 }
 
 impl ImageBank {
-    pub fn new(handle: ImageBankHandle, range: Range<RawAddress>) -> Self {
+    pub fn new(handle: ImageBankHandle, range: RangeInclusive<RawAddress>) -> Self {
         Self { handle, range }
+    }
+
+    pub fn new_in_default(range: RangeInclusive<RawAddress>) -> Self {
+        Self::new(ImageBankHandle::default(), range)
     }
 
     pub fn handle(&self) -> ImageBankHandle {
         self.handle
     }
 
-    pub fn range(&self) -> &Range<RawAddress> {
+    pub fn range(&self) -> &RangeInclusive<RawAddress> {
         &self.range
     }
 }
@@ -299,30 +303,32 @@ impl ImageSpace {
     }
 }
 
+pub type ImageBanks = SmallVec<[ImageBank; 4]>;
+pub type ImageSpaces = SmallVec<[ImageSpace; 4]>;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImageLayout {
-    banks: SmallVec<[ImageBank; 4]>,
-    spaces: SmallVec<[ImageSpace; 4]>,
+    banks: ImageBanks,
+    spaces: ImageSpaces,
 }
 
 impl ImageLayout {
-    pub fn new(
-        banks: impl Into<SmallVec<[ImageBank; 4]>>,
-        spaces: impl Into<SmallVec<[ImageSpace; 4]>>,
-    ) -> Self {
+    pub fn new(banks: impl Into<ImageBanks>, spaces: impl Into<ImageSpaces>) -> Self {
         Self {
             banks: banks.into(),
             spaces: spaces.into(),
         }
     }
 
-    pub fn single_bank(size: u64) -> Self {
-        let bank = ImageBankHandle::default();
+    pub fn single_bank(size: u64) -> Result<Self, LoaderError> {
         let space = ImageSpaceHandle::default();
-        Self::new(
-            smallvec![ImageBank::new(bank, RawAddress::zero()..size.into())],
+        let last = RawAddress::from(size)
+            .checked_sub(1usize)
+            .ok_or(LoaderError::EmptyImage)?;
+        Ok(Self::new(
+            smallvec![ImageBank::new_in_default(RawAddress::zero()..=last)],
             smallvec![ImageSpace::base(space)],
-        )
+        ))
     }
 
     pub fn banks(&self) -> &[ImageBank] {
@@ -590,9 +596,8 @@ impl<'a> ImageSegmentContents<'a> {
         }
     }
 
-    pub fn with_bank(mut self, bank: ImageBankHandle) -> Self {
+    pub fn set_bank(&mut self, bank: ImageBankHandle) {
         self.bank = bank;
-        self
     }
 
     pub fn bank(&self) -> ImageBankHandle {

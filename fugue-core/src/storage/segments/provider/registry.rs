@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -10,8 +11,7 @@ use crate::types::AttributeMap;
 static REGISTRY: OnceLock<SegmentStorageProviderRegistry> = OnceLock::new();
 
 type FromSegmentRangeFn = fn(
-    start: Address,
-    end: Address,
+    range: RangeInclusive<Address>,
     attributes: &mut AttributeMap,
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
@@ -84,15 +84,14 @@ impl SegmentStorageProviderRegistry {
     pub fn from_segment_range(
         &self,
         tag: &str,
-        start: Address,
-        end: Address,
+        range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError> {
         let entry = self.by_tag.get(tag).ok_or_else(|| {
             SegmentStorageError::backing_with(format!("unknown provider tag: {tag}"))
         })?;
 
-        (entry.from_segment_range)(start, end, attributes)
+        (entry.from_segment_range)(range, attributes)
     }
 
     pub fn from_storage(

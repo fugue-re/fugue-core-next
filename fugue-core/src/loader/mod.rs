@@ -18,9 +18,9 @@ pub use elf::Elf;
 
 pub mod image;
 pub use image::{
-    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageResolution,
-    ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator,
-    ImageSpace, ImageSpaceHandle, ImageSpaceKind, ImageWrite,
+    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBanks, ImageLayout,
+    ImageResolution, ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator,
+    ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaceKind, ImageSpaces, ImageWrite,
 };
 
 // pub mod macho
@@ -36,6 +36,8 @@ pub use shellcode::Shellcode;
 pub enum LoaderError {
     #[error("cannot load object: address overflow using base address of {0}")]
     AddressOverflow(Address),
+    #[error("cannot load object: image has zero size")]
+    EmptyImage,
     #[error("cannot apply loader extension: {0}")]
     Extension(anyhow::Error),
     #[error("cannot load object: {0}")]

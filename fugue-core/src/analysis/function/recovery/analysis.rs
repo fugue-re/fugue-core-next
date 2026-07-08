@@ -120,7 +120,7 @@ impl FunctionDiscoveryContext {
                     let block = cbtable
                         .get_by_id(bid)
                         .expect("block should exist in code block table");
-                    covered.insert_meta_range(block.range_inclusive());
+                    covered.insert_meta_range(block.range());
                 }
                 MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
                     let min_block = cbtable
@@ -152,7 +152,7 @@ impl FunctionDiscoveryContext {
                 let block = cbtable
                     .get_by_id(bid)
                     .expect("block should exist in code block table");
-                covered.insert_meta_range(block.range_inclusive());
+                covered.insert_meta_range(block.range());
             }
         }
 

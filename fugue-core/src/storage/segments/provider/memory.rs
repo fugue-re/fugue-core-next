@@ -1,4 +1,6 @@
-use crate::ir::Address;
+use std::ops::RangeInclusive;
+
+use crate::ir::{Address, AddressRange};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::{
@@ -57,11 +59,13 @@ impl InMemorySegmentStorage {
 
 impl SegmentStorageProviderFromSegmentRange for InMemorySegmentStorage {
     fn from_segment_range(
-        start: Address,
-        end: Address,
+        range: RangeInclusive<Address>,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let size = end.offset() - start.offset() + 1;
+        let size = range
+            .size()
+            .filter(|&size| size > 0)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
 
         tracing::trace!("creating sparse in-memory storage spanning {size} bytes");
 

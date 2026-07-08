@@ -49,7 +49,7 @@ impl CodeBlockTable {
         for entry in entries.try_iter()? {
             let (id, block) = entry?;
 
-            let range = block.start().raw_address()..block.next_address().raw_address();
+            let range = block.start().raw_address()..=block.last_address().raw_address();
             bounds
                 .entry(block.space())
                 .or_default()
@@ -98,7 +98,7 @@ impl CodeBlockTable {
             return Err(CodeBlockTableError::AddressMismatch);
         }
 
-        let range = block.start().raw_address()..block.next_address().raw_address();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
         self.index
             .bounds
             .entry(addr.space())
@@ -169,7 +169,7 @@ impl CodeBlockTable {
         };
 
         let space = block.space();
-        let range = block.start().raw_address()..block.next_address().raw_address();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
         drop(block);
 
         if let Some(Entry::Occupied(mut entry)) =
@@ -208,7 +208,7 @@ impl CodeBlockTable {
 
         let ranges = bounds
             .intervals_overlap(raw)
-            .filter(|iv| iv.start == raw)
+            .filter(|iv| *iv.start() == raw)
             .collect::<SmallVec<[_; 2]>>();
 
         let mut removed = 0;
@@ -252,7 +252,7 @@ impl CodeBlockTable {
 
         let ranges = bounds
             .intervals_overlap(raw)
-            .filter(|iv| iv.start == raw)
+            .filter(|iv| *iv.start() == raw)
             .collect::<SmallVec<[_; 2]>>();
 
         let mut removed = 0;
@@ -362,7 +362,7 @@ impl CodeBlockTable {
             .get(&space)
             .into_iter()
             .flat_map(move |bounds| bounds.overlap(raw))
-            .filter(move |(range, _)| range.start == raw)
+            .filter(move |(range, _)| *range.start() == raw)
             .flat_map(|(_, id_set)| id_set.iter());
 
         Box::new(self.entries.get_disjoint_mut(ids))
@@ -382,7 +382,7 @@ impl CodeBlockTable {
             .get(&space)
             .into_iter()
             .flat_map(move |bounds| bounds.overlap(raw))
-            .filter(move |(range, _)| range.start == raw)
+            .filter(move |(range, _)| *range.start() == raw)
             .flat_map(|(_, id_set)| id_set.iter());
 
         Box::new(
