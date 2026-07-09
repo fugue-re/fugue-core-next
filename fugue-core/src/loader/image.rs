@@ -568,7 +568,13 @@ impl<'a> ImageSegmentContents<'a> {
     ) -> Self {
         let data = bytes.into();
         let len = data.len() as u64;
-        Self::from_data(address.into(), endian, data, len)
+        Self::from_data(
+            ImageBankHandle::default(),
+            address.into(),
+            endian,
+            data,
+            len,
+        )
     }
 
     pub fn new_sparse(
@@ -577,10 +583,43 @@ impl<'a> ImageSegmentContents<'a> {
         bytes: impl Into<Cow<'a, [u8]>>,
         len: u64,
     ) -> Self {
-        Self::from_data(address.into(), endian, bytes.into(), len)
+        Self::from_data(
+            ImageBankHandle::default(),
+            address.into(),
+            endian,
+            bytes.into(),
+            len,
+        )
     }
 
-    fn from_data(address: RawAddress, endian: Endian, data: Cow<'a, [u8]>, len: u64) -> Self {
+    pub fn new_in_bank(
+        bank: ImageBankHandle,
+        address: impl Into<RawAddress>,
+        endian: Endian,
+        bytes: impl Into<Cow<'a, [u8]>>,
+    ) -> Self {
+        let data = bytes.into();
+        let len = data.len() as u64;
+        Self::from_data(bank, address.into(), endian, data, len)
+    }
+
+    pub fn new_sparse_in_bank(
+        bank: ImageBankHandle,
+        address: impl Into<RawAddress>,
+        endian: Endian,
+        bytes: impl Into<Cow<'a, [u8]>>,
+        len: u64,
+    ) -> Self {
+        Self::from_data(bank, address.into(), endian, bytes.into(), len)
+    }
+
+    fn from_data(
+        bank: ImageBankHandle,
+        address: RawAddress,
+        endian: Endian,
+        data: Cow<'a, [u8]>,
+        len: u64,
+    ) -> Self {
         let mut chunks = BTreeMap::new();
         if !data.is_empty() {
             chunks.insert(0, ImageSegmentChunk::new(data));
@@ -592,7 +631,7 @@ impl<'a> ImageSegmentContents<'a> {
             function_hints: BTreeSet::new(),
             mapping_hints: BTreeMap::new(),
             endian,
-            bank: ImageBankHandle::default(),
+            bank,
         }
     }
 
