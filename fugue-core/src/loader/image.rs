@@ -8,7 +8,7 @@ use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, Endian, RawAddress, SegmentProperties};
+use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
 use crate::storage::segments::SegmentStorageProviderId;
@@ -337,6 +337,107 @@ impl ImageLayout {
 
     pub fn spaces(&self) -> &[ImageSpace] {
         &self.spaces
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ImageCoveredRegions {
+    by_bank: BTreeMap<ImageBankHandle, RawAddressRangeSet>,
+}
+
+impl ImageCoveredRegions {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn covered_in_bank(&self, bank: ImageBankHandle) -> Option<&RawAddressRangeSet> {
+        self.by_bank.get(&bank)
+    }
+
+    pub(crate) fn covered_in_bank_mut(&mut self, bank: ImageBankHandle) -> &mut RawAddressRangeSet {
+        self.by_bank.entry(bank).or_default()
+    }
+
+    pub(crate) fn intersects_range(
+        &self,
+        bank: ImageBankHandle,
+        range: RangeInclusive<RawAddress>,
+    ) -> bool {
+        self.covered_in_bank(bank)
+            .is_some_and(|covered| covered.intersects_range(range))
+    }
+
+    pub(crate) fn insert_range(
+        &mut self,
+        bank: ImageBankHandle,
+        range: RangeInclusive<RawAddress>,
+    ) {
+        self.covered_in_bank_mut(bank).insert_range(range);
+    }
+}
+
+pub(crate) struct ImageRegionBankMap<T> {
+    by_source: BTreeMap<T, ImageBankHandle>,
+}
+
+impl<T> Default for ImageRegionBankMap<T> {
+    fn default() -> Self {
+        Self {
+            by_source: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T> ImageRegionBankMap<T>
+where
+    T: Ord,
+{
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn route(&mut self, source: T, bank: ImageBankHandle) {
+        self.by_source.insert(source, bank);
+    }
+
+    pub(crate) fn bank_for(&self, source: T) -> Option<ImageBankHandle> {
+        self.by_source.get(&source).copied()
+    }
+}
+
+pub(crate) struct ImageBankLayout<T> {
+    banks: ImageBanks,
+    regions: ImageRegionBankMap<T>,
+}
+
+impl<T> ImageBankLayout<T>
+where
+    T: Ord,
+{
+    pub(crate) fn new(default_bank: ImageBank) -> Self {
+        Self {
+            banks: smallvec![default_bank],
+            regions: ImageRegionBankMap::new(),
+        }
+    }
+
+    pub(crate) fn allocate_overlay(
+        &mut self,
+        range: RangeInclusive<RawAddress>,
+    ) -> ImageBankHandle {
+        let handle = ImageBankHandle::new(
+            u16::try_from(self.banks.len()).expect("bank count must fit in u16"),
+        );
+        self.banks.push(ImageBank::new(handle, range));
+        handle
+    }
+
+    pub(crate) fn route_region(&mut self, source: T, bank: ImageBankHandle) {
+        self.regions.route(source, bank);
+    }
+
+    pub(crate) fn into_parts(self) -> (ImageBanks, ImageRegionBankMap<T>) {
+        (self.banks, self.regions)
     }
 }
 

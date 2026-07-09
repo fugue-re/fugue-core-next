@@ -22,6 +22,7 @@ pub use image::{
     ImageResolution, ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator,
     ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaceKind, ImageSpaces, ImageWrite,
 };
+pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap};
 
 // pub mod macho
 // pub use macho::Macho;
