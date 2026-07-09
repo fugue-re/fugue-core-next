@@ -11,10 +11,12 @@ use object::elf::{
     STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT,
     STT_TLS,
 };
-use object::read::elf::{self, ElfFile, ElfSectionIterator, ElfSegmentIterator, FileHeader};
+use object::read::elf::{
+    self, ElfFile, ElfSection, ElfSectionIterator, ElfSegmentIterator, FileHeader,
+};
 use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
-    SectionFlags, SectionKind, SegmentFlags, SymbolFlags,
+    SectionFlags, SectionIndex, SectionKind, SegmentFlags, SymbolFlags,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -415,6 +417,46 @@ impl ElfBankLayout {
     }
 }
 
+struct ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    elf: &'file ElfFile<'data, Elf, R>,
+    cursor: usize,
+}
+
+impl<'data, 'file, Elf, R> ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    fn new(elf: &'file ElfFile<'data, Elf, R>) -> Self {
+        Self {
+            elf,
+            cursor: elf.elf_section_table().len(),
+        }
+    }
+}
+
+impl<'data, 'file, Elf, R> Iterator for ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    type Item = ElfSection<'data, 'file, Elf, R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.cursor > 0 {
+            self.cursor -= 1;
+            if let Ok(section) = self.elf.section_by_index(SectionIndex(self.cursor)) {
+                return Some(section);
+            }
+        }
+        None
+    }
+}
+
 struct ElfSegmentWalk<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
@@ -426,7 +468,7 @@ where
     bank_base: RawAddress,
     base_space: ImageSpaceHandle,
     sections: &'file ElfSectionMap,
-    sects: ElfSectionIterator<'data, 'file, Elf, R>,
+    sects: ElfSectionRevIterator<'data, 'file, Elf, R>,
     segms: ElfSegmentIterator<'data, 'file, Elf, R>,
     extern_segm: Option<&'file ExternSegment>,
     covered: RawAddressRangeSet,
@@ -512,7 +554,7 @@ where
             bank_base,
             base_space,
             sections,
-            sects: elf.sections(),
+            sects: ElfSectionRevIterator::new(elf),
             segms: elf.segments(),
             extern_segm: Some(externs),
             covered: RawAddressRangeSet::new(),

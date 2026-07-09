@@ -1115,7 +1115,7 @@ pub trait AddressRange<T> {
 
     fn is_empty(&self) -> bool;
 
-    fn as_inclusive(&self) -> RangeInclusive<T>;
+    fn inclusive(&self) -> RangeInclusive<T>;
 }
 
 trait RangeAddress: Copy + Ord + Sub<usize, Output = Self> {
@@ -1160,7 +1160,7 @@ impl<T: RangeAddress> AddressRange<T> for RangeInclusive<T> {
         RangeInclusive::is_empty(self)
     }
 
-    fn as_inclusive(&self) -> RangeInclusive<T> {
+    fn inclusive(&self) -> RangeInclusive<T> {
         self.clone()
     }
 }
@@ -1189,7 +1189,7 @@ impl<T: RangeAddress> AddressRange<T> for Range<T> {
         Range::is_empty(self)
     }
 
-    fn as_inclusive(&self) -> RangeInclusive<T> {
+    fn inclusive(&self) -> RangeInclusive<T> {
         self.start..=(self.end - 1usize)
     }
 }
@@ -1225,7 +1225,7 @@ mod test {
         assert!(range.contains_address(RawAddress::from(8u64)));
         assert!(!range.contains_address(RawAddress::from(9u64)));
         assert_eq!(
-            range.as_inclusive(),
+            range.inclusive(),
             RawAddress::from(4u64)..=RawAddress::from(8u64)
         );
     }
@@ -1251,7 +1251,7 @@ mod test {
         assert!(range.contains_address(RawAddress::from(4u64)));
         assert!(!range.contains_address(RawAddress::from(9u64)));
         assert_eq!(
-            range.as_inclusive(),
+            range.inclusive(),
             RawAddress::from(4u64)..=RawAddress::from(8u64)
         );
     }
