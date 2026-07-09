@@ -10,7 +10,7 @@ use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,
@@ -229,14 +229,12 @@ impl SegmentStorage {
 
         for bank in layout.banks() {
             let range = bank.range();
-            let end = range
-                .end
-                .checked_sub(1)
-                .filter(|end| *end >= range.start)
-                .ok_or(SegmentStorageError::InvalidBankRange(bank.handle()))?;
-            let start = Address::new(DEFAULT_SPACE_ID, range.start);
-            let end = Address::new(DEFAULT_SPACE_ID, end);
-            let provider = S::from_segment_range(start, end, attributes)?;
+            if !matches!(range.size(), Some(size) if size > 0) {
+                return Err(SegmentStorageError::InvalidBankRange(bank.handle()));
+            }
+            let start = Address::new(DEFAULT_SPACE_ID, *range.start());
+            let last = Address::new(DEFAULT_SPACE_ID, *range.end());
+            let provider = S::from_segment_range(start..=last, attributes)?;
             let provider_id = storage.open_provider(provider, SegmentProperties::PERM_ALL);
             resolution.insert_bank(bank.handle(), provider_id);
         }
@@ -278,7 +276,7 @@ impl SegmentStorage {
         let bank_bases = layout
             .banks()
             .iter()
-            .map(|bank| (bank.handle(), bank.range().start))
+            .map(|bank| (bank.handle(), *bank.range().start()))
             .collect::<BTreeMap<ImageBankHandle, RawAddress>>();
 
         let space_banks = layout
@@ -1470,12 +1468,13 @@ mod test {
                 .contents
                 .iter()
                 .map(|spec| {
-                    Ok(ImageSegmentContents::new(
+                    let mut contents = ImageSegmentContents::new(
                         spec.addr,
                         Endian::Little,
                         vec![spec.fill; spec.size],
-                    )
-                    .with_bank(spec.bank))
+                    );
+                    contents.set_bank(spec.bank);
+                    Ok(contents)
                 })
                 .collect::<Vec<Result<ImageSegmentContents<'a>, LoaderError>>>();
             Box::new(fallible_iterator::convert(contents.into_iter()))
@@ -1534,8 +1533,10 @@ mod test {
             let contents = self
                 .content
                 .map(|(addr, bank, fill, size)| {
-                    ImageSegmentContents::new(addr, Endian::Little, vec![fill; size])
-                        .with_bank(bank)
+                    let mut contents =
+                        ImageSegmentContents::new(addr, Endian::Little, vec![fill; size]);
+                    contents.set_bank(bank);
+                    contents
                 })
                 .into_iter()
                 .map(Ok)
@@ -1733,7 +1734,7 @@ mod test {
         let layout = ImageLayout::new(
             vec![ImageBank::new(
                 ImageBankHandle::default(),
-                RawAddress::from(0x1000u64)..RawAddress::from(0x1100u64),
+                RawAddress::from(0x1000u64)..=RawAddress::from(0x10ffu64),
             )],
             vec![ImageSpace::base(ImageSpaceHandle::default())],
         );
@@ -1774,7 +1775,7 @@ mod test {
         const BASE: u64 = 0x1000;
         const SIZE: usize = 0x10;
 
-        let range = RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64);
+        let range = RawAddress::from(BASE)..=RawAddress::from(BASE + SIZE as u64 - 1);
         let loader = FakeImage {
             layout: ImageLayout::new(
                 vec![
@@ -1871,7 +1872,7 @@ mod test {
             layout: ImageLayout::new(
                 vec![ImageBank::new(
                     DECLARED,
-                    RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
+                    RawAddress::from(BASE)..=RawAddress::from(BASE + SIZE as u64 - 1),
                 )],
                 vec![ImageSpace::base(SPACE)],
             ),
@@ -1902,6 +1903,69 @@ mod test {
     }
 
     #[test]
+    fn test_from_loadable_rejects_whole_space_bank() {
+        const BANK: ImageBankHandle = ImageBankHandle::new(0);
+        const SPACE: ImageSpaceHandle = ImageSpaceHandle::new(0);
+
+        let loader = FakeImage {
+            layout: ImageLayout::new(
+                vec![ImageBank::new(BANK, RawAddress::zero()..=RawAddress::MAX)],
+                vec![ImageSpace::base(SPACE)],
+            ),
+            segments: Vec::new(),
+            contents: Vec::new(),
+            metadata: LoadableMetadata::new(b"", "test"),
+            attributes: AttributeMap::new(),
+        };
+
+        let mut attributes = AttributeMap::new();
+        let result =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes);
+        assert!(
+            matches!(result, Err(SegmentStorageError::InvalidBankRange(bank)) if bank == BANK),
+            "a bank spanning the whole address space has an unrepresentable size and must fail",
+        );
+    }
+
+    #[test]
+    fn test_from_loadable_accepts_top_of_space_bank() -> Result<(), SegmentStorageError> {
+        const BANK: ImageBankHandle = ImageBankHandle::new(0);
+        const SPACE: ImageSpaceHandle = ImageSpaceHandle::new(0);
+        const SIZE: usize = 0x100;
+
+        let base = u64::MAX - (SIZE as u64 - 1);
+        let loader = FakeImage {
+            layout: ImageLayout::new(
+                vec![ImageBank::new(
+                    BANK,
+                    RawAddress::from(base)..=RawAddress::MAX,
+                )],
+                vec![ImageSpace::base(SPACE)],
+            ),
+            segments: vec![SegSpec {
+                name: "s",
+                space: SPACE,
+                addr: base,
+                size: SIZE as u64,
+                bank: BANK,
+            }],
+            contents: vec![ContentSpec {
+                addr: base,
+                bank: BANK,
+                fill: 0xCC,
+                size: SIZE,
+            }],
+            metadata: LoadableMetadata::new(b"", "test"),
+            attributes: AttributeMap::new(),
+        };
+
+        let mut attributes = AttributeMap::new();
+        SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_from_loadable_base_with_bank_backs_unbacked_segment() -> Result<(), SegmentStorageError>
     {
         const BANK: ImageBankHandle = ImageBankHandle::new(0);
@@ -1913,7 +1977,7 @@ mod test {
             layout: ImageLayout::new(
                 vec![ImageBank::new(
                     BANK,
-                    RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
+                    RawAddress::from(BASE)..=RawAddress::from(BASE + SIZE as u64 - 1),
                 )],
                 vec![ImageSpace::base_with(SPACE, BANK)],
             ),
@@ -1952,7 +2016,7 @@ mod test {
             layout: ImageLayout::new(
                 vec![ImageBank::new(
                     BANK,
-                    RawAddress::from(BASE)..RawAddress::from(BASE + SIZE as u64),
+                    RawAddress::from(BASE)..=RawAddress::from(BASE + SIZE as u64 - 1),
                 )],
                 vec![ImageSpace::base(SPACE)],
             ),

@@ -223,7 +223,8 @@ impl LoadableFromFile for IDABinary {
             bank_base = bank_base.min(segm.start_address().into());
             bank_end = bank_end.max(segm.end_address().into());
         }
-        let layout = ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()));
+        let layout =
+            ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()))?;
 
         let mut symbols = SymbolTable::<ImageAddress>::new();
         for (index, _, symbol) in address_symbols.iter_by_index() {

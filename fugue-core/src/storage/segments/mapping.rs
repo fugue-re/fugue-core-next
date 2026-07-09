@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::{Range, RangeInclusive};
+use std::ops::RangeInclusive;
 
 use bitflags::bitflags;
 use uuid::Uuid;
@@ -246,8 +246,8 @@ impl SegmentMapping {
         self.end() - 1usize
     }
 
-    pub fn range(&self) -> Range<Address> {
-        self.start..self.end()
+    pub fn range(&self) -> RangeInclusive<Address> {
+        self.start..=self.last()
     }
 
     pub fn offset(&self) -> u64 {
@@ -456,11 +456,7 @@ impl SegmentSubMapping {
         self.end() - 1usize
     }
 
-    pub fn range(&self) -> Range<Address> {
-        self.start..self.end()
-    }
-
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
+    pub fn range(&self) -> RangeInclusive<Address> {
         self.start..=self.last()
     }
 

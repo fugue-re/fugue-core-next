@@ -4,7 +4,7 @@ use iset::IntervalMap;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
 #[derive(Debug, Error)]
@@ -161,7 +161,7 @@ impl AddressSpace {
 
         let overlapping = self
             .submaps
-            .iter(start..end)
+            .iter(start..=last)
             .map(|(iv, view)| (iv.clone(), view.clone()))
             .collect::<SmallVec<[_; 8]>>();
 
@@ -181,7 +181,7 @@ impl AddressSpace {
         }
 
         let new_view = SegmentSubMapping::new(mapping_ref, start, size, properties);
-        self.submaps.insert(start..end, new_view);
+        self.submaps.insert(start..=last, new_view);
     }
 
     pub(crate) fn add_mapping_bottom(
@@ -191,46 +191,47 @@ impl AddressSpace {
         size: u64,
         properties: SegmentProperties,
     ) {
+        self.priority_list
+            .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
+        self.priority_list.insert(0, mapping_ref);
+
+        let Some(span) = size.checked_sub(1) else {
+            return;
+        };
         let start = Address::new(self.id, addr.into());
-        let end = start + size;
+        let last = start + span;
 
         let mut gaps = SmallVec::<[_; 8]>::new();
         let mut current = start;
 
         let overlapping = self
             .submaps
-            .iter(start..end)
+            .iter(start..=last)
             .map(|(iv, _)| iv.clone())
             .collect::<SmallVec<[_; 8]>>();
 
         for iv in overlapping {
-            if iv.start > current {
-                let gap_end = iv.start.min(end);
-                if gap_end > current {
-                    gaps.push(current..gap_end);
-                }
+            let iv_start = *iv.start();
+            if iv_start > current {
+                gaps.push(current..=(iv_start - 1usize));
             }
-            current = iv.end.max(current);
+            current = (*iv.end() + 1usize).max(current);
         }
 
-        if current < end {
-            gaps.push(current..end);
+        if current <= last {
+            gaps.push(current..=last);
         }
 
         for gap in gaps {
-            let gap_size = u64::from(gap.end - gap.start);
-            let view = SegmentSubMapping::new(mapping_ref, gap.start, gap_size, properties);
+            let gap_size = gap.size().expect("bounded gap has a representable size");
+            let view = SegmentSubMapping::new(mapping_ref, gap.first(), gap_size, properties);
             self.submaps.insert(gap, view);
         }
-
-        self.priority_list
-            .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
-        self.priority_list.insert(0, mapping_ref);
     }
 
     pub fn find_containing(&self, addr: impl Into<Address>) -> Option<&SegmentSubMapping> {
         let addr = Address::new(self.id, addr.into());
-        self.submaps.values(addr..(addr + 1usize)).next()
+        self.submaps.values_overlap(addr).next()
     }
 
     pub fn gap_len_at(&self, addr: impl Into<Address>, max: usize) -> usize {
@@ -248,7 +249,7 @@ impl AddressSpace {
         addr: impl Into<Address>,
     ) -> Option<&mut SegmentSubMapping> {
         let addr = Address::new(self.id, addr.into());
-        self.submaps.values_mut(addr..(addr + 1usize)).next()
+        self.submaps.values_overlap_mut(addr).next()
     }
 
     pub(crate) fn deprioritise(&mut self, mapping_id: SegmentMappingId) {
@@ -274,7 +275,7 @@ impl AddressSpace {
 
         let overlapping = self
             .submaps
-            .iter(range_start..range_end)
+            .iter(range_start..=range_last)
             .map(|(iv, view)| (iv.clone(), view.clone()))
             .collect::<SmallVec<[_; 8]>>();
 

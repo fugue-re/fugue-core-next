@@ -1,14 +1,14 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
-use std::ops::{Add, Range};
+use std::ops::{Add, RangeInclusive};
 
 use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, Endian, RawAddress, SegmentProperties};
+use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
 use crate::storage::segments::SegmentStorageProviderId;
@@ -250,19 +250,23 @@ impl ImageSpaceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageBank {
     handle: ImageBankHandle,
-    range: Range<RawAddress>,
+    range: RangeInclusive<RawAddress>,
 }
 
 impl ImageBank {
-    pub fn new(handle: ImageBankHandle, range: Range<RawAddress>) -> Self {
+    pub fn new(handle: ImageBankHandle, range: RangeInclusive<RawAddress>) -> Self {
         Self { handle, range }
+    }
+
+    pub fn new_in_default(range: RangeInclusive<RawAddress>) -> Self {
+        Self::new(ImageBankHandle::default(), range)
     }
 
     pub fn handle(&self) -> ImageBankHandle {
         self.handle
     }
 
-    pub fn range(&self) -> &Range<RawAddress> {
+    pub fn range(&self) -> &RangeInclusive<RawAddress> {
         &self.range
     }
 }
@@ -299,30 +303,32 @@ impl ImageSpace {
     }
 }
 
+pub type ImageBanks = SmallVec<[ImageBank; 4]>;
+pub type ImageSpaces = SmallVec<[ImageSpace; 4]>;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImageLayout {
-    banks: SmallVec<[ImageBank; 4]>,
-    spaces: SmallVec<[ImageSpace; 4]>,
+    banks: ImageBanks,
+    spaces: ImageSpaces,
 }
 
 impl ImageLayout {
-    pub fn new(
-        banks: impl Into<SmallVec<[ImageBank; 4]>>,
-        spaces: impl Into<SmallVec<[ImageSpace; 4]>>,
-    ) -> Self {
+    pub fn new(banks: impl Into<ImageBanks>, spaces: impl Into<ImageSpaces>) -> Self {
         Self {
             banks: banks.into(),
             spaces: spaces.into(),
         }
     }
 
-    pub fn single_bank(size: u64) -> Self {
-        let bank = ImageBankHandle::default();
+    pub fn single_bank(size: u64) -> Result<Self, LoaderError> {
         let space = ImageSpaceHandle::default();
-        Self::new(
-            smallvec![ImageBank::new(bank, RawAddress::zero()..size.into())],
+        let last = RawAddress::from(size)
+            .checked_sub(1usize)
+            .ok_or(LoaderError::EmptyImage)?;
+        Ok(Self::new(
+            smallvec![ImageBank::new_in_default(RawAddress::zero()..=last)],
             smallvec![ImageSpace::base(space)],
-        )
+        ))
     }
 
     pub fn banks(&self) -> &[ImageBank] {
@@ -331,6 +337,107 @@ impl ImageLayout {
 
     pub fn spaces(&self) -> &[ImageSpace] {
         &self.spaces
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ImageCoveredRegions {
+    by_bank: BTreeMap<ImageBankHandle, RawAddressRangeSet>,
+}
+
+impl ImageCoveredRegions {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn covered_in_bank(&self, bank: ImageBankHandle) -> Option<&RawAddressRangeSet> {
+        self.by_bank.get(&bank)
+    }
+
+    pub(crate) fn covered_in_bank_mut(&mut self, bank: ImageBankHandle) -> &mut RawAddressRangeSet {
+        self.by_bank.entry(bank).or_default()
+    }
+
+    pub(crate) fn intersects_range(
+        &self,
+        bank: ImageBankHandle,
+        range: RangeInclusive<RawAddress>,
+    ) -> bool {
+        self.covered_in_bank(bank)
+            .is_some_and(|covered| covered.intersects_range(range))
+    }
+
+    pub(crate) fn insert_range(
+        &mut self,
+        bank: ImageBankHandle,
+        range: RangeInclusive<RawAddress>,
+    ) {
+        self.covered_in_bank_mut(bank).insert_range(range);
+    }
+}
+
+pub(crate) struct ImageRegionBankMap<T> {
+    by_source: BTreeMap<T, ImageBankHandle>,
+}
+
+impl<T> Default for ImageRegionBankMap<T> {
+    fn default() -> Self {
+        Self {
+            by_source: BTreeMap::new(),
+        }
+    }
+}
+
+impl<T> ImageRegionBankMap<T>
+where
+    T: Ord,
+{
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn route(&mut self, source: T, bank: ImageBankHandle) {
+        self.by_source.insert(source, bank);
+    }
+
+    pub(crate) fn bank_for(&self, source: T) -> Option<ImageBankHandle> {
+        self.by_source.get(&source).copied()
+    }
+}
+
+pub(crate) struct ImageBankLayout<T> {
+    banks: ImageBanks,
+    regions: ImageRegionBankMap<T>,
+}
+
+impl<T> ImageBankLayout<T>
+where
+    T: Ord,
+{
+    pub(crate) fn new(default_bank: ImageBank) -> Self {
+        Self {
+            banks: smallvec![default_bank],
+            regions: ImageRegionBankMap::new(),
+        }
+    }
+
+    pub(crate) fn allocate_overlay(
+        &mut self,
+        range: RangeInclusive<RawAddress>,
+    ) -> ImageBankHandle {
+        let handle = ImageBankHandle::new(
+            u16::try_from(self.banks.len()).expect("bank count must fit in u16"),
+        );
+        self.banks.push(ImageBank::new(handle, range));
+        handle
+    }
+
+    pub(crate) fn route_region(&mut self, source: T, bank: ImageBankHandle) {
+        self.regions.route(source, bank);
+    }
+
+    pub(crate) fn into_parts(self) -> (ImageBanks, ImageRegionBankMap<T>) {
+        (self.banks, self.regions)
     }
 }
 
@@ -562,7 +669,13 @@ impl<'a> ImageSegmentContents<'a> {
     ) -> Self {
         let data = bytes.into();
         let len = data.len() as u64;
-        Self::from_data(address.into(), endian, data, len)
+        Self::from_data(
+            ImageBankHandle::default(),
+            address.into(),
+            endian,
+            data,
+            len,
+        )
     }
 
     pub fn new_sparse(
@@ -571,10 +684,43 @@ impl<'a> ImageSegmentContents<'a> {
         bytes: impl Into<Cow<'a, [u8]>>,
         len: u64,
     ) -> Self {
-        Self::from_data(address.into(), endian, bytes.into(), len)
+        Self::from_data(
+            ImageBankHandle::default(),
+            address.into(),
+            endian,
+            bytes.into(),
+            len,
+        )
     }
 
-    fn from_data(address: RawAddress, endian: Endian, data: Cow<'a, [u8]>, len: u64) -> Self {
+    pub fn new_in_bank(
+        bank: ImageBankHandle,
+        address: impl Into<RawAddress>,
+        endian: Endian,
+        bytes: impl Into<Cow<'a, [u8]>>,
+    ) -> Self {
+        let data = bytes.into();
+        let len = data.len() as u64;
+        Self::from_data(bank, address.into(), endian, data, len)
+    }
+
+    pub fn new_sparse_in_bank(
+        bank: ImageBankHandle,
+        address: impl Into<RawAddress>,
+        endian: Endian,
+        bytes: impl Into<Cow<'a, [u8]>>,
+        len: u64,
+    ) -> Self {
+        Self::from_data(bank, address.into(), endian, bytes.into(), len)
+    }
+
+    fn from_data(
+        bank: ImageBankHandle,
+        address: RawAddress,
+        endian: Endian,
+        data: Cow<'a, [u8]>,
+        len: u64,
+    ) -> Self {
         let mut chunks = BTreeMap::new();
         if !data.is_empty() {
             chunks.insert(0, ImageSegmentChunk::new(data));
@@ -586,13 +732,12 @@ impl<'a> ImageSegmentContents<'a> {
             function_hints: BTreeSet::new(),
             mapping_hints: BTreeMap::new(),
             endian,
-            bank: ImageBankHandle::default(),
+            bank,
         }
     }
 
-    pub fn with_bank(mut self, bank: ImageBankHandle) -> Self {
+    pub fn set_bank(&mut self, bank: ImageBankHandle) {
         self.bank = bank;
-        self
     }
 
     pub fn bank(&self) -> ImageBankHandle {

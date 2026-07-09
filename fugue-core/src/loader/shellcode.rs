@@ -77,7 +77,7 @@ impl<'a> Shellcode<'a> {
         }
 
         let attributes = attributes.into();
-        let layout = ImageLayout::single_bank(size as u64);
+        let layout = ImageLayout::single_bank(size as u64)?;
 
         Ok(Self {
             address,

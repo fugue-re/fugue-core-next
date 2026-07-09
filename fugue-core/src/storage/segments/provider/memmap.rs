@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use fugue_core_derive::SegmentStorageProvider;
@@ -12,7 +13,7 @@ use super::{
     SegmentRangeOverlap, SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentView,
 };
-use crate::ir::Address;
+use crate::ir::{Address, AddressRange};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::AttributeMap;
@@ -377,8 +378,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
     fn from_segment_range(
-        start: Address,
-        end: Address,
+        range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let project = attributes
@@ -387,7 +387,10 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let size = end.offset() - start.offset() + 1;
+        let size = range
+            .size()
+            .filter(|&size| size > 0)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
 
         if data_path.exists() {
             let existing = Self::open_existing(&project)?;

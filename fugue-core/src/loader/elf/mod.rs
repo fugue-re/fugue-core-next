@@ -11,10 +11,12 @@ use object::elf::{
     STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT,
     STT_TLS,
 };
-use object::read::elf::{self, ElfFile, ElfSectionIterator, ElfSegmentIterator, FileHeader};
+use object::read::elf::{
+    self, ElfFile, ElfSection, ElfSectionIterator, ElfSegmentIterator, FileHeader,
+};
 use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
-    SectionFlags, SectionKind, SegmentFlags, SymbolFlags,
+    SectionFlags, SectionIndex, SectionKind, SegmentFlags, SymbolFlags,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -26,10 +28,11 @@ use crate::ir::{
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::ImageContext;
 use crate::loader::{
-    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
-    ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
-    ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile,
-    LoadableMetadata, LoaderError,
+    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout, ImageCoveredRegions,
+    ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
+    ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaces,
+    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
+    LoaderError,
 };
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
@@ -50,6 +53,9 @@ pub const ELF_DYNSYM_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1)
 
 pub const ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS: &str = "loader.elf.override_segment_permissions";
 pub const ATTRIBUTE_SKIP_NOTE_SECTIONS: &str = "loader.elf.skip_note_sections";
+pub const ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES: &str =
+    "loader.elf.preserve_relocatable_section_addresses";
+pub const ATTRIBUTE_LOAD_HEADERS: &str = "loader.elf.load_headers";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -118,6 +124,7 @@ pub struct Elf<'a> {
     image_symbols: SymbolTable<ImageAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     segments: Vec<ElfImageSegment>,
+    region_bank: ElfRegionBankMap,
     sections: ElfSectionMap,
     extern_segm: ExternSegment,
     attributes: AttributeMap,
@@ -176,33 +183,50 @@ impl<'a> Elf<'a> {
             elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base, config)?
         );
 
-        let bank_base = *bounds.start();
-        let bank_size = bounds
-            .end()
-            .checked_offset_from(*bounds.start())
-            .and_then(|size| size.checked_add(1))
+        let header_last = config
+            .load_headers()
+            .then(|| {
+                with_elf!(
+                    view,
+                    elf | elf
+                        .data()
+                        .len()
+                        .ok()
+                        .and_then(|len| base.checked_add(len.checked_sub(1)?))
+                )
+            })
+            .flatten();
+        let bank_base = if config.load_headers() {
+            base.min(*bounds.start())
+        } else {
+            *bounds.start()
+        };
+        let bank_last = header_last
+            .map_or(*bounds.end(), |last| last.max(*bounds.end()))
+            .checked_offset_from(bank_base)
+            .and_then(|size| bank_base.checked_add(size))
             .ok_or_else(|| LoaderError::address_overflow(base))?;
 
-        let (placements, spaces) = with_elf!(
+        let default_bank = ImageBank::new_in_default(bank_base..=bank_last);
+        let (placements, spaces, bank_layout) = with_elf!(
             view,
             elf | {
                 let mut walk = ElfSegmentWalk::new(
                     elf,
                     base,
                     preferred_base,
-                    bank_base,
+                    default_bank,
                     &sections,
                     &extern_segm,
                     config,
-                );
-                let mut placements = Vec::new();
-                while let Some(placement) = walk.next_segment()? {
-                    placements.push(placement);
+                )?;
+                while let Some(region) = walk.next_region()? {
+                    walk.place_region(region)?;
                 }
-                let spaces = walk.into_spaces();
-                (placements, spaces)
+                walk.into_parts()
             }
         );
+        let (banks, region_bank) = bank_layout.into_parts();
 
         let mut symbol_indices_by_offset =
             BTreeMap::<RawAddress, SmallVec<[SymbolIndex; 1]>>::new();
@@ -244,13 +268,7 @@ impl<'a> Elf<'a> {
             );
         }
 
-        let layout = ImageLayout::new(
-            smallvec![ImageBank::new(
-                ImageBankHandle::default(),
-                bank_base..(bank_base + bank_size),
-            )],
-            spaces,
-        );
+        let layout = ImageLayout::new(banks, spaces);
 
         let entry = entry.map(|entry| ImageAddress::in_default_space(entry));
 
@@ -266,6 +284,7 @@ impl<'a> Elf<'a> {
             layout,
             mapping_hints,
             segments: placements,
+            region_bank,
             sections,
             extern_segm,
             attributes,
@@ -341,6 +360,18 @@ struct ElfRegion<'data> {
     size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
+    file_offset: Option<u64>,
+    source: Option<ElfRegionSource>,
+}
+
+impl ElfRegion<'_> {
+    fn source(&self) -> Option<ElfRegionSource> {
+        self.source
+    }
+
+    fn section_source(&self) -> Option<ElfRegionSource> {
+        self.source.filter(|source| source.is_section())
+    }
 }
 
 struct ElfImageSegment {
@@ -350,11 +381,277 @@ struct ElfImageSegment {
     size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
+    bank: ImageBankHandle,
 }
 
 impl ElfImageSegment {
+    fn new(region: &ElfRegion, space: ImageSpaceHandle, backing_offset: RawAddress) -> Self {
+        Self {
+            name: region.name.as_ref().to_owned(),
+            address: ImageAddress::new(space, region.address),
+            backing_offset,
+            size: region.size,
+            properties: region.properties,
+            provenance: region.provenance,
+            bank: ImageBankHandle::default(),
+        }
+    }
+
     fn space(&self) -> ImageSpaceHandle {
         self.address.space()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ElfRegionSourceKind {
+    Header,
+    Section,
+    Segment,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ElfRegionSource {
+    kind: ElfRegionSourceKind,
+    index: usize,
+}
+
+impl ElfRegionSource {
+    fn new(kind: ElfRegionSourceKind, index: usize) -> Self {
+        Self { kind, index }
+    }
+
+    fn section(index: usize) -> Self {
+        Self::new(ElfRegionSourceKind::Section, index)
+    }
+
+    fn segment(index: usize) -> Self {
+        Self::new(ElfRegionSourceKind::Segment, index)
+    }
+
+    fn header(index: usize) -> Self {
+        Self::new(ElfRegionSourceKind::Header, index)
+    }
+
+    fn kind(self) -> ElfRegionSourceKind {
+        self.kind
+    }
+
+    fn is_kind(self, kind: ElfRegionSourceKind) -> bool {
+        self.kind() == kind
+    }
+
+    fn is_section(self) -> bool {
+        self.is_kind(ElfRegionSourceKind::Section)
+    }
+
+    fn is_segment(self) -> bool {
+        self.is_kind(ElfRegionSourceKind::Segment)
+    }
+
+    fn is_header(self) -> bool {
+        self.is_kind(ElfRegionSourceKind::Header)
+    }
+}
+
+type ElfCoveredRegions = ImageCoveredRegions;
+type ElfRegionBankMap = ImageRegionBankMap<ElfRegionSource>;
+type ElfBankLayout = ImageBankLayout<ElfRegionSource>;
+
+struct ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    elf: &'file ElfFile<'data, Elf, R>,
+    cursor: usize,
+}
+
+struct ElfHeaderRegion<'data> {
+    name: &'static str,
+    address: RawAddress,
+    file_offset: u64,
+    data: &'data [u8],
+    source: ElfRegionSource,
+}
+
+impl<'data> ElfHeaderRegion<'data> {
+    fn new(
+        name: &'static str,
+        address: RawAddress,
+        file_offset: u64,
+        data: &'data [u8],
+        source: ElfRegionSource,
+    ) -> Self {
+        Self {
+            name,
+            address,
+            file_offset,
+            data,
+            source,
+        }
+    }
+
+    fn size(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn data(&self) -> &'data [u8] {
+        self.data
+    }
+}
+
+struct ElfHeaderRegions<'data> {
+    regions: SmallVec<[ElfHeaderRegion<'data>; 3]>,
+}
+
+impl<'data> ElfHeaderRegions<'data> {
+    fn new<Elf, R>(
+        elf: &ElfFile<'data, Elf, R>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+    ) -> Result<Self, LoaderError>
+    where
+        Elf: FileHeader,
+        R: ReadRef<'data>,
+    {
+        let endian = elf.endian();
+        let header = elf.elf_header();
+
+        let ph_size = u64::from(header.e_phentsize(endian)) * u64::from(header.e_phnum(endian));
+        let sh_size = u64::from(header.e_shentsize(endian)) * u64::from(header.e_shnum(endian));
+
+        let ranges = [
+            ("_elfHeader", 0u64, u64::from(header.e_ehsize(endian))),
+            ("_elfProgramHeaders", header.e_phoff(endian).into(), ph_size),
+            ("_elfSectionHeaders", header.e_shoff(endian).into(), sh_size),
+        ];
+
+        let mut regions = SmallVec::<[ElfHeaderRegion<'data>; 3]>::new();
+        for (index, (name, file_offset, size)) in ranges.into_iter().enumerate() {
+            if let Some(region) =
+                Self::file_range(elf, base, preferred_base, name, file_offset, size, index)?
+            {
+                regions.push(region);
+            }
+        }
+        regions.reverse();
+
+        Ok(Self { regions })
+    }
+
+    fn file_range<Elf, R>(
+        elf: &ElfFile<'data, Elf, R>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        name: &'static str,
+        file_offset: u64,
+        size: u64,
+        index: usize,
+    ) -> Result<Option<ElfHeaderRegion<'data>>, LoaderError>
+    where
+        Elf: FileHeader,
+        R: ReadRef<'data>,
+    {
+        if size == 0 {
+            return Ok(None);
+        }
+        let Ok(file_len) = elf.data().len() else {
+            tracing::warn!("cannot determine file length for header `{name}`; skipping");
+            return Ok(None);
+        };
+        if file_offset >= file_len {
+            tracing::warn!(
+                "header `{name}` file offset {file_offset:#x} exceeds file length {file_len:#x}; skipping"
+            );
+            return Ok(None);
+        }
+        let size = size.min(file_len - file_offset);
+        let Ok(data) = elf.data().read_bytes_at(file_offset, size) else {
+            tracing::warn!("cannot read header `{name}` at offset {file_offset:#x}; skipping");
+            return Ok(None);
+        };
+        let address =
+            match Self::load_address_for_file_range(elf, base, preferred_base, file_offset, size) {
+                Some(address) => address,
+                None => base
+                    .checked_add(file_offset)
+                    .ok_or_else(|| LoaderError::address_overflow(base))?,
+            };
+        Ok(Some(ElfHeaderRegion::new(
+            name,
+            address,
+            file_offset,
+            data,
+            ElfRegionSource::header(index),
+        )))
+    }
+
+    fn load_address_for_file_range<Elf, R>(
+        elf: &ElfFile<'data, Elf, R>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        file_offset: u64,
+        size: u64,
+    ) -> Option<RawAddress>
+    where
+        Elf: FileHeader,
+        R: ReadRef<'data>,
+    {
+        let last_offset = file_offset.checked_add(size.checked_sub(1)?)?;
+        elf.segments().find_map(|segment| {
+            let (segment_offset, segment_size) = segment.file_range();
+            if segment_size == 0 {
+                return None;
+            }
+            let segment_last = segment_offset.checked_add(segment_size.checked_sub(1)?)?;
+            if file_offset < segment_offset || last_offset > segment_last {
+                return None;
+            }
+            let delta = file_offset.checked_sub(segment_offset)?;
+            let address = base
+                .checked_sub(preferred_base)?
+                .checked_add(segment.address())?;
+            address.checked_add(delta)
+        })
+    }
+}
+
+impl<'data> Iterator for ElfHeaderRegions<'data> {
+    type Item = ElfHeaderRegion<'data>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.regions.pop()
+    }
+}
+
+impl<'data, 'file, Elf, R> ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    fn new(elf: &'file ElfFile<'data, Elf, R>) -> Self {
+        Self {
+            elf,
+            cursor: elf.elf_section_table().len(),
+        }
+    }
+}
+
+impl<'data, 'file, Elf, R> Iterator for ElfSectionRevIterator<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+{
+    type Item = ElfSection<'data, 'file, Elf, R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.cursor > 0 {
+            self.cursor -= 1;
+            if let Ok(section) = self.elf.section_by_index(SectionIndex(self.cursor)) {
+                return Some(section);
+            }
+        }
+        None
     }
 }
 
@@ -369,14 +666,64 @@ where
     bank_base: RawAddress,
     base_space: ImageSpaceHandle,
     sections: &'file ElfSectionMap,
-    sects: ElfSectionIterator<'data, 'file, Elf, R>,
+    sects: ElfSectionRevIterator<'data, 'file, Elf, R>,
     segms: ElfSegmentIterator<'data, 'file, Elf, R>,
+    headers: ElfHeaderRegions<'data>,
     extern_segm: Option<&'file ExternSegment>,
     covered: RawAddressRangeSet,
-    spaces: SmallVec<[ImageSpace; 4]>,
-    pending: Option<ElfImageSegment>,
+    spaces: ImageSpaces,
+    bank_layout: ElfBankLayout,
+    placements: Vec<ElfImageSegment>,
+    placed_regions: Vec<ElfPlacedRegion>,
+    segment_ordinal: usize,
     config: ElfLoaderProperties,
     is_object: bool,
+}
+
+struct ElfPlacedRegion {
+    start: RawAddress,
+    last: RawAddress,
+    file_delta: u64,
+    placement: usize,
+    source: ElfRegionSource,
+}
+
+impl ElfPlacedRegion {
+    fn new(
+        start: RawAddress,
+        last: RawAddress,
+        file_delta: u64,
+        placement: usize,
+        source: ElfRegionSource,
+    ) -> Self {
+        Self {
+            start,
+            last,
+            file_delta,
+            placement,
+            source,
+        }
+    }
+
+    fn start(&self) -> RawAddress {
+        self.start
+    }
+
+    fn last(&self) -> RawAddress {
+        self.last
+    }
+
+    fn file_delta(&self) -> u64 {
+        self.file_delta
+    }
+
+    fn placement(&self) -> usize {
+        self.placement
+    }
+
+    fn source(&self) -> ElfRegionSource {
+        self.source
+    }
 }
 
 impl<'data, 'file, Elf, R> ElfSegmentWalk<'data, 'file, Elf, R>
@@ -389,38 +736,57 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         base: RawAddress,
         preferred_base: RawAddress,
-        bank_base: RawAddress,
+        default_bank: ImageBank,
         sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
         mut config: ElfLoaderProperties,
-    ) -> Self {
+    ) -> Result<Self, LoaderError> {
         let is_object = elf.kind() == ObjectKind::Relocatable;
         if is_object {
             config.insert(ElfLoaderProperties::IS_OBJECT);
         }
         let base_space = ImageSpaceHandle::default();
-        Self {
+        let bank_base = *default_bank.range().start();
+        Ok(Self {
             base,
             preferred_base,
             bank_base,
             base_space,
             sections,
-            sects: elf.sections(),
+            sects: ElfSectionRevIterator::new(elf),
             segms: elf.segments(),
+            headers: ElfHeaderRegions::new(elf, base, preferred_base)?,
             extern_segm: Some(externs),
             covered: RawAddressRangeSet::new(),
             spaces: smallvec![ImageSpace::base(base_space)],
-            pending: None,
+            bank_layout: ElfBankLayout::new(default_bank),
+            placements: Vec::new(),
+            placed_regions: Vec::new(),
+            segment_ordinal: 0,
             config,
             is_object,
-        }
+        })
     }
 
-    fn into_spaces(self) -> SmallVec<[ImageSpace; 4]> {
-        self.spaces
+    fn into_parts(self) -> (Vec<ElfImageSegment>, ImageSpaces, ElfBankLayout) {
+        (self.placements, self.spaces, self.bank_layout)
     }
 
     fn next_region(&mut self) -> Result<Option<ElfRegion<'data>>, LoaderError> {
+        if self.config.load_headers() {
+            if let Some(header) = self.headers.next() {
+                return Ok(Some(ElfRegion {
+                    name: Cow::Borrowed(header.name),
+                    address: header.address,
+                    size: header.size(),
+                    properties: SegmentProperties::PERM_READ,
+                    provenance: SegmentMappingProvenance::Section,
+                    file_offset: Some(header.file_offset),
+                    source: Some(header.source),
+                }));
+            }
+        }
+
         if self.is_object {
             for sect in self.sects.by_ref() {
                 let Some(address) = self.sections.get(sect.index().0) else {
@@ -432,6 +798,8 @@ where
                     size: sect.size().max(1),
                     properties: elf_section_properties(&sect, &self.config),
                     provenance: SegmentMappingProvenance::Section,
+                    file_offset: sect.file_range().map(|(off, _)| off),
+                    source: Some(ElfRegionSource::section(sect.index().0)),
                 }));
             }
             return Ok(self.extern_region());
@@ -458,6 +826,8 @@ where
                 size,
                 properties: elf_section_properties(&sect, &self.config),
                 provenance: SegmentMappingProvenance::Section,
+                file_offset: sect.file_range().map(|(off, _)| off),
+                source: Some(ElfRegionSource::section(sect.index().0)),
             }));
         }
 
@@ -466,16 +836,21 @@ where
             if size == 0 {
                 continue;
             }
-            let name = match segm.name().ok().flatten() {
-                Some(name) => Cow::Owned(name.to_owned()),
-                None => Cow::Borrowed("LOAD"),
-            };
+            let name = segm
+                .name()
+                .ok()
+                .flatten()
+                .map(|name| Cow::Owned(name.to_owned()))
+                .unwrap_or(Cow::Borrowed("LOAD"));
+            let (file_off, file_size) = segm.file_range();
             return Ok(Some(ElfRegion {
                 name,
                 address: (self.base - self.preferred_base) + segm.address(),
                 size,
                 properties: elf_segment_properties(&segm, &self.config),
                 provenance: SegmentMappingProvenance::Segment,
+                file_offset: (file_size != 0).then_some(file_off),
+                source: Some(ElfRegionSource::segment(self.next_segment_ordinal())),
             }));
         }
 
@@ -492,65 +867,187 @@ where
                 | SegmentProperties::PERM_READ
                 | SegmentProperties::PERM_EXECUTE,
             provenance: SegmentMappingProvenance::Extern,
+            file_offset: None,
+            source: None,
         })
     }
 
-    fn next_segment(&mut self) -> Result<Option<ElfImageSegment>, LoaderError> {
-        if let Some(buffered) = self.pending.take() {
-            return Ok(Some(buffered));
+    fn next_segment_ordinal(&mut self) -> usize {
+        let ordinal = self.segment_ordinal;
+        self.segment_ordinal += 1;
+        ordinal
+    }
+
+    fn next_overlay_space(&mut self) -> ImageSpaceHandle {
+        let handle = ImageSpaceHandle::new(
+            u16::try_from(self.spaces.len()).expect("space count must fit in u16"),
+        );
+        self.spaces
+            .push(ImageSpace::overlay(handle, self.base_space));
+        handle
+    }
+
+    fn push_placement(
+        &mut self,
+        region: &ElfRegion,
+        space: ImageSpaceHandle,
+        backing_offset: impl Into<RawAddress>,
+    ) -> usize {
+        let placement = self.placements.len();
+        self.placements
+            .push(ElfImageSegment::new(region, space, backing_offset.into()));
+        placement
+    }
+
+    fn conflicting_base_regions(
+        &self,
+        kind: ElfRegionSourceKind,
+        start: RawAddress,
+        last: RawAddress,
+        file_delta: u64,
+    ) -> SmallVec<[usize; 2]> {
+        self.placed_regions
+            .iter()
+            .enumerate()
+            .filter(|(_, placed)| {
+                placed.source().is_kind(kind)
+                    && placed.file_delta() != file_delta
+                    && start <= placed.last()
+                    && placed.start() <= last
+                    && self.placements[placed.placement()].space() == self.base_space
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn demote_section_if_conflicting(
+        &mut self,
+        source: ElfRegionSource,
+        address: RawAddress,
+        placement: usize,
+        last: RawAddress,
+        file_delta: u64,
+    ) {
+        let conflicts =
+            self.conflicting_base_regions(ElfRegionSourceKind::Section, address, last, file_delta);
+        if conflicts.is_empty() {
+            return;
         }
 
-        let Some(region) = self.next_region()? else {
-            return Ok(None);
-        };
-        let ElfRegion {
-            name,
-            address,
-            size,
-            properties,
-            provenance,
-        } = region;
+        let bank = self.bank_layout.allocate_overlay(address..=last);
+        let displaced = &mut self.placements[placement];
+        displaced.bank = bank;
+        displaced.backing_offset = RawAddress::from(0u64);
+        self.bank_layout.route_region(source, bank);
+    }
 
-        let last = address
-            .checked_add(size.saturating_sub(1))
-            .ok_or_else(|| LoaderError::address_overflow(address))?;
-        let backing_offset = address
-            .checked_sub(self.bank_base)
+    fn place_overlapping_region(
+        &mut self,
+        region: &ElfRegion,
+        backing_offset: RawAddress,
+        last: RawAddress,
+        file_delta: Option<u64>,
+    ) -> Option<usize> {
+        let base = region
+            .source()
+            .is_some_and(ElfRegionSource::is_segment)
+            .then(|| self.push_placement(region, self.base_space, backing_offset));
+        let overlay = self.next_overlay_space();
+        let placement = self.push_placement(region, overlay, backing_offset);
+        if let Some((source, delta)) = region.section_source().zip(file_delta) {
+            self.demote_section_if_conflicting(source, region.address, placement, last, delta);
+        }
+        base
+    }
+
+    fn place_region(&mut self, region: ElfRegion) -> Result<(), LoaderError> {
+        let address = region.address;
+        let last = region
+            .size
+            .max(1)
+            .checked_sub(1)
+            .and_then(|extent| address.checked_add(extent))
             .ok_or_else(|| LoaderError::address_overflow(address))?;
         let range = address..=last;
         let overlaps = self.covered.intersects_range(range.clone());
+        let source = region.source();
+        let is_segment = source.is_some_and(ElfRegionSource::is_segment);
+        if source.is_some_and(ElfRegionSource::is_header) {
+            let overlay = self.next_overlay_space();
+            let bank = self.bank_layout.allocate_overlay(range.clone());
+            let placement = self.push_placement(&region, overlay, 0u64);
+            self.placements[placement].bank = bank;
+            self.bank_layout
+                .route_region(source.expect("header source"), bank);
+            self.covered.insert_range(range);
+            return Ok(());
+        }
+        let backing_offset = address
+            .checked_sub(self.bank_base)
+            .ok_or_else(|| LoaderError::address_overflow(address))?;
 
-        let make_segment = |space| ElfImageSegment {
-            name: name.to_string(),
-            address: ImageAddress::new(space, address),
-            backing_offset: backing_offset.into(),
-            size,
-            properties,
-            provenance,
-        };
+        let file_delta = region
+            .file_offset
+            .map(|off| off.wrapping_sub(address.offset()));
 
-        let base_segment = (overlaps && provenance == SegmentMappingProvenance::Segment)
-            .then(|| make_segment(self.base_space));
+        let conflicts = file_delta
+            .and_then(|delta| {
+                is_segment.then(|| {
+                    self.conflicting_base_regions(
+                        ElfRegionSourceKind::Segment,
+                        address,
+                        last,
+                        delta,
+                    )
+                })
+            })
+            .unwrap_or_default();
 
-        let space = if overlaps {
-            let handle = ImageSpaceHandle::new(self.spaces.len() as u16);
-            self.spaces
-                .push(ImageSpace::overlay(handle, self.base_space));
-            handle
+        let placement = if !conflicts.is_empty() {
+            for index in conflicts {
+                self.demote_region(index)?;
+            }
+            Some(self.push_placement(&region, self.base_space, backing_offset))
+        } else if overlaps {
+            self.place_overlapping_region(&region, backing_offset, last, file_delta)
         } else {
-            self.base_space
+            Some(self.push_placement(&region, self.base_space, backing_offset))
         };
 
         self.covered.insert_range(range);
 
-        let segment = make_segment(space);
+        let Some(((placement, source), file_delta)) = placement.zip(source).zip(file_delta) else {
+            return Ok(());
+        };
 
-        if let Some(base_segment) = base_segment {
-            self.pending = Some(segment);
-            return Ok(Some(base_segment));
+        self.placed_regions.push(ElfPlacedRegion::new(
+            address, last, file_delta, placement, source,
+        ));
+
+        Ok(())
+    }
+
+    fn demote_region(&mut self, placed_index: usize) -> Result<(), LoaderError> {
+        let placed = &self.placed_regions[placed_index];
+        let placement = placed.placement();
+        let start = placed.start();
+        let last = placed.last();
+        let source = placed.source();
+
+        if self.placements[placement].space() != self.base_space {
+            return Ok(());
         }
 
-        Ok(Some(segment))
+        let overlay = self.next_overlay_space();
+        let bank = self.bank_layout.allocate_overlay(start..=last);
+
+        let displaced = &mut self.placements[placement];
+        displaced.address = ImageAddress::new(overlay, start);
+        displaced.bank = bank;
+        displaced.backing_offset = RawAddress::from(0u64);
+
+        self.bank_layout.route_region(source, bank);
+        Ok(())
     }
 }
 
@@ -609,7 +1106,7 @@ impl<'a> ElfImageSegments<'a> {
             segment.size,
             segment.properties,
         )
-        .with_backing(ImageBacking::in_default_bank(segment.backing_offset))
+        .with_backing(ImageBacking::new(segment.bank, segment.backing_offset))
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
         .with_function_hints(function_hints)
@@ -656,6 +1153,7 @@ impl ElfSymbolData {
 
         let is_object = elf.kind() == ObjectKind::Relocatable;
         let addr_size = arch.language().address_size();
+        let address_upper_bound = RawAddress::from(arch.language().address_upper_bound());
 
         // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
         // which is only applicable for Thumb.
@@ -668,37 +1166,19 @@ impl ElfSymbolData {
         let mut max_addr = base_addr;
 
         let extern_base = if is_object {
-            let mut base = base_addr.offset();
-            for sect in elf.sections() {
-                let SectionFlags::Elf { sh_flags } = sect.flags() else {
-                    continue;
-                };
+            let base = if config.preserve_relocatable_section_addresses() {
+                Self::place_object_sections_preserving_addresses(
+                    elf,
+                    base_addr,
+                    address_upper_bound,
+                    &mut sections,
+                    &config,
+                )?
+            } else {
+                Self::place_object_sections(elf, base_addr, &mut sections, &config)?
+            };
 
-                if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
-                    continue;
-                }
-
-                if config.skip_note_sections() && sect.kind() == SectionKind::Note {
-                    continue;
-                }
-
-                let align = sect.align().max(1);
-                let aligned_start =
-                    base.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
-
-                if aligned_start < base {
-                    tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
-                    continue;
-                }
-
-                sections.insert(sect.index().0, aligned_start.into());
-
-                base = aligned_start
-                    .checked_add(sect.size().max(1))
-                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
-            }
-
-            max_addr = base.into();
+            max_addr = base;
             base
         } else {
             for (addr, size) in elf
@@ -719,13 +1199,11 @@ impl ElfSymbolData {
                 min_addr = min_addr.min(curr_min);
             }
             max_addr
-                .offset()
                 .checked_add(addr_size as u64)
                 .ok_or_else(|| LoaderError::address_overflow(base_addr))?
         };
 
-        let aligned_extern_base = extern_base.wrapping_add(addr_align.wrapping_sub(1) as u64)
-            & !(addr_align as u64).wrapping_sub(1);
+        let aligned_extern_base = extern_base.align(addr_align);
 
         if aligned_extern_base < extern_base {
             return Err(LoaderError::address_overflow(base_addr));
@@ -900,6 +1378,114 @@ impl ElfSymbolData {
             extern_segm,
         })
     }
+
+    fn is_placeable_object_section<'a>(
+        sect: &impl ObjectSection<'a>,
+        config: &ElfLoaderProperties,
+    ) -> bool {
+        let SectionFlags::Elf { sh_flags } = sect.flags() else {
+            return false;
+        };
+
+        if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+            return false;
+        }
+
+        !(config.skip_note_sections() && sect.kind() == SectionKind::Note)
+    }
+
+    fn place_object_sections<'a>(
+        elf: &'a impl Object<'a>,
+        base_addr: RawAddress,
+        sections: &mut ElfSectionMap,
+        config: &ElfLoaderProperties,
+    ) -> Result<RawAddress, LoaderError> {
+        let mut base = base_addr;
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) {
+                continue;
+            }
+
+            let aligned_start = base.align(sect.align().max(1) as usize);
+
+            if aligned_start < base {
+                tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
+                continue;
+            }
+
+            sections.insert(sect.index().0, aligned_start);
+
+            base = aligned_start
+                .checked_add(sect.size().max(1))
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+        }
+        Ok(base)
+    }
+
+    // Preserves non-zero relocatable section addresses while packing the remaining
+    // allocatable sections after the pinned range.
+    fn place_object_sections_preserving_addresses<'a>(
+        elf: &'a impl Object<'a>,
+        base_addr: RawAddress,
+        address_upper_bound: RawAddress,
+        sections: &mut ElfSectionMap,
+        config: &ElfLoaderProperties,
+    ) -> Result<RawAddress, LoaderError> {
+        let mut pinned_end = RawAddress::zero();
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) || sect.size() == 0 {
+                continue;
+            }
+
+            if sect.address() != 0 {
+                let end = RawAddress::from(sect.address())
+                    .checked_add(sect.size())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+                pinned_end = pinned_end.max(end);
+            }
+        }
+
+        if pinned_end.offset() > address_upper_bound.offset() >> 1 {
+            pinned_end = RawAddress::zero();
+        }
+
+        let mut base = base_addr
+            .checked_add(pinned_end)
+            .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+
+        for sect in elf.sections() {
+            if !Self::is_placeable_object_section(&sect, config) || sect.size() == 0 {
+                continue;
+            }
+
+            if sect.address() != 0 {
+                let pinned_start = base_addr
+                    .checked_add(sect.address())
+                    .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+                sections.insert(sect.index().0, pinned_start);
+                continue;
+            }
+
+            let aligned_start = base.align(sect.align().max(1) as usize);
+
+            if aligned_start < base {
+                tracing::debug!("section start {aligned_start:#x} overflow; skipping section");
+                continue;
+            }
+
+            sections.insert(sect.index().0, aligned_start);
+
+            base = aligned_start
+                .checked_add(sect.size())
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?;
+        }
+
+        Ok(base.max(
+            base_addr
+                .checked_add(pinned_end)
+                .ok_or_else(|| LoaderError::address_overflow(base_addr))?,
+        ))
+    }
 }
 
 fn elf_section_properties<'a>(
@@ -966,6 +1552,8 @@ bitflags! {
         // user configuration
         const OVERRIDE_SEGMENT_PERMISSIONS = 0b0000_0001;
         const SKIP_NOTE_SECTIONS = 0b0000_0010;
+        const PRESERVE_RELOCATABLE_SECTION_ADDRESSES = 0b0000_0100;
+        const LOAD_HEADERS = 0b0000_1000;
 
         // loader state tracking
         const HAS_LOADED_SECTIONS = 0b0001_0000;
@@ -995,6 +1583,20 @@ impl ElfLoaderProperties {
             config.insert(Self::SKIP_NOTE_SECTIONS);
         }
 
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES)
+            .unwrap_or_default()
+        {
+            config.insert(Self::PRESERVE_RELOCATABLE_SECTION_ADDRESSES);
+        }
+
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_LOAD_HEADERS)
+            .unwrap_or_default()
+        {
+            config.insert(Self::LOAD_HEADERS);
+        }
+
         config
     }
 
@@ -1006,8 +1608,16 @@ impl ElfLoaderProperties {
         self.contains(Self::SKIP_NOTE_SECTIONS)
     }
 
+    pub(crate) fn preserve_relocatable_section_addresses(&self) -> bool {
+        self.contains(Self::PRESERVE_RELOCATABLE_SECTION_ADDRESSES)
+    }
+
     pub(crate) fn ignore_segment_exec_permission(&self) -> bool {
         self.contains(Self::IGNORE_SEGMENT_EXEC_PERMISSION)
+    }
+
+    pub(crate) fn load_headers(&self) -> bool {
+        self.contains(Self::LOAD_HEADERS)
     }
 }
 
@@ -1025,8 +1635,9 @@ where
     pub(crate) segms: ElfSegmentIterator<'data, 'file, Elf, R>,
     // sections iterator
     pub(crate) sects: ElfSectionIterator<'data, 'file, Elf, R>,
-    // ranges already covered
-    covered: RawAddressRangeSet,
+    headers: ElfHeaderRegions<'data>,
+    // ranges already covered, grouped by image bank
+    covered: ElfCoveredRegions,
     // current base address
     pub(crate) current_base: RawAddress,
     // the binary's preferred load address
@@ -1037,6 +1648,10 @@ where
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
     pub(crate) extern_segm: Option<&'file ExternSegment>,
+    // bank overrides for regions displaced into overlay banks
+    region_bank: &'file ElfRegionBankMap,
+    // running segment ordinal, matched with the walk's ordering
+    segment_ordinal: usize,
     // loader config
     config: ElfLoaderProperties,
 }
@@ -1047,7 +1662,8 @@ where
     R: ReadRef<'data>,
     'file: 'data,
 {
-    pub(crate) fn new(
+    #[allow(clippy::too_many_arguments)]
+    fn new(
         elf: &'file ElfFile<'data, Elf, R>,
         arch: &'file Arch,
         base: RawAddress,
@@ -1055,24 +1671,28 @@ where
         symbols: &'file SymbolTable<ImageAddress>,
         sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
+        region_bank: &'file ElfRegionBankMap,
         mut config: ElfLoaderProperties,
-    ) -> Self {
+    ) -> Result<Self, LoaderError> {
         if elf.kind() == ObjectKind::Relocatable {
             config.insert(ElfLoaderProperties::IS_OBJECT);
         }
-        Self {
+        Ok(Self {
             elf,
             sects: elf.sections(),
             segms: elf.segments(),
-            covered: RawAddressRangeSet::new(),
+            headers: ElfHeaderRegions::new(elf, base, preferred_base)?,
+            covered: ElfCoveredRegions::new(),
             current_base: base,
             preferred_base,
             symbols,
             sections,
             extern_segm: Some(externs),
+            region_bank,
+            segment_ordinal: 0,
             arch,
             config,
-        }
+        })
     }
 
     pub(crate) fn extern_segment(
@@ -1114,7 +1734,8 @@ where
         }
 
         let extern_range = address..=last_address;
-        self.covered.insert_range(extern_range);
+        self.covered
+            .insert_range(ImageBankHandle::default(), extern_range);
 
         let mut bytes =
             ImageSegmentContents::new(externs.address(), self.arch.endian(), Cow::Owned(contents));
@@ -1125,9 +1746,40 @@ where
         Ok(Some(bytes))
     }
 
+    pub(crate) fn header_segment(
+        &mut self,
+    ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
+        if !self.config.load_headers() {
+            return Ok(None);
+        }
+
+        let Some(header) = self.headers.next() else {
+            return Ok(None);
+        };
+        let last_address = header
+            .address
+            .checked_add(header.size().wrapping_sub(1))
+            .ok_or_else(|| LoaderError::address_overflow(header.address))?;
+        let bank = self.region_bank.bank_for(header.source).unwrap_or_default();
+        self.covered
+            .insert_range(bank, header.address..=last_address);
+
+        Ok(Some(ImageSegmentContents::new_sparse_in_bank(
+            bank,
+            header.address,
+            self.arch.endian(),
+            header.data(),
+            header.size(),
+        )))
+    }
+
     pub(crate) fn next_unlinked(
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
+        if let Some(header) = self.header_segment()? {
+            return Ok(Some(header));
+        }
+
         for sect in self.sects.by_ref() {
             let Some(address) = self.sections.get(sect.index().0) else {
                 continue;
@@ -1152,10 +1804,20 @@ where
 
             let emit = (data.len() as u64).min(span) as usize;
 
-            let mut bytes =
-                ImageSegmentContents::new_sparse(address, self.arch.endian(), &data[..emit], span);
+            let bank = self
+                .region_bank
+                .bank_for(ElfRegionSource::section(sect.index().0))
+                .unwrap_or_default();
 
-            self.covered.insert_range(vrange);
+            let mut bytes = ImageSegmentContents::new_sparse_in_bank(
+                bank,
+                address,
+                self.arch.endian(),
+                &data[..emit],
+                span,
+            );
+
+            self.covered.insert_range(bank, vrange);
 
             let relocator = ElfSegmentRelocator::new(
                 self.elf,
@@ -1214,7 +1876,11 @@ where
             }
 
             let vrange = address..=last_address;
-            if self.covered.intersects_range(vrange.clone()) {
+            let bank = self
+                .region_bank
+                .bank_for(ElfRegionSource::section(sect.index().0))
+                .unwrap_or_default();
+            if self.covered.intersects_range(bank, vrange.clone()) {
                 tracing::debug!("section {address}-{last_address} already covered; skipping");
                 continue;
             }
@@ -1227,14 +1893,15 @@ where
 
             let emit = (data.len() as u64).min(sect.size()) as usize;
 
-            let mut bytes = ImageSegmentContents::new_sparse(
+            let mut bytes = ImageSegmentContents::new_sparse_in_bank(
+                bank,
                 address,
                 self.arch.endian(),
                 &data[..emit],
                 sect.size(),
             );
 
-            self.covered.insert_range(vrange);
+            self.covered.insert_range(bank, vrange);
 
             relocator.apply(address, &mut bytes, &sect)?;
 
@@ -1262,6 +1929,9 @@ where
                 continue;
             }
 
+            let ordinal = self.segment_ordinal;
+            self.segment_ordinal += 1;
+
             let address = (self.current_base - self.preferred_base) + segm.address();
 
             let last_address = address
@@ -1274,7 +1944,11 @@ where
             }
 
             let vrange = address..=last_address;
-            self.covered.insert_range(vrange);
+            let bank = self
+                .region_bank
+                .bank_for(ElfRegionSource::segment(ordinal))
+                .unwrap_or_default();
+            self.covered.insert_range(bank, vrange);
 
             tracing::trace!("processing segment {address}-{last_address}");
 
@@ -1284,8 +1958,13 @@ where
 
             let emit = data.len().min(size as usize);
 
-            let mut bytes =
-                ImageSegmentContents::new_sparse(address, self.arch.endian(), &data[..emit], size);
+            let mut bytes = ImageSegmentContents::new_sparse_in_bank(
+                bank,
+                address,
+                self.arch.endian(),
+                &data[..emit],
+                size,
+            );
 
             relocator.apply_dynamic_relocations(address, &mut bytes)?;
 
@@ -1298,6 +1977,10 @@ where
     pub(crate) fn next_linked(
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
+        if let Some(header) = self.header_segment()? {
+            return Ok(Some(header));
+        }
+
         if let Some(v) = self.next_linked_segment()? {
             return Ok(Some(v));
         }
@@ -1417,7 +2100,7 @@ impl Loadable for Elf<'_> {
 
         with_elf!(
             view,
-            elf | Box::new(ElfImageSegmentContents::new(
+            elf | match ElfImageSegmentContents::new(
                 elf,
                 &self.architecture,
                 self.base,
@@ -1425,8 +2108,13 @@ impl Loadable for Elf<'_> {
                 &self.image_symbols,
                 &self.sections,
                 &self.extern_segm,
+                &self.region_bank,
                 props,
-            )) as ImageSegmentContentsIterator<'b>
+            ) {
+                Ok(contents) => Box::new(contents) as ImageSegmentContentsIterator<'b>,
+                Err(err) =>
+                    Box::new(fallible_iterator::once_err(err)) as ImageSegmentContentsIterator<'b>,
+            }
         )
     }
 
@@ -1437,14 +2125,20 @@ impl Loadable for Elf<'_> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeSet;
 
     use fallible_iterator::FallibleIterator;
     use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
     use object::{Object, RelocationFlags, RelocationTarget};
 
-    use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
-    use crate::ir::{Address, RawAddress, SymbolIndex};
-    use crate::loader::{ImageBankHandle, ImageSegmentContents, Loadable};
+    use super::{ATTRIBUTE_LOAD_HEADERS, ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
+    use crate::attributes;
+    use crate::ir::{Address, RawAddress, RawAddressRangeSet, SymbolIndex};
+    use crate::loader::{
+        ImageBankHandle, ImageSegmentContents, ImageSpaceHandle, ImageSpaceKind, Loadable,
+        LoadableFromFile, LoadableMetadata,
+    };
+    use crate::storage::segments::{InMemorySegmentStorage, SegmentStorage};
     use crate::types::BytesOrMapping;
     use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
 
@@ -1470,7 +2164,7 @@ mod test {
             .banks()
             .iter()
             .find(|entry| entry.handle() == bank)
-            .map(|entry| entry.range().start)
+            .map(|entry| *entry.range().start())
             .expect("default bank");
 
         let mut contents = loadable.image_contents();
@@ -1523,7 +2217,7 @@ mod test {
             .banks()
             .iter()
             .find(|entry| entry.handle() == bank)
-            .map(|entry| entry.range().start)
+            .map(|entry| *entry.range().start())
             .expect("default bank");
 
         let mut contents = loadable.image_contents();
@@ -1565,6 +2259,52 @@ mod test {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn test_elf_headers_default_disabled() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
+        let mut segments = elf.image_segments();
+        while let Some(segment) = segments.next()? {
+            assert!(
+                !segment.name().starts_with("_elf"),
+                "unexpected default ELF header segment {}",
+                segment.name()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_headers_enabled() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new_with(
+            BytesOrMapping::from_file("tests/ls.elf")?,
+            attributes![ATTRIBUTE_LOAD_HEADERS => true],
+        )?;
+
+        let mut header_addresses = BTreeSet::new();
+        let mut segments = elf.image_segments();
+        while let Some(segment) = segments.next()? {
+            if segment.name().starts_with("_elf") {
+                header_addresses.insert(segment.address().offset());
+                assert!(segment.size() > 0);
+            }
+        }
+        assert!(
+            header_addresses.contains(&RawAddress::zero()),
+            "expected ELF file header segment"
+        );
+
+        let mut saw_contents = false;
+        let mut contents = elf.image_contents();
+        while let Some(segment) = contents.next()? {
+            if header_addresses.contains(&segment.address()) {
+                saw_contents = true;
+                assert!(segment.len() > 0);
+            }
+        }
+        assert!(saw_contents, "expected ELF header contents");
+        Ok(())
     }
 
     #[test]
@@ -1872,10 +2612,6 @@ mod test {
 
     #[test]
     fn test_elf_overlapping_segments() -> Result<(), Box<dyn std::error::Error>> {
-        use std::collections::BTreeSet;
-
-        use crate::loader::{ImageBankHandle, ImageSpaceHandle, ImageSpaceKind};
-
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
 
         let layout = elf.image_layout();
@@ -1942,15 +2678,9 @@ mod test {
         Ok(())
     }
 
-    #[cfg(feature = "static-lifters")]
     #[test]
     fn test_elf_overlapping_segments_distinct_storage_spaces()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::collections::BTreeSet;
-
-        use crate::storage::segments::{InMemorySegmentStorage, SegmentStorage};
-        use crate::types::AttributeMap;
-
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
 
         let mut attributes = AttributeMap::new();
@@ -1979,9 +2709,45 @@ mod test {
     }
 
     #[test]
-    fn test_elf_image_writes_no_double_emit() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::ir::RawAddressRangeSet;
+    fn test_elf_overlapping_sections_distinct_content() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-sections.elf")?)?;
+        let mut attributes = AttributeMap::new();
+        let (storage, _resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(&elf, &mut attributes)?
+                .into_parts();
 
+        let overlap = RawAddress::from(0x1020u64);
+        let mut base_byte = None;
+        let mut overlay_bytes = BTreeSet::new();
+        for space in storage.spaces() {
+            let mut buf = [0u8; 1];
+            if storage
+                .read_bytes_from_space(space.id(), overlap, &mut buf)
+                .unwrap_or(0)
+                != 1
+            {
+                continue;
+            }
+            if space.is_overlay() {
+                overlay_bytes.insert(buf[0]);
+            } else {
+                base_byte = Some(buf[0]);
+            }
+        }
+        assert_eq!(
+            base_byte,
+            Some(0xBBu8),
+            "base space must expose the later section (.data) at the overlap"
+        );
+        assert!(
+            overlay_bytes.contains(&0xAAu8),
+            "an overlay space must expose the earlier section (.text) at the overlap, saw {overlay_bytes:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_image_writes_no_double_emit() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
 
         let mut covered = RawAddressRangeSet::new();
@@ -2011,8 +2777,6 @@ mod test {
 
     #[test]
     fn test_elf_metadata_lazy() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::loader::{LoadableFromFile, LoadableMetadata};
-
         let elf = Elf::from_file_with("tests/ls.elf", AttributeMap::new())?;
         let meta = elf.metadata();
 

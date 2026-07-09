@@ -53,7 +53,7 @@ impl CodeBlockTable {
             return Err(CodeBlockTableError::AddressMismatch);
         }
 
-        let range = block.start().raw_address()..block.next_address().raw_address();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
         self.index
             .bounds
             .entry(addr.space())
@@ -98,7 +98,7 @@ impl CodeBlockTable {
         };
 
         let space = block.space();
-        let range = block.start().raw_address()..block.next_address().raw_address();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
 
         if let Some(Entry::Occupied(mut entry)) =
             self.index.bounds.get_mut(&space).map(|m| m.entry(range))
@@ -128,7 +128,7 @@ impl CodeBlockTable {
 
         let ranges = bounds
             .intervals_overlap(raw)
-            .filter(|iv| iv.start == raw)
+            .filter(|iv| *iv.start() == raw)
             .collect::<SmallVec<[_; 2]>>();
 
         let mut removed = 0;
@@ -159,7 +159,7 @@ impl CodeBlockTable {
 
         let ranges = bounds
             .intervals_overlap(raw)
-            .filter(|iv| iv.start == raw)
+            .filter(|iv| *iv.start() == raw)
             .collect::<SmallVec<[_; 2]>>();
 
         let mut matching = SmallVec::<[Id<CodeBlock>; 2]>::new();
