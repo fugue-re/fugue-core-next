@@ -28,21 +28,21 @@ impl FunctionRecoveryCommitContext {
     }
 }
 
-pub trait FunctionRecoveryCommitHook {
+pub trait FunctionRecoveryCommitHook: Send {
     fn should_commit(
         &self,
-        project: &mut Project,
+        project: &Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
 impl<F> FunctionRecoveryCommitHook for F
 where
-    F: Fn(&mut Project, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>,
+    F: Fn(&Project, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError> + Send,
 {
     fn should_commit(
         &self,
-        project: &mut Project,
+        project: &Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         (self)(project, context)
@@ -52,7 +52,7 @@ where
 impl FunctionRecoveryCommitHook for Box<dyn FunctionRecoveryCommitHook + 'static> {
     fn should_commit(
         &self,
-        project: &mut Project,
+        project: &Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         self.as_ref().should_commit(project, context)
@@ -65,7 +65,7 @@ where
 {
     fn should_commit(
         &self,
-        project: &mut Project,
+        project: &Project,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         match self {

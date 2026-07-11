@@ -1,14 +1,21 @@
-use std::fmt::{Debug, LowerHex, UpperHex};
-use std::hash::Hash;
+use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter, LowerHex, Result as FmtResult, UpperHex};
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 
 use bytes::{BufMut, BytesMut};
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
+use rkyv::bytecheck::CheckBytes;
+use rkyv::primitive::ArchivedU64;
+use rkyv::rancor::{Fallible, Source};
+use rkyv::ser::{Allocator, Writer};
+use rkyv::traits::NoUndef;
+use rkyv::{Archive, Archived, Deserialize, Place, Portable, Serialize};
+use tinyset::SetU64;
 
 pub mod address;
 pub use address::{
-    Address, AddressRange, AddressWithContext, RawAddress, RawAddressMap, RawAddressRangeSet,
-    ToRawAddress,
+    Address, AddressRange, AddressRangeSet, AddressWithContext, RawAddress, RawAddressMap,
+    RawAddressRangeSet, ToRawAddress,
 };
 
 pub mod block;
@@ -41,7 +48,8 @@ pub use symbol::{
 
 pub struct Id<T> {
     id: u32,
-    _marker: std::marker::PhantomData<T>,
+    generation: u32,
+    _marker: PhantomData<T>,
 }
 
 impl<T> Default for Id<T> {
@@ -51,20 +59,23 @@ impl<T> Default for Id<T> {
 }
 
 impl<T> Debug for Id<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <u32 as Debug>::fmt(&self.id, f)
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_tuple("Id")
+            .field(&self.id)
+            .field(&self.generation)
+            .finish()
     }
 }
 
 impl<T> LowerHex for Id<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <u32 as LowerHex>::fmt(&self.id, f)
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        <u64 as LowerHex>::fmt(&self.key(), f)
     }
 }
 
 impl<T> UpperHex for Id<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <u32 as UpperHex>::fmt(&self.id, f)
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        <u64 as UpperHex>::fmt(&self.key(), f)
     }
 }
 
@@ -78,51 +89,63 @@ impl<T> Copy for Id<T> {}
 
 impl<T> PartialEq for Id<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.key() == other.key()
     }
 }
 
 impl<T> Eq for Id<T> {}
 
 impl<T> PartialOrd for Id<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl<T> Ord for Id<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key().cmp(&other.key())
     }
 }
 
 impl<T> Hash for Id<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
+        self.generation.hash(state);
     }
 }
 
 impl<T> Id<T> {
-    pub const INVALID: Self = Self::new(u32::MAX);
+    pub const INVALID: Self = Self::with_generation(u32::MAX, u32::MAX);
 
     pub(crate) const fn new(id: u32) -> Self {
-        Id {
+        Self::with_generation(id, 0)
+    }
+
+    pub(crate) const fn with_generation(id: u32, generation: u32) -> Self {
+        Self {
             id,
-            _marker: std::marker::PhantomData,
+            generation,
+            _marker: PhantomData,
         }
     }
 
     pub(crate) const fn from_index(index: usize) -> Self {
         assert!(index < u32::MAX as usize, "invalid index");
-        Id {
-            id: index as u32,
-            _marker: std::marker::PhantomData,
-        }
+        Self::new(index as u32)
     }
 
     pub(crate) const fn index(&self) -> usize {
         assert!(self.id < u32::MAX, "invalid index");
         self.id as usize
+    }
+
+    pub(crate) const fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    pub(crate) const fn next_generation(&self) -> Self {
+        assert!(self.generation < u32::MAX - 1, "invalid generation");
+        Self::with_generation(self.id, self.generation + 1)
     }
 
     #[inline(always)]
@@ -137,11 +160,8 @@ impl<T> Id<T> {
 
     #[inline(always)]
     pub(crate) fn decode_as_key(buf: &[u8]) -> Option<Self> {
-        if buf.len() == 4 {
-            Some(Id {
-                id: u32::from_be_bytes(buf.try_into().unwrap()),
-                _marker: std::marker::PhantomData,
-            })
+        if buf.len() == 8 {
+            Some(Self::from_key(u64::from_be_bytes(buf.try_into().unwrap())))
         } else {
             None
         }
@@ -149,18 +169,28 @@ impl<T> Id<T> {
 
     #[inline(always)]
     pub(crate) fn encode_as_key(&self, buf: &mut BytesMut) {
-        buf.put_u32(self.id);
+        buf.put_u64(self.key());
+    }
+
+    #[inline(always)]
+    const fn key(&self) -> u64 {
+        ((self.generation as u64) << 32) | self.id as u64
+    }
+
+    #[inline(always)]
+    const fn from_key(key: u64) -> Self {
+        Self::with_generation(key as u32, (key >> 32) as u32)
     }
 }
 
 #[repr(transparent)]
 pub struct IdSet<T> {
-    set: tinyset::SetU32,
-    _marker: std::marker::PhantomData<T>,
+    set: SetU64,
+    _marker: PhantomData<T>,
 }
 
 impl<T> Debug for IdSet<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_set().entries(self.iter()).finish()
     }
 }
@@ -175,7 +205,7 @@ impl<T> Clone for IdSet<T> {
     fn clone(&self) -> Self {
         IdSet {
             set: self.set.clone(),
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -191,28 +221,25 @@ impl<T> Eq for IdSet<T> {}
 impl<T> IdSet<T> {
     pub const fn new() -> Self {
         IdSet {
-            set: tinyset::SetU32::new(),
-            _marker: std::marker::PhantomData,
+            set: SetU64::new(),
+            _marker: PhantomData,
         }
     }
 
     pub fn insert(&mut self, id: Id<T>) -> bool {
-        self.set.insert(id.id)
+        self.set.insert(id.key())
     }
 
     pub fn contains(&self, id: Id<T>) -> bool {
-        self.set.contains(id.id)
+        self.set.contains(id.key())
     }
 
     pub fn remove(&mut self, id: Id<T>) -> bool {
-        self.set.remove(id.id)
+        self.set.remove(id.key())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Id<T>> + '_ {
-        self.set.iter().map(|id| Id {
-            id,
-            _marker: std::marker::PhantomData,
-        })
+        self.set.iter().map(Id::from_key)
     }
 
     pub fn len(&self) -> usize {
@@ -225,17 +252,17 @@ impl<T> IdSet<T> {
 }
 
 #[repr(transparent)]
-pub struct ArchivedId(rkyv::primitive::ArchivedU32);
+pub struct ArchivedId(ArchivedU64);
 
-unsafe impl rkyv::Portable for ArchivedId {}
-unsafe impl rkyv::traits::NoUndef for ArchivedId {}
+unsafe impl Portable for ArchivedId {}
+unsafe impl NoUndef for ArchivedId {}
 
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedId
+unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedId
 where
-    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
+    ArchivedU64: CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
+        unsafe { ArchivedU64::check_bytes(value.cast(), context) }
     }
 }
 
@@ -244,9 +271,7 @@ impl<T> Archive for Id<T> {
     type Resolver = ();
 
     fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedId(rkyv::primitive::ArchivedU32::from_native(
-            self.id,
-        )));
+        out.write(ArchivedId(ArchivedU64::from_native(self.key())));
     }
 }
 
@@ -256,55 +281,52 @@ impl<S: Fallible + ?Sized, T> Serialize<S> for Id<T> {
     }
 }
 
-impl<D: Fallible + ?Sized, T> rkyv::Deserialize<Id<T>, D> for ArchivedId {
+impl<D: Fallible + ?Sized, T> Deserialize<Id<T>, D> for ArchivedId {
     fn deserialize(&self, _: &mut D) -> Result<Id<T>, D::Error> {
-        Ok(Id {
-            id: self.0.to_native(),
-            _marker: std::marker::PhantomData,
-        })
+        Ok(Id::from_key(self.0.to_native()))
     }
 }
 
 #[repr(transparent)]
-pub struct ArchivedIdSet(rkyv::Archived<tinyset::SetU32>);
+pub struct ArchivedIdSet(Archived<SetU64>);
 
-unsafe impl rkyv::Portable for ArchivedIdSet {}
-unsafe impl rkyv::traits::NoUndef for ArchivedIdSet {}
+unsafe impl Portable for ArchivedIdSet {}
+unsafe impl NoUndef for ArchivedIdSet {}
 
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedIdSet
+unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedIdSet
 where
-    rkyv::Archived<tinyset::SetU32>: rkyv::bytecheck::CheckBytes<C>,
+    Archived<SetU64>: CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { <rkyv::Archived<tinyset::SetU32>>::check_bytes(value.cast(), context) }
+        unsafe { <Archived<SetU64>>::check_bytes(value.cast(), context) }
     }
 }
 
 impl<T> Archive for IdSet<T> {
     type Archived = ArchivedIdSet;
-    type Resolver = <tinyset::SetU32 as Archive>::Resolver;
+    type Resolver = <SetU64 as Archive>::Resolver;
 
     fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<tinyset::SetU32>>() };
+        let out_inner = unsafe { out.cast_unchecked::<Archived<SetU64>>() };
         self.set.resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized, T> Serialize<S> for IdSet<T> {
+impl<S: Fallible + Writer + Allocator + ?Sized, T> Serialize<S> for IdSet<T> {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         self.set.serialize(serializer)
     }
 }
 
-impl<D: Fallible + ?Sized, T> rkyv::Deserialize<IdSet<T>, D> for ArchivedIdSet
+impl<D: Fallible + ?Sized, T> Deserialize<IdSet<T>, D> for ArchivedIdSet
 where
-    D::Error: rkyv::rancor::Source,
+    D::Error: Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<IdSet<T>, D::Error> {
-        let set = rkyv::Deserialize::<tinyset::SetU32, D>::deserialize(&self.0, deserializer)?;
+        let set = Deserialize::<SetU64, D>::deserialize(&self.0, deserializer)?;
         Ok(IdSet {
             set,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         })
     }
 }

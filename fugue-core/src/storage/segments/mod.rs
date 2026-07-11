@@ -300,8 +300,8 @@ impl SegmentStorage {
             let bank_base = *bank_bases
                 .get(&content.bank())
                 .ok_or(SegmentStorageError::UnknownBank(content.bank()))?;
-            let mut writes = content.into_writes(bank_base)?;
-            while let Some(write) = writes.next() {
+            let writes = content.into_writes(bank_base)?;
+            for write in writes {
                 let provider_id = resolution
                     .resolve_bank(write.bank())
                     .ok_or(SegmentStorageError::UnknownBank(write.bank()))?;
@@ -338,7 +338,7 @@ impl SegmentStorage {
                 segment.into_name_and_hints();
 
             let start = address.raw_address();
-            let end = address.raw_address() + size as u64;
+            let end = address.raw_address() + size;
 
             let extra_hints = discovered_hints.range(start..end).copied();
             let extra_mapping_hints = discovered_mapping_hints
@@ -723,6 +723,42 @@ impl SegmentStorage {
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
 
         Ok(())
+    }
+
+    pub fn mapping(&self, id: SegmentMappingId) -> Option<&SegmentMapping> {
+        self.mappings.get(&id)
+    }
+
+    pub fn mapping_placements(
+        &self,
+        id: SegmentMappingId,
+    ) -> impl Iterator<Item = (AddressSpaceId, (RawAddress, RawAddress))> + '_ {
+        self.mappings.get(&id).into_iter().flat_map(move |mapping| {
+            let range = (mapping.start().raw_address(), mapping.last().raw_address());
+            self.spaces.values().filter_map(move |space| {
+                space
+                    .priority_list()
+                    .iter()
+                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
+                    .then_some((space.id(), range))
+            })
+        })
+    }
+
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
+        self.spaces.values().flat_map(move |space| {
+            space.iter().flat_map(move |submap| {
+                self.mappings
+                    .get(&submap.mapping_ref().mapping_id())
+                    .into_iter()
+                    .flat_map(move |mapping| {
+                        mapping.function_hints().filter_map(move |address| {
+                            let mapped = Address::new(space.id(), address.raw_address());
+                            submap.contains(mapped).then_some(mapped)
+                        })
+                    })
+            })
+        })
     }
 
     pub fn remap_mapping(
@@ -1755,6 +1791,12 @@ mod test {
         assert!(
             hints.iter().any(|hint| hint.offset() == 0x1040),
             "relocation-discovered function hint should reach the covering mapping",
+        );
+        assert!(
+            storage
+                .function_hints()
+                .any(|hint| hint == Address::in_default_space(0x1040u64)),
+            "storage-level function hints should use mapped addresses",
         );
 
         assert_eq!(

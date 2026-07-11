@@ -111,8 +111,7 @@ where
             );
             return Ok(());
         };
-        let Some(origin_last_offset) =
-            origin_offset.checked_add(bytes.len().saturating_sub(1) as u64)
+        let Some(origin_last_offset) = origin_offset.checked_add(bytes.len().saturating_sub(1))
         else {
             return Err(LoaderError::address_overflow(origin));
         };

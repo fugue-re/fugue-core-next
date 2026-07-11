@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
-use std::fmt::{Debug, Display};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::mem;
+use std::ops::RangeBounds;
+use std::slice::Iter;
 use std::sync::LazyLock;
 
+use rkyv::bytecheck::CheckBytes;
+use rkyv::rancor::Fallible;
+use rkyv::traits::NoUndef;
+use rkyv::{Archive, Deserialize, Place, Portable, Serialize};
 use smallvec::SmallVec;
 pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
@@ -31,7 +37,7 @@ impl SymbolTableSelector {
 }
 
 impl Display for SymbolTableSelector {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{:02x}", self.0)
     }
 }
@@ -79,7 +85,7 @@ impl<A> Display for SymbolEntry<A>
 where
     A: Display + Copy,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let address = self.address;
         let properties = self.properties;
         if !self.symbol.is_empty() {
@@ -240,44 +246,41 @@ impl Default for SymbolProperties {
 #[repr(transparent)]
 pub struct ArchivedSymbolProperties(u8);
 
-unsafe impl rkyv::Portable for ArchivedSymbolProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedSymbolProperties {}
+unsafe impl Portable for ArchivedSymbolProperties {}
+unsafe impl NoUndef for ArchivedSymbolProperties {}
 
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedSymbolProperties
+unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedSymbolProperties
 where
-    u8: rkyv::bytecheck::CheckBytes<C>,
+    u8: CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
         unsafe { u8::check_bytes(value.cast(), context) }
     }
 }
 
-impl rkyv::Archive for SymbolProperties {
+impl Archive for SymbolProperties {
     type Archived = ArchivedSymbolProperties;
     type Resolver = ();
 
-    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+    fn resolve(&self, _resolver: Self::Resolver, out: Place<Self::Archived>) {
         out.write(ArchivedSymbolProperties(self.bits()));
     }
 }
 
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for SymbolProperties {
+impl<S: Fallible + ?Sized> Serialize<S> for SymbolProperties {
     fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SymbolProperties, D>
-    for ArchivedSymbolProperties
-{
+impl<D: Fallible + ?Sized> Deserialize<SymbolProperties, D> for ArchivedSymbolProperties {
     fn deserialize(&self, _deserializer: &mut D) -> Result<SymbolProperties, D::Error> {
         Ok(SymbolProperties::from_bits_truncate(self.0))
     }
 }
 
 impl Display for SymbolProperties {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let mut names = self.iter_names();
 
         let Some((name, _)) = names.next() else {
@@ -341,7 +344,7 @@ impl SymbolProperties {
 pub struct SymbolIndex(u64);
 
 impl Debug for SymbolIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("SymbolIndex")
             .field("selector", &self.selector())
             .field("index", &self.index())
@@ -401,6 +404,7 @@ impl Entity for SymbolTableHeader {
 pub struct SymbolTable<A = Address> {
     // all known symbols
     symbols: Vec<SymbolEntry<A>>,
+    generations: Vec<u32>,
     // map from each original symbol table to its symbols
     indices: BTreeMap<SymbolIndex, Id<Symbol>>,
     // map of symbol names to known symbols
@@ -416,8 +420,21 @@ impl SymbolTable {
         let index = id.index();
 
         while self.symbols.len() < index {
-            self.free_ids.push(Id::from_index(self.symbols.len()));
             self.symbols.push(SymbolEntry::default());
+            self.generations.push(0);
+        }
+
+        if self.symbols.len() == index {
+            self.symbols.push(entry);
+            self.generations.push(id.generation());
+        } else {
+            self.symbols[index] = entry;
+            self.generations[index] = id.generation();
+        }
+
+        let entry = &self.symbols[index];
+        if !entry.is_valid() {
+            return;
         }
 
         self.names.entry(entry.symbol()).or_default().push(id);
@@ -426,8 +443,16 @@ impl SymbolTable {
         for &symbol_index in entry.indices() {
             self.indices.insert(symbol_index, id);
         }
+    }
 
-        self.symbols.push(entry);
+    fn rebuild_free_ids(&mut self) {
+        self.free_ids = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_valid())
+            .map(|(index, _)| Id::with_generation(index as u32, self.generations[index]))
+            .collect();
     }
 
     fn write_entries<P, D>(&self, mut put: P, mut delete: D) -> Result<(), EntityStorageError>
@@ -436,12 +461,14 @@ impl SymbolTable {
         D: FnMut(&Id<Symbol>) -> Result<(), EntityStorageError>,
     {
         for (index, entry) in self.symbols.iter().enumerate() {
-            let id = Id::<Symbol>::from_index(index);
-            if entry.is_valid() {
-                put(&id, entry)?;
-            } else {
-                delete(&id)?;
+            let generation = self.generations[index];
+            for previous_generation in 0..generation {
+                let previous = Id::<Symbol>::with_generation(index as u32, previous_generation);
+                delete(&previous)?;
             }
+
+            let id = Id::<Symbol>::with_generation(index as u32, generation);
+            put(&id, entry)?;
         }
 
         Ok(())
@@ -457,11 +484,11 @@ impl ProjectEntityFromStorage for SymbolTable {
         }
 
         let mut table = SymbolTable::new();
-
         for entry in storage.iter::<Id<Symbol>, SymbolEntry>()? {
             let (id, entry) = entry?;
             table.load_entry(id, entry);
         }
+        table.rebuild_free_ids();
 
         Ok(Some(table))
     }
@@ -500,7 +527,7 @@ impl PersistableProjectEntity for SymbolTable {
 
 #[derive(Clone)]
 pub struct SymbolEntryIter<'a, A = Address> {
-    ids: std::slice::Iter<'a, Id<Symbol>>,
+    ids: Iter<'a, Id<Symbol>>,
     symbols: &'a [SymbolEntry<A>],
 }
 
@@ -529,7 +556,7 @@ impl<'a, A> Iterator for SymbolEntryIter<'a, A> {
 impl<'a, A> ExactSizeIterator for SymbolEntryIter<'a, A> {}
 
 pub struct SymbolEntryIterMut<'a, A = Address> {
-    ids: std::slice::Iter<'a, Id<Symbol>>,
+    ids: Iter<'a, Id<Symbol>>,
     symbols: &'a mut [SymbolEntry<A>],
 }
 
@@ -595,11 +622,21 @@ where
     }
 
     pub fn get_by_id(&self, id: Id<Symbol>) -> Option<&SymbolEntry<A>> {
-        self.symbols.get(id.index())
+        let index = id.index();
+        if self.generations.get(index).copied()? != id.generation() {
+            return None;
+        }
+
+        self.symbols.get(index).filter(|entry| entry.is_valid())
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<Symbol>) -> Option<&mut SymbolEntry<A>> {
-        self.symbols.get_mut(id.index())
+        let index = id.index();
+        if self.generations.get(index).copied()? != id.generation() {
+            return None;
+        }
+
+        self.symbols.get_mut(index).filter(|entry| entry.is_valid())
     }
 
     pub fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, &SymbolEntry<A>)> {
@@ -719,6 +756,7 @@ where
         addresses: &mut BTreeMap<A, SmallVec<[Id<Symbol>; 2]>>,
         names: &mut SymbolMap<SmallVec<[Id<Symbol>; 2]>>,
         symbols: &mut Vec<SymbolEntry<A>>,
+        generations: &mut Vec<u32>,
         free_ids: &mut Vec<Id<Symbol>>,
         index: SymbolIndex,
         entry: SymbolEntry<A>,
@@ -743,10 +781,12 @@ where
         } else {
             let symbol_id = if let Some(free_id) = free_ids.pop() {
                 symbols[free_id.index()] = entry;
+                generations[free_id.index()] = free_id.generation();
                 free_id
             } else {
                 let id = Id::from_index(symbols.len());
                 symbols.push(entry);
+                generations.push(id.generation());
                 id
             };
 
@@ -776,6 +816,7 @@ where
                     &mut self.addresses,
                     &mut self.names,
                     &mut self.symbols,
+                    &mut self.generations,
                     &mut self.free_ids,
                     index,
                     symbol_entry,
@@ -803,6 +844,7 @@ where
                         &mut self.addresses,
                         &mut self.names,
                         &mut self.symbols,
+                        &mut self.generations,
                         &mut self.free_ids,
                         index,
                         symbol_entry,
@@ -828,7 +870,7 @@ where
             .enumerate()
             .filter(|(_, entry)| entry.is_valid())
             .map(|(i, entry)| {
-                let id = Id::from_index(i);
+                let id = Id::with_generation(i as u32, self.generations[i]);
                 (id, entry)
             })
     }
@@ -861,7 +903,7 @@ where
         range: R,
     ) -> impl Iterator<Item = (Id<Symbol>, &'a SymbolEntry<A>)> + 'a
     where
-        R: std::ops::RangeBounds<A>,
+        R: RangeBounds<A>,
     {
         self.addresses
             .range(range)
@@ -916,7 +958,9 @@ where
                 self.indices.remove(index);
             }
 
-            self.free_ids.push(id);
+            let next_id = id.next_generation();
+            self.generations[id.index()] = next_id.generation();
+            self.free_ids.push(next_id);
         }
 
         count
@@ -951,7 +995,9 @@ where
                 self.indices.remove(index);
             }
 
-            self.free_ids.push(id);
+            let next_id = id.next_generation();
+            self.generations[id.index()] = next_id.generation();
+            self.free_ids.push(next_id);
         }
 
         count
@@ -961,7 +1007,13 @@ where
         use std::collections::btree_map::Entry as AddrsEntry;
         use std::collections::hash_map::Entry as NamesEntry;
 
-        let Some(symbol_entry) = self.symbols.get_mut(id.index()) else {
+        let index = id.index();
+        if self.generations.get(index).copied() != Some(id.generation()) {
+            return false;
+        }
+
+        let Some(symbol_entry) = self.symbols.get_mut(index).filter(|entry| entry.is_valid())
+        else {
             return false;
         };
 
@@ -993,7 +1045,9 @@ where
 
         // mark as removed
         mem::take(symbol_entry);
-        self.free_ids.push(id);
+        let next_id = id.next_generation();
+        self.generations[index] = next_id.generation();
+        self.free_ids.push(next_id);
 
         true
     }
@@ -1067,8 +1121,11 @@ mod test {
         assert!(inserted3);
         assert_eq!(table.len(), 2);
 
-        // check that the reused ID is the same as the removed one
-        assert_eq!(id1, id3);
+        assert_eq!(id1.index(), id3.index());
+        assert_eq!(id1.generation() + 1, id3.generation());
+        assert!(table.get_by_id(id1).is_none());
+        assert!(!table.remove_by_id(id1));
+        assert_eq!(table.len(), 2);
 
         let (inserted4, id4) = table.insert_local(
             SymbolIndex::new(sel, 4),

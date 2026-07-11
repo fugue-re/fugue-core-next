@@ -112,7 +112,7 @@ impl Mips {
             _ => {}
         }
         let lid = LanguageId::new_with("MIPS", is_be, 32, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 

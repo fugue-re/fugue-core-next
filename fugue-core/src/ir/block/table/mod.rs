@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
+use std::fmt::{Debug as FmtDebug, Display};
 use std::sync::Arc;
 
+use anyhow::Error as AnyhowError;
 use iset::IntervalMap;
 use thiserror::Error;
 
@@ -35,6 +38,7 @@ struct CodeBlockIndex {
     bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     free_ids: Vec<Id<CodeBlock>>,
     live_entries: usize,
+    next_index: usize,
 }
 
 pub enum CodeBlockTable {
@@ -47,7 +51,7 @@ pub enum CodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Other(anyhow::Error),
+    Other(AnyhowError),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
@@ -55,16 +59,16 @@ pub enum CodeBlockTableError {
 impl CodeBlockTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::new(error))
+        Self::Other(AnyhowError::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+        M: FmtDebug + Display + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::msg(msg))
+        Self::Other(AnyhowError::msg(msg))
     }
 }
 
@@ -423,6 +427,34 @@ mod test {
     }
 
     #[test]
+    fn test_reused_slot_invalidates_removed_id() {
+        let mut table = table();
+
+        let first = table
+            .insert(Address::from(0x1000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        assert!(table.remove_by_id(first));
+        assert!(table.get_by_id(first).is_none());
+
+        let second = table
+            .insert(Address::from(0x2000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        assert_eq!(first.index(), second.index());
+        assert_eq!(first.generation() + 1, second.generation());
+        assert!(table.get_by_id(first).is_none());
+        assert_eq!(
+            table.get_by_id(second).unwrap().start(),
+            Address::from(0x2000)
+        );
+    }
+
+    #[test]
     fn test_overlapped() {
         let mut table = table();
 
@@ -536,7 +568,7 @@ mod test {
             })
             .unwrap();
 
-        assert_eq!([first.index(), second.index(), third.index()], [3, 1, 5]);
+        assert_eq!([first.index(), second.index(), third.index()], [5, 6, 7]);
     }
 
     #[cfg(feature = "sqlite")]

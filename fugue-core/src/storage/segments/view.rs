@@ -64,7 +64,7 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn space(&self) -> AddressSpaceId {
-        self.mapping.space()
+        self.start.space()
     }
 
     pub fn size(&self) -> u64 {
@@ -97,15 +97,25 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
-        self.mapping.mapping_hints()
+        self.mapping.mapping_hints().filter_map(|(address, hint)| {
+            let mapped = Address::new(self.space(), address.raw_address());
+            self.contains(mapped).then_some((mapped, hint))
+        })
     }
 
     pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
-        self.mapping.mapping_hint_at(addr)
+        let addr = addr.into();
+        self.contains(addr).then(|| {
+            self.mapping
+                .mapping_hint_at(Address::new(self.mapping.space(), addr.raw_address()))
+        })?
     }
 
     pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
-        self.mapping.function_hints()
+        self.mapping.function_hints().filter_map(|address| {
+            let mapped = Address::new(self.space(), address.raw_address());
+            self.contains(mapped).then_some(mapped)
+        })
     }
 
     pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<SegmentView<'a>> {

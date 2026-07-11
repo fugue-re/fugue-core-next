@@ -189,6 +189,7 @@ mod test {
     use crate::loader::shellcode::Shellcode;
 
     #[test]
+    #[ignore = "requires FUGUE_LANGUAGE_DIR"]
     fn test_arm_snippet() -> anyhow::Result<()> {
         let shellcode = Shellcode::new_with(
             "ARM:LE:32",

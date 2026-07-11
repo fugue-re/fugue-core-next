@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
@@ -643,8 +644,125 @@ impl RawAddressRangeSet {
             .map(|r| RawAddress::from(*r.start())..=RawAddress::from(*r.end()))
     }
 
+    pub fn range_count(&self) -> usize {
+        self.0.ranges().count()
+    }
+
+    pub fn span(&self) -> Option<RangeInclusive<RawAddress>> {
+        let mut ranges = self.ranges();
+        let first = ranges.next()?;
+        let start = *first.start();
+        let mut end = *first.end();
+
+        for range in ranges {
+            end = *range.end();
+        }
+
+        Some(start..=end)
+    }
+
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct AddressRangeSet {
+    spaces: BTreeMap<AddressSpaceId, RawAddressRangeSet>,
+}
+
+impl AddressRangeSet {
+    pub fn new() -> Self {
+        Self {
+            spaces: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, address: Address) -> bool {
+        self.spaces
+            .entry(address.space())
+            .or_default()
+            .insert(address.raw_address())
+    }
+
+    pub fn insert_range(&mut self, range: RangeInclusive<Address>) {
+        if range.start().space() != range.end().space() {
+            return;
+        }
+
+        self.spaces
+            .entry(range.start().space())
+            .or_default()
+            .insert_range(range.start().raw_address()..=range.end().raw_address());
+    }
+
+    pub fn insert_raw_range(
+        &mut self,
+        space: AddressSpaceId,
+        range: impl Into<RangeInclusive<RawAddress>>,
+    ) {
+        self.spaces.entry(space).or_default().insert_range(range);
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        let mut union = self.clone();
+
+        for (space, ranges) in &other.spaces {
+            let merged = union.spaces.entry(*space).or_default().union(ranges);
+            union.spaces.insert(*space, merged);
+        }
+
+        union
+    }
+
+    pub fn contains(&self, address: impl Into<Address>) -> bool {
+        let address = address.into();
+        self.spaces
+            .get(&address.space())
+            .is_some_and(|ranges| ranges.contains(address.raw_address()))
+    }
+
+    pub fn spaces(&self) -> impl Iterator<Item = (AddressSpaceId, &RawAddressRangeSet)> + '_ {
+        self.spaces.iter().map(|(space, ranges)| (*space, ranges))
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = RangeInclusive<Address>> + '_ {
+        self.spaces.iter().flat_map(|(space, ranges)| {
+            ranges.ranges().map(move |range| {
+                Address::new(*space, *range.start())..=Address::new(*space, *range.end())
+            })
+        })
+    }
+
+    pub fn range_count(&self) -> usize {
+        self.spaces
+            .values()
+            .map(RawAddressRangeSet::range_count)
+            .sum()
+    }
+
+    pub fn spanning_ranges(&self) -> Self {
+        let mut spanning = Self::new();
+
+        for (space, ranges) in &self.spaces {
+            if let Some(span) = ranges.span() {
+                spanning.insert_raw_range(*space, span);
+            }
+        }
+
+        spanning
+    }
+
+    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
+        self.spaces.iter().flat_map(|(space, ranges)| {
+            ranges
+                .iter()
+                .map(move |address| Address::new(*space, address))
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spaces.values().all(RawAddressRangeSet::is_empty)
     }
 }
 

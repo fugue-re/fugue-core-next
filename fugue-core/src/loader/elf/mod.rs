@@ -35,7 +35,9 @@ use crate::loader::{
     LoaderError,
 };
 use crate::storage::segments::mapping::SegmentMappingProvenance;
-use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
+use crate::types::attributes::{
+    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
+};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -232,7 +234,7 @@ impl<'a> Elf<'a> {
             BTreeMap::<RawAddress, SmallVec<[SymbolIndex; 1]>>::new();
         for (index, symbol) in &symbols {
             symbol_indices_by_offset
-                .entry(symbol.address.into())
+                .entry(symbol.address)
                 .or_default()
                 .push(*index);
         }
@@ -240,7 +242,7 @@ impl<'a> Elf<'a> {
         let mut space_by_index = BTreeMap::<SymbolIndex, ImageSpaceHandle>::new();
         for placement in &placements {
             let start = placement.address.offset();
-            let Some(last) = start.checked_add(placement.size.saturating_sub(1) as u64) else {
+            let Some(last) = start.checked_add(placement.size.saturating_sub(1)) else {
                 continue;
             };
             let covered = symbol_indices_by_offset
@@ -270,7 +272,7 @@ impl<'a> Elf<'a> {
 
         let layout = ImageLayout::new(banks, spaces);
 
-        let entry = entry.map(|entry| ImageAddress::in_default_space(entry));
+        let entry = entry.map(ImageAddress::in_default_space);
 
         let mut slf = Self {
             object,
@@ -294,16 +296,14 @@ impl<'a> Elf<'a> {
             slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
         }
 
+        slf.attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "elf");
+
         Ok(slf)
     }
 
     pub fn entry(&self) -> Option<RawAddress> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
         (addr != 0).then(|| (self.base - self.preferred_base) + addr)
-    }
-
-    pub fn convention(&self) -> Option<&'a str> {
-        None
     }
 
     pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
@@ -773,18 +773,18 @@ where
     }
 
     fn next_region(&mut self) -> Result<Option<ElfRegion<'data>>, LoaderError> {
-        if self.config.load_headers() {
-            if let Some(header) = self.headers.next() {
-                return Ok(Some(ElfRegion {
-                    name: Cow::Borrowed(header.name),
-                    address: header.address,
-                    size: header.size(),
-                    properties: SegmentProperties::PERM_READ,
-                    provenance: SegmentMappingProvenance::Section,
-                    file_offset: Some(header.file_offset),
-                    source: Some(header.source),
-                }));
-            }
+        if self.config.load_headers()
+            && let Some(header) = self.headers.next()
+        {
+            return Ok(Some(ElfRegion {
+                name: Cow::Borrowed(header.name),
+                address: header.address,
+                size: header.size(),
+                properties: SegmentProperties::PERM_READ,
+                provenance: SegmentMappingProvenance::Section,
+                file_offset: Some(header.file_offset),
+                source: Some(header.source),
+            }));
         }
 
         if self.is_object {
@@ -1072,13 +1072,13 @@ impl<'a> ElfImageSegments<'a> {
 
     fn image_segment(&self, segment: &'a ElfImageSegment) -> ImageSegment<'a> {
         let seg_start = segment.address.offset();
-        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
+        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1));
 
         let (mapping_hints, function_hints) = seg_last
             .map(|seg_last| {
                 let mapping_hints = self
                     .mapping_hints
-                    .range(RawAddress::from(seg_start)..=RawAddress::from(seg_last))
+                    .range(seg_start..=seg_last)
                     .map(|(addr, hint)| (*addr, hint.clone()))
                     .collect::<BTreeMap<RawAddress, ContextHint>>();
 
@@ -1088,12 +1088,12 @@ impl<'a> ElfImageSegments<'a> {
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
                     )
-                    .filter_map(|(_, entry)| {
+                    .filter(|(_, entry)| {
                         entry
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
-                            .then(|| entry.address().offset())
                     })
+                    .map(|(_, entry)| entry.address().offset())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
@@ -2232,6 +2232,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_exe() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -2262,6 +2263,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_headers_default_disabled() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
         let mut segments = elf.image_segments();
@@ -2276,6 +2278,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_headers_enabled() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new_with(
             BytesOrMapping::from_file("tests/ls.elf")?,
@@ -2308,6 +2311,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_dyn() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -2342,6 +2346,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_rel() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -2372,6 +2377,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_ko_rel() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -2402,6 +2408,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let mut attributes = AttributeMap::new();
         let image_base = RawAddress::new(0x4000_0000u64);
@@ -2440,6 +2447,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_arm_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let mut attributes = AttributeMap::new();
         let image_base = RawAddress::new(0x5000_0000u64);
@@ -2490,6 +2498,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_arm_relocation_mapping_hints() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/libipmi.so")?)?;
         let arch = elf.architecture();
@@ -2546,6 +2555,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_arm_jump_slot_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/libipmi.so")?)?;
         let (relocation_offset, expected_value) = with_elf!(
@@ -2611,6 +2621,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_overlapping_segments() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
 
@@ -2679,6 +2690,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_overlapping_segments_distinct_storage_spaces()
     -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
@@ -2709,6 +2721,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_overlapping_sections_distinct_content() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-sections.elf")?)?;
         let mut attributes = AttributeMap::new();
@@ -2747,6 +2760,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_image_writes_no_double_emit() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
 
@@ -2776,6 +2790,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_metadata_lazy() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::from_file_with("tests/ls.elf", AttributeMap::new())?;
         let meta = elf.metadata();
@@ -2791,6 +2806,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_elf_sparse_uninitialised() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
 

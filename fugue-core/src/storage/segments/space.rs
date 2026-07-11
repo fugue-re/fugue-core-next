@@ -283,10 +283,10 @@ impl AddressSpace {
             self.submaps.remove(iv);
 
             // preserve the portion before the rebuild range
-            if view.start() < range_start {
-                if let Some(left) = view.with_end(range_start) {
-                    self.submaps.insert(left.range(), left);
-                }
+            if view.start() < range_start
+                && let Some(left) = view.with_end(range_start)
+            {
+                self.submaps.insert(left.range(), left);
             }
             if view.last() > range_last {
                 // preserve the portion after the rebuild range

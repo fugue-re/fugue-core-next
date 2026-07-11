@@ -1,15 +1,32 @@
 use crate::ir::{Address, Insn, InsnTarget};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowGraph {
+    targets: Vec<FlowTarget>,
+}
+
+impl FlowGraph {
+    pub fn new(targets: impl Into<Vec<FlowTarget>>) -> Self {
+        Self {
+            targets: targets.into(),
+        }
+    }
+
+    pub fn targets(&self) -> &[FlowTarget] {
+        &self.targets
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FlowKind {
     Branch,
-    CBranch,
-    IBranch,
     Call,
-    ICall,
-    ServiceCall,
-    Return,
+    CBranch,
     Fall,
+    IBranch,
+    ICall,
+    Return,
+    ServiceCall,
     SwitchBranch,
     SwitchCall,
     TailCallBranch,

@@ -1,20 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
+use std::ops::ControlFlow;
 
 use super::{
     FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
 };
+use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::ir::{Address, AddressWithContext, FlowKind, FlowTarget, RawAddressRangeSet};
 use crate::lifter::ContextSet;
-use crate::project::Project;
+use crate::project::ProjectTransaction;
 use crate::storage::SegmentStorage;
 
 pub struct PartialFunctionWithContext {
-    pub config: FunctionRecoveryConfig,
-    pub context: FunctionBuilderContext,
-    pub function: PartialFunction,
+    config: FunctionRecoveryConfig,
+    context: FunctionBuilderContext,
+    function: PartialFunction,
 }
 
 pub(crate) struct CodeBlockStructuringContext<'a> {
@@ -22,6 +24,16 @@ pub(crate) struct CodeBlockStructuringContext<'a> {
     pub(crate) block_ends: &'a mut BTreeMap<Address, usize>,
     pub(crate) cut_points: &'a mut Vec<usize>,
     pub(crate) contexts: &'a BTreeMap<Address, ContextSet>,
+}
+
+struct FunctionBuilderAnalysis<'a, 'p> {
+    transaction: &'a mut ProjectTransaction<'p>,
+    translator: &'a mut Translator,
+    candidate: AddressWithContext,
+    token: &'a CancellationToken,
+    config: &'a FunctionRecoveryConfig,
+    initialisation_passes: &'a mut AnalysisGroup<FunctionBuilderContext>,
+    post_lifting_passes: &'a mut AnalysisGroup<PartialFunctionWithContext>,
 }
 
 #[derive(Default)]
@@ -109,18 +121,20 @@ impl FunctionBuilder {
 
     pub fn analyse(
         &mut self,
-        project: &mut Project,
+        transaction: &mut ProjectTransaction<'_>,
         translator: &mut Translator,
         candidate: impl Into<AddressWithContext>,
-    ) -> Result<PartialFunction, FunctionRecoveryError> {
-        self.context.analyse(
-            project,
+        token: &CancellationToken,
+    ) -> Result<ControlFlow<Cancelled, PartialFunction>, FunctionRecoveryError> {
+        self.context.analyse(FunctionBuilderAnalysis {
+            transaction,
             translator,
-            candidate,
-            &self.config,
-            &mut self.initialisation_passes,
-            &mut self.post_lifting_passes,
-        )
+            candidate: candidate.into(),
+            token,
+            config: &self.config,
+            initialisation_passes: &mut self.initialisation_passes,
+            post_lifting_passes: &mut self.post_lifting_passes,
+        })
     }
 
     pub fn avoids(&self) -> &RawAddressRangeSet {
@@ -241,7 +255,8 @@ impl FunctionBuilderContext {
         segments: &SegmentStorage,
         translator: &mut Translator,
         f: &mut PartialFunction,
-    ) {
+        token: &CancellationToken,
+    ) -> Result<(), Cancelled> {
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
         // create a "cheap" view over the containing segment and use that to avoid lookups for each
         // address read from.
@@ -253,6 +268,8 @@ impl FunctionBuilderContext {
 
         // This is the stage where we build blocks by collecting instructions and marking them.
         'outer: while let Some(candidate) = self.candidates.pop_front() {
+            token.check()?;
+
             let (block, mut context) = candidate.into_parts();
 
             // This ensures correct alignment, to address is correctly wrapped with respect to
@@ -296,6 +313,8 @@ impl FunctionBuilderContext {
             let mut offset = 0usize;
 
             '_inner: loop {
+                token.check()?;
+
                 let address = block + offset;
 
                 tracing::trace!("lifting at {address}");
@@ -396,6 +415,8 @@ impl FunctionBuilderContext {
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn contexts(&self) -> &BTreeMap<Address, ContextSet> {
@@ -439,15 +460,10 @@ impl FunctionBuilderContext {
         }
     }
 
-    pub fn analyse(
+    fn analyse(
         &mut self,
-        project: &mut Project,
-        translator: &mut Translator,
-        candidate: impl Into<AddressWithContext>,
-        config: &FunctionRecoveryConfig,
-        initialisation_passes: &mut AnalysisGroup<FunctionBuilderContext>,
-        post_lifting_passes: &mut AnalysisGroup<PartialFunctionWithContext>,
-    ) -> Result<PartialFunction, FunctionRecoveryError> {
+        analysis: FunctionBuilderAnalysis<'_, '_>,
+    ) -> Result<ControlFlow<Cancelled, PartialFunction>, FunctionRecoveryError> {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context
@@ -464,17 +480,22 @@ impl FunctionBuilderContext {
         // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
         // initialisation.
 
-        let mut candidate = candidate.into();
+        let mut candidate = analysis.candidate;
 
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
-        self.entry = candidate.address().into();
+        self.entry = candidate.address();
 
-        if config.use_segment_mapping_hints() {
+        if analysis.config.use_segment_mapping_hints() {
             // NOTE: this expect is safe because the entry address must be valid to reach this
             // point under normal usage.
-            let view = project.segments().view_at(self.entry).expect("valid entry");
+            let view = analysis
+                .transaction
+                .project()
+                .segments()
+                .view_at(self.entry)
+                .expect("valid entry");
 
             if let Some(hint) = view.mapping_hint_at(self.entry) {
                 if hint.is_data() {
@@ -493,40 +514,59 @@ impl FunctionBuilderContext {
         self.candidates.push_back(candidate);
 
         // Run the initialisation passes
-        initialisation_passes
-            .analyse_with(project, self)
+        analysis
+            .transaction
+            .analyse_with(analysis.initialisation_passes, self)
             .map_err(FunctionRecoveryError::InitialisationPass)?;
 
         let mut partial = PartialFunction::new(self.entry);
 
         loop {
-            let arch = project.arch();
-            let segments = project.segments();
+            if let Err(cancelled) = analysis.token.check() {
+                return Ok(ControlFlow::Break(cancelled));
+            }
 
-            self.lift_insns(arch, segments, translator, &mut partial);
+            let arch = analysis.transaction.project().arch();
+            let segments = analysis.transaction.project().segments();
+
+            if let Err(cancelled) = self.lift_insns(
+                arch,
+                segments,
+                analysis.translator,
+                &mut partial,
+                analysis.token,
+            ) {
+                return Ok(ControlFlow::Break(cancelled));
+            }
 
             if !partial.has_insns() {
                 tracing::debug!("no instructions lifted; invalid function");
                 return Err(FunctionRecoveryError::InvalidFunction);
             }
 
-            partial.structure_blocks(config, self)?;
+            partial.structure_blocks(analysis.config, self)?;
 
             let num_local_targets = self.local_targets.len();
 
             let mut function_with_context = PartialFunctionWithContext {
-                config: *config,
+                config: *analysis.config,
                 context: mem::take(self),
                 function: mem::take(&mut partial),
             };
 
             // Run post-lifting passes
-            let result = post_lifting_passes.analyse_with(project, &mut function_with_context);
+            let result = analysis
+                .transaction
+                .analyse_with(analysis.post_lifting_passes, &mut function_with_context);
 
             *self = function_with_context.context;
             partial = function_with_context.function;
 
             result.map_err(FunctionRecoveryError::PostLiftingPass)?;
+
+            if let Err(cancelled) = analysis.token.check() {
+                return Ok(ControlFlow::Break(cancelled));
+            }
 
             if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
                 // No new candidates were added, and no new local targets were discovered.
@@ -536,6 +576,6 @@ impl FunctionBuilderContext {
             }
         }
 
-        Ok(partial)
+        Ok(ControlFlow::Continue(partial))
     }
 }

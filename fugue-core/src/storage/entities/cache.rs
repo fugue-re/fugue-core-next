@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
+use rkyv::rancor::Error as RkyvError;
 
 use super::{
     Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
@@ -62,7 +63,7 @@ impl<E> Display for CachedRef<'_, E>
 where
     E: Entity + Display,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         self.0.fmt(f)
     }
 }
@@ -291,7 +292,7 @@ where
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
                     WriteBackAction::Insert(bytes) => {
-                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
+                        let entity = rkyv::from_bytes::<E, RkyvError>(&bytes)
                             .map_err(EntityStorageError::decode)?;
                         Ok(Some(self.admit(
                             key.clone(),
@@ -386,36 +387,14 @@ where
 
     fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
         self.storage.get_as::<K, E, _, _>(key, |bytes| {
-            let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes)
-                .map_err(EntityStorageError::decode)?;
+            let entity =
+                rkyv::from_bytes::<E, RkyvError>(bytes).map_err(EntityStorageError::decode)?;
             Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
     }
 
-    fn try_get_uncached(&self, key: &K) -> Result<Option<Arc<E>>, EntityStorageError> {
-        if let Some(cached) = self.entities.get(key) {
-            return Ok(Some(cached.value));
-        }
-
-        if let WriteSink::Worker(worker) = &self.sink {
-            let key_bytes = schema::make_key::<K, E>(key);
-            if let Some(pending) = worker.pending(&key_bytes) {
-                return match pending {
-                    WriteBackAction::Insert(bytes) => Ok(Some(Arc::new(
-                        rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
-                            .map_err(EntityStorageError::decode)?,
-                    ))),
-                    WriteBackAction::Remove => Ok(None),
-                };
-            }
-        }
-
-        Ok(self.fetch(key)?.map(|(entity, _)| Arc::new(entity)))
-    }
-
     fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        let encoded = rkyv::to_bytes::<RkyvError>(entity).map_err(EntityStorageError::encode)?;
         let weight = ByteWeighter::entry_weight(encoded.len());
 
         match &self.sink {
@@ -438,6 +417,23 @@ where
     K: EntityKey,
     E: MutableEntity<Key = K>,
 {
+    pub(crate) fn iter_disjoint_mut<'a>(
+        &'a self,
+        keys: impl IntoIterator<Item = K> + 'a,
+    ) -> impl Iterator<Item = CachedMut<'a, E>> + 'a {
+        keys.into_iter().filter_map(move |key| {
+            let current = self
+                .try_get(&key)
+                .unwrap_or_else(|error| error.into_fatal())?;
+
+            Some(CachedMut {
+                cache: self,
+                entity: current.into_arc(),
+                dirty: false,
+            })
+        })
+    }
+
     pub fn try_get_mut(&mut self, key: &K) -> Result<Option<CachedMut<'_, E>>, EntityStorageError> {
         let Some(current) = self.try_get(key)? else {
             return Ok(None);
@@ -453,25 +449,6 @@ where
     pub fn get_mut(&mut self, key: &K) -> Option<CachedMut<'_, E>> {
         self.try_get_mut(key)
             .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn get_disjoint_mut<'a>(
-        &'a mut self,
-        keys: impl IntoIterator<Item = K> + 'a,
-    ) -> impl Iterator<Item = CachedMut<'a, E>> + 'a {
-        let cache = &*self;
-
-        keys.into_iter().filter_map(move |key| {
-            let entity = cache
-                .try_get_uncached(&key)
-                .unwrap_or_else(|error| error.into_fatal())?;
-
-            Some(CachedMut {
-                cache,
-                entity,
-                dirty: false,
-            })
-        })
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = CachedMut<'_, E>> + '_ {

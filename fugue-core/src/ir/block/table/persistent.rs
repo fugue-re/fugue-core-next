@@ -42,9 +42,8 @@ impl CodeBlockTable {
     ) -> Result<Self, EntityStorageError> {
         let mut bounds =
             BTreeMap::<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>::new();
-        let mut free_ids = Vec::new();
         let mut live_entries = 0;
-        let mut expected = 0u32;
+        let mut next_index = 0usize;
 
         for entry in entries.try_iter()? {
             let (id, block) = entry?;
@@ -57,20 +56,16 @@ impl CodeBlockTable {
                 .or_default()
                 .insert(id);
 
-            let index = id.index() as u32;
-            while expected < index {
-                free_ids.push(Id::new(expected));
-                expected += 1;
-            }
-            expected = index + 1;
             live_entries += 1;
+            next_index = next_index.max(id.index() + 1);
         }
 
         Ok(Self {
             index: CodeBlockIndex {
                 bounds,
-                free_ids,
+                free_ids: Vec::new(),
                 live_entries,
+                next_index,
             },
             entries,
         })
@@ -89,8 +84,7 @@ impl CodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id
-            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let block = f(id, addr)?;
 
@@ -109,6 +103,8 @@ impl CodeBlockTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         self.entries.put(id, block);
@@ -184,7 +180,7 @@ impl CodeBlockTable {
         }
 
         self.entries.try_remove(&id)?;
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.index.live_entries -= 1;
 
         Ok(true)
@@ -220,7 +216,7 @@ impl CodeBlockTable {
 
             for id in id_set.iter() {
                 self.entries.try_remove(&id)?;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -282,7 +278,7 @@ impl CodeBlockTable {
 
             for id in matching {
                 self.entries.try_remove(&id)?;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -365,7 +361,7 @@ impl CodeBlockTable {
             .filter(move |(range, _)| *range.start() == raw)
             .flat_map(|(_, id_set)| id_set.iter());
 
-        Box::new(self.entries.get_disjoint_mut(ids))
+        Box::new(self.entries.iter_disjoint_mut(ids))
     }
 
     pub(crate) fn get_by_address_and_context_mut<'a>(
@@ -387,7 +383,7 @@ impl CodeBlockTable {
 
         Box::new(
             self.entries
-                .get_disjoint_mut(ids)
+                .iter_disjoint_mut(ids)
                 .filter(move |block| block.context() == context),
         )
     }
@@ -404,7 +400,7 @@ impl CodeBlockTable {
             .flat_map(move |bounds| bounds.values(raw..=raw))
             .flat_map(|id_set| id_set.iter());
 
-        Box::new(self.entries.get_disjoint_mut(ids))
+        Box::new(self.entries.iter_disjoint_mut(ids))
     }
 
     pub(crate) fn iter(&self) -> Iter<'_> {
@@ -449,14 +445,16 @@ mod test {
         }
 
         assert!(table.remove_by_id(ids[1]));
-        assert_eq!(table.index.free_ids, [ids[1]]);
+        assert_eq!(table.index.free_ids, [ids[1].next_generation()]);
 
         let reused = table
             .insert(Address::from(0x4000), |id, start| {
                 Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
             })
             .unwrap();
-        assert_eq!(reused, ids[1]);
+        assert_eq!(reused.index(), ids[1].index());
+        assert_eq!(reused.generation(), ids[1].generation() + 1);
+        assert!(table.get_by_id(ids[1]).is_none());
         assert!(table.index.free_ids.is_empty());
 
         let fresh = table

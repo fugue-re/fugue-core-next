@@ -26,6 +26,7 @@ impl CodeBlockTable {
                 bounds: BTreeMap::new(),
                 free_ids: Vec::new(),
                 live_entries: 0,
+                next_index: 0,
             },
             entries: Vec::new(),
         }
@@ -36,7 +37,10 @@ impl CodeBlockTable {
     }
 
     fn get_raw(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
-        self.entries.get(id.index())?.as_ref()
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|block| block.id() == id)
     }
 
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
@@ -44,8 +48,7 @@ impl CodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id
-            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let block = f(id, addr)?;
 
@@ -64,6 +67,8 @@ impl CodeBlockTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         let index = id.index();
@@ -89,7 +94,10 @@ impl CodeBlockTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<&mut CodeBlock> {
-        self.entries.get_mut(id.index())?.as_mut()
+        self.entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|block| block.id() == id)
     }
 
     pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
@@ -112,7 +120,7 @@ impl CodeBlockTable {
         }
 
         self.entries[id.index()] = None;
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.index.live_entries -= 1;
 
         true
@@ -140,7 +148,7 @@ impl CodeBlockTable {
 
             for id in id_set.iter() {
                 self.entries[id.index()] = None;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -194,7 +202,7 @@ impl CodeBlockTable {
 
         for id in matching {
             self.entries[id.index()] = None;
-            self.index.free_ids.push(id);
+            self.index.free_ids.push(id.next_generation());
             self.index.live_entries -= 1;
         }
 

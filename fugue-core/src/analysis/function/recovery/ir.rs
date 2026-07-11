@@ -12,8 +12,8 @@ use crate::lifter::{ContextSet, LifterError};
 use crate::storage::SegmentStorage;
 
 pub enum InsnEntry<'a> {
-    Vacant(VacantInsnEntry<'a>),
     Occupied(OccupiedInsnEntry<'a>),
+    Vacant(VacantInsnEntry<'a>),
 }
 
 pub struct VacantInsnEntry<'a> {
@@ -143,7 +143,7 @@ impl PartialCodeBlock {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialFunction {
     name: Option<Symbol>,
     entry: Address,

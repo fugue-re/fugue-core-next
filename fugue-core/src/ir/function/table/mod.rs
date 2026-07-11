@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
+use std::fmt::{Debug as FmtDebug, Display};
 use std::sync::Arc;
 
+use anyhow::Error as AnyhowError;
 use thiserror::Error;
 
 use crate::ir::{Address, Function, Id};
@@ -34,6 +37,7 @@ impl Entity for FunctionTableHeader {
 struct FunctionIndex {
     addresses: BTreeMap<Address, Id<Function>>,
     free_ids: Vec<Id<Function>>,
+    next_index: usize,
 }
 
 pub enum FunctionTable {
@@ -46,7 +50,7 @@ pub enum FunctionTableError {
     #[error("function to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Other(anyhow::Error),
+    Other(AnyhowError),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
@@ -54,16 +58,16 @@ pub enum FunctionTableError {
 impl FunctionTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::new(error))
+        Self::Other(AnyhowError::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+        M: FmtDebug + Display + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::msg(msg))
+        Self::Other(AnyhowError::msg(msg))
     }
 }
 
@@ -359,14 +363,17 @@ mod test {
 
         assert_eq!(table.len(), 2);
 
-        assert_eq!(func_id1, func_id3);
+        assert_eq!(func_id1.index(), func_id3.index());
+        assert_eq!(func_id1.generation() + 1, func_id3.generation());
+        assert!(table.get_by_id(func_id1).is_none());
+        assert_eq!(table.get_by_id(func_id3).unwrap().entry(), addr3);
 
         let func_id4 = table
             .insert(addr1, |id, entry| Ok(Function::new(id, entry)))
             .unwrap();
 
         assert_eq!(table.len(), 3);
-        assert_ne!(func_id4, func_id1);
+        assert_ne!(func_id4.index(), func_id1.index());
 
         assert!(table.remove_by_id(func_id2));
         assert_eq!(table.len(), 2);
@@ -476,7 +483,7 @@ mod test {
             })
             .unwrap();
 
-        assert_eq!([first.index(), second.index(), third.index()], [3, 1, 5]);
+        assert_eq!([first.index(), second.index(), third.index()], [5, 6, 7]);
     }
 
     #[test]

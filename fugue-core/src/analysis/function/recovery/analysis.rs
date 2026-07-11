@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::iter::repeat;
 use std::mem;
-use std::ops::RangeInclusive;
+use std::ops::{ControlFlow, RangeInclusive};
 use std::time::Instant;
 
 use itertools::{Itertools, MinMaxResult};
@@ -12,11 +12,15 @@ use super::{
     FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
     PartialFunctionWithContext, Translator,
 };
+use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
+use crate::engine::{Analyser, AnalyserProvider, AnalysisCx, Priority, Trigger};
 use crate::ir::{
-    Address, AddressWithContext, CodeBlockTable, FunctionTable, RawAddress, RawAddressRangeSet,
+    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable, RawAddress,
+    RawAddressRangeSet,
 };
-use crate::project::{Project, ProjectMut};
+use crate::project::{Project, ProjectTransaction};
+use crate::registry::{self, Registration};
 use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Confidence;
@@ -28,7 +32,38 @@ pub struct FunctionRecovery {
     structuring_passes: AnalysisGroup<FunctionStructuringContext>,
     commit_hook: Option<Box<dyn FunctionRecoveryCommitHook + 'static>>,
     pending_functions: BTreeMap<Address, PartialFunction>,
+    cancellation: CancellationToken,
+    progress: Progress,
 }
+
+type FunctionRecoveryExtensionFn = fn(&Project, &mut FunctionRecovery) -> Result<(), AnalysisError>;
+
+pub struct FunctionRecoveryExtension {
+    apply: FunctionRecoveryExtensionFn,
+    name: &'static str,
+}
+
+impl FunctionRecoveryExtension {
+    pub const fn new(name: &'static str, apply: FunctionRecoveryExtensionFn) -> Self {
+        Self { apply, name }
+    }
+
+    pub fn apply(
+        &self,
+        project: &Project,
+        recovery: &mut FunctionRecovery,
+    ) -> Result<(), AnalysisError> {
+        (self.apply)(project, recovery)
+    }
+}
+
+impl Registration for FunctionRecoveryExtension {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+registry::collect!(FunctionRecoveryExtension);
 
 #[derive(Default)]
 pub struct FunctionDiscoveryContext {
@@ -236,8 +271,8 @@ impl FunctionStructuringContext {
         let address = address.into();
         let mut existing = false;
 
-        existing |= insert_function(&mut self.functions, address, confidence);
-        existing |= insert_function(&mut self.new_functions, address, confidence);
+        existing |= FunctionRecovery::insert_function(&mut self.functions, address, confidence);
+        existing |= FunctionRecovery::insert_function(&mut self.new_functions, address, confidence);
 
         if !existing {
             // in case we have previously marked this function as committed or for removal
@@ -311,6 +346,8 @@ impl FunctionRecovery {
             structuring_passes: AnalysisGroup::new(),
             commit_hook: None,
             pending_functions: BTreeMap::new(),
+            cancellation: CancellationToken::default(),
+            progress: Progress::default(),
         }
     }
 
@@ -328,6 +365,18 @@ impl FunctionRecovery {
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
+        self.cancellation = token;
+    }
+
+    pub fn progress(&self) -> Progress {
+        self.progress.clone()
     }
 
     // global passes
@@ -391,46 +440,18 @@ impl FunctionRecovery {
     pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook + 'static) {
         self.commit_hook = Some(Box::new(hook));
     }
-}
 
-fn insert_function(
-    functions: &mut BTreeMap<Address, Confidence>,
-    address: Address,
-    confidence: Confidence,
-) -> bool {
-    use std::collections::btree_map::Entry;
-    let Entry::Vacant(entry) = functions
-        .entry(address)
-        .and_modify(|c| c.merge_max(confidence))
-    else {
-        return false;
-    };
-    entry.insert(confidence);
-    true
-}
+    pub fn build_analyser(project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+        let mut recovery = Self::new();
+        for extension in registry::iter::<FunctionRecoveryExtension>() {
+            extension.apply(project, &mut recovery)?;
+        }
 
-fn update_function(
-    functions: &mut BTreeMap<Address, Confidence>,
-    address: Address,
-    confidence: Confidence,
-) -> bool {
-    use std::collections::btree_map::Entry;
-    matches!(
-        functions
-            .entry(address)
-            .and_modify(|c| c.merge_max(confidence)),
-        Entry::Occupied(_)
-    )
-}
+        Ok(Box::new(recovery))
+    }
 
-impl AnalysisPass for FunctionRecovery {
-    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
-        tracing::debug!("starting function recovery");
-
-        let span = tracing::span!(Level::TRACE, "function-recovery");
-        let function_recovery_span = span.enter();
-
-        let t = Instant::now();
+    fn add_project_candidates(&mut self, project: &Project) -> Result<(), AnalysisError> {
+        self.cancellation.check()?;
 
         if let Some(entry) = project.entry() {
             tracing::debug!("entry point: {entry}");
@@ -443,6 +464,7 @@ impl AnalysisPass for FunctionRecovery {
                 .iter_by_address()
                 .filter(|(_, s)| s.is_function())
             {
+                self.cancellation.check()?;
                 tracing::debug!(
                     source = "symbol-table",
                     "function hint: {} (name: {})",
@@ -454,18 +476,136 @@ impl AnalysisPass for FunctionRecovery {
         }
 
         if self.config().use_segment_function_hints() {
-            // FIXME: function hints should be a view over the hints of a given
-            // mapping within a given address space, not the segment as a whole.
+            for hint in project.segments().function_hints() {
+                self.cancellation.check()?;
+                tracing::debug!(source = "segment", "function hint: {hint}");
+                self.add_candidate(hint);
+            }
         }
+
+        Ok(())
+    }
+
+    fn add_region_candidates(
+        &mut self,
+        project: &Project,
+        regions: &AddressRangeSet,
+    ) -> Result<(), AnalysisError> {
+        for range in regions.ranges() {
+            self.cancellation.check()?;
+            self.add_candidate(*range.start());
+        }
+
+        if self.config().use_symbol_table_function_hints() {
+            for (_, entry) in project
+                .symbols()
+                .iter_by_address()
+                .filter(|(_, s)| s.is_function())
+                .filter(|(_, entry)| regions.contains(entry.address()))
+            {
+                self.cancellation.check()?;
+                tracing::debug!(
+                    source = "symbol-table",
+                    "function hint: {} (name: {})",
+                    entry.address(),
+                    entry.symbol(),
+                );
+                self.add_candidate(entry.address());
+            }
+        }
+
+        if self.config().use_segment_function_hints() {
+            for hint in project
+                .segments()
+                .function_hints()
+                .filter(|hint| regions.contains(*hint))
+            {
+                self.cancellation.check()?;
+                tracing::debug!(source = "segment", "function hint: {hint}");
+                self.add_candidate(hint);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn insert_function(
+        functions: &mut BTreeMap<Address, Confidence>,
+        address: Address,
+        confidence: Confidence,
+    ) -> bool {
+        use std::collections::btree_map::Entry;
+        let Entry::Vacant(entry) = functions
+            .entry(address)
+            .and_modify(|c| c.merge_max(confidence))
+        else {
+            return false;
+        };
+        entry.insert(confidence);
+        true
+    }
+
+    fn update_function(
+        functions: &mut BTreeMap<Address, Confidence>,
+        address: Address,
+        confidence: Confidence,
+    ) -> bool {
+        use std::collections::btree_map::Entry;
+        matches!(
+            functions
+                .entry(address)
+                .and_modify(|c| c.merge_max(confidence)),
+            Entry::Occupied(_)
+        )
+    }
+}
+
+impl FunctionRecovery {
+    pub fn analyse_transaction(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), AnalysisError> {
+        self.add_project_candidates(transaction.project())?;
+        self.analyse_candidates(transaction)
+    }
+
+    fn analyse_regions(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &AddressRangeSet,
+    ) -> Result<(), AnalysisError> {
+        if transaction.project().functions().is_empty() {
+            self.add_project_candidates(transaction.project())?;
+        } else {
+            self.add_region_candidates(transaction.project(), regions)?;
+        }
+
+        self.analyse_candidates(transaction)
+    }
+
+    fn analyse_candidates(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), AnalysisError> {
+        tracing::debug!("starting function recovery");
+
+        let span = tracing::span!(Level::TRACE, "function-recovery");
+        let function_recovery_span = span.enter();
+
+        let t = Instant::now();
+        self.progress.reset();
+        self.progress.set_message("recovering functions");
+        self.progress.set_total(self.candidates.len() as u64);
 
         // global state
         let mut failures = BTreeSet::new();
-        let mut functions = project
+        let mut functions = transaction
+            .project()
             .functions()
             .addresses()
             .zip(repeat(Confidence::certain()))
             .collect::<BTreeMap<_, _>>();
-        let mut translator = Translator::new(project);
+        let mut translator = Translator::new(transaction.project());
 
         // per pass state
         let mut new_functions = BTreeMap::new();
@@ -473,11 +613,17 @@ impl AnalysisPass for FunctionRecovery {
         tracing::debug!("existing functions: {}", functions.len());
 
         loop {
+            self.cancellation.check()?;
+
             while let Some(candidate) = self.candidates.pop_front() {
+                self.cancellation.check()?;
+                self.progress.advance(1);
+
                 let address = candidate.address();
                 let confidence = Confidence::certain();
 
-                if !project
+                if !transaction
+                    .project()
                     .segments()
                     .space_contains_segment(address.space(), address)
                 {
@@ -495,8 +641,8 @@ impl AnalysisPass for FunctionRecovery {
                     continue;
                 }
 
-                if update_function(&mut functions, address, confidence)
-                    || update_function(&mut new_functions, address, confidence)
+                if Self::update_function(&mut functions, address, confidence)
+                    || Self::update_function(&mut new_functions, address, confidence)
                 {
                     tracing::trace!("skipping {address}: already analysed");
                     continue;
@@ -506,8 +652,14 @@ impl AnalysisPass for FunctionRecovery {
                     "analysing function candidate at {candidate} (confidence: {confidence})"
                 );
 
-                let function = match self.builder.analyse(project, &mut translator, candidate) {
-                    Ok(f) => f,
+                let function = match self.builder.analyse(
+                    transaction,
+                    &mut translator,
+                    candidate,
+                    &self.cancellation,
+                ) {
+                    Ok(ControlFlow::Continue(f)) => f,
+                    Ok(ControlFlow::Break(cancelled)) => return Err(cancelled.into()),
                     Err(e) => {
                         failures.insert(address);
                         tracing::trace!("failed to analyse {address}: {e}");
@@ -519,24 +671,18 @@ impl AnalysisPass for FunctionRecovery {
 
                 if self
                     .commit_hook
-                    .should_commit(project, &commit_context)
+                    .should_commit(transaction.project(), &commit_context)
                     .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
                 {
                     tracing::debug!("committing function at {address}");
 
-                    let ProjectMut {
-                        functions: ftable,
-                        blocks: cbtable,
-                        ..
-                    } = project.fields_mut();
-
                     let function = commit_context.into_function();
 
-                    if let Err(e) = function.commit(ftable, cbtable) {
+                    if let Err(e) = transaction.add_function(function) {
                         tracing::debug!("failed to commit function at {address}: {e}");
 
-                        new_functions.into_iter().for_each(|(function, address)| {
-                            insert_function(&mut functions, function, address);
+                        new_functions.into_iter().for_each(|(address, confidence)| {
+                            Self::insert_function(&mut functions, address, confidence);
                         });
 
                         return Err(AnalysisError::pass_failed("function-recovery", e));
@@ -558,8 +704,8 @@ impl AnalysisPass for FunctionRecovery {
                         .filter(|candidate| {
                             let start = candidate.address();
                             let confidence = Confidence::certain();
-                            !update_function(&mut functions, start, confidence)
-                                && !update_function(&mut functions, start, confidence)
+                            !Self::update_function(&mut functions, start, confidence)
+                                && !Self::update_function(&mut new_functions, start, confidence)
                                 && !failures.contains(&start)
                         })
                         .cloned(),
@@ -568,7 +714,7 @@ impl AnalysisPass for FunctionRecovery {
 
             // flush pass functions
             new_functions.iter().for_each(|(&address, &confidence)| {
-                insert_function(&mut functions, address, confidence);
+                Self::insert_function(&mut functions, address, confidence);
             });
 
             // perform a restructuring pass over existing functions, which may split
@@ -590,9 +736,8 @@ impl AnalysisPass for FunctionRecovery {
                 removed_functions: BTreeSet::new(),
             };
 
-            let result = self
-                .structuring_passes
-                .analyse_with(project, &mut context)
+            let result = transaction
+                .analyse_with(&mut self.structuring_passes, &mut context)
                 .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
 
             if let Err(e) = result {
@@ -607,25 +752,7 @@ impl AnalysisPass for FunctionRecovery {
                     continue;
                 }
 
-                let ProjectMut {
-                    functions: ftable,
-                    blocks: cbtable,
-                    ..
-                } = project.fields_mut();
-
-                let Some(f) = ftable.get_by_address(f) else {
-                    continue;
-                };
-
-                for (_addr, bid) in f.blocks() {
-                    cbtable.remove_by_id(bid);
-                }
-
-                let fid = f.id();
-
-                let _ = f;
-
-                ftable.remove_by_id(fid);
+                transaction.remove_function(f);
             }
 
             // commit any functions that were forced during restructuring
@@ -637,13 +764,7 @@ impl AnalysisPass for FunctionRecovery {
 
                 tracing::debug!("committing pending function at {f}");
 
-                let ProjectMut {
-                    functions: ftable,
-                    blocks: cbtable,
-                    ..
-                } = project.fields_mut();
-
-                if let Err(e) = function.commit(ftable, cbtable) {
+                if let Err(e) = transaction.add_function(function) {
                     tracing::debug!("failed to commit function at {f}: {e}");
 
                     return Err(AnalysisError::pass_failed("function-recovery", e));
@@ -655,6 +776,7 @@ impl AnalysisPass for FunctionRecovery {
                 "performing {} candidate discovery pass(es)",
                 self.discovery_passes.len()
             );
+            self.cancellation.check()?;
 
             let mut context = FunctionDiscoveryContext {
                 config: context.config,
@@ -665,9 +787,8 @@ impl AnalysisPass for FunctionRecovery {
                 new_functions: context.new_functions,
             };
 
-            let result = self
-                .discovery_passes
-                .analyse_with(project, &mut context)
+            let result = transaction
+                .analyse_with(&mut self.discovery_passes, &mut context)
                 .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
 
             self.candidates = context.candidates;
@@ -681,19 +802,15 @@ impl AnalysisPass for FunctionRecovery {
             if self.candidates.is_empty() {
                 break;
             }
+            self.progress
+                .set_total(self.progress.done() + self.candidates.len() as u64);
         }
 
         if self.config().commit_pending_functions() {
-            let ProjectMut {
-                functions: ftable,
-                blocks: cbtable,
-                ..
-            } = project.fields_mut();
-
             for (address, function) in mem::take(&mut self.pending_functions) {
                 tracing::debug!("committing pending function at {address}");
 
-                if let Err(e) = function.commit(ftable, cbtable) {
+                if let Err(e) = transaction.add_function(function) {
                     tracing::debug!("failed to commit function at {address}: {e}");
 
                     return Err(AnalysisError::pass_failed("function-recovery", e));
@@ -713,7 +830,52 @@ impl AnalysisPass for FunctionRecovery {
             elapsed.as_secs(),
             elapsed.as_millis(),
         );
+        self.progress.clear_message();
 
         Ok(())
     }
+}
+
+impl AnalysisPass for FunctionRecovery {
+    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+        let mut transaction = project.transaction("function recovery");
+        let result = self.analyse_transaction(&mut transaction);
+        transaction.commit();
+        result
+    }
+}
+
+impl Analyser for FunctionRecovery {
+    fn name(&self) -> &'static str {
+        "function-recovery"
+    }
+
+    fn trigger(&self) -> Trigger {
+        Trigger::BytesMapped
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::DISCOVERY
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        let _ = project;
+        true
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        self.set_cancellation_token(cx.cancellation().clone());
+        self.progress = cx.progress().clone();
+
+        self.analyse_regions(transaction, regions)
+    }
+}
+
+crate::registry::submit! {
+    AnalyserProvider::new("function-recovery", FunctionRecovery::build_analyser)
 }

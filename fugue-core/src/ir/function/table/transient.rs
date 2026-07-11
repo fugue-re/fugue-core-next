@@ -21,6 +21,7 @@ impl FunctionTable {
             index: FunctionIndex {
                 addresses: BTreeMap::new(),
                 free_ids: Vec::new(),
+                next_index: 0,
             },
             entries: Vec::new(),
         }
@@ -47,7 +48,7 @@ impl FunctionTable {
         }
 
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::new(self.index.addresses.len() as u32));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let function = f(id, addr)?;
 
@@ -59,6 +60,8 @@ impl FunctionTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         let index = id.index();
@@ -71,7 +74,10 @@ impl FunctionTable {
     }
 
     pub fn get_by_id(&self, id: Id<Function>) -> Option<&Function> {
-        self.entries.get(id.index())?.as_ref()
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|function| function.id() == id)
     }
 
     pub fn get_by_address(&self, addr: Address) -> Option<&Function> {
@@ -80,7 +86,10 @@ impl FunctionTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<&mut Function> {
-        self.entries.get_mut(id.index())?.as_mut()
+        self.entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|function| function.id() == id)
     }
 
     pub fn get_by_address_mut(&mut self, addr: Address) -> Option<&mut Function> {
@@ -110,7 +119,7 @@ impl FunctionTable {
         };
 
         self.index.addresses.remove(&function.entry());
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
 
         true
     }
@@ -123,7 +132,7 @@ impl FunctionTable {
         if let Some(slot) = self.entries.get_mut(id.index()) {
             *slot = None;
         }
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
 
         true
     }

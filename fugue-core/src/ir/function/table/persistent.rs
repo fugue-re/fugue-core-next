@@ -34,25 +34,19 @@ impl FunctionTable {
         entries: EntityCache<Id<Function>, Function>,
     ) -> Result<Self, EntityStorageError> {
         let mut addresses = BTreeMap::new();
-        let mut free_ids = Vec::new();
-        let mut expected = 0u32;
+        let mut next_index = 0usize;
 
         for entry in entries.try_iter()? {
             let (id, function) = entry?;
             addresses.insert(function.entry(), id);
-
-            let index = id.index() as u32;
-            while expected < index {
-                free_ids.push(Id::new(expected));
-                expected += 1;
-            }
-            expected = index + 1;
+            next_index = next_index.max(id.index() + 1);
         }
 
         Ok(Self {
             index: FunctionIndex {
                 addresses,
-                free_ids,
+                free_ids: Vec::new(),
+                next_index,
             },
             entries,
         })
@@ -83,7 +77,7 @@ impl FunctionTable {
         }
 
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::new(self.index.addresses.len() as u32));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let function = f(id, addr)?;
 
@@ -95,6 +89,8 @@ impl FunctionTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         self.entries.put(id, function);
@@ -208,7 +204,7 @@ impl FunctionTable {
         };
 
         self.index.addresses.remove(&addr);
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.entries.try_remove(&id)?;
 
         Ok(true)
@@ -227,7 +223,7 @@ impl FunctionTable {
             return Ok(false);
         };
 
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.entries.try_remove(&id)?;
 
         Ok(true)
@@ -296,14 +292,16 @@ mod test {
         assert_eq!([id0.index(), id1.index(), id2.index()], [0, 1, 2]);
 
         assert!(table.remove_by_address(Address::from(0x2000)));
-        assert_eq!(table.index.free_ids, [id1]);
+        assert_eq!(table.index.free_ids, [id1.next_generation()]);
 
         let reused = table
             .insert(Address::from(0x4000), |id, entry| {
                 Ok(Function::new(id, entry))
             })
             .unwrap();
-        assert_eq!(reused, id1);
+        assert_eq!(reused.index(), id1.index());
+        assert_eq!(reused.generation(), id1.generation() + 1);
+        assert!(table.get_by_id(id1).is_none());
         assert!(table.index.free_ids.is_empty());
 
         let fresh = table

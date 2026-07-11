@@ -21,9 +21,10 @@ impl<'a> LoadableAnalysers for PeAnalysers<'a> {
     ) -> Result<FunctionRecovery, AnalysisError> {
         let mut analyser = FunctionRecovery::new_with(config);
         let arch = self.pe.architecture();
-        let context = AnalysisContext::new(self.pe, arch, self.pe.convention());
+        let platform = self.pe.platform();
+        let context = AnalysisContext::new(self.pe, arch, platform);
 
-        context.configure_function_recovery(&mut analyser)?;
+        context.apply_function_recovery_extensions(&mut analyser)?;
 
         Ok(analyser)
     }

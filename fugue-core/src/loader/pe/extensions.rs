@@ -10,6 +10,7 @@ use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::pe::PeFileRepr;
 use crate::loader::{ImageSegmentContents, LoaderError, Pe};
+use crate::platform::{CallingConvention, Platform};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
@@ -100,7 +101,7 @@ impl<'a> ImageContext<'a> {
         resolver: &ArchResolver,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
-        (resolver.resolve_architecture)(self, source)
+        resolver.resolve_architecture(self, source)
     }
 }
 
@@ -110,6 +111,23 @@ type ArchResolveFn =
 pub struct ArchResolver {
     pub name: &'static str,
     pub resolve_architecture: ArchResolveFn,
+}
+
+impl ArchResolver {
+    pub const fn new(name: &'static str, resolve_architecture: ArchResolveFn) -> Self {
+        Self {
+            name,
+            resolve_architecture,
+        }
+    }
+
+    pub fn resolve_architecture(
+        &self,
+        context: &ImageContext<'_>,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<Arch>, LoaderError> {
+        (self.resolve_architecture)(context, source)
+    }
 }
 
 impl Registration for ArchResolver {
@@ -167,16 +185,12 @@ impl ArchResolver {
 pub struct AnalysisContext<'a> {
     pe: &'a Pe<'a>,
     arch: Arch,
-    convention: Option<&'a str>,
+    platform: Platform,
 }
 
 impl<'a> AnalysisContext<'a> {
-    pub(crate) fn new(pe: &'a Pe<'a>, arch: Arch, convention: Option<&'a str>) -> Self {
-        Self {
-            pe,
-            arch,
-            convention,
-        }
+    pub(crate) fn new(pe: &'a Pe<'a>, arch: Arch, platform: Platform) -> Self {
+        Self { pe, arch, platform }
     }
 
     pub fn pe(&self) -> &'a Pe<'a> {
@@ -187,36 +201,54 @@ impl<'a> AnalysisContext<'a> {
         &self.arch
     }
 
-    pub fn convention(&self) -> Option<&'a str> {
-        self.convention
+    pub fn platform(&self) -> &Platform {
+        &self.platform
     }
 
-    pub fn configure_function_recovery(
+    pub fn calling_convention(&self) -> CallingConvention {
+        self.platform.calling_convention()
+    }
+
+    pub fn apply_function_recovery_extensions(
         &self,
         recovery: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
         for handler in registry::iter::<FunctionRecoveryHandler>() {
-            self.configure_function_recovery_with(handler, recovery)?;
+            self.apply_function_recovery_extension(handler, recovery)?;
         }
 
         Ok(())
     }
 
-    pub fn configure_function_recovery_with(
+    pub fn apply_function_recovery_extension(
         &self,
         handler: &FunctionRecoveryHandler,
         recovery: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        (handler.configure_function_recovery)(self, recovery)
+        handler.apply(self, recovery)
     }
 }
 
-type FunctionRecoveryConfigureFn =
+type FunctionRecoveryHandlerFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
 pub struct FunctionRecoveryHandler {
     pub name: &'static str,
-    pub configure_function_recovery: FunctionRecoveryConfigureFn,
+    pub apply: FunctionRecoveryHandlerFn,
+}
+
+impl FunctionRecoveryHandler {
+    pub const fn new(name: &'static str, apply: FunctionRecoveryHandlerFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(
+        &self,
+        context: &AnalysisContext<'_>,
+        recovery: &mut FunctionRecovery,
+    ) -> Result<(), AnalysisError> {
+        (self.apply)(context, recovery)
+    }
 }
 
 impl Registration for FunctionRecoveryHandler {
@@ -312,7 +344,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
     }
 
     fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
-        (handler.apply_relocation)(self)
+        handler.apply_relocation(self)
     }
 }
 
@@ -321,6 +353,22 @@ type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, Load
 pub struct RelocationHandler {
     pub name: &'static str,
     pub apply_relocation: RelocationApplyFn,
+}
+
+impl RelocationHandler {
+    pub const fn new(name: &'static str, apply_relocation: RelocationApplyFn) -> Self {
+        Self {
+            name,
+            apply_relocation,
+        }
+    }
+
+    pub fn apply_relocation(
+        &self,
+        context: &mut RelocationContext<'_, '_>,
+    ) -> Result<bool, LoaderError> {
+        (self.apply_relocation)(context)
+    }
 }
 
 impl Registration for RelocationHandler {

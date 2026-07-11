@@ -1,5 +1,7 @@
 use std::borrow::Borrow;
+use std::error::Error as StdError;
 
+use anyhow::Error as AnyhowError;
 use downcast_rs::{Downcast, impl_downcast};
 use indexmap::IndexMap;
 use thiserror::Error;
@@ -7,9 +9,11 @@ use uuid::Uuid;
 
 use crate::project::Project;
 
+pub mod control;
 pub mod function;
 
 pub mod core {
+    pub use super::control::{CancellationToken, Cancelled, Progress};
     pub use super::function::recovery::{
         FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError,
     };
@@ -17,14 +21,16 @@ pub mod core {
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
+    #[error(transparent)]
+    Cancelled(#[from] control::Cancelled),
     #[error("analysis pass forms a cyclic dependency: {0} -> {1}")]
     CyclicDependency(String, String),
+    #[error("analysis pass configuration failed: {0}")]
+    PassConfigurationFailed(String, AnyhowError),
+    #[error("analysis pass failed: {0}")]
+    PassFailed(String, AnyhowError),
     #[error("analysis pass not found: {0}")]
     PassNotFound(String),
-    #[error("analysis pass configuration failed: {0}")]
-    PassConfigurationFailed(String, anyhow::Error),
-    #[error("analysis pass failed: {0}")]
-    PassFailed(String, anyhow::Error),
 }
 
 impl AnalysisError {
@@ -34,14 +40,14 @@ impl AnalysisError {
 
     pub fn pass_failed<E>(name: impl Into<String>, error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
         AnalysisError::PassFailed(name.into(), error.into())
     }
 
     pub fn pass_configuration_failed<E>(name: impl Into<String>, error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
         AnalysisError::PassConfigurationFailed(name.into(), error.into())
     }
@@ -51,7 +57,7 @@ pub type NoState = ();
 pub type BoxedAnalysisPass<S = NoState> = Box<dyn AnalysisPass<S> + 'static>;
 
 pub struct AnalysisManager<S = NoState> {
-    passes: IndexMap<String, Box<dyn AnalysisPass<S> + 'static>>,
+    passes: IndexMap<String, BoxedAnalysisPass<S>>,
 }
 
 impl<S> Default for AnalysisManager<S>
@@ -82,7 +88,7 @@ where
         T: AnalysisPass<S>,
     {
         self.get_boxed_pass(name)
-            .and_then(|pass| pass.as_ref().downcast_ref::<T>())
+            .and_then(|pass| pass.downcast_ref::<T>())
     }
 
     pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<S>> {
@@ -94,7 +100,7 @@ where
         T: AnalysisPass<S>,
     {
         self.get_boxed_pass_mut(name)
-            .and_then(|pass| pass.as_mut().downcast_mut::<T>())
+            .and_then(|pass| pass.downcast_mut::<T>())
     }
 
     pub fn get_boxed_pass_mut(
@@ -174,7 +180,7 @@ impl AnalysisManager {
     }
 }
 
-pub trait AnalysisPass<S = NoState>: Downcast {
+pub trait AnalysisPass<S = NoState>: Downcast + Send {
     fn analyse(&mut self, #[allow(unused)] project: &mut Project) -> Result<(), AnalysisError> {
         unimplemented!(
             "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
@@ -202,7 +208,7 @@ impl_downcast!(AnalysisPass<S>);
 
 impl<S, F> AnalysisPass<S> for F
 where
-    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError> + 'static,
+    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError> + Send + 'static,
     S: 'static,
 {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
@@ -210,13 +216,13 @@ where
     }
 }
 
-pub trait AnalysisCondition<S> {
+pub trait AnalysisCondition<S>: Send {
     fn evaluate(&mut self, state: &mut S) -> bool;
 }
 
 impl<F, S> AnalysisCondition<S> for F
 where
-    F: FnMut(&mut S) -> bool,
+    F: FnMut(&mut S) -> bool + Send,
 {
     fn evaluate(&mut self, state: &mut S) -> bool {
         self(state)
@@ -235,7 +241,7 @@ impl<S> AnalysisCondition<S> for usize {
 }
 
 pub struct AnalysisGroup<S = NoState> {
-    passes: IndexMap<String, Box<dyn AnalysisPass<S> + 'static>>,
+    passes: IndexMap<String, BoxedAnalysisPass<S>>,
 }
 
 impl<S, T> FromIterator<T> for AnalysisGroup<S>
@@ -281,7 +287,7 @@ where
         let prefix = prefix.into();
         self.passes.extend(passes.into_iter().map(|pass| {
             let name = format!("{prefix}-{}", Uuid::now_v7().as_hyphenated());
-            (name, Box::new(pass) as Box<dyn AnalysisPass<S>>)
+            (name, Box::new(pass) as BoxedAnalysisPass<S>)
         }));
     }
 
@@ -294,7 +300,7 @@ where
         T: AnalysisPass<S>,
     {
         self.get_boxed_pass(name)
-            .and_then(|pass| pass.as_ref().downcast_ref::<T>())
+            .and_then(|pass| pass.downcast_ref::<T>())
     }
 
     pub fn get_boxed_pass_mut(
@@ -309,7 +315,7 @@ where
         T: AnalysisPass<S>,
     {
         self.get_boxed_pass_mut(name)
-            .and_then(|pass| pass.as_mut().downcast_mut::<T>())
+            .and_then(|pass| pass.downcast_mut::<T>())
     }
 
     pub fn insert_after(
@@ -391,7 +397,7 @@ where
 }
 
 pub struct IteratedAnalysis<S = NoState> {
-    pass: Box<dyn AnalysisPass<S> + 'static>,
+    pass: BoxedAnalysisPass<S>,
     condition: Box<dyn AnalysisCondition<S> + 'static>,
 }
 
@@ -421,14 +427,14 @@ where
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_ref().downcast_ref::<T>()
+        self.pass.downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_mut().downcast_mut::<T>()
+        self.pass.downcast_mut::<T>()
     }
 
     pub fn condition(&self) -> &(dyn AnalysisCondition<S> + 'static) {
@@ -461,7 +467,7 @@ where
 }
 
 pub struct ConditionalAnalysis<S = NoState> {
-    pass: Box<dyn AnalysisPass<S> + 'static>,
+    pass: BoxedAnalysisPass<S>,
     condition: Box<dyn AnalysisCondition<S> + 'static>,
 }
 
@@ -491,14 +497,14 @@ where
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_ref().downcast_ref::<T>()
+        self.pass.downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_mut().downcast_mut::<T>()
+        self.pass.downcast_mut::<T>()
     }
 
     pub fn condition(&self) -> &(dyn AnalysisCondition<S> + 'static) {
@@ -531,13 +537,13 @@ where
 }
 
 pub struct StatefulAnalysis<S = NoState> {
-    pass: Box<dyn AnalysisPass<S> + 'static>,
+    pass: BoxedAnalysisPass<S>,
     state: S,
 }
 
 impl<S> StatefulAnalysis<S>
 where
-    S: 'static,
+    S: Send + 'static,
 {
     pub fn new(pass: impl AnalysisPass<S> + 'static, state: S) -> Self {
         StatefulAnalysis {
@@ -558,14 +564,14 @@ where
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_ref().downcast_ref::<T>()
+        self.pass.downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_mut().downcast_mut::<T>()
+        self.pass.downcast_mut::<T>()
     }
 
     pub fn state(&self) -> &S {
@@ -582,7 +588,7 @@ where
 // require `S` to be `NoState` as well.
 impl<S> AnalysisPass for StatefulAnalysis<S>
 where
-    S: 'static,
+    S: Send + 'static,
 {
     fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
         self.pass.analyse_with(project, &mut self.state)
@@ -590,7 +596,7 @@ where
 }
 
 pub struct OneShotAnalysis<S = NoState> {
-    pass: Box<dyn AnalysisPass<S> + 'static>,
+    pass: BoxedAnalysisPass<S>,
     executed: bool,
 }
 
@@ -617,14 +623,14 @@ where
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_ref().downcast_ref::<T>()
+        self.pass.downcast_ref::<T>()
     }
 
     pub fn pass_mut<T>(&mut self) -> Option<&mut T>
     where
         T: AnalysisPass<S>,
     {
-        self.pass.as_mut().downcast_mut::<T>()
+        self.pass.downcast_mut::<T>()
     }
 
     pub fn has_executed(&self) -> bool {
@@ -674,6 +680,7 @@ where
     fn with_state(self, state: S) -> StatefulAnalysis<S>
     where
         Self: AnalysisPass<S> + Sized + 'static,
+        S: Send,
     {
         StatefulAnalysis::new(self, state)
     }
@@ -698,6 +705,7 @@ mod test {
     use super::*;
 
     #[test]
+    #[ignore = "requires local language data and binary fixtures"]
     fn test_analysis_passes() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file("tests/ls.elf")?;
 

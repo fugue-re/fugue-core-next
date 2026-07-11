@@ -635,8 +635,11 @@ where
     }
 }
 
+type OutMapFn<'a> = dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a;
+type OutMapPairFn<'a> = dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a;
+
 pub struct OutMapper<'a> {
-    f: Box<dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a>,
+    f: Box<OutMapFn<'a>>,
 }
 
 impl<'a> OutMapper<'a> {
@@ -655,7 +658,7 @@ impl<'a> OutMapper<'a> {
 }
 
 pub struct OutMapper2<'a> {
-    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a>,
+    f: Box<OutMapPairFn<'a>>,
 }
 
 impl<'a> OutMapper2<'a> {

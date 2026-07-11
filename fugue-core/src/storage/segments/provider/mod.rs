@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::num::TryFromIntError;
 use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
@@ -48,14 +49,14 @@ impl SegmentStorageProviderId {
     }
 }
 
-impl std::fmt::Display for SegmentStorageProviderId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for SegmentStorageProviderId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)
     }
 }
 
 impl TryFrom<usize> for SegmentStorageProviderId {
-    type Error = std::num::TryFromIntError;
+    type Error = TryFromIntError;
 
     fn try_from(index: usize) -> Result<Self, Self::Error> {
         u32::try_from(index).map(Self)
@@ -70,7 +71,7 @@ pub struct SegmentStorageDescriptor {
 }
 
 impl Debug for SegmentStorageDescriptor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("SegmentStorageDescriptor")
             .field("id", &self.id)
             .field("permissions", &self.permissions)
@@ -293,7 +294,7 @@ impl SegmentRangeOverlap {
     }
 }
 
-pub trait SegmentStorageProvider {
+pub trait SegmentStorageProvider: Send + Sync {
     fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError>;
 
     fn read_bytes_exact(&self, offset: u64, bytes: &mut [u8]) -> Result<(), SegmentStorageError> {

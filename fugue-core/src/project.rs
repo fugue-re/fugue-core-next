@@ -1,18 +1,31 @@
 use std::path::{Path, PathBuf};
 
+use smallvec::SmallVec;
 use thiserror::Error;
 
+use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
+use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::ir::{Address, CodeBlockTable, FunctionTable, SymbolTable};
+use crate::engine::change::{ChangeRecord, ChangeSet, FunctionChangeKind, Revision};
+use crate::ir::{
+    Address, CodeBlockTable, FunctionId, FunctionTable, RawAddress, Symbol, SymbolEntry, SymbolId,
+    SymbolIndex, SymbolTable,
+};
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
-use crate::storage::entities::{EntityStorage, EntityStorageError, ProjectEntity};
+use crate::platform::Platform;
+use crate::storage::entities::{EntityStorageError, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
 use crate::storage::segments::SegmentStorage;
+use crate::storage::segments::mapping::{
+    SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
+    SegmentMappingProvenance,
+};
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{
     ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES,
-    DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider, StorageContainer, StorageProvider,
-    StorageProviderError, TransientStorageProvider,
+    DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider, SegmentStorageError,
+    StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
@@ -25,22 +38,19 @@ pub struct Project {
     pub(crate) symbols: SymbolTable,
     pub(crate) functions: FunctionTable,
     pub(crate) blocks: CodeBlockTable,
+    pub(crate) platform: Platform,
     pub(crate) attributes: AttributeMap,
+    pub(crate) revision: Revision,
+    transaction_active: bool,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
 }
 
-impl Drop for Project {
-    fn drop(&mut self) {
-        if let Err(e) = self.persist() {
-            tracing::error!("failed to persist project data: {e}");
-        }
-    }
-}
-
+#[allow(unknown_lints, pub_field_in_struct)]
 pub struct ProjectRef<'a> {
     pub arch: &'a Arch,
     pub language: &'static Language,
+    pub platform: &'a Platform,
     pub symbols: &'a SymbolTable,
     pub functions: &'a FunctionTable,
     pub blocks: &'a CodeBlockTable,
@@ -48,9 +58,11 @@ pub struct ProjectRef<'a> {
     pub storage: &'a StorageContainer,
 }
 
+#[allow(unknown_lints, pub_field_in_struct)]
 pub struct ProjectMut<'a> {
     pub arch: &'a mut Arch,
     pub language: &'static Language,
+    pub platform: &'a mut Platform,
     pub symbols: &'a mut SymbolTable,
     pub functions: &'a mut FunctionTable,
     pub blocks: &'a mut CodeBlockTable,
@@ -58,14 +70,450 @@ pub struct ProjectMut<'a> {
     pub storage: &'a mut StorageContainer,
 }
 
+impl Drop for Project {
+    fn drop(&mut self) {
+        if let Err(e) = self.save() {
+            tracing::error!("failed to persist project data: {e}");
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProjectError {
-    #[error(transparent)]
-    Loader(#[from] LoaderError),
     #[error("failed to create entity cache: {0}")]
     EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
+    FunctionRecovery(#[from] FunctionRecoveryError),
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
+    #[error(transparent)]
+    SegmentStorage(#[from] SegmentStorageError),
+    #[error(transparent)]
     StorageProvider(#[from] StorageProviderError),
+}
+
+pub struct ProjectTransaction<'p> {
+    project: &'p mut Project,
+    records: Vec<ChangeRecord>,
+    committed: bool,
+}
+
+impl Drop for ProjectTransaction<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            debug_assert!(self.committed, "project transaction dropped without commit");
+        }
+        self.project.transaction_active = false;
+    }
+}
+
+impl ProjectTransaction<'_> {
+    pub fn project(&self) -> &Project {
+        self.project
+    }
+
+    pub(crate) fn analyse_with<S>(
+        &mut self,
+        passes: &mut AnalysisGroup<S>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError>
+    where
+        S: 'static,
+    {
+        passes.analyse_with(self.project, state)
+    }
+
+    pub fn add_function(&mut self, function: PartialFunction) -> Result<FunctionId, ProjectError> {
+        let entry = function.entry();
+        let old_blocks = self
+            .project
+            .functions
+            .get_by_address(entry)
+            .map(|function| {
+                function
+                    .blocks()
+                    .map(|(_, id)| id)
+                    .collect::<SmallVec<[_; 8]>>()
+            });
+        let id = function.commit(&mut self.project.functions, &mut self.project.blocks)?;
+
+        if let Some(blocks) = old_blocks {
+            for block in blocks {
+                self.project.blocks.remove_by_id(block);
+            }
+
+            self.records.push(ChangeRecord::FunctionChanged {
+                entry,
+                kind: FunctionChangeKind::Body,
+            });
+        } else {
+            self.records.push(ChangeRecord::FunctionAdded { entry });
+        }
+
+        Ok(id)
+    }
+
+    pub fn remove_function(&mut self, entry: Address) -> bool {
+        let Some(function) = self.project.functions.get_by_address(entry) else {
+            return false;
+        };
+
+        let blocks = function
+            .blocks()
+            .map(|(_, id)| id)
+            .collect::<SmallVec<[_; 8]>>();
+        let id = function.id();
+
+        let _ = function;
+
+        for block in blocks {
+            self.project.blocks.remove_by_id(block);
+        }
+
+        self.project.functions.remove_by_id(id);
+        self.records.push(ChangeRecord::FunctionRemoved { entry });
+
+        true
+    }
+
+    pub fn insert_symbol(&mut self, index: SymbolIndex, entry: SymbolEntry) -> SymbolId {
+        let address = entry.address();
+        let symbol = entry.symbol();
+        let (is_new, id) = self
+            .project
+            .symbols
+            .insert(index, address, symbol, entry.properties());
+
+        if is_new {
+            self.records
+                .push(ChangeRecord::SymbolAdded { address, symbol });
+        }
+
+        id
+    }
+
+    pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> usize {
+        let removed = self
+            .project
+            .symbols
+            .get(symbol.as_ref())
+            .map(|entries| {
+                entries
+                    .map(|(_, entry)| (entry.address(), entry.symbol()))
+                    .collect::<SmallVec<[_; 4]>>()
+            })
+            .unwrap_or_default();
+        let count = self.project.symbols.remove(symbol);
+        self.record_symbols_removed(removed);
+        count
+    }
+
+    pub fn remove_symbols_by_address(&mut self, address: Address) -> usize {
+        let removed = self
+            .project
+            .symbols
+            .get_by_address(address)
+            .map(|(_, entry)| (entry.address(), entry.symbol()))
+            .collect::<SmallVec<[_; 4]>>();
+        let count = self.project.symbols.remove_by_address(address);
+        self.record_symbols_removed(removed);
+        count
+    }
+
+    pub fn remove_symbol_by_id(&mut self, id: SymbolId) -> bool {
+        let removed = self
+            .project
+            .symbols
+            .get_by_id(id)
+            .map(|entry| (entry.address(), entry.symbol()));
+
+        if !self.project.symbols.remove_by_id(id) {
+            return false;
+        }
+
+        if let Some((address, symbol)) = removed {
+            self.record_symbol_removed(address, symbol);
+        }
+
+        true
+    }
+
+    pub fn remove_symbol_by_index(&mut self, index: SymbolIndex) -> bool {
+        let removed = self
+            .project
+            .symbols
+            .get_by_index(index)
+            .map(|(_, entry)| (entry.address(), entry.symbol()));
+
+        if !self.project.symbols.remove_by_index(index) {
+            return false;
+        }
+
+        if let Some((address, symbol)) = removed {
+            self.record_symbol_removed(address, symbol);
+        }
+
+        true
+    }
+
+    pub fn create_mapping_from_builder(
+        &mut self,
+        builder: SegmentMappingBuilder,
+    ) -> Result<SegmentMappingId, ProjectError> {
+        let mapping = self
+            .project
+            .storage
+            .segments
+            .create_mapping_from_builder(builder)?;
+        self.records
+            .push(ChangeRecord::SegmentMappingCreated { mapping });
+        Ok(mapping)
+    }
+
+    pub fn create_space(&mut self) -> Result<AddressSpaceId, ProjectError> {
+        let space = self.project.storage.segments.create_space()?;
+        self.records.push(ChangeRecord::SpaceCreated { space });
+        Ok(space)
+    }
+
+    pub fn add_mapping_to_space(
+        &mut self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .add_mapping_to_space(space, mapping)?;
+        self.record_mapping_added(space, mapping);
+
+        Ok(())
+    }
+
+    pub fn add_mapping_to_space_top(
+        &mut self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .add_mapping_to_space_top(space, mapping)?;
+        self.record_mapping_added(space, mapping);
+
+        Ok(())
+    }
+
+    pub fn add_mapping_to_space_bottom(
+        &mut self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .add_mapping_to_space_bottom(space, mapping)?;
+        self.record_mapping_added(space, mapping);
+
+        Ok(())
+    }
+
+    pub fn remove_mapping(&mut self, id: SegmentMappingId) -> Result<(), ProjectError> {
+        let removed = self
+            .project
+            .storage
+            .segments
+            .mapping_placements(id)
+            .collect::<SmallVec<[_; 4]>>();
+
+        self.project.storage.segments.remove_mapping(id)?;
+        self.record_mapping_removed(id, removed);
+
+        Ok(())
+    }
+
+    pub fn remap_mapping(
+        &mut self,
+        id: SegmentMappingId,
+        new_start: impl Into<Address>,
+    ) -> Result<(), ProjectError> {
+        let removed = self
+            .project
+            .storage
+            .segments
+            .mapping_placements(id)
+            .collect::<SmallVec<[_; 4]>>();
+
+        self.project.storage.segments.remap_mapping(id, new_start)?;
+        self.record_mapping_removed(id, removed);
+        self.record_mapping_added_to_placements(id);
+
+        Ok(())
+    }
+
+    pub fn resize_mapping(
+        &mut self,
+        id: SegmentMappingId,
+        new_size: u64,
+    ) -> Result<(), ProjectError> {
+        let removed = self
+            .project
+            .storage
+            .segments
+            .mapping_placements(id)
+            .collect::<SmallVec<[_; 4]>>();
+
+        self.project.storage.segments.resize_mapping(id, new_size)?;
+        self.record_mapping_removed(id, removed);
+        self.record_mapping_added_to_placements(id);
+
+        Ok(())
+    }
+
+    pub fn update_mapping_metadata(
+        &mut self,
+        id: SegmentMappingId,
+        kind: SegmentMappingKind,
+        provenance: SegmentMappingProvenance,
+        flags: SegmentMappingFlags,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .update_mapping_metadata(id, kind, provenance, flags)?;
+        self.records
+            .push(ChangeRecord::SegmentMappingChanged { mapping: id });
+
+        Ok(())
+    }
+
+    pub fn prioritise_mapping(
+        &mut self,
+        space: AddressSpaceId,
+        id: SegmentMappingId,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .prioritise_mapping(space, id)?;
+        self.record_mapping_added(space, id);
+
+        Ok(())
+    }
+
+    pub fn deprioritise_mapping(
+        &mut self,
+        space: AddressSpaceId,
+        id: SegmentMappingId,
+    ) -> Result<(), ProjectError> {
+        self.project
+            .storage
+            .segments
+            .deprioritise_mapping(space, id)?;
+        self.record_mapping_added(space, id);
+
+        Ok(())
+    }
+
+    pub fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<(), ProjectError> {
+        let written = self.project.storage.segments.write_bytes(addr, bytes)?;
+
+        if let Some(range) = Self::bytes_range(addr.raw_address(), written as u64) {
+            self.records.push(ChangeRecord::BytesWritten {
+                space: addr.space(),
+                range,
+            });
+        }
+
+        if written == bytes.len() {
+            Ok(())
+        } else {
+            Err(SegmentStorageError::InvalidAddressRange.into())
+        }
+    }
+
+    pub fn write_bytes_to_space(
+        &mut self,
+        space: AddressSpaceId,
+        addr: impl Into<RawAddress>,
+        bytes: &[u8],
+    ) -> Result<(), ProjectError> {
+        let addr = Address::new(space, addr.into());
+        self.write_bytes(addr, bytes)
+    }
+
+    fn mapping_range(start: Address, size: u64) -> (RawAddress, RawAddress) {
+        Self::bytes_range(start.raw_address(), size)
+            .unwrap_or_else(|| (start.raw_address(), start.raw_address()))
+    }
+
+    fn bytes_range(start: RawAddress, len: u64) -> Option<(RawAddress, RawAddress)> {
+        let end = len
+            .checked_sub(1)
+            .and_then(|last| start.checked_add(last))?;
+
+        Some((start, end))
+    }
+
+    fn record_mapping_added(&mut self, space: AddressSpaceId, id: SegmentMappingId) {
+        if let Some(mapping) = self.project.storage.segments.mapping(id) {
+            self.records.push(ChangeRecord::SegmentMapped {
+                mapping: id,
+                space,
+                range: Self::mapping_range(mapping.start(), mapping.size()),
+            });
+        }
+    }
+
+    fn record_mapping_added_to_placements(&mut self, id: SegmentMappingId) {
+        let added = self
+            .project
+            .storage
+            .segments
+            .mapping_placements(id)
+            .collect::<SmallVec<[_; 4]>>();
+
+        for (space, range) in added {
+            self.records.push(ChangeRecord::SegmentMapped {
+                mapping: id,
+                space,
+                range,
+            });
+        }
+    }
+
+    fn record_mapping_removed(
+        &mut self,
+        id: SegmentMappingId,
+        removed: impl IntoIterator<Item = (AddressSpaceId, (RawAddress, RawAddress))>,
+    ) {
+        for (space, range) in removed {
+            self.records.push(ChangeRecord::SegmentUnmapped {
+                mapping: id,
+                space,
+                range,
+            });
+        }
+    }
+
+    fn record_symbols_removed(&mut self, removed: impl IntoIterator<Item = (Address, Symbol)>) {
+        for (address, symbol) in removed {
+            self.record_symbol_removed(address, symbol);
+        }
+    }
+
+    fn record_symbol_removed(&mut self, address: Address, symbol: Symbol) {
+        self.records
+            .push(ChangeRecord::SymbolRemoved { address, symbol });
+    }
+
+    pub fn commit(mut self) -> ChangeSet {
+        if !self.records.is_empty() {
+            self.project.revision = self.project.revision.next();
+        }
+        self.committed = true;
+        ChangeSet::with_records(self.project.revision, std::mem::take(&mut self.records))
+    }
 }
 
 impl Project {
@@ -129,6 +577,9 @@ impl Project {
         };
 
         let language = arch.language();
+        let platform = loadable
+            .map(Loadable::platform)
+            .unwrap_or_else(|| arch.platform());
 
         tracing::trace!("loading project attributes");
 
@@ -228,7 +679,10 @@ impl Project {
             symbols,
             functions,
             blocks,
+            platform,
             attributes,
+            revision: Revision::default(),
+            transaction_active: false,
             storage,
         })
     }
@@ -402,6 +856,10 @@ impl Project {
         &self.arch
     }
 
+    pub fn platform(&self) -> &Platform {
+        &self.platform
+    }
+
     pub fn lifter(&self) -> Lifter {
         self.arch.lifter()
     }
@@ -412,6 +870,24 @@ impl Project {
 
     pub fn entry(&self) -> Option<Address> {
         self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
+    }
+
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    pub fn transaction(&mut self, reason: impl AsRef<str>) -> ProjectTransaction<'_> {
+        let _ = reason.as_ref();
+        assert!(
+            !self.transaction_active,
+            "project transaction already active"
+        );
+        self.transaction_active = true;
+        ProjectTransaction {
+            project: self,
+            records: Vec::new(),
+            committed: false,
+        }
     }
 
     pub fn symbols(&self) -> &SymbolTable {
@@ -438,8 +914,12 @@ impl Project {
         &mut self.functions
     }
 
-    pub fn entities(&self) -> &EntityStorage {
-        &self.storage.entities
+    pub fn storage(&self) -> &StorageContainer {
+        &self.storage
+    }
+
+    pub fn storage_mut(&mut self) -> &mut StorageContainer {
+        &mut self.storage
     }
 
     pub fn segments(&self) -> &SegmentStorage {
@@ -450,20 +930,42 @@ impl Project {
         &mut self.storage.segments
     }
 
-    pub fn storage(&self) -> &StorageContainer {
-        &self.storage
-    }
-
-    pub fn storage_mut(&mut self) -> &mut StorageContainer {
-        &mut self.storage
-    }
-
     pub fn attributes(&self) -> &AttributeMap {
         &self.attributes
     }
 
     pub fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    pub fn fields(&self) -> ProjectRef<'_> {
+        ProjectRef {
+            arch: &self.arch,
+            language: self.language,
+            platform: &self.platform,
+            symbols: &self.symbols,
+            functions: &self.functions,
+            blocks: &self.blocks,
+            attributes: &self.attributes,
+            storage: &self.storage,
+        }
+    }
+
+    pub fn fields_mut(&mut self) -> ProjectMut<'_> {
+        ProjectMut {
+            arch: &mut self.arch,
+            language: self.language,
+            platform: &mut self.platform,
+            symbols: &mut self.symbols,
+            functions: &mut self.functions,
+            blocks: &mut self.blocks,
+            attributes: &mut self.attributes,
+            storage: &mut self.storage,
+        }
+    }
+
+    pub fn save(&mut self) -> Result<(), ProjectError> {
+        self.persist().map_err(ProjectError::from)
     }
 
     pub(crate) fn persist(&self) -> Result<(), StorageProviderError> {
@@ -500,30 +1002,6 @@ impl Project {
 
         Ok(())
     }
-
-    pub fn fields(&self) -> ProjectRef<'_> {
-        ProjectRef {
-            arch: &self.arch,
-            language: self.language,
-            symbols: &self.symbols,
-            functions: &self.functions,
-            blocks: &self.blocks,
-            attributes: &self.attributes,
-            storage: &self.storage,
-        }
-    }
-
-    pub fn fields_mut(&mut self) -> ProjectMut<'_> {
-        ProjectMut {
-            arch: &mut self.arch,
-            language: self.language,
-            symbols: &mut self.symbols,
-            functions: &mut self.functions,
-            blocks: &mut self.blocks,
-            attributes: &mut self.attributes,
-            storage: &mut self.storage,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -556,6 +1034,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires local language data and binary fixtures"]
     fn test_project() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
             let project = Project::from_file_transient("tests/ls.elf")?;
@@ -624,36 +1103,6 @@ mod test {
             let _project = Project::from_file_with_provider::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
             >("tests/test-project.rdb.fdbz")?;
-
-            /*
-            let functions = project.functions();
-
-            // warm the cache!
-            for addr in functions.keys()? {
-                let addr = addr?;
-                let _f = functions.get(&addr)?;
-            }
-
-            let mut iter = functions.iter()?;
-
-            let t = Instant::now();
-            let mut count = 0;
-
-            while let Some(Ok((addr, f))) = iter.next() {
-                println!("function at {addr:#x}");
-                println!(
-                    "function at {addr:#x} with {} instructions and {} blocks",
-                    f.instructions().len(),
-                    f.blocks().len()
-                );
-                count += 1;
-            }
-
-            println!(
-                "iterated {count} functions in {}ms",
-                t.elapsed().as_millis()
-            );
-            */
 
             Ok(())
         })
