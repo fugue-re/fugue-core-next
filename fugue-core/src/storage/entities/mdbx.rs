@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io;
 use std::mem::{self, ManuallyDrop};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use libmdbx as mdbx;
@@ -211,6 +212,14 @@ impl EntityStorageProvider for MdbxEntityStorage {
         MdbxEntityBytesIterator::new(self, prefix)
     }
 
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        MdbxEntityBytesIterator::new_range(self, prefix, start)
+    }
+
     fn iter_prefix_as<'a, F, T>(
         &'a self,
         prefix: &[u8],
@@ -305,6 +314,7 @@ struct MdbxEntityBytesIteratorInner<'a> {
 
 struct MdbxEntityBytesIterator<'a> {
     inner: MdbxEntityBytesIteratorInner<'a>,
+    excluded_start: Option<Box<[u8]>>,
     prefix: Option<Box<[u8]>>,
 }
 
@@ -323,6 +333,36 @@ impl<'a> MdbxEntityBytesIterator<'a> {
 
         Ok(Box::new(Self {
             inner,
+            excluded_start: None,
+            prefix: Some(prefix.to_vec().into_boxed_slice()),
+        }))
+    }
+
+    fn new_range(
+        database: &'a MdbxEntityStorage,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'a>, EntityStorageError> {
+        let txn = database.database.begin_ro_txn()?;
+        let seek = match start {
+            Bound::Included(key) | Bound::Excluded(key) => key,
+            Bound::Unbounded => prefix,
+        };
+
+        let inner =
+            MdbxEntityBytesIteratorInner::try_new(txn, |txn| -> Result<_, EntityStorageError> {
+                let tbl = txn.open_table(None)?;
+                Ok(txn.cursor(&tbl)?.into_iter_from(seek))
+            })?;
+
+        let excluded_start = match start {
+            Bound::Excluded(key) => Some(key.to_vec().into_boxed_slice()),
+            Bound::Included(_) | Bound::Unbounded => None,
+        };
+
+        Ok(Box::new(Self {
+            inner,
+            excluded_start,
             prefix: Some(prefix.to_vec().into_boxed_slice()),
         }))
     }
@@ -334,19 +374,30 @@ impl<'a> Iterator for MdbxEntityBytesIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = self.prefix.as_deref()?;
 
-        let Some(Ok((key, val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
-            self.prefix = None;
-            return None;
-        };
+        loop {
+            let Some(Ok((key, val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
+                self.prefix = None;
+                return None;
+            };
 
-        if key.starts_with(prefix) {
-            Some(Ok((
+            if !key.starts_with(prefix) {
+                self.prefix = None;
+                return None;
+            }
+
+            if self
+                .excluded_start
+                .as_deref()
+                .is_some_and(|start| start == key.as_ref())
+            {
+                self.excluded_start = None;
+                continue;
+            }
+
+            return Some(Ok((
                 BytesOrSlice::from(key.to_vec()),
                 BytesOrSlice::from(val.to_vec()),
-            )))
-        } else {
-            self.prefix = None;
-            None
+            )));
         }
     }
 }
@@ -465,6 +516,7 @@ impl<'a> EntityStorageBulkInserter<'a> for MdbxEntityBytesBulkInserter<'a> {
 
         self.txn
             .put(&tbl, key, value, mdbx::WriteFlags::default())?;
+        self.batch_size += 1;
 
         Ok(())
     }
@@ -544,6 +596,68 @@ impl<'a> EntityStorageTransactionalWriter<'a> for MdbxEntityWriter<'a> {
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
         self.txn.commit()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Bound;
+
+    use super::MdbxEntityStorage;
+    use crate::ir::Address;
+    use crate::storage::entities::schema::EntityId;
+    use crate::storage::entities::{Entity, EntityStorage};
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        value: u64,
+    }
+
+    impl TestEntity {
+        fn new(value: u64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(124);
+    }
+
+    #[test]
+    fn mdbx_scan_range_respects_inclusive_and_exclusive_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let database = libmdbx::Database::open(directory.path())?;
+        {
+            let txn = database.begin_rw_txn()?;
+            txn.create_table(None, libmdbx::TableFlags::default())?;
+            txn.commit()?;
+        }
+        let storage = EntityStorage::new(MdbxEntityStorage { database });
+
+        for value in 1..=4 {
+            storage.insert(&Address::from(value), &TestEntity::new(value))?;
+        }
+
+        let included = storage
+            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(included, vec![2, 3, 4]);
+
+        let excluded = storage
+            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(excluded, vec![3, 4]);
+
+        let unbounded = storage
+            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(unbounded, vec![1, 2, 3, 4]);
+
         Ok(())
     }
 }

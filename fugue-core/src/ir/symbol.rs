@@ -137,7 +137,7 @@ where
         self
     }
 
-    fn indices(&self) -> &[SymbolIndex] {
+    pub(crate) fn indices(&self) -> &[SymbolIndex] {
         &self.indices
     }
 
@@ -415,6 +415,85 @@ pub struct SymbolTable<A = Address> {
     free_ids: Vec<Id<Symbol>>,
 }
 
+pub(crate) struct SymbolTableRevert<A = Address> {
+    allocation: SymbolTableAllocation,
+    entries: Vec<(Id<Symbol>, SymbolEntry<A>)>,
+    touched: Vec<Id<Symbol>>,
+}
+
+struct SymbolTableAllocation {
+    symbols_len: usize,
+    generations_len: usize,
+    free_ids_len: usize,
+    free_ids_tail: Vec<Id<Symbol>>,
+}
+
+impl SymbolTableAllocation {
+    fn new(
+        free_ids: &[Id<Symbol>],
+        symbols_len: usize,
+        generations_len: usize,
+        max_pops: usize,
+    ) -> Self {
+        let tail_start = free_ids.len().saturating_sub(max_pops);
+        Self {
+            symbols_len,
+            generations_len,
+            free_ids_len: free_ids.len(),
+            free_ids_tail: free_ids[tail_start..].to_vec(),
+        }
+    }
+}
+
+impl<A> SymbolTableRevert<A>
+where
+    A: Copy + Default + Ord + Eq,
+{
+    fn new(
+        table: &SymbolTable<A>,
+        ids: impl IntoIterator<Item = Id<Symbol>>,
+        max_pops: usize,
+    ) -> Self {
+        let mut touched = Vec::new();
+        let mut entries = Vec::new();
+
+        for id in ids {
+            if touched.contains(&id) {
+                continue;
+            }
+
+            if let Some(entry) = table.get_by_id(id) {
+                entries.push((id, entry.clone()));
+            }
+            touched.push(id);
+        }
+
+        Self {
+            allocation: table.allocation_checkpoint(max_pops),
+            entries,
+            touched,
+        }
+    }
+
+    pub(crate) fn touch(&mut self, id: Id<Symbol>) {
+        if !self.touched.contains(&id) {
+            self.touched.push(id);
+        }
+    }
+
+    pub(crate) fn restore(self, table: &mut SymbolTable<A>) {
+        for id in self.touched {
+            table.clear_entry(id);
+        }
+
+        table.restore_allocation(self.allocation);
+
+        for (id, entry) in self.entries {
+            table.restore_entry(id, entry);
+        }
+    }
+}
+
 impl SymbolTable {
     fn load_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry) {
         let index = id.index();
@@ -590,6 +669,133 @@ where
 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn allocation_checkpoint(&self, max_pops: usize) -> SymbolTableAllocation {
+        SymbolTableAllocation::new(
+            &self.free_ids,
+            self.symbols.len(),
+            self.generations.len(),
+            max_pops,
+        )
+    }
+
+    fn restore_allocation(&mut self, allocation: SymbolTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
+        self.free_ids.truncate(tail_start);
+        self.free_ids.extend(allocation.free_ids_tail);
+        self.symbols.truncate(allocation.symbols_len);
+        self.generations.truncate(allocation.generations_len);
+    }
+
+    fn restore_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry<A>) {
+        self.clear_entry(id);
+
+        let index = id.index();
+        if index >= self.symbols.len() {
+            self.symbols.resize_with(index + 1, SymbolEntry::default);
+            self.generations.resize(index + 1, 0);
+        }
+
+        self.symbols[index] = entry;
+        self.generations[index] = id.generation();
+
+        let entry = &self.symbols[index];
+        if entry.is_valid() {
+            self.names.entry(entry.symbol()).or_default().push(id);
+            self.addresses.entry(entry.address()).or_default().push(id);
+
+            for &symbol_index in entry.indices() {
+                self.indices.insert(symbol_index, id);
+            }
+        }
+
+        self.free_ids
+            .retain(|free_id| free_id.index() != id.index());
+    }
+
+    fn clear_entry(&mut self, id: Id<Symbol>) -> bool {
+        use std::collections::btree_map::Entry as AddrsEntry;
+        use std::collections::hash_map::Entry as NamesEntry;
+
+        let index = id.index();
+        if self.generations.get(index).copied() != Some(id.generation()) {
+            return false;
+        }
+
+        let Some(symbol_entry) = self.symbols.get_mut(index).filter(|entry| entry.is_valid())
+        else {
+            return false;
+        };
+
+        if let NamesEntry::Occupied(mut entry) = self.names.entry(symbol_entry.symbol()) {
+            let ids = entry.get_mut();
+            ids.retain(|oid| *oid != id);
+
+            if ids.is_empty() {
+                entry.remove();
+            }
+        }
+
+        if let AddrsEntry::Occupied(mut entry) = self.addresses.entry(symbol_entry.address()) {
+            let ids = entry.get_mut();
+            ids.retain(|oid| *oid != id);
+
+            if ids.is_empty() {
+                entry.remove();
+            }
+        }
+
+        for index in symbol_entry.indices() {
+            self.indices.remove(index);
+        }
+
+        mem::take(symbol_entry);
+        true
+    }
+
+    pub(crate) fn insert_revert(
+        &self,
+        index: SymbolIndex,
+        entry: &SymbolEntry<A>,
+    ) -> SymbolTableRevert<A> {
+        let mut touched = Vec::new();
+        if let Some(id) = self.indices.get(&index).copied() {
+            touched.push(id);
+        }
+
+        if let Some(id) = self.addresses.get(&entry.address()).and_then(|ids| {
+            SymbolEntryIter::new(ids, &self.symbols)
+                .find_map(|(id, existing)| existing.has_same_referent(entry).then_some(id))
+        }) {
+            touched.push(id);
+        }
+
+        SymbolTableRevert::new(self, touched, 1)
+    }
+
+    pub(crate) fn remove_symbol_revert(&self, symbol: impl AsRef<str>) -> SymbolTableRevert<A> {
+        let ids = Symbol::from_existing(symbol.as_ref())
+            .and_then(|symbol| self.names.get(&symbol))
+            .into_iter()
+            .flatten()
+            .copied();
+
+        SymbolTableRevert::new(self, ids, 0)
+    }
+
+    pub(crate) fn remove_address_revert(&self, address: A) -> SymbolTableRevert<A> {
+        let ids = self.addresses.get(&address).into_iter().flatten().copied();
+
+        SymbolTableRevert::new(self, ids, 0)
+    }
+
+    pub(crate) fn remove_id_revert(&self, id: Id<Symbol>) -> SymbolTableRevert<A> {
+        SymbolTableRevert::new(self, [id], 0)
+    }
+
+    pub(crate) fn remove_index_revert(&self, index: SymbolIndex) -> SymbolTableRevert<A> {
+        SymbolTableRevert::new(self, self.indices.get(&index).copied(), 0)
     }
 
     pub fn get<'a>(

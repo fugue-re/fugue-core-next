@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::error::Error as StdError;
+use std::marker::PhantomData;
 
 use anyhow::Error as AnyhowError;
 use downcast_rs::{Downcast, impl_downcast};
@@ -242,6 +243,7 @@ impl<S> AnalysisCondition<S> for usize {
 
 pub struct AnalysisGroup<S = NoState> {
     passes: IndexMap<String, BoxedAnalysisPass<S>>,
+    state: PhantomData<fn(S)>,
 }
 
 impl<S, T> FromIterator<T> for AnalysisGroup<S>
@@ -250,7 +252,7 @@ where
     S: 'static,
 {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut group = AnalysisGroup::new();
+        let mut group = AnalysisGroup::<S>::new();
         group.add_passes("pass", iter);
         group
     }
@@ -272,23 +274,8 @@ where
     pub fn new() -> Self {
         AnalysisGroup {
             passes: IndexMap::new(),
+            state: PhantomData,
         }
-    }
-
-    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
-        self.passes.insert(name.into(), Box::new(pass));
-    }
-
-    pub fn add_passes(
-        &mut self,
-        prefix: impl Into<String>,
-        passes: impl IntoIterator<Item = impl AnalysisPass<S> + 'static>,
-    ) {
-        let prefix = prefix.into();
-        self.passes.extend(passes.into_iter().map(|pass| {
-            let name = format!("{prefix}-{}", Uuid::now_v7().as_hyphenated());
-            (name, Box::new(pass) as BoxedAnalysisPass<S>)
-        }));
     }
 
     pub fn get_boxed_pass(&self, name: impl Borrow<str>) -> Option<&BoxedAnalysisPass<S>> {
@@ -316,6 +303,60 @@ where
     {
         self.get_boxed_pass_mut(name)
             .and_then(|pass| pass.downcast_mut::<T>())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
+        self.passes.iter().map(|(name, pass)| (name.as_ref(), pass))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
+        self.passes
+            .iter_mut()
+            .map(move |(name, pass)| (name.as_ref(), pass))
+    }
+
+    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
+        self.iter()
+    }
+
+    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
+        self.iter_mut()
+    }
+
+    pub fn len(&self) -> usize {
+        self.passes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.passes.is_empty()
+    }
+
+    pub fn analyse_with(
+        &mut self,
+        project: &mut Project,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
+        for pass in self.passes.values_mut() {
+            pass.analyse_with(project, state)?;
+        }
+        Ok(())
+    }
+
+    pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
+        self.passes.insert(name.into(), Box::new(pass));
+    }
+
+    pub fn add_passes(
+        &mut self,
+        prefix: impl Into<String>,
+        passes: impl IntoIterator<Item = impl AnalysisPass<S> + 'static>,
+    ) {
+        let prefix = prefix.into();
+        self.passes.extend(passes.into_iter().map(|pass| {
+            let suffix = Uuid::now_v7();
+            let name = format!("{prefix}-{suffix}");
+            (name, Box::new(pass) as BoxedAnalysisPass<S>)
+        }));
     }
 
     pub fn insert_after(
@@ -348,32 +389,6 @@ where
             self.passes.insert(name.into(), Box::new(pass));
         }
     }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
-        self.passes.iter().map(|(name, pass)| (name.as_ref(), pass))
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
-        self.passes
-            .iter_mut()
-            .map(move |(name, pass)| (name.as_ref(), pass))
-    }
-
-    pub fn passes(&self) -> impl Iterator<Item = (&str, &BoxedAnalysisPass<S>)> {
-        self.iter()
-    }
-
-    pub fn passes_mut(&mut self) -> impl Iterator<Item = (&str, &mut BoxedAnalysisPass<S>)> {
-        self.iter_mut()
-    }
-
-    pub fn len(&self) -> usize {
-        self.passes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.passes.is_empty()
-    }
 }
 
 impl<S> AnalysisPass<S> for AnalysisGroup<S>
@@ -381,10 +396,7 @@ where
     S: 'static,
 {
     fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
-        for pass in self.passes.values_mut() {
-            pass.analyse_with(project, state)?;
-        }
-        Ok(())
+        AnalysisGroup::analyse_with(self, project, state)
     }
 
     fn as_group(&self) -> Option<&AnalysisGroup<S>> {
@@ -719,7 +731,7 @@ mod test {
             },
         );
 
-        let mut group = AnalysisGroup::new();
+        let mut group = AnalysisGroup::<NoState>::new();
 
         group.add_pass(
             "bloop-step",

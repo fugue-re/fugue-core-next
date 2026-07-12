@@ -180,6 +180,40 @@ pub struct SegmentMapping {
     function_hints: BTreeSet<RawAddress>,
 }
 
+pub(crate) struct SegmentMappingLocation {
+    size: u64,
+    start: Address,
+    version: u64,
+}
+
+impl SegmentMappingLocation {
+    pub(crate) fn capture(mapping: &SegmentMapping) -> Self {
+        Self {
+            size: mapping.size,
+            start: mapping.start,
+            version: mapping.version,
+        }
+    }
+}
+
+pub(crate) struct SegmentMappingMetadata {
+    flags: SegmentMappingFlags,
+    kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
+    version: u64,
+}
+
+impl SegmentMappingMetadata {
+    pub(crate) fn capture(mapping: &SegmentMapping) -> Self {
+        Self {
+            flags: mapping.flags,
+            kind: mapping.kind,
+            provenance: mapping.provenance,
+            version: mapping.version,
+        }
+    }
+}
+
 impl SegmentMapping {
     pub fn new(
         id: SegmentMappingId,
@@ -338,6 +372,19 @@ impl SegmentMapping {
     pub fn set_size(&mut self, size: u64) {
         self.size = size;
         self.touch();
+    }
+
+    pub(crate) fn restore_location(&mut self, location: SegmentMappingLocation) {
+        self.start = location.start;
+        self.size = location.size;
+        self.version = location.version;
+    }
+
+    pub(crate) fn restore_metadata(&mut self, metadata: SegmentMappingMetadata) {
+        self.flags = metadata.flags;
+        self.kind = metadata.kind;
+        self.provenance = metadata.provenance;
+        self.version = metadata.version;
     }
 
     pub fn name(&self) -> &str {

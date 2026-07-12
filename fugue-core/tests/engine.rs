@@ -1,15 +1,25 @@
-#![cfg(feature = "static-lifters")]
-
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io;
+use std::ops::Bound;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
-use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
+use fugue_core::analysis::control::Cancelled;
+use fugue_core::analysis::function::recovery::{
+    FunctionRecovery, FunctionRecoveryExtension, PartialCodeBlock, PartialFunction,
+};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::Arch;
-use fugue_core::engine::change::ChangeRecord;
-use fugue_core::engine::{AnalysisEngine, MappingMetadataUpdate};
+use fugue_core::engine::change::{ChangeRecord, Revision};
+use fugue_core::engine::{
+    Analyser, AnalyserProvider, AnalysisCx, AnalysisEngine, AnalysisMessageKind,
+    DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
+    Trigger,
+};
 use fugue_core::ir::{
     Address, Endian, RawAddress, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
     SymbolTableSelector,
@@ -20,13 +30,789 @@ use fugue_core::loader::{
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
-use fugue_core::project::Project;
-use fugue_core::queries::QueryError;
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
+use fugue_core::project::{Project, ProjectTransaction};
+use fugue_core::queries::{CallEdge, MappingRecord, QueryError, QueryPage, SymbolRecord};
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::PersistentStorageProvider;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::entities::SqliteEntityStorage;
+use fugue_core::storage::entities::{
+    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageTransactionalReader,
+    EntityStorageTransactionalWriter, InMemoryEntityStorage,
+};
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
 use fugue_core::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind, SegmentMappingProvenance,
 };
-use fugue_core::types::AttributeMap;
+use fugue_core::storage::segments::{DEFAULT_SPACE_ID, InMemorySegmentStorage};
+use fugue_core::storage::{
+    EntityStorage, EntityStorageError, PERSISTENT, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError,
+};
+#[cfg(feature = "sqlite")]
+use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::types::{AttributeMap, BytesOrSlice};
+
+const TEST_ANALYSER_ATTR: &str = "fugue.test.engine-analyser";
+const TEST_CHUNKED_RECOVERY_ATTR: &str = "fugue.test.chunked-recovery";
+
+#[cfg(feature = "sqlite")]
+type SqliteProjectProvider =
+    PersistentStorageProvider<SqliteEntityStorage<PERSISTENT>, DefaultPersistentSegmentStorage>;
+
+static FAIL_ENTITY_INSERTS: AtomicBool = AtomicBool::new(false);
+static SAVE_FAILURE_TEST_LOCK: Mutex<()> = Mutex::new(());
+static STORM_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
+const PROJECT_REVISION_KEY: &[u8] = &[0, 12, 6];
+
+fn run_query<T>(mut query: impl FnMut() -> Result<T, QueryError>) -> Result<T, QueryError> {
+    query()
+}
+
+#[derive(Default)]
+struct FailingSaveEntityStorage {
+    inner: InMemoryEntityStorage,
+}
+
+enum FailingSaveWrite {
+    Insert(Bytes, Bytes),
+    Remove(Bytes),
+}
+
+struct FailingSaveTransaction<'a> {
+    storage: &'a FailingSaveEntityStorage,
+    writes: RefCell<Vec<FailingSaveWrite>>,
+}
+
+impl<'a> FailingSaveTransaction<'a> {
+    fn new(storage: &'a FailingSaveEntityStorage) -> Self {
+        Self {
+            storage,
+            writes: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<'a> EntityStorageTransactionalReader<'a> for FailingSaveTransaction<'a> {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.storage.get(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.storage.contains(key)
+    }
+}
+
+impl<'a> EntityStorageTransactionalWriter<'a> for FailingSaveTransaction<'a> {
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.writes.borrow_mut().push(FailingSaveWrite::Insert(
+            Bytes::copy_from_slice(key),
+            value.into_bytes(),
+        ));
+        Ok(())
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.writes
+            .borrow_mut()
+            .push(FailingSaveWrite::Remove(Bytes::copy_from_slice(key)));
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
+        for write in self.writes.into_inner() {
+            match write {
+                FailingSaveWrite::Insert(key, value) => {
+                    self.storage
+                        .insert(key.as_ref(), BytesOrSlice::from(value))?;
+                }
+                FailingSaveWrite::Remove(key) => {
+                    self.storage.remove(key.as_ref())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl EntityStorageProviderFromLoadable for FailingSaveEntityStorage {
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError> {
+        Ok(Self {
+            inner: InMemoryEntityStorage::from_loadable(loadable, attributes)?,
+        })
+    }
+}
+
+impl EntityStorageProvider for FailingSaveEntityStorage {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.inner.get(key)
+    }
+
+    fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        self.inner.get_as(key, f)
+    }
+
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        if FAIL_ENTITY_INSERTS.load(Ordering::SeqCst) && key == PROJECT_REVISION_KEY {
+            return Err(EntityStorageError::backing(io::Error::other(
+                "injected save failure",
+            )));
+        }
+
+        self.inner.insert(key, value)
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.inner.remove(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.inner.contains(key)
+    }
+
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+        self.inner.iter_prefix_keys(prefix)
+    }
+
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.inner.iter_prefix(prefix)
+    }
+
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.inner.scan_range(prefix, start)
+    }
+
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a,
+    {
+        self.inner.iter_prefix_as(prefix, f)
+    }
+
+    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
+        self.inner.bulk_inserter()
+    }
+
+    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
+        Ok(Box::new(FailingSaveTransaction::new(self)))
+    }
+
+    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+        Ok(Box::new(FailingSaveTransaction::new(self)))
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        PERSISTENT
+    }
+}
+
+struct FailingSaveStorageProvider;
+
+impl StorageProvider for FailingSaveStorageProvider {
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+
+        let entities = EntityStorage::new(FailingSaveEntityStorage::from_loadable(
+            loadable, attributes,
+        )?);
+        let (segments, image_resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?
+                .into_parts();
+
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution))
+    }
+
+    fn from_storage(
+        path: impl AsRef<std::path::Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        let _ = path;
+        let _ = attributes;
+        Err(StorageProviderError::NotAStandaloneProject)
+    }
+}
+
+struct FailingTestAnalyser {
+    mode: &'static str,
+}
+
+impl FailingTestAnalyser {
+    fn new(mode: &'static str) -> Self {
+        Self { mode }
+    }
+}
+
+impl Analyser for FailingTestAnalyser {
+    fn name(&self) -> &'static str {
+        self.mode
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.mode)
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+
+        if self.mode == "mutating-error"
+            && let Some(address) = regions.ranges().next().map(|range| *range.start())
+        {
+            transaction.insert_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(251), 0),
+                SymbolEntry::new(
+                    address,
+                    "rolled_back_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            );
+        }
+
+        Err(AnalysisError::pass_failed(
+            self.mode,
+            io::Error::other("test analyser failed"),
+        ))
+    }
+}
+
+struct PanickingTestAnalyser;
+
+static COMPLETION_ANALYSE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static COMPLETION_END_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+struct CompletionTestAnalyser {
+    address: Option<Address>,
+    completed: bool,
+}
+
+impl CompletionTestAnalyser {
+    fn new() -> Self {
+        Self {
+            address: None,
+            completed: false,
+        }
+    }
+}
+
+struct DerivedSymbolAnalyser {
+    next_index: usize,
+}
+
+impl DerivedSymbolAnalyser {
+    fn new() -> Self {
+        Self { next_index: 0 }
+    }
+}
+
+struct StormTestAnalyser;
+struct CancellingTestAnalyser;
+struct CancellationFollowUpAnalyser;
+struct PanickingCompletionTestAnalyser;
+
+impl Analyser for PanickingTestAnalyser {
+    fn name(&self) -> &'static str {
+        "panicking-test"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten, Trigger::SymbolAdded]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+        if let Some(address) = regions.ranges().next().map(|range| *range.start()) {
+            transaction.insert_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(252), 0),
+                SymbolEntry::new(
+                    address,
+                    "panicked_torn_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            );
+        }
+        panic!("test analyser panic");
+    }
+}
+
+impl Analyser for CompletionTestAnalyser {
+    fn name(&self) -> &'static str {
+        "completion-test"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = transaction;
+        let _ = cx;
+        COMPLETION_ANALYSE_COUNT.fetch_add(1, Ordering::SeqCst);
+        self.address = regions.ranges().next().map(|range| *range.start());
+        Ok(())
+    }
+
+    fn analysis_ended(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+        let Some(address) = self.address.take() else {
+            return Ok(());
+        };
+        COMPLETION_END_COUNT.fetch_add(1, Ordering::SeqCst);
+
+        if self.completed {
+            return Ok(());
+        }
+
+        self.completed = true;
+        transaction.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(252), 1),
+            SymbolEntry::new(
+                address,
+                "completion_symbol",
+                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+            ),
+        );
+        Ok(())
+    }
+}
+
+impl Analyser for PanickingCompletionTestAnalyser {
+    fn name(&self) -> &'static str {
+        "completion-panic-test"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = transaction;
+        let _ = regions;
+        let _ = cx;
+        Ok(())
+    }
+
+    fn analysis_ended(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = transaction;
+        let _ = cx;
+        panic!("test completion panic");
+    }
+}
+
+impl Analyser for DerivedSymbolAnalyser {
+    fn name(&self) -> &'static str {
+        "derived-symbol"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::FunctionAdded]
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::DERIVED
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+
+        for range in regions.ranges() {
+            let address = *range.start();
+            transaction.insert_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(253), self.next_index),
+                SymbolEntry::new(
+                    address,
+                    "derived_function",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            );
+            self.next_index += 1;
+        }
+
+        Ok(())
+    }
+}
+
+impl Analyser for StormTestAnalyser {
+    fn name(&self) -> &'static str {
+        "storm-test"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+        STORM_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
+
+        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+            return Ok(());
+        };
+
+        transaction.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(250), 0),
+            SymbolEntry::new(
+                address,
+                "storm_symbol",
+                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+            ),
+        );
+        Ok(())
+    }
+}
+
+impl Analyser for CancellingTestAnalyser {
+    fn name(&self) -> &'static str {
+        "cancelling-test"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::BytesWritten]
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some(self.name())
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+            return Err(Cancelled.into());
+        };
+
+        transaction.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(248), 0),
+            SymbolEntry::new(
+                address,
+                "cancel_committed_symbol",
+                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+            ),
+        );
+
+        Err(Cancelled.into())
+    }
+}
+
+impl Analyser for CancellationFollowUpAnalyser {
+    fn name(&self) -> &'static str {
+        "cancellation-follow-up"
+    }
+
+    fn triggers(&self) -> &'static [Trigger] {
+        &[Trigger::SymbolAdded]
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::DERIVED
+    }
+
+    fn can_analyse(&self, project: &Project) -> bool {
+        project
+            .attributes()
+            .get_attr::<String>(TEST_ANALYSER_ATTR)
+            .as_deref()
+            == Some("cancelling-test")
+    }
+
+    fn analyse(
+        &mut self,
+        transaction: &mut ProjectTransaction<'_>,
+        regions: &fugue_core::ir::AddressRangeSet,
+        cx: &AnalysisCx,
+    ) -> Result<(), AnalysisError> {
+        let _ = cx;
+        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+            return Ok(());
+        };
+
+        transaction.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(248), 1),
+            SymbolEntry::new(
+                address,
+                "cancel_followup_symbol",
+                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+            ),
+        );
+
+        Ok(())
+    }
+}
+
+fn build_error_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(FailingTestAnalyser::new("error-test")))
+}
+
+fn build_mutating_error_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(FailingTestAnalyser::new("mutating-error")))
+}
+
+fn build_panicking_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(PanickingTestAnalyser))
+}
+
+fn build_completion_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(CompletionTestAnalyser::new()))
+}
+
+fn build_completion_panic_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(PanickingCompletionTestAnalyser))
+}
+
+fn build_derived_symbol_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(DerivedSymbolAnalyser::new()))
+}
+
+fn build_storm_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(StormTestAnalyser))
+}
+
+fn build_cancelling_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(CancellingTestAnalyser))
+}
+
+fn build_cancellation_follow_up_analyser(
+    _project: &Project,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
+    Ok(Box::new(CancellationFollowUpAnalyser))
+}
+
+fn configure_chunked_recovery(
+    project: &Project,
+    recovery: &mut FunctionRecovery,
+) -> Result<(), AnalysisError> {
+    if project
+        .attributes()
+        .get_attr::<bool>(TEST_CHUNKED_RECOVERY_ATTR)
+        .unwrap_or(false)
+    {
+        recovery.set_chunk_function_limit(Some(1));
+        recovery.set_chunk_candidate_limit(Some(1));
+    }
+
+    Ok(())
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("error-test", build_error_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("mutating-error", build_mutating_error_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("panicking-test", build_panicking_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("completion-test", build_completion_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("completion-panic-test", build_completion_panic_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("derived-symbol", build_derived_symbol_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("storm-test", build_storm_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("cancelling-test", build_cancelling_analyser)
+}
+
+fugue_core::registry::submit! {
+    AnalyserProvider::new("cancellation-follow-up", build_cancellation_follow_up_analyser)
+}
+
+fugue_core::registry::submit! {
+    FunctionRecoveryExtension::new("test-chunked-recovery", configure_chunked_recovery)
+}
+
+fn project_with_test_analyser(mode: &'static str) -> Result<Project, Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_ANALYSER_ATTR, mode);
+    Ok(Project::new_transient_with(&loader, attributes)?)
+}
+
+fn trigger_test_analyser(
+    engine: &AnalysisEngine,
+    address: Address,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    regions.insert(address);
+    engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+    engine.wait_until_idle()?;
+    Ok(())
+}
+
+fn symbol_exists(
+    engine: &AnalysisEngine,
+    address: Address,
+    symbol: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(engine
+        .query_reader()?
+        .symbols_at(address, None, 4096)?
+        .entries()
+        .iter()
+        .any(|record| record.symbol().as_str() == symbol))
+}
+
+fn assert_strict_cursor_pages<T, F>(mut next_page: F) -> Result<Vec<T>, Box<dyn std::error::Error>>
+where
+    T: Copy + Ord + std::fmt::Debug,
+    F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
+{
+    let mut cursor = None;
+    let mut records = Vec::new();
+
+    loop {
+        let page = next_page(cursor)?;
+        assert!(page.entries().len() <= 1);
+
+        for record in page.entries().iter().copied() {
+            if let Some(previous) = records.last() {
+                assert!(record > *previous, "page order did not advance");
+            }
+            records.push(record);
+        }
+
+        let Some(next_cursor) = page.next_cursor().copied() else {
+            break;
+        };
+
+        if let Some(current) = cursor {
+            assert!(next_cursor > current, "cursor did not advance");
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Ok(records)
+}
 
 #[test]
 fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,26 +834,33 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
     let changes = engine.subscribe(4096)?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let mut cursor = None;
     let mut engine_functions = BTreeSet::new();
-    loop {
-        let page = reader.function_page(cursor, 128)?;
-        engine_functions.extend(page.entries().iter().copied());
+    let function_spaces = imperative_functions
+        .iter()
+        .map(|address| address.space())
+        .collect::<BTreeSet<_>>();
+    for space in function_spaces {
+        let mut cursor = None::<Address>;
+        loop {
+            let page =
+                reader.function_page(space, cursor.map(|address| address.raw_address()), 128)?;
+            engine_functions.extend(page.entries().iter().copied());
 
-        let Some(next_cursor) = page.next_cursor().copied() else {
-            break;
-        };
-        cursor = Some(next_cursor);
+            let Some(next_cursor) = page.next_cursor().copied() else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
     }
     let mut journal_functions = BTreeSet::new();
 
     for changes in changes.try_iter() {
         for record in changes.records() {
             match record {
-                ChangeRecord::FunctionAdded { entry } => {
+                ChangeRecord::FunctionAdded { entry, .. } => {
                     journal_functions.insert(*entry);
                 }
-                ChangeRecord::FunctionRemoved { entry } => {
+                ChangeRecord::FunctionRemoved { entry, .. } => {
                     journal_functions.remove(entry);
                 }
                 ChangeRecord::Restored { .. } => {
@@ -110,6 +903,251 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+
+    let functions = assert_strict_cursor_pages::<Address, _>(|cursor| {
+        reader.function_page(
+            DEFAULT_SPACE_ID,
+            cursor.map(|address| address.raw_address()),
+            1,
+        )
+    })?;
+    assert!(!functions.is_empty());
+
+    let symbols =
+        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+    assert!(!symbols.is_empty());
+
+    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+        reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
+    })?;
+    assert!(!mappings.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    let address = Address::in_default_space(0x7fff_1234u64);
+    let inserted = [
+        SymbolEntry::new(address, "z_page_boundary", SymbolProperties::LOCAL),
+        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERN),
+        SymbolEntry::new(
+            address,
+            "m_page_boundary",
+            SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+        ),
+    ];
+
+    engine.wait_until_idle()?;
+    for (index, symbol) in inserted.iter().cloned().enumerate() {
+        engine.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(247), index),
+            symbol,
+        )?;
+    }
+
+    let reader = engine.query_reader()?;
+    let mut expected = inserted
+        .iter()
+        .map(|entry| SymbolRecord::new(entry.address(), entry.symbol(), entry.properties()))
+        .collect::<Vec<_>>();
+    expected.sort();
+
+    let symbols_at = assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| {
+        reader.symbols_at(address, cursor, 1)
+    })?;
+    assert_eq!(symbols_at, expected);
+
+    let symbol_page =
+        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+    let shared_address = symbol_page
+        .into_iter()
+        .filter(|record| record.address() == address)
+        .collect::<Vec<_>>();
+    assert_eq!(shared_address, expected);
+
+    Ok(())
+}
+
+#[test]
+fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let view = project
+        .segments()
+        .iter_views(DEFAULT_SPACE_ID)?
+        .find(|view| view.size() > 1)
+        .ok_or_else(|| io::Error::other("fixture mapping missing"))?;
+    let mapping = project
+        .segments()
+        .mapping(view.mapping_ref().mapping_id())
+        .ok_or_else(|| io::Error::other("fixture mapping metadata missing"))?;
+    let shared_start = mapping
+        .start()
+        .checked_add(mapping.size() + 0x4000)
+        .ok_or_else(|| io::Error::other("fixture mapping cannot form shared-start page"))?;
+    let mapping_offset = mapping.offset();
+    let provider_id = mapping.provider_id();
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+
+    let first = engine
+        .create_mapping_from_builder(
+            SegmentMappingBuilder::new(shared_start, 1, mapping_offset, provider_id)
+                .with_properties(SegmentProperties::PERM_READ)
+                .with_name("z_page_boundary_mapping"),
+        )?
+        .mapping();
+    let second = engine
+        .create_mapping_from_builder(
+            SegmentMappingBuilder::new(shared_start, 1, mapping_offset, provider_id)
+                .with_properties(SegmentProperties::PERM_READ | SegmentProperties::PERM_WRITE)
+                .with_name("a_page_boundary_mapping"),
+        )?
+        .mapping();
+    let third = engine
+        .create_mapping_from_builder(
+            SegmentMappingBuilder::new(shared_start, 1, mapping_offset, provider_id)
+                .with_properties(SegmentProperties::PERM_EXECUTE)
+                .with_name("m_page_boundary_mapping"),
+        )?
+        .mapping();
+
+    engine.add_mapping_to_space_top(DEFAULT_SPACE_ID, first)?;
+    engine.add_mapping_to_space_top(DEFAULT_SPACE_ID, second)?;
+    engine.add_mapping_to_space_top(DEFAULT_SPACE_ID, third)?;
+
+    let _ = (first, second);
+    let reader = engine.query_reader()?;
+
+    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+        reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
+    })?;
+    let shared_start_records = mappings
+        .into_iter()
+        .filter(|record| record.start() == shared_start)
+        .collect::<Vec<_>>();
+    assert_eq!(shared_start_records.len(), 1);
+    assert_eq!(shared_start_records[0].mapping(), third);
+
+    Ok(())
+}
+
+#[test]
+fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut unchunked_project = Project::new_transient(&loader)?;
+    let mut chunked_project = Project::new_transient(&loader)?;
+    let mut unchunked = FunctionRecovery::new();
+    let mut chunked = FunctionRecovery::new();
+
+    chunked.set_chunk_function_limit(Some(1));
+
+    let mut transaction = unchunked_project.transaction("unchunked recovery");
+    unchunked.analyse_transaction(&mut transaction)?;
+    transaction.commit()?;
+
+    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    if let Some(entry) = chunked_project.entry() {
+        regions.insert(entry);
+    }
+
+    loop {
+        let mut transaction = chunked_project.transaction("chunked recovery");
+        Analyser::analyse(
+            &mut chunked,
+            &mut transaction,
+            &regions,
+            &AnalysisCx::default(),
+        )?;
+        transaction.commit()?;
+
+        if !Analyser::has_pending_work(&chunked) {
+            break;
+        }
+
+        regions = fugue_core::ir::AddressRangeSet::new();
+    }
+
+    let unchunked_functions = unchunked_project
+        .functions()
+        .addresses()
+        .collect::<BTreeSet<_>>();
+    let chunked_functions = chunked_project
+        .functions()
+        .addresses()
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(chunked_functions, unchunked_functions);
+
+    Ok(())
+}
+
+#[test]
+fn test_reader_observes_progress_during_chunked_function_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_CHUNKED_RECOVERY_ATTR, true);
+    let project = Project::new_transient_with(&loader, attributes)?;
+    let engine = AnalysisEngine::new(project)?;
+    let reader = engine.query_reader()?;
+    let running = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(Barrier::new(2));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let reader_running = running.clone();
+        let reader_started = started.clone();
+        let observed = observed.clone();
+        let handle = scope.spawn(move || -> Result<(), QueryError> {
+            reader_started.wait();
+            let mut last = None;
+            while reader_running.load(Ordering::Acquire) {
+                let revision = reader.revision()?;
+                if last != Some(revision) {
+                    observed
+                        .lock()
+                        .expect("observed revisions lock poisoned")
+                        .push(revision);
+                    last = Some(revision);
+                }
+                std::thread::yield_now();
+            }
+            Ok(())
+        });
+
+        started.wait();
+        engine.wait_until_idle()?;
+        running.store(false, Ordering::Release);
+        handle
+            .join()
+            .map_err(|_| io::Error::other("reader thread panicked"))??;
+
+        Ok(())
+    })?;
+
+    let observed = observed.lock().expect("observed revisions lock poisoned");
+    assert!(
+        observed.len() >= 2,
+        "reader did not observe multiple committed revisions during chunked recovery: {observed:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -122,6 +1160,69 @@ fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn s
     drop(engine);
 
     assert_eq!(reader.revision(), Err(QueryError::Stopped));
+
+    Ok(())
+}
+
+#[test]
+fn test_query_readers_block_until_idle_during_concurrent_updates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let baseline_revision = reader.revision()?;
+    let running = Arc::new(AtomicBool::new(true));
+    let start = Arc::new(Barrier::new(5));
+
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let reader = reader.clone();
+            let running = running.clone();
+            let start = start.clone();
+            readers.push(scope.spawn(move || -> Result<(), QueryError> {
+                start.wait();
+                let mut last = reader.revision()?;
+                while running.load(Ordering::Acquire) {
+                    let revision = reader.revision()?;
+                    assert!(revision >= last);
+                    last = revision;
+                    let page = reader.function_page(DEFAULT_SPACE_ID, None, 16)?;
+                    assert!(page.entries().len() <= 16);
+                }
+                Ok(())
+            }));
+        }
+
+        start.wait();
+        for index in 0..64 {
+            let address = Address::in_default_space(0x7100_0000u64 + index as u64);
+            let symbol = SymbolEntry::new(
+                address,
+                format!("concurrent_query_symbol_{index}"),
+                SymbolProperties::LOCAL,
+            );
+            engine.insert_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(246), index),
+                symbol,
+            )?;
+        }
+        running.store(false, Ordering::Release);
+
+        for reader in readers {
+            reader
+                .join()
+                .map_err(|_| io::Error::other("reader thread panicked"))??;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(reader.revision()? > baseline_revision);
 
     Ok(())
 }
@@ -205,7 +1306,12 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn std::
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
 
-    assert!(reader.function_page(None, 16)?.entries().contains(&hint));
+    assert!(
+        reader
+            .function_page(DEFAULT_SPACE_ID, None, 16)?
+            .entries()
+            .contains(&hint)
+    );
 
     Ok(())
 }
@@ -264,7 +1370,8 @@ fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_engine_partial_write_publishes_written_range() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_partial_write_rolls_back_without_publishing()
+-> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let address = project
@@ -280,12 +1387,7 @@ fn test_engine_partial_write_publishes_written_range() -> Result<(), Box<dyn std
     let changes = engine.subscribe(16)?;
 
     assert!(engine.write_bytes(address, [0xcc, 0xdd]).is_err());
-
-    let delivered = changes.recv_timeout(Duration::from_secs(1))?;
-    assert!(delivered.records().contains(&ChangeRecord::BytesWritten {
-        space: address.space(),
-        range: (address.raw_address(), address.raw_address()),
-    }));
+    assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
 
     Ok(())
 }
@@ -346,6 +1448,63 @@ fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn test_engine_symbol_replacement_publishes_removed_and_added()
+-> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let old_entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let new_entry = old_entry
+        .checked_add(0x40u64)
+        .ok_or_else(|| io::Error::other("replacement symbol address overflow"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    let index = SymbolIndex::new(SymbolTableSelector::new(245), 0);
+    let old_symbol = SymbolEntry::new(
+        old_entry,
+        "engine_symbol_replace_old",
+        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+    );
+    let new_symbol = SymbolEntry::new(
+        new_entry,
+        "engine_symbol_replace_new",
+        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+    );
+
+    engine.insert_symbol(index, old_symbol.clone())?;
+    let replaced = engine.insert_symbol(index, new_symbol.clone())?;
+
+    assert!(replaced.records().contains(&ChangeRecord::SymbolRemoved {
+        address: old_entry,
+        symbol: old_symbol.symbol(),
+    }));
+    assert!(replaced.records().contains(&ChangeRecord::SymbolAdded {
+        address: new_entry,
+        symbol: new_symbol.symbol(),
+    }));
+
+    let reader = engine.query_reader()?;
+    assert!(
+        !reader
+            .symbols_at(old_entry, None, 16)?
+            .entries()
+            .iter()
+            .any(|record| record.symbol() == old_symbol.symbol())
+    );
+    assert!(
+        reader
+            .symbols_at(new_entry, None, 16)?
+            .entries()
+            .iter()
+            .any(|record| record.symbol() == new_symbol.symbol())
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -361,14 +1520,26 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::erro
 
     let removed = engine.remove_function(entry)?;
 
-    assert!(
-        removed
-            .records()
-            .contains(&ChangeRecord::FunctionRemoved { entry })
-    );
+    assert!(removed.records().iter().any(|record| matches!(
+        record,
+        ChangeRecord::FunctionRemoved { entry: removed_entry, .. } if *removed_entry == entry
+    )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &removed);
     assert!(reader.flow_graph(entry)?.is_none());
-    assert!(!reader.function_page(None, 4096)?.entries().contains(&entry));
+    assert!(
+        !reader
+            .function_page(DEFAULT_SPACE_ID, None, 4096)?
+            .entries()
+            .contains(&entry)
+    );
+    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+    assert!(
+        !reader
+            .call_edges(None, 4096)?
+            .entries()
+            .iter()
+            .any(|edge| edge.caller() == entry)
+    );
 
     let mut function = PartialFunction::new(entry);
     function.push_block(PartialCodeBlock::new(
@@ -379,14 +1550,77 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::erro
     ));
     let added = engine.add_function(function)?;
 
-    assert!(
-        added
-            .records()
-            .contains(&ChangeRecord::FunctionAdded { entry })
-    );
+    assert!(added.records().iter().any(|record| matches!(
+        record,
+        ChangeRecord::FunctionAdded { entry: added_entry, .. } if *added_entry == entry
+    )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &added);
     assert!(reader.flow_graph(entry)?.is_some());
-    assert!(reader.function_page(None, 4096)?.entries().contains(&entry));
+    assert!(
+        reader
+            .function_page(DEFAULT_SPACE_ID, None, 4096)?
+            .entries()
+            .contains(&entry)
+    );
+    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+
+    let functions = assert_strict_cursor_pages::<Address, _>(|cursor| {
+        reader.function_page(
+            DEFAULT_SPACE_ID,
+            cursor.map(|address| address.raw_address()),
+            1,
+        )
+    })?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let edges = assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edges(cursor, 1))?;
+    let edge = edges
+        .iter()
+        .copied()
+        .find(|edge| {
+            edge.caller() != edge.callee()
+                && functions.contains(&edge.caller())
+                && functions.contains(&edge.callee())
+        })
+        .ok_or_else(|| io::Error::other("fixture has no live non-recursive call edge"))?;
+
+    let removed = engine.remove_function(edge.callee())?;
+
+    assert!(removed.records().iter().any(|record| matches!(
+        record,
+        ChangeRecord::FunctionRemoved { entry, .. } if *entry == edge.callee()
+    )));
+    engine.wait_until_idle()?;
+
+    let functions_after = assert_strict_cursor_pages::<Address, _>(|cursor| {
+        reader.function_page(
+            DEFAULT_SPACE_ID,
+            cursor.map(|address| address.raw_address()),
+            1,
+        )
+    })?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let callers_after =
+        assert_strict_cursor_pages(|cursor| reader.callers_of(edge.callee(), cursor, 1))?;
+    let edges_after =
+        assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edges(cursor, 1))?;
+
+    assert!(!functions_after.contains(&edge.callee()));
+    assert!(callers_after.contains(&edge.caller()));
+    assert!(edges_after.contains(&edge));
 
     Ok(())
 }
@@ -429,8 +1663,7 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
     let reader = engine.query_reader()?;
     let changes = engine.subscribe(16)?;
     assert!(
-        reader
-            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
+        run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
             .entries()
             .iter()
             .any(|record| record.mapping() == mapping_id)
@@ -455,8 +1688,7 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
             })
     );
     assert!(
-        !reader
-            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
+        !run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
             .entries()
             .iter()
             .any(|record| record.mapping() == created_id)
@@ -480,8 +1712,7 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
         range: (created_start.raw_address(), created_start.raw_address()),
     }));
     assert!(
-        reader
-            .mapping_page(extra_space, None, 4096)?
+        run_query(|| reader.mapping_page(extra_space, None, 4096))?
             .entries()
             .iter()
             .any(|record| record.mapping() == created_id)
@@ -516,14 +1747,13 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
     }));
     let mut delivered = false;
     for _ in 0..16 {
-        if &*changes.recv_timeout(Duration::from_secs(1))? == &remapped {
+        if *changes.recv_timeout(Duration::from_secs(1))? == remapped {
             delivered = true;
             break;
         }
     }
     assert!(delivered);
-    let remapped_record = reader
-        .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
+    let remapped_record = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
         .entries()
         .iter()
         .find(|record| record.mapping() == mapping_id)
@@ -545,14 +1775,13 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
     }));
     let mut delivered = false;
     for _ in 0..16 {
-        if &*changes.recv_timeout(Duration::from_secs(1))? == &resized {
+        if *changes.recv_timeout(Duration::from_secs(1))? == resized {
             delivered = true;
             break;
         }
     }
     assert!(delivered);
-    let resized_record = reader
-        .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
+    let resized_record = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
         .entries()
         .iter()
         .find(|record| record.mapping() == mapping_id)
@@ -569,15 +1798,14 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
     }));
     let mut delivered = false;
     for _ in 0..16 {
-        if &*changes.recv_timeout(Duration::from_secs(1))? == &removed {
+        if *changes.recv_timeout(Duration::from_secs(1))? == removed {
             delivered = true;
             break;
         }
     }
     assert!(delivered);
     assert!(
-        !reader
-            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
+        !run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
             .entries()
             .iter()
             .any(|record| record.mapping() == mapping_id)
@@ -598,6 +1826,579 @@ fn test_idle_cancel_does_not_poison_future_work() -> Result<(), Box<dyn std::err
     engine.save()?;
 
     assert!(!engine.cancellation_token().is_cancelled());
+
+    Ok(())
+}
+
+#[test]
+fn test_cancelling_analyser_commits_partial_progress_and_clears_followup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("cancelling-test")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    trigger_test_analyser(&engine, address)?;
+
+    assert!(symbol_exists(&engine, address, "cancel_committed_symbol")?);
+    assert!(!symbol_exists(&engine, address, "cancel_followup_symbol")?);
+    assert!(!engine.cancellation_token().is_cancelled());
+    engine.save()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_constructors_accept_explicit_persistence_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
+
+    engine.wait_until_idle()?;
+    engine.save()?;
+
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::with_capacity_and_policy(project, 8, PersistencePolicy::OnCommit)?;
+
+    engine.wait_until_idle()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_manual_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = SAVE_FAILURE_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("save failure test lock poisoned"))?;
+    FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project =
+        Project::new_with_provider::<FailingSaveStorageProvider>(&loader, AttributeMap::new())?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
+
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let created = engine.create_space()?;
+    let revision = created.changes().revision();
+    assert!(revision > Default::default());
+
+    FAIL_ENTITY_INSERTS.store(true, Ordering::SeqCst);
+    let error = engine
+        .save()
+        .expect_err("injected save failure should reach caller");
+    FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+
+    assert!(matches!(error, EngineError::Persistence(_)));
+    assert_eq!(reader.revision()?, revision);
+    engine.save()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_on_idle_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = SAVE_FAILURE_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("save failure test lock poisoned"))?;
+    FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project =
+        Project::new_with_provider::<FailingSaveStorageProvider>(&loader, AttributeMap::new())?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnIdle)?;
+
+    engine.wait_until_idle()?;
+
+    FAIL_ENTITY_INSERTS.store(true, Ordering::SeqCst);
+    let created = engine.create_space()?;
+    assert!(created.changes().revision() > Revision::default());
+    let error = engine
+        .wait_until_idle()
+        .expect_err("injected on-idle save failure should reach caller");
+    FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+
+    assert!(matches!(error, EngineError::Persistence(_)));
+    let reader = engine.query_reader()?;
+    let _ = reader.revision()?;
+
+    engine.wait_until_idle()?;
+    let _ = reader.revision()?;
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_on_idle_persists_revision_and_reopen_sends_restored()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnIdle)?;
+    engine.wait_until_idle()?;
+    let revision = engine.query_reader()?.revision()?;
+    assert!(revision > Default::default());
+    drop(engine);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.revision(), revision);
+
+    let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
+    let changes = engine.subscribe(1)?;
+    let restored = changes.recv_timeout(Duration::from_secs(1))?;
+
+    assert_eq!(restored.revision(), revision);
+    assert_eq!(
+        restored.records(),
+        &[ChangeRecord::Restored { to: revision }]
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_manual_save_reopen_queries_saved_state_and_single_restored()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine-saved-state.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
+
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let symbol = SymbolEntry::new(
+        entry,
+        "saved_engine_symbol",
+        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+    );
+    let symbol_name = symbol.symbol();
+    let inserted =
+        engine.insert_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 0), symbol)?;
+
+    assert!(inserted.records().contains(&ChangeRecord::SymbolAdded {
+        address: entry,
+        symbol: symbol_name,
+    }));
+    assert!(
+        reader
+            .symbols_at(entry, None, 4096)?
+            .entries()
+            .iter()
+            .any(|record| record.symbol() == symbol_name)
+    );
+
+    engine.save()?;
+    let revision = reader.revision()?;
+    drop(reader);
+    drop(engine);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.revision(), revision);
+
+    let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
+    let changes = engine.subscribe(2)?;
+    let restored = changes.recv_timeout(Duration::from_secs(1))?;
+
+    assert_eq!(restored.revision(), revision);
+    assert_eq!(
+        restored.records(),
+        &[ChangeRecord::Restored { to: revision }]
+    );
+    assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(
+        engine
+            .query_reader()?
+            .symbols_at(entry, None, 4096)?
+            .entries()
+            .iter()
+            .any(|record| record.symbol() == symbol_name)
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine-on-commit.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnCommit)?;
+
+    engine.wait_until_idle()?;
+    let symbol = SymbolEntry::new(
+        entry,
+        "on_commit_symbol",
+        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+    );
+    let symbol_name = symbol.symbol();
+    let inserted =
+        engine.insert_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 1), symbol)?;
+    let revision = inserted.revision();
+    drop(engine);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.revision(), revision);
+
+    let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
+    assert!(
+        engine
+            .query_reader()?
+            .symbols_at(entry, None, 4096)?
+            .entries()
+            .iter()
+            .any(|record| record.symbol() == symbol_name)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_analyser_error_is_logged_without_poisoning_engine() -> Result<(), Box<dyn std::error::Error>>
+{
+    let project = project_with_test_analyser("error-test")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    trigger_test_analyser(&engine, address)?;
+    engine.save()?;
+
+    let messages = engine.take_run_log();
+    assert!(messages.iter().any(|message| {
+        message.analyser() == "error-test" && message.kind() == AnalysisMessageKind::Error
+    }));
+
+    Ok(())
+}
+
+#[test]
+fn test_repeated_analyser_errors_disable_analyser() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("error-test")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    for _ in 0..DEFAULT_ANALYSER_MAX_FAILURES {
+        trigger_test_analyser(&engine, address)?;
+    }
+
+    let messages = engine.take_run_log();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| {
+                message.analyser() == "error-test" && message.kind() == AnalysisMessageKind::Error
+            })
+            .count(),
+        DEFAULT_ANALYSER_MAX_FAILURES
+    );
+
+    trigger_test_analyser(&engine, address)?;
+    assert!(engine.take_run_log().is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("panicking-test")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    regions.insert(address);
+    engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+
+    let result = engine.wait_until_idle();
+    assert!(matches!(
+        result,
+        Err(EngineError::Poisoned(_)) | Err(EngineError::Stopped)
+    ));
+    assert!(matches!(
+        engine.poison_check(),
+        Err(EngineError::Poisoned(message)) if message.contains("test analyser panic")
+    ));
+    assert!(matches!(
+        engine.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(249), 0),
+            SymbolEntry::new(
+                address,
+                "after_panic_symbol",
+                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+            ),
+        ),
+        Err(EngineError::Poisoned(_))
+    ));
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine-panic-torn.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
+    attributes.set_attr(TEST_ANALYSER_ATTR, "panicking-test");
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnIdle)?;
+
+    engine.wait_until_idle()?;
+    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    regions.insert(entry);
+    engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+
+    assert!(matches!(
+        engine.wait_until_idle(),
+        Err(EngineError::Poisoned(_)) | Err(EngineError::Stopped)
+    ));
+    assert!(matches!(
+        engine.poison_check(),
+        Err(EngineError::Poisoned(_))
+    ));
+    drop(engine);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert!(
+        reopened
+            .symbols()
+            .get_first("panicked_torn_symbol")
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_panicking_completion_hook_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("completion-panic-test")?;
+    let engine = AnalysisEngine::new(project)?;
+
+    let result = engine.wait_until_idle();
+    assert!(matches!(
+        result,
+        Err(EngineError::Poisoned(_)) | Err(EngineError::Stopped)
+    ));
+    assert!(matches!(
+        engine.poison_check(),
+        Err(EngineError::Poisoned(message)) if message.contains("test completion panic")
+    ));
+    assert!(matches!(engine.save(), Err(EngineError::Poisoned(_))));
+
+    Ok(())
+}
+
+#[test]
+fn test_completion_hook_runs_once_after_drain() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("completion-test")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    let reader = engine.query_reader()?;
+
+    engine.wait_until_idle()?;
+    COMPLETION_ANALYSE_COUNT.store(0, Ordering::SeqCst);
+    COMPLETION_END_COUNT.store(0, Ordering::SeqCst);
+    trigger_test_analyser(&engine, address)?;
+
+    let symbols = reader.symbols_at(address, None, 4096)?;
+    assert_eq!(
+        symbols
+            .entries()
+            .iter()
+            .filter(|symbol| symbol.symbol().as_str() == "completion_symbol")
+            .count(),
+        1
+    );
+    assert_eq!(COMPLETION_END_COUNT.load(Ordering::SeqCst), 1);
+
+    Ok(())
+}
+
+#[test]
+fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("derived-symbol")?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    let changes = engine.subscribe(4096)?;
+
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let symbols = reader.symbols_at(entry, None, 4096)?;
+
+    assert!(
+        symbols
+            .entries()
+            .iter()
+            .any(|symbol| symbol.symbol().as_str() == "derived_function")
+    );
+
+    let journal = changes.try_iter().collect::<Vec<_>>();
+    let first_function_revision = journal.iter().position(|changes| {
+        changes
+            .records()
+            .iter()
+            .any(|record| matches!(record, ChangeRecord::FunctionAdded { .. }))
+    });
+    let first_symbol_revision = journal.iter().position(|changes| {
+        changes.records().iter().any(|record| {
+            matches!(
+                record,
+                ChangeRecord::SymbolAdded { symbol, .. }
+                    if symbol.as_str() == "derived_function"
+            )
+        })
+    });
+
+    assert!(matches!(
+        (first_function_revision, first_symbol_revision),
+        (Some(function), Some(symbol)) if function < symbol
+    ));
+
+    Ok(())
+}
+
+fn run_storm_analyser_scenario(
+    storm: bool,
+) -> Result<(usize, Vec<SymbolRecord>), Box<dyn std::error::Error>> {
+    STORM_ANALYSER_RUNS.store(0, Ordering::SeqCst);
+
+    let project = project_with_test_analyser("storm-test")?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+
+    if storm {
+        for offset in 0..512u64 {
+            let end = entry
+                .raw_address()
+                .checked_add(RawAddress::from(offset))
+                .ok_or_else(|| io::Error::other("fixture entry cannot form storm range"))?;
+            let mut regions = fugue_core::ir::AddressRangeSet::new();
+            regions.insert_raw_range(entry.space(), entry.raw_address()..=end);
+            engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+        }
+    } else {
+        let mut regions = fugue_core::ir::AddressRangeSet::new();
+        regions.insert(entry);
+        engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+    }
+
+    engine.wait_until_idle()?;
+
+    let symbols = engine
+        .query_reader()?
+        .symbols_at(entry, None, 4096)?
+        .entries()
+        .iter()
+        .copied()
+        .filter(|symbol| symbol.symbol().as_str() == "storm_symbol")
+        .collect::<Vec<_>>();
+
+    Ok((STORM_ANALYSER_RUNS.load(Ordering::SeqCst), symbols))
+}
+
+#[test]
+fn test_engine_storm_regions_coalesce_to_single_analyser_task()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (calm_runs, calm_symbols) = run_storm_analyser_scenario(false)?;
+    let (storm_runs, storm_symbols) = run_storm_analyser_scenario(true)?;
+
+    assert_eq!(calm_runs, 1);
+    assert!(
+        (1..512).contains(&storm_runs),
+        "storm sends should coalesce far below the send count, got {storm_runs}"
+    );
+    assert_eq!(storm_symbols, calm_symbols);
+    assert_eq!(storm_symbols.len(), 1);
+
+    Ok(())
+}
+
+#[test]
+fn test_analyser_error_rolls_back_without_publishing_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("mutating-error")?;
+    let address = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+
+    engine.wait_until_idle()?;
+    let revision = engine.query_reader()?.revision()?;
+    let changes = engine.subscribe(16)?;
+    trigger_test_analyser(&engine, address)?;
+
+    assert_eq!(engine.query_reader()?.revision()?, revision);
+    assert!(!symbol_exists(&engine, address, "rolled_back_symbol")?);
+    assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(engine.take_run_log().iter().any(|message| {
+        message.analyser() == "mutating-error" && message.kind() == AnalysisMessageKind::Error
+    }));
 
     Ok(())
 }

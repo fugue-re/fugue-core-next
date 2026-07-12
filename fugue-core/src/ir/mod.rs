@@ -14,12 +14,15 @@ use tinyset::SetU64;
 
 pub mod address;
 pub use address::{
-    Address, AddressRange, AddressRangeSet, AddressWithContext, RawAddress, RawAddressMap,
-    RawAddressRangeSet, ToRawAddress,
+    Address, AddressCoverage, AddressRange, AddressRangeSet, AddressWithContext,
+    CoveredAddressRange, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
 };
 
 pub mod block;
 pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable};
+
+pub mod call_graph;
+pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
 pub mod cfg;
 pub use cfg::{FlowKind, FlowTarget};

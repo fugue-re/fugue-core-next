@@ -65,6 +65,7 @@ pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = EntityKeyId::new(3);
 pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = EntityKeyId::new(4);
 pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(5);
 pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
+pub const ENTITY_KEY_CALL_GRAPH_EDGE_ID: EntityKeyId = EntityKeyId::new(7);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -77,6 +78,10 @@ pub const ENTITY_FUNCTION_ID: EntityId = EntityId::new(5);
 pub const ENTITY_CODE_BLOCK_ID: EntityId = EntityId::new(6);
 pub const ENTITY_INSN_ID: EntityId = EntityId::new(7);
 pub const ENTITY_SYMBOL_ID: EntityId = EntityId::new(8);
+pub const ENTITY_CALL_GRAPH_FORWARD_EDGE_ID: EntityId = EntityId::new(9);
+pub const ENTITY_CALL_GRAPH_INVERSE_EDGE_ID: EntityId = EntityId::new(10);
+pub const ENTITY_CALL_GRAPH_INDEX_HEADER_ID: EntityId = EntityId::new(11);
+pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -99,6 +104,8 @@ pub enum ProjectEntity {
     FunctionTable = 0b0000_0010,
     SymbolTable = 0b0000_0011,
     CodeBlockTable = 0b0000_0100,
+    CallGraphIndex = 0b0000_0101,
+    Revision = 0b0000_0110,
 }
 
 impl EntityKey for ProjectEntity {
@@ -109,9 +116,11 @@ impl EntityKey for ProjectEntity {
             match buf[0] {
                 0b0000_0000 => Some(ProjectEntity::Architecture),
                 0b0000_0001 => Some(ProjectEntity::Attributes),
-                0b0000_0010 => Some(ProjectEntity::SymbolTable),
-                0b0000_0011 => Some(ProjectEntity::FunctionTable),
+                0b0000_0010 => Some(ProjectEntity::FunctionTable),
+                0b0000_0011 => Some(ProjectEntity::SymbolTable),
                 0b0000_0100 => Some(ProjectEntity::CodeBlockTable),
+                0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
+                0b0000_0110 => Some(ProjectEntity::Revision),
                 _ => None,
             }
         } else {
@@ -260,5 +269,23 @@ mod test {
         let decoded = Address::decode(&buf).expect("decodes");
         assert_eq!(decoded, address);
         assert_eq!(decoded.space().index(), 300);
+    }
+
+    #[test]
+    fn test_project_entity_key_roundtrips() {
+        for entity in [
+            ProjectEntity::Architecture,
+            ProjectEntity::Attributes,
+            ProjectEntity::FunctionTable,
+            ProjectEntity::SymbolTable,
+            ProjectEntity::CodeBlockTable,
+            ProjectEntity::CallGraphIndex,
+            ProjectEntity::Revision,
+        ] {
+            let mut buf = BytesMut::new();
+            entity.encode(&mut buf);
+
+            assert_eq!(ProjectEntity::decode(&buf), Some(entity));
+        }
     }
 }

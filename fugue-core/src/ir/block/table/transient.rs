@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use iset::Entry;
 use smallvec::SmallVec;
 
-use super::{CodeBlockIndex, CodeBlockTableError};
+use super::{CodeBlockIndex, CodeBlockTableAllocation, CodeBlockTableError};
 use crate::ir::{Address, CodeBlock, Id};
 use crate::lifter::ContextSet;
 use crate::storage::EntityStorageError;
@@ -34,6 +34,68 @@ impl CodeBlockTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         Ok(())
+    }
+
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        CodeBlockTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) {
+        let id = block.id();
+        if self.get_by_id(id).is_some() {
+            self.clear_entry(id);
+        }
+
+        let index = id.index();
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        self.index
+            .bounds
+            .entry(block.space())
+            .or_default()
+            .entry(range)
+            .or_default()
+            .insert(id);
+        self.index.next_index = self.index.next_index.max(index + 1);
+        self.index.live_entries += 1;
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != index);
+        self.entries[index] = Some(block);
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> bool {
+        let Some(block) = self.get_raw(id) else {
+            return false;
+        };
+
+        let space = block.space();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+
+        if let Some(Entry::Occupied(mut entry)) =
+            self.index.bounds.get_mut(&space).map(|m| m.entry(range))
+        {
+            let id_set = entry.get_mut();
+            id_set.remove(id);
+
+            if id_set.is_empty() {
+                entry.remove();
+            }
+        }
+
+        self.entries[id.index()] = None;
+        self.index.live_entries -= 1;
+        true
     }
 
     fn get_raw(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {

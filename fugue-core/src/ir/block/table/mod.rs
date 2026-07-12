@@ -7,7 +7,7 @@ use anyhow::Error as AnyhowError;
 use iset::IntervalMap;
 use thiserror::Error;
 
-use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
+use crate::ir::{Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
 use crate::storage::entities::{
@@ -39,6 +39,23 @@ struct CodeBlockIndex {
     free_ids: Vec<Id<CodeBlock>>,
     live_entries: usize,
     next_index: usize,
+}
+
+pub(crate) struct CodeBlockTableAllocation {
+    free_ids_len: usize,
+    free_ids: Vec<Id<CodeBlock>>,
+    next_index: usize,
+}
+
+impl CodeBlockTableAllocation {
+    fn new(free_ids: &[Id<CodeBlock>], next_index: usize, max_pops: usize) -> Self {
+        let tail_start = free_ids.len().saturating_sub(max_pops);
+        Self {
+            free_ids_len: free_ids.len(),
+            free_ids: free_ids[tail_start..].to_vec(),
+            next_index,
+        }
+    }
 }
 
 pub enum CodeBlockTable {
@@ -154,6 +171,37 @@ impl CodeBlockTable {
         }
     }
 
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        match self {
+            Self::Persistent(p) => p.allocation_checkpoint(max_pops),
+            Self::Transient(t) => t.allocation_checkpoint(max_pops),
+        }
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        match self {
+            Self::Persistent(p) => p.restore_allocation(allocation),
+            Self::Transient(t) => t.restore_allocation(allocation),
+        }
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.restore_entry(block),
+            Self::Transient(t) => {
+                t.restore_entry(block);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.clear_entry(id),
+            Self::Transient(t) => Ok(t.clear_entry(id)),
+        }
+    }
+
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
     where
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
@@ -178,6 +226,24 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
             Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn coverage(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(blocks, &mut covered);
+        covered
+    }
+
+    pub fn coverage_into(
+        &self,
+        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
+        covered: &mut AddressRangeSet,
+    ) {
+        for id in blocks {
+            if let Some(block) = self.get_by_id(id) {
+                block.coverage_into(covered);
+            }
         }
     }
 

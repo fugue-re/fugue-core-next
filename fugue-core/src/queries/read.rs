@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
 use crate::ir::block::table::CodeBlockRef;
 use crate::ir::cfg::{FlowGraph, FlowTarget};
 use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, InsnTargetKind};
+use crate::ir::{Address, AddressCoverage, CallGraphEdgeKey, RawAddress};
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -18,24 +18,22 @@ impl<'p> ProjectRead<'p> {
         Self { project }
     }
 
+    pub(crate) fn project(&self) -> &Project {
+        self.project
+    }
+
     pub(crate) fn call_edges(&self, after: Option<CallEdge>, limit: usize) -> QueryPage<CallEdge> {
-        let limit = Self::limit(limit);
-        let mut edges = BTreeSet::new();
-
-        for function in self.project.functions().iter() {
-            let caller = function.entry();
-            self.visit_function_call_targets(function, |callee| {
-                let edge = CallEdge::new(caller, callee);
-                if after.is_none_or(|after| edge > after) {
-                    edges.insert(edge);
-                    if edges.len() > limit + 1 {
-                        edges.pop_last();
-                    }
-                }
-
-                true
+        let after = after.map(|edge| CallGraphEdgeKey::new(edge.caller(), edge.callee()));
+        let edges = self
+            .project
+            .call_graph()
+            .edges(after)
+            .unwrap_or_else(|err| err.into_fatal())
+            .map(|result| {
+                result
+                    .map(|edge| CallEdge::new(edge.source(), edge.target()))
+                    .unwrap_or_else(|err| err.into_fatal())
             });
-        }
 
         Self::page(edges, limit)
     }
@@ -50,20 +48,25 @@ impl<'p> ProjectRead<'p> {
         after: Option<Address>,
         limit: usize,
     ) -> QueryPage<Address> {
-        let limit = Self::limit(limit);
-        let mut callers = BTreeSet::new();
-
-        for function in self.project.functions().iter() {
-            let source = function.entry();
-            if after.is_none_or(|after| source > after) && self.function_calls(function, entry) {
-                callers.insert(source);
-                if callers.len() > limit + 1 {
-                    callers.pop_last();
-                }
-            }
-        }
+        let callers = self
+            .project
+            .call_graph()
+            .callers(entry, after)
+            .unwrap_or_else(|err| err.into_fatal())
+            .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
 
         Self::page(callers, limit)
+    }
+
+    pub(crate) fn callees_of(
+        &self,
+        entry: Address,
+        after: Option<Address>,
+        limit: usize,
+    ) -> QueryPage<Address> {
+        self.function(entry)
+            .map(|function| self.function_callee_page(function, after, limit))
+            .unwrap_or_else(|| QueryPage::new(Vec::new(), None))
     }
 
     pub(crate) fn flow_graph(&self, function: FunctionRef<'_>) -> Arc<FlowGraph> {
@@ -74,12 +77,25 @@ impl<'p> ProjectRead<'p> {
         Arc::new(FlowGraph::new(Self::flow_targets(blocks)))
     }
 
-    pub(crate) fn function_page(&self, after: Option<Address>, limit: usize) -> QueryPage<Address> {
+    pub(crate) fn function_coverage(&self, function: &FunctionRef<'_>) -> AddressCoverage {
+        let covered = self
+            .project
+            .blocks()
+            .coverage(function.blocks().map(|(_, id)| id));
+
+        AddressCoverage::from(&covered)
+    }
+
+    pub(crate) fn function_page(
+        &self,
+        space: AddressSpaceId,
+        after: Option<RawAddress>,
+        limit: usize,
+    ) -> QueryPage<Address> {
         Self::page(
             self.project
                 .functions()
-                .addresses()
-                .filter(|entry| after.is_none_or(|after| *entry > after)),
+                .addresses_in_space_after(space, after),
             limit,
         )
     }
@@ -91,21 +107,35 @@ impl<'p> ProjectRead<'p> {
         limit: usize,
     ) -> QueryPage<MappingRecord> {
         let limit = Self::limit(limit);
-        let mut mappings = BTreeSet::new();
-        let Ok(views) = self.project.segments().iter_views(space) else {
+        let Ok(views) = self
+            .project
+            .segments()
+            .iter_views_from(space, after.map(|record| record.start()))
+        else {
             return QueryPage::new(Vec::new(), None);
         };
 
-        for view in views {
-            Self::insert_mapping_record(
-                &mut mappings,
-                MappingRecord::from_view(&view),
-                after,
-                limit,
-            );
+        let mut records = Vec::with_capacity(limit + 1);
+        let mut group = Vec::new();
+        let mut current_start = None;
+
+        for record in views.map(|view| MappingRecord::from_view(&view)) {
+            if current_start.is_some_and(|start| start != record.start()) {
+                Self::push_ordered_mapping_group(&mut records, &mut group, after, limit);
+                if records.len() > limit {
+                    break;
+                }
+            }
+
+            current_start = Some(record.start());
+            group.push(record);
         }
 
-        Self::page(mappings, limit)
+        if records.len() <= limit {
+            Self::push_ordered_mapping_group(&mut records, &mut group, after, limit);
+        }
+
+        Self::page(records, limit)
     }
 
     pub(crate) fn symbol_page(
@@ -114,13 +144,34 @@ impl<'p> ProjectRead<'p> {
         limit: usize,
     ) -> QueryPage<SymbolRecord> {
         let limit = Self::limit(limit);
-        let mut symbols = BTreeSet::new();
+        let start = after.map_or(Bound::Unbounded, |after| Bound::Included(after.address()));
+        let symbols = self
+            .project
+            .symbols()
+            .range_by_address((start, Bound::Unbounded))
+            .map(|(_, entry)| SymbolRecord::from_entry(entry));
 
-        for (_, entry) in self.project.symbols().iter_by_address() {
-            Self::insert_symbol_record(&mut symbols, SymbolRecord::from_entry(entry), after, limit);
+        let mut records = Vec::with_capacity(limit + 1);
+        let mut group = Vec::new();
+        let mut current_address = None;
+
+        for record in symbols {
+            if current_address.is_some_and(|address| address != record.address()) {
+                Self::push_ordered_symbol_group(&mut records, &mut group, after, limit);
+                if records.len() > limit {
+                    break;
+                }
+            }
+
+            current_address = Some(record.address());
+            group.push(record);
         }
 
-        Self::page(symbols, limit)
+        if records.len() <= limit {
+            Self::push_ordered_symbol_group(&mut records, &mut group, after, limit);
+        }
+
+        Self::page(records, limit)
     }
 
     pub(crate) fn symbols_at(
@@ -129,14 +180,16 @@ impl<'p> ProjectRead<'p> {
         after: Option<SymbolRecord>,
         limit: usize,
     ) -> QueryPage<SymbolRecord> {
-        let limit = Self::limit(limit);
-        let mut symbols = BTreeSet::new();
+        let mut records = self
+            .project
+            .symbols()
+            .get_by_address(address)
+            .map(|(_, entry)| SymbolRecord::from_entry(entry))
+            .filter(|record| after.is_none_or(|after| *record > after))
+            .collect::<Vec<_>>();
+        records.sort();
 
-        for (_, entry) in self.project.symbols().get_by_address(address) {
-            Self::insert_symbol_record(&mut symbols, SymbolRecord::from_entry(entry), after, limit);
-        }
-
-        Self::page(symbols, limit)
+        Self::page(records, limit)
     }
 
     fn flow_targets<'a>(blocks: impl IntoIterator<Item = CodeBlockRef<'a>>) -> Vec<FlowTarget> {
@@ -161,64 +214,48 @@ impl<'p> ProjectRead<'p> {
         after: Option<Address>,
         limit: usize,
     ) -> QueryPage<Address> {
-        let limit = Self::limit(limit);
-        let mut callees = BTreeSet::new();
-
-        self.visit_function_call_targets(function, |callee| {
-            if after.is_none_or(|after| callee > after) {
-                callees.insert(callee);
-                if callees.len() > limit + 1 {
-                    callees.pop_last();
-                }
-            }
-
-            true
-        });
+        let callees = self
+            .project
+            .call_graph()
+            .callees(function.entry(), after)
+            .unwrap_or_else(|err| err.into_fatal())
+            .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
 
         Self::page(callees, limit)
     }
 
-    fn function_calls(&self, function: FunctionRef<'_>, target: Address) -> bool {
-        let mut found = false;
-
-        self.visit_function_call_targets(function, |callee| {
-            found = callee == target;
-            !found
-        });
-
-        found
+    fn limit(limit: usize) -> usize {
+        limit.clamp(1, super::MAX_QUERY_PAGE_LEN)
     }
 
-    fn insert_mapping_record(
-        mappings: &mut BTreeSet<MappingRecord>,
-        record: MappingRecord,
+    fn push_ordered_mapping_group(
+        records: &mut Vec<MappingRecord>,
+        group: &mut Vec<MappingRecord>,
         after: Option<MappingRecord>,
         limit: usize,
     ) {
-        if after.is_none_or(|after| record > after) {
-            mappings.insert(record);
-            if mappings.len() > limit + 1 {
-                mappings.pop_last();
-            }
-        }
+        group.sort();
+        records.extend(
+            group
+                .drain(..)
+                .filter(|record| after.is_none_or(|after| *record > after))
+                .take(limit + 1 - records.len()),
+        );
     }
 
-    fn insert_symbol_record(
-        symbols: &mut BTreeSet<SymbolRecord>,
-        record: SymbolRecord,
+    fn push_ordered_symbol_group(
+        records: &mut Vec<SymbolRecord>,
+        group: &mut Vec<SymbolRecord>,
         after: Option<SymbolRecord>,
         limit: usize,
     ) {
-        if after.is_none_or(|after| record > after) {
-            symbols.insert(record);
-            if symbols.len() > limit + 1 {
-                symbols.pop_last();
-            }
-        }
-    }
-
-    fn limit(limit: usize) -> usize {
-        limit.clamp(1, super::MAX_QUERY_PAGE_LEN)
+        group.sort();
+        records.extend(
+            group
+                .drain(..)
+                .filter(|record| after.is_none_or(|after| *record > after))
+                .take(limit + 1 - records.len()),
+        );
     }
 
     fn page<T>(source: impl IntoIterator<Item = T>, limit: usize) -> QueryPage<T>
@@ -234,28 +271,5 @@ impl<'p> ProjectRead<'p> {
         entries.truncate(limit);
 
         QueryPage::new(entries, next_cursor)
-    }
-
-    fn visit_function_call_targets(
-        &self,
-        function: FunctionRef<'_>,
-        mut visit: impl FnMut(Address) -> bool,
-    ) {
-        let blocks = function
-            .blocks()
-            .filter_map(|(_, id)| self.project.blocks().get_by_id(id));
-
-        for block in blocks {
-            for insn in block.instructions().iter() {
-                for (target, kind, to) in insn.iter_targets() {
-                    let is_call = kind == InsnTargetKind::Global
-                        && FlowTarget::from_insn_target(insn, target, to)
-                            .is_some_and(|flow_target| flow_target.kind().is_call());
-                    if is_call && !visit(to) {
-                        return;
-                    }
-                }
-            }
-        }
     }
 }

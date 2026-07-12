@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeSet, Revision};
 use crate::ir::cfg::FlowGraph;
-use crate::ir::{Address, SegmentProperties, Symbol, SymbolEntry, SymbolProperties};
+use crate::ir::{Address, RawAddress, SegmentProperties, Symbol, SymbolEntry, SymbolProperties};
 use crate::project::Project;
+use crate::queries::read::ProjectRead;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
@@ -17,7 +18,7 @@ mod stamps;
 #[cfg(test)]
 mod tests;
 
-use stamps::StampDatabase;
+use stamps::{StampDatabase, StampDatabaseState};
 
 const MAX_QUERY_PAGE_LEN: usize = 4096;
 
@@ -110,7 +111,7 @@ impl SymbolRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MappingRecord {
     mapping: SegmentMappingId,
     start: Address,
@@ -159,28 +160,47 @@ impl MappingRecord {
     }
 }
 
+impl PartialOrd for MappingRecord {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MappingRecord {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.start
+            .cmp(&other.start)
+            .then_with(|| self.mapping.cmp(&other.mapping))
+            .then_with(|| self.size.cmp(&other.size))
+            .then_with(|| self.properties.cmp(&other.properties))
+    }
+}
+
 #[derive(Clone)]
 pub struct QueryReader {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
-    stamps: Arc<Mutex<StampDatabase>>,
+    project: Arc<RwLock<Project>>,
+    stamps: Arc<Mutex<StampDatabaseState>>,
 }
 
 impl QueryReader {
     pub(crate) fn new(
         active: Arc<AtomicBool>,
         gate: Arc<RwLock<()>>,
-        stamps: Arc<Mutex<StampDatabase>>,
+        project: Arc<RwLock<Project>>,
+        stamps: Arc<Mutex<StampDatabaseState>>,
     ) -> Self {
         Self {
             active,
             gate,
+            project,
             stamps,
         }
     }
 
     pub fn revision(&self) -> Result<Revision, QueryError> {
-        self.with_database(|database| database.revision())
+        self.with_project(|read| read.project().revision())
     }
 
     pub fn flow_graph(&self, entry: Address) -> Result<Option<Arc<FlowGraph>>, QueryError> {
@@ -192,7 +212,7 @@ impl QueryReader {
         after: Option<CallEdge>,
         limit: usize,
     ) -> Result<QueryPage<CallEdge>, QueryError> {
-        self.with_database(|database| database.call_edges(after, limit))
+        self.with_project(|read| read.call_edges(after, limit))
     }
 
     pub fn callees_of(
@@ -201,15 +221,16 @@ impl QueryReader {
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_database(|database| database.callees_of(entry, after, limit))
+        self.with_project(|read| read.callees_of(entry, after, limit))
     }
 
     pub fn function_page(
         &self,
-        after: Option<Address>,
+        space: AddressSpaceId,
+        after: Option<RawAddress>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_database(|database| database.function_page(after, limit))
+        self.with_project(|read| read.function_page(space, after, limit))
     }
 
     pub fn callers_of(
@@ -218,7 +239,7 @@ impl QueryReader {
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_database(|database| database.callers_of(entry, after, limit))
+        self.with_project(|read| read.callers_of(entry, after, limit))
     }
 
     pub fn mapping_page(
@@ -227,7 +248,7 @@ impl QueryReader {
         after: Option<MappingRecord>,
         limit: usize,
     ) -> Result<QueryPage<MappingRecord>, QueryError> {
-        self.with_database(|database| database.mapping_page(space, after, limit))
+        self.with_project(|read| read.mapping_page(space, after, limit))
     }
 
     pub fn symbol_page(
@@ -235,7 +256,7 @@ impl QueryReader {
         after: Option<SymbolRecord>,
         limit: usize,
     ) -> Result<QueryPage<SymbolRecord>, QueryError> {
-        self.with_database(|database| database.symbol_page(after, limit))
+        self.with_project(|read| read.symbol_page(after, limit))
     }
 
     pub fn symbols_at(
@@ -244,7 +265,7 @@ impl QueryReader {
         after: Option<SymbolRecord>,
         limit: usize,
     ) -> Result<QueryPage<SymbolRecord>, QueryError> {
-        self.with_database(|database| database.symbols_at(address, after, limit))
+        self.with_project(|read| read.symbols_at(address, after, limit))
     }
 
     fn with_database<T>(&self, query: impl FnOnce(&StampDatabase) -> T) -> Result<T, QueryError> {
@@ -252,20 +273,33 @@ impl QueryReader {
             return Err(QueryError::Stopped);
         }
 
-        let _read = self.gate.read();
-        if !self.active.load(Ordering::Acquire) {
-            return Err(QueryError::Stopped);
-        }
+        let _query_guard = self.enter_query()?;
 
-        let database = self.stamps.lock().clone();
+        let database = self.stamps.lock().worker();
         Ok(query(&database))
+    }
+
+    fn with_project<T>(&self, query: impl FnOnce(ProjectRead<'_>) -> T) -> Result<T, QueryError> {
+        let _query_guard = self.enter_query()?;
+        let project = self.project.read();
+        Ok(query(ProjectRead::new(&project)))
+    }
+
+    fn enter_query(&self) -> Result<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>, QueryError> {
+        let guard = self.gate.read_arc();
+        if self.active.load(Ordering::Acquire) {
+            Ok(guard)
+        } else {
+            Err(QueryError::Stopped)
+        }
     }
 }
 
 pub(crate) struct QueryEngine {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
-    stamps: Arc<Mutex<StampDatabase>>,
+    project: Arc<RwLock<Project>>,
+    stamps: Arc<Mutex<StampDatabaseState>>,
 }
 
 impl QueryEngine {
@@ -273,22 +307,37 @@ impl QueryEngine {
         Self {
             active: Arc::new(AtomicBool::new(true)),
             gate: Arc::new(RwLock::new(())),
-            stamps: Arc::new(Mutex::new(StampDatabase::new(project))),
+            project: project.clone(),
+            stamps: Arc::new(Mutex::new(StampDatabaseState::new(project))),
         }
     }
 
     pub(crate) fn reader(&self) -> QueryReader {
-        QueryReader::new(self.active.clone(), self.gate.clone(), self.stamps.clone())
+        QueryReader::new(
+            self.active.clone(),
+            self.gate.clone(),
+            self.project.clone(),
+            self.stamps.clone(),
+        )
+    }
+
+    pub(crate) fn write_guard(&self) -> QueryWriteGuard {
+        self.gate.write_arc()
     }
 
     pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) {
-        let _write = self.gate.write();
         self.stamps.lock().apply_changes(changes);
+    }
+
+    pub(crate) fn mark_dead(&self) {
+        self.active.store(false, Ordering::Release);
     }
 }
 
 impl Drop for QueryEngine {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
+        self.mark_dead();
     }
 }
+
+pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<parking_lot::RawRwLock, ()>;

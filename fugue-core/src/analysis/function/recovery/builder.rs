@@ -103,22 +103,6 @@ impl FunctionBuilder {
         &mut self.context
     }
 
-    pub fn add_initialisation_pass(
-        &mut self,
-        name: impl Into<String>,
-        pass: impl AnalysisPass<FunctionBuilderContext> + 'static,
-    ) {
-        self.initialisation_passes.add_pass(name, pass);
-    }
-
-    pub fn add_post_lifting_pass(
-        &mut self,
-        name: impl Into<String>,
-        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
-    ) {
-        self.post_lifting_passes.add_pass(name, pass);
-    }
-
     pub fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
@@ -151,6 +135,21 @@ impl FunctionBuilder {
 
     pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.context.global_targets
+    }
+    pub fn add_initialisation_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<FunctionBuilderContext> + 'static,
+    ) {
+        self.initialisation_passes.add_pass(name, pass);
+    }
+
+    pub fn add_post_lifting_pass(
+        &mut self,
+        name: impl Into<String>,
+        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
+    ) {
+        self.post_lifting_passes.add_pass(name, pass);
     }
 }
 

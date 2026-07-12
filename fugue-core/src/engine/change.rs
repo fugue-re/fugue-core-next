@@ -1,4 +1,4 @@
-use crate::ir::{Address, RawAddress, Symbol};
+use crate::ir::{Address, AddressCoverage, RawAddress, Symbol};
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -49,13 +49,16 @@ pub enum ChangeRecord {
     },
     FunctionAdded {
         entry: Address,
+        coverage: AddressCoverage,
     },
     FunctionChanged {
         entry: Address,
         kind: FunctionChangeKind,
+        coverage: AddressCoverage,
     },
     FunctionRemoved {
         entry: Address,
+        coverage: AddressCoverage,
     },
     Restored {
         to: Revision,

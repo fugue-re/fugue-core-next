@@ -314,7 +314,7 @@ impl DisassemblerT for ArmDisassembler {
     }
 }
 
-#[cfg(all(test, feature = "static-lifters"))]
+#[cfg(test)]
 mod test {
     use super::Arm;
     use crate::ir::RawAddress;

@@ -666,6 +666,65 @@ impl RawAddressRangeSet {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct CoveredAddressRange {
+    space: AddressSpaceId,
+    start: RawAddress,
+    end: RawAddress,
+}
+
+impl CoveredAddressRange {
+    pub fn new(space: AddressSpaceId, start: RawAddress, end: RawAddress) -> Self {
+        Self { space, start, end }
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.space
+    }
+
+    pub fn start(&self) -> RawAddress {
+        self.start
+    }
+
+    pub fn end(&self) -> RawAddress {
+        self.end
+    }
+}
+
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct AddressCoverage {
+    ranges: Vec<CoveredAddressRange>,
+}
+
+impl AddressCoverage {
+    pub fn ranges(&self) -> &[CoveredAddressRange] {
+        &self.ranges
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+impl From<&AddressRangeSet> for AddressCoverage {
+    fn from(covered: &AddressRangeSet) -> Self {
+        Self {
+            ranges: covered
+                .spaces()
+                .flat_map(|(space, ranges)| {
+                    ranges.ranges().map(move |range| {
+                        CoveredAddressRange::new(space, *range.start(), *range.end())
+                    })
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct AddressRangeSet {
     spaces: BTreeMap<AddressSpaceId, RawAddressRangeSet>,

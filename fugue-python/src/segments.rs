@@ -1,6 +1,5 @@
 use fallible_iterator::FallibleIterator;
-use fugue_core::ir::Address as CoreAddress;
-use fugue_core::ir::SegmentProperties as CoreSegmentProperties;
+use fugue_core::ir::{Address as CoreAddress, SegmentProperties as CoreSegmentProperties};
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use fugue_core::storage::segments::mapping::SegmentMappingBuilder;

@@ -1386,8 +1386,7 @@ mod test {
         let mut loaded = Vec::new();
 
         while let Some(segment) = contents.next()? {
-            let mut writes = segment.into_writes(bank_base)?;
-            while let Some(write) = writes.next() {
+            for write in segment.into_writes(bank_base)? {
                 let placement = segments
                     .iter()
                     .find_map(|segment| segment.resolve(write.bank(), write.offset().offset()))
@@ -1534,7 +1533,7 @@ mod test {
         while let Some(segment) = contents.next()? {
             if segment.address() == header_address {
                 saw_contents = true;
-                assert!(segment.len() > 0);
+                assert!(!segment.is_empty());
                 break;
             }
         }
@@ -1548,7 +1547,7 @@ mod test {
     fn test_pe_custom_image_base() -> Result<(), Box<dyn std::error::Error>> {
         let data = BytesOrMapping::from_file("tests/hello-pe.exe")?;
         let (preferred_base, slot_address, original_value) = first_dir64_relocation(&data)?;
-        let image_base = RawAddress::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x0001_8000_0000_u64);
         let pe = Pe::new_with(data, attributes![ATTRIBUTE_IMAGE_BASE => image_base])?;
         let segments = load_segments(&pe)?;
         let rebased_address = Address::in_default_space(
@@ -1588,7 +1587,7 @@ mod test {
 
     #[test]
     fn test_pe_custom_image_base_without_relocations() {
-        let image_base = RawAddress::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x0001_8000_0000_u64);
         let err = match Pe::new_with(
             BytesOrMapping::from_file("tests/hello-pe-fixed.exe").expect("fixture"),
             attributes![ATTRIBUTE_IMAGE_BASE => image_base],

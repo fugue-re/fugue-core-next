@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
 use fugue_core::analysis::core::FunctionRecoveryConfig;
@@ -381,6 +383,95 @@ pub struct IDAAnalysers<'a> {
     binary: &'a IDABinary,
 }
 
+#[derive(Clone)]
+struct IDAFunctionFacts {
+    blocks: Arc<BTreeMap<u64, Arc<[IDABlockHint]>>>,
+    functions: Arc<[IDAFunctionHint]>,
+}
+
+#[derive(Clone, Copy)]
+struct IDAFunctionHint {
+    address: u64,
+    thumb: bool,
+}
+
+#[derive(Clone)]
+struct IDABlockHint {
+    start: u64,
+    last_insn: u64,
+    indirect: bool,
+    successors: Arc<[u64]>,
+}
+
+impl IDAFunctionFacts {
+    fn new(binary: &IDABinary) -> Self {
+        let database = binary.database();
+        let processor = database.processor();
+        let mut functions = Vec::new();
+        let mut blocks = BTreeMap::new();
+
+        for (_, function) in database.functions() {
+            let entry = function.start_address();
+            functions.push(IDAFunctionHint {
+                address: entry,
+                thumb: binary.mark_thumb && processor.is_thumb_at(entry),
+            });
+
+            let Ok(cfg) = function.cfg() else {
+                continue;
+            };
+
+            let mut block_hints = Vec::new();
+            for block in cfg.blocks() {
+                let Some((last_insn, indirect)) =
+                    Self::last_block_instruction(database, block.start_address())
+                else {
+                    continue;
+                };
+                let successors = if indirect {
+                    block
+                        .succs_with(&cfg)
+                        .map(|successor| successor.start_address())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+
+                block_hints.push(IDABlockHint {
+                    start: block.start_address(),
+                    last_insn,
+                    indirect,
+                    successors: successors.into(),
+                });
+            }
+
+            blocks.insert(entry, block_hints.into());
+        }
+
+        Self {
+            blocks: Arc::new(blocks),
+            functions: functions.into(),
+        }
+    }
+
+    fn last_block_instruction(database: &IDB, start: u64) -> Option<(u64, bool)> {
+        let mut address = start;
+        loop {
+            let insn = database.insn_at(address)?;
+            if insn.is_basic_block_end(false) {
+                return Some((insn.address(), insn.is_indirect_jump()));
+            }
+            address += insn.len() as u64;
+        }
+    }
+
+    fn blocks(&self, entry: Address) -> Option<&[IDABlockHint]> {
+        self.blocks
+            .get(&entry.offset())
+            .map(|blocks| blocks.as_ref())
+    }
+}
+
 impl<'a> LoadableAnalysers for IDAAnalysers<'a> {
     fn function_recovery_with(
         &self,
@@ -392,14 +483,20 @@ impl<'a> LoadableAnalysers for IDAAnalysers<'a> {
                 .with_symbol_table_function_hints(false),
         );
 
+        let facts = IDAFunctionFacts::new(self.binary);
+
         recovery.add_candidate_discovery_pass(
             "ida-function-discovery",
-            IDAFunctionDiscovery::new(self.binary, self.binary.mark_thumb),
+            IDAFunctionDiscovery::new(
+                &facts,
+                self.binary.architecture.language(),
+                self.binary.mark_thumb,
+            ),
         );
 
         recovery.add_builder_initialisation_pass(
             "ida-function-builder",
-            IDAFunctionBuilder::new(self.binary),
+            IDAFunctionBuilder::new(&facts),
         );
 
         Ok(recovery)
@@ -407,22 +504,17 @@ impl<'a> LoadableAnalysers for IDAAnalysers<'a> {
 }
 
 pub struct IDAFunctionDiscovery {
-    database: Rc<IDB>,
+    facts: IDAFunctionFacts,
     t_mode: Option<ContextBitRange>,
 }
 
 impl IDAFunctionDiscovery {
-    pub fn new(database: &IDABinary, mark_thumb: bool) -> Self {
+    fn new(facts: &IDAFunctionFacts, language: &'static Language, mark_thumb: bool) -> Self {
         let t_mode = mark_thumb
-            .then(|| {
-                database
-                    .architecture
-                    .language()
-                    .context_variable_by_name("TMode")
-            })
+            .then(|| language.context_variable_by_name("TMode"))
             .flatten();
         Self {
-            database: database.database.clone(),
+            facts: facts.clone(),
             t_mode,
         }
     }
@@ -444,8 +536,8 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
                     .then(|| view.start()..=view.last())
             });
 
-        for (_, f) in self.database.functions() {
-            let addr = Address::from(f.start_address());
+        for function in self.facts.functions.iter() {
+            let addr = Address::from(function.address);
 
             if state.functions().contains_key(&addr) {
                 continue;
@@ -456,7 +548,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
             }
 
             if let Some(t_mode) = self.t_mode {
-                let value = u32::from(self.database.processor().is_thumb_at(f.start_address()));
+                let value = u32::from(function.thumb);
                 state.add_candidate(AddressWithContext::new(
                     addr,
                     ContextSet::single(t_mode, value),
@@ -471,15 +563,13 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
 }
 
 pub struct IDAFunctionBuilder {
-    database: Rc<IDB>,
-    last_insns: Vec<(u64, bool)>,
+    facts: IDAFunctionFacts,
 }
 
 impl IDAFunctionBuilder {
-    pub fn new(binary: &IDABinary) -> Self {
-        IDAFunctionBuilder {
-            database: binary.database.clone(),
-            last_insns: Vec::new(),
+    fn new(facts: &IDAFunctionFacts) -> Self {
+        Self {
+            facts: facts.clone(),
         }
     }
 }
@@ -491,44 +581,18 @@ impl AnalysisPass<FunctionBuilderContext> for IDAFunctionBuilder {
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();
-        let Some(f) = self.database.function_at(entry.offset()) else {
+        let Some(blocks) = self.facts.blocks(entry) else {
             return Ok(());
         };
 
-        let Ok(cfg) = f.cfg() else {
-            return Ok(());
-        };
-
-        self.last_insns.clear();
-        self.last_insns.reserve(cfg.blocks_count());
-
-        self.last_insns.extend(cfg.blocks().map(|b| {
-            let mut addr = b.start_address();
-            loop {
-                let insn = self
-                    .database
-                    .insn_at(addr.into())
-                    .expect("valid instruction");
-                if insn.is_basic_block_end(false) {
-                    return (insn.address(), insn.is_indirect_jump());
-                }
-                addr += insn.len() as u64;
-            }
-        }));
-
-        for (i, block) in cfg.blocks().enumerate() {
-            let (last_insn, is_indirect) = self.last_insns[i];
-
-            // NOTE: concrete edges will be automatically resolved, so we only use IDA's
-            // edges to hint at indirect flows, e.g., jump tables, etc.
-            if is_indirect {
-                for succ in block.succs_with(&cfg) {
-                    // TODO: classify edges correctly
-                    builder.add_local_target(last_insn, succ.start_address(), FlowKind::IBranch);
+        for block in blocks {
+            if block.indirect {
+                for successor in block.successors.iter().copied() {
+                    builder.add_local_target(block.last_insn, successor, FlowKind::IBranch);
                 }
             }
 
-            builder.add_candidate(block.start_address());
+            builder.add_candidate(block.start);
         }
 
         Ok(())

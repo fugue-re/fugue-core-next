@@ -2,26 +2,30 @@ use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 use thiserror::Error;
+use tracing::Span;
 
 use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
-use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
+use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, FunctionChangeKind, Revision};
+use crate::ir::function::table::FunctionTableRevert;
+use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
-    Address, CodeBlockTable, FunctionId, FunctionTable, RawAddress, Symbol, SymbolEntry, SymbolId,
-    SymbolIndex, SymbolTable,
+    Address, AddressCoverage, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable,
+    RawAddress, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
 use crate::platform::Platform;
-use crate::storage::entities::{EntityStorageError, ProjectEntity};
+use crate::storage::entities::schema::ENTITY_PROJECT_REVISION_ID;
+use crate::storage::entities::{Entity, EntityId, EntityStorageError, ProjectEntity};
 use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
-use crate::storage::segments::SegmentStorage;
 use crate::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance,
 };
 use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::{SegmentStorage, SegmentStorageRevert, SegmentWriteRevert};
 use crate::storage::{
     ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES,
     DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider, SegmentStorageError,
@@ -38,12 +42,34 @@ pub struct Project {
     pub(crate) symbols: SymbolTable,
     pub(crate) functions: FunctionTable,
     pub(crate) blocks: CodeBlockTable,
+    pub(crate) call_graph: CallGraphIndex,
     pub(crate) platform: Platform,
+    restored_revision: Option<Revision>,
     pub(crate) attributes: AttributeMap,
     pub(crate) revision: Revision,
     transaction_active: bool,
+    persistable: bool,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct ProjectRevision {
+    revision: Revision,
+}
+
+impl ProjectRevision {
+    fn new(revision: Revision) -> Self {
+        Self { revision }
+    }
+
+    fn revision(&self) -> Revision {
+        self.revision
+    }
+}
+
+impl Entity for ProjectRevision {
+    const ID: EntityId = ENTITY_PROJECT_REVISION_ID;
 }
 
 #[allow(unknown_lints, pub_field_in_struct)]
@@ -55,7 +81,6 @@ pub struct ProjectRef<'a> {
     pub functions: &'a FunctionTable,
     pub blocks: &'a CodeBlockTable,
     pub attributes: &'a AttributeMap,
-    pub storage: &'a StorageContainer,
 }
 
 #[allow(unknown_lints, pub_field_in_struct)]
@@ -66,12 +91,17 @@ pub struct ProjectMut<'a> {
     pub symbols: &'a mut SymbolTable,
     pub functions: &'a mut FunctionTable,
     pub blocks: &'a mut CodeBlockTable,
+    pub call_graph: &'a mut CallGraphIndex,
     pub attributes: &'a mut AttributeMap,
     pub storage: &'a mut StorageContainer,
 }
 
 impl Drop for Project {
     fn drop(&mut self) {
+        if !self.persistable {
+            return;
+        }
+
         if let Err(e) = self.save() {
             tracing::error!("failed to persist project data: {e}");
         }
@@ -92,15 +122,35 @@ pub enum ProjectError {
     StorageProvider(#[from] StorageProviderError),
 }
 
+impl ProjectError {
+    pub(crate) fn is_write_back_poisoned(&self) -> bool {
+        match self {
+            Self::EntityStorage(error) => error.is_write_back_poisoned(),
+            Self::StorageProvider(StorageProviderError::EntityStorage(error)) => {
+                error.is_write_back_poisoned()
+            }
+            _ => false,
+        }
+    }
+}
+
 pub struct ProjectTransaction<'p> {
     project: &'p mut Project,
     records: Vec<ChangeRecord>,
+    function_reverts: Vec<FunctionTableRevert>,
+    symbol_reverts: Vec<SymbolTableRevert>,
+    segment_reverts: Vec<SegmentStorageRevert>,
+    segment_write_reverts: Vec<SegmentWriteRevert>,
+    abandoned: bool,
     committed: bool,
+    span: Span,
 }
 
 impl Drop for ProjectTransaction<'_> {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
+        let span = self.span.clone();
+        let _entered = span.enter();
+        if !self.abandoned && !std::thread::panicking() {
             debug_assert!(self.committed, "project transaction dropped without commit");
         }
         self.project.transaction_active = false;
@@ -110,6 +160,11 @@ impl Drop for ProjectTransaction<'_> {
 impl ProjectTransaction<'_> {
     pub fn project(&self) -> &Project {
         self.project
+    }
+
+    pub(crate) fn abandon(&mut self) {
+        self.abandoned = true;
+        self.project.abandon_persistence();
     }
 
     pub(crate) fn analyse_with<S>(
@@ -125,6 +180,12 @@ impl ProjectTransaction<'_> {
 
     pub fn add_function(&mut self, function: PartialFunction) -> Result<FunctionId, ProjectError> {
         let entry = function.entry();
+        let revert = FunctionTableRevert::capture(
+            &self.project.functions,
+            &self.project.blocks,
+            entry,
+            function.blocks().len(),
+        );
         let old_blocks = self
             .project
             .functions
@@ -135,7 +196,34 @@ impl ProjectTransaction<'_> {
                     .map(|(_, id)| id)
                     .collect::<SmallVec<[_; 8]>>()
             });
-        let id = function.commit(&mut self.project.functions, &mut self.project.blocks)?;
+        let mut covered = self
+            .project
+            .blocks
+            .coverage(old_blocks.iter().flatten().copied());
+        let id = match function.commit(&mut self.project.functions, &mut self.project.blocks) {
+            Ok(id) => id,
+            Err(error) => {
+                revert.restore(
+                    &mut self.project.functions,
+                    &mut self.project.blocks,
+                    &mut self.project.call_graph,
+                )?;
+                return Err(error.into());
+            }
+        };
+        let targets = self
+            .project
+            .functions
+            .get_by_address(entry)
+            .map(|function| {
+                self.project
+                    .blocks
+                    .coverage_into(function.blocks().map(|(_, id)| id), &mut covered);
+                CallGraphIndex::function_call_targets(&function, &self.project.blocks)
+            })
+            .unwrap_or_default();
+        self.function_reverts.push(revert);
+        self.project.call_graph.set_function_edges(entry, targets)?;
 
         if let Some(blocks) = old_blocks {
             for block in blocks {
@@ -145,58 +233,98 @@ impl ProjectTransaction<'_> {
             self.records.push(ChangeRecord::FunctionChanged {
                 entry,
                 kind: FunctionChangeKind::Body,
+                coverage: AddressCoverage::from(&covered),
             });
         } else {
-            self.records.push(ChangeRecord::FunctionAdded { entry });
+            self.records.push(ChangeRecord::FunctionAdded {
+                entry,
+                coverage: AddressCoverage::from(&covered),
+            });
         }
-
         Ok(id)
     }
 
-    pub fn remove_function(&mut self, entry: Address) -> bool {
+    pub fn remove_function(&mut self, entry: Address) -> Result<bool, ProjectError> {
         let Some(function) = self.project.functions.get_by_address(entry) else {
-            return false;
+            return Ok(false);
         };
+        let id = function.id();
+        drop(function);
 
+        self.remove_function_by_id(id)
+    }
+
+    pub fn remove_function_by_id(&mut self, id: FunctionId) -> Result<bool, ProjectError> {
+        let Some(function) = self.project.functions.get_by_id(id) else {
+            return Ok(false);
+        };
+        let entry = function.entry();
+        let revert =
+            FunctionTableRevert::capture(&self.project.functions, &self.project.blocks, entry, 0);
         let blocks = function
             .blocks()
             .map(|(_, id)| id)
             .collect::<SmallVec<[_; 8]>>();
-        let id = function.id();
 
-        let _ = function;
+        drop(function);
+
+        let covered = self.project.blocks.coverage(blocks.iter().copied());
+
+        self.function_reverts.push(revert);
+        self.project.call_graph.remove_function_edges(entry)?;
 
         for block in blocks {
             self.project.blocks.remove_by_id(block);
         }
 
         self.project.functions.remove_by_id(id);
-        self.records.push(ChangeRecord::FunctionRemoved { entry });
+        self.records.push(ChangeRecord::FunctionRemoved {
+            entry,
+            coverage: AddressCoverage::from(&covered),
+        });
 
-        true
+        Ok(true)
     }
 
     pub fn insert_symbol(&mut self, index: SymbolIndex, entry: SymbolEntry) -> SymbolId {
         let address = entry.address();
         let symbol = entry.symbol();
+        let removed = self
+            .project
+            .symbols
+            .get_by_index(index)
+            .and_then(|(_, existing)| {
+                (*existing != entry && existing.indices().len() == 1)
+                    .then(|| (existing.address(), existing.symbol()))
+            });
+        let mut revert = self.project.symbols.insert_revert(index, &entry);
         let (is_new, id) = self
             .project
             .symbols
             .insert(index, address, symbol, entry.properties());
+        revert.touch(id);
+
+        if let Some((address, symbol)) = removed {
+            self.record_symbol_removed(address, symbol);
+        }
 
         if is_new {
             self.records
                 .push(ChangeRecord::SymbolAdded { address, symbol });
         }
 
+        self.symbol_reverts.push(revert);
+
         id
     }
 
     pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> usize {
+        let symbol = symbol.as_ref();
+        let revert = self.project.symbols.remove_symbol_revert(symbol);
         let removed = self
             .project
             .symbols
-            .get(symbol.as_ref())
+            .get(symbol)
             .map(|entries| {
                 entries
                     .map(|(_, entry)| (entry.address(), entry.symbol()))
@@ -205,10 +333,14 @@ impl ProjectTransaction<'_> {
             .unwrap_or_default();
         let count = self.project.symbols.remove(symbol);
         self.record_symbols_removed(removed);
+        if count > 0 {
+            self.symbol_reverts.push(revert);
+        }
         count
     }
 
     pub fn remove_symbols_by_address(&mut self, address: Address) -> usize {
+        let revert = self.project.symbols.remove_address_revert(address);
         let removed = self
             .project
             .symbols
@@ -217,10 +349,14 @@ impl ProjectTransaction<'_> {
             .collect::<SmallVec<[_; 4]>>();
         let count = self.project.symbols.remove_by_address(address);
         self.record_symbols_removed(removed);
+        if count > 0 {
+            self.symbol_reverts.push(revert);
+        }
         count
     }
 
     pub fn remove_symbol_by_id(&mut self, id: SymbolId) -> bool {
+        let revert = self.project.symbols.remove_id_revert(id);
         let removed = self
             .project
             .symbols
@@ -233,12 +369,14 @@ impl ProjectTransaction<'_> {
 
         if let Some((address, symbol)) = removed {
             self.record_symbol_removed(address, symbol);
+            self.symbol_reverts.push(revert);
         }
 
         true
     }
 
     pub fn remove_symbol_by_index(&mut self, index: SymbolIndex) -> bool {
+        let revert = self.project.symbols.remove_index_revert(index);
         let removed = self
             .project
             .symbols
@@ -251,6 +389,7 @@ impl ProjectTransaction<'_> {
 
         if let Some((address, symbol)) = removed {
             self.record_symbol_removed(address, symbol);
+            self.symbol_reverts.push(revert);
         }
 
         true
@@ -260,18 +399,24 @@ impl ProjectTransaction<'_> {
         &mut self,
         builder: SegmentMappingBuilder,
     ) -> Result<SegmentMappingId, ProjectError> {
+        let mut revert = self.project.storage.segments.empty_revert();
         let mapping = self
             .project
             .storage
             .segments
             .create_mapping_from_builder(builder)?;
+        revert.touch_mapping(mapping);
+        self.segment_reverts.push(revert);
         self.records
             .push(ChangeRecord::SegmentMappingCreated { mapping });
         Ok(mapping)
     }
 
     pub fn create_space(&mut self) -> Result<AddressSpaceId, ProjectError> {
+        let mut revert = self.project.storage.segments.empty_revert();
         let space = self.project.storage.segments.create_space()?;
+        revert.touch_space(space);
+        self.segment_reverts.push(revert);
         self.records.push(ChangeRecord::SpaceCreated { space });
         Ok(space)
     }
@@ -281,10 +426,16 @@ impl ProjectTransaction<'_> {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .space_mapping_revert(space, mapping);
         self.project
             .storage
             .segments
             .add_mapping_to_space(space, mapping)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
 
         Ok(())
@@ -295,10 +446,16 @@ impl ProjectTransaction<'_> {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .space_mapping_revert(space, mapping);
         self.project
             .storage
             .segments
             .add_mapping_to_space_top(space, mapping)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
 
         Ok(())
@@ -309,10 +466,16 @@ impl ProjectTransaction<'_> {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .space_mapping_revert(space, mapping);
         self.project
             .storage
             .segments
             .add_mapping_to_space_bottom(space, mapping)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
 
         Ok(())
@@ -326,7 +489,8 @@ impl ProjectTransaction<'_> {
             .mapping_placements(id)
             .collect::<SmallVec<[_; 4]>>();
 
-        self.project.storage.segments.remove_mapping(id)?;
+        let revert = self.project.storage.segments.remove_mapping_tracked(id)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed);
 
         Ok(())
@@ -337,6 +501,12 @@ impl ProjectTransaction<'_> {
         id: SegmentMappingId,
         new_start: impl Into<Address>,
     ) -> Result<(), ProjectError> {
+        let new_start = new_start.into();
+        let revert = self
+            .project
+            .storage
+            .segments
+            .mapping_remap_revert(id, new_start);
         let removed = self
             .project
             .storage
@@ -345,6 +515,7 @@ impl ProjectTransaction<'_> {
             .collect::<SmallVec<[_; 4]>>();
 
         self.project.storage.segments.remap_mapping(id, new_start)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed);
         self.record_mapping_added_to_placements(id);
 
@@ -356,6 +527,11 @@ impl ProjectTransaction<'_> {
         id: SegmentMappingId,
         new_size: u64,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .mapping_resize_revert(id, new_size);
         let removed = self
             .project
             .storage
@@ -364,6 +540,7 @@ impl ProjectTransaction<'_> {
             .collect::<SmallVec<[_; 4]>>();
 
         self.project.storage.segments.resize_mapping(id, new_size)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed);
         self.record_mapping_added_to_placements(id);
 
@@ -377,10 +554,12 @@ impl ProjectTransaction<'_> {
         provenance: SegmentMappingProvenance,
         flags: SegmentMappingFlags,
     ) -> Result<(), ProjectError> {
+        let revert = self.project.storage.segments.mapping_metadata_revert(id);
         self.project
             .storage
             .segments
             .update_mapping_metadata(id, kind, provenance, flags)?;
+        self.segment_reverts.push(revert);
         self.records
             .push(ChangeRecord::SegmentMappingChanged { mapping: id });
 
@@ -392,10 +571,16 @@ impl ProjectTransaction<'_> {
         space: AddressSpaceId,
         id: SegmentMappingId,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .space_mapping_revert(space, id);
         self.project
             .storage
             .segments
             .prioritise_mapping(space, id)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_added(space, id);
 
         Ok(())
@@ -406,28 +591,39 @@ impl ProjectTransaction<'_> {
         space: AddressSpaceId,
         id: SegmentMappingId,
     ) -> Result<(), ProjectError> {
+        let revert = self
+            .project
+            .storage
+            .segments
+            .space_mapping_revert(space, id);
         self.project
             .storage
             .segments
             .deprioritise_mapping(space, id)?;
+        self.segment_reverts.push(revert);
         self.record_mapping_added(space, id);
 
         Ok(())
     }
 
     pub fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<(), ProjectError> {
-        let written = self.project.storage.segments.write_bytes(addr, bytes)?;
-
-        if let Some(range) = Self::bytes_range(addr.raw_address(), written as u64) {
-            self.records.push(ChangeRecord::BytesWritten {
-                space: addr.space(),
-                range,
-            });
-        }
+        let (written, revert) = self.project.storage.segments.write_bytes_to_space_tracked(
+            addr.space(),
+            addr,
+            bytes,
+        )?;
 
         if written == bytes.len() {
+            if let Some(range) = Self::bytes_range(addr.raw_address(), written as u64) {
+                self.records.push(ChangeRecord::BytesWritten {
+                    space: addr.space(),
+                    range,
+                });
+            }
+            self.segment_write_reverts.push(revert);
             Ok(())
         } else {
+            revert.restore(&mut self.project.storage.segments)?;
             Err(SegmentStorageError::InvalidAddressRange.into())
         }
     }
@@ -507,12 +703,41 @@ impl ProjectTransaction<'_> {
             .push(ChangeRecord::SymbolRemoved { address, symbol });
     }
 
-    pub fn commit(mut self) -> ChangeSet {
+    pub fn commit(mut self) -> Result<ChangeSet, ProjectError> {
+        let span = self.span.clone();
+        let _entered = span.enter();
         if !self.records.is_empty() {
-            self.project.revision = self.project.revision.next();
+            let revision = self.project.revision.next();
+            self.project.revision = revision;
         }
         self.committed = true;
-        ChangeSet::with_records(self.project.revision, std::mem::take(&mut self.records))
+        Ok(ChangeSet::with_records(
+            self.project.revision,
+            std::mem::take(&mut self.records),
+        ))
+    }
+
+    pub fn rollback(mut self) -> Result<(), ProjectError> {
+        let _entered = self.span.enter();
+        self.committed = true;
+        while let Some(revert) = self.function_reverts.pop() {
+            revert.restore(
+                &mut self.project.functions,
+                &mut self.project.blocks,
+                &mut self.project.call_graph,
+            )?;
+        }
+        while let Some(revert) = self.symbol_reverts.pop() {
+            revert.restore(&mut self.project.symbols);
+        }
+        while let Some(revert) = self.segment_write_reverts.pop() {
+            revert.restore(&mut self.project.storage.segments)?;
+        }
+        while let Some(revert) = self.segment_reverts.pop() {
+            revert.restore(&mut self.project.storage.segments);
+        }
+        self.records.clear();
+        Ok(())
     }
 }
 
@@ -673,16 +898,32 @@ impl Project {
             .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?
         };
 
+        let revision = storage
+            .entities
+            .get::<ProjectEntity, ProjectRevision>(&ProjectEntity::Revision)?
+            .map(|revision| revision.revision())
+            .unwrap_or_default();
+        let restored_revision = (revision != Revision::default()).then_some(revision);
+
+        let call_graph = match storage.write_back() {
+            Some(worker) => CallGraphIndex::new_with(storage.entities.clone(), worker.clone()),
+            None => CallGraphIndex::new(storage.entities.clone())?,
+        };
+        call_graph.ensure_current(functions.iter(), &blocks, revision.value())?;
+
         Ok(Self {
             arch,
             language,
             symbols,
             functions,
             blocks,
+            call_graph,
             platform,
+            restored_revision,
             attributes,
-            revision: Revision::default(),
+            revision,
             transaction_active: false,
+            persistable: true,
             storage,
         })
     }
@@ -748,18 +989,16 @@ impl Project {
         if let Some(path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH) {
             return match P::from_storage(path, &mut attributes) {
                 Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
-                Err(e) if e.requires_loadable() => L::from_bytes_with(bytes, attributes)
+                Err(e) if e.requires_loadable() => L::from_bytes_with(bytes, attributes.clone())
                     .map_err(ProjectError::from)
-                    .and_then(|loader| {
-                        Self::new_with_provider::<P>(&loader, AttributeMap::default())
-                    }),
+                    .and_then(|loader| Self::new_with_provider::<P>(&loader, attributes)),
                 Err(e) => Err(ProjectError::from(e)),
             };
         }
 
-        L::from_bytes_with(bytes, attributes)
+        L::from_bytes_with(bytes, attributes.clone())
             .map_err(ProjectError::from)
-            .and_then(|loader| Self::new_with_provider::<P>(&loader, AttributeMap::default()))
+            .and_then(|loader| Self::new_with_provider::<P>(&loader, attributes))
     }
 
     /// Loads or creates a project from the given file path.
@@ -845,9 +1084,9 @@ impl Project {
 
         match P::from_storage(project_path, &mut attributes) {
             Ok(storage) => Self::from_storage(None::<&L>, storage, attributes),
-            Err(e) if e.requires_loadable() => L::from_file_with(path, attributes)
+            Err(e) if e.requires_loadable() => L::from_file_with(path, attributes.clone())
                 .map_err(ProjectError::from)
-                .and_then(|loader| Self::new_with_provider::<P>(&loader, AttributeMap::default())),
+                .and_then(|loader| Self::new_with_provider::<P>(&loader, attributes)),
             Err(e) => Err(ProjectError::from(e)),
         }
     }
@@ -876,8 +1115,16 @@ impl Project {
         self.revision
     }
 
+    pub fn restored_revision(&self) -> Option<Revision> {
+        self.restored_revision
+    }
+
+    pub(crate) fn abandon_persistence(&mut self) {
+        self.persistable = false;
+    }
+
     pub fn transaction(&mut self, reason: impl AsRef<str>) -> ProjectTransaction<'_> {
-        let _ = reason.as_ref();
+        let span = tracing::debug_span!("project_transaction", reason = reason.as_ref());
         assert!(
             !self.transaction_active,
             "project transaction already active"
@@ -886,7 +1133,13 @@ impl Project {
         ProjectTransaction {
             project: self,
             records: Vec::new(),
+            function_reverts: Vec::new(),
+            symbol_reverts: Vec::new(),
+            segment_reverts: Vec::new(),
+            segment_write_reverts: Vec::new(),
+            abandoned: false,
             committed: false,
+            span,
         }
     }
 
@@ -910,11 +1163,15 @@ impl Project {
         &self.functions
     }
 
+    pub fn call_graph(&self) -> &CallGraphIndex {
+        &self.call_graph
+    }
+
     pub fn functions_mut(&mut self) -> &mut FunctionTable {
         &mut self.functions
     }
 
-    pub fn storage(&self) -> &StorageContainer {
+    pub(crate) fn storage(&self) -> &StorageContainer {
         &self.storage
     }
 
@@ -947,7 +1204,6 @@ impl Project {
             functions: &self.functions,
             blocks: &self.blocks,
             attributes: &self.attributes,
-            storage: &self.storage,
         }
     }
 
@@ -959,6 +1215,7 @@ impl Project {
             symbols: &mut self.symbols,
             functions: &mut self.functions,
             blocks: &mut self.blocks,
+            call_graph: &mut self.call_graph,
             attributes: &mut self.attributes,
             storage: &mut self.storage,
         }
@@ -969,8 +1226,13 @@ impl Project {
     }
 
     pub(crate) fn persist(&self) -> Result<(), StorageProviderError> {
+        if !self.persistable {
+            tracing::warn!("project persistence abandoned; skipping persistence");
+            return Ok(());
+        }
+
         if self.storage.entities.is_transient() {
-            tracing::debug!("entity storage is transient; skipping persistenece");
+            tracing::debug!("entity storage is transient; skipping persistence");
             return Ok(());
         }
 
@@ -999,6 +1261,15 @@ impl Project {
             tracing::debug!("draining write-back worker");
             worker.flush()?;
         }
+
+        tracing::debug!("persisting call graph marker");
+        self.call_graph.mark_current(self.revision.value())?;
+
+        tracing::debug!("persisting project revision");
+        self.storage.entities.insert(
+            &ProjectEntity::Revision,
+            &ProjectRevision::new(self.revision),
+        )?;
 
         Ok(())
     }

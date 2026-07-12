@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 
-use super::{CodeBlockIndex, CodeBlockTableError};
+use super::{CodeBlockIndex, CodeBlockTableAllocation, CodeBlockTableError};
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
@@ -45,7 +46,7 @@ impl CodeBlockTable {
         let mut live_entries = 0;
         let mut next_index = 0usize;
 
-        for entry in entries.try_iter()? {
+        for entry in entries.try_scan_range(Bound::Unbounded)? {
             let (id, block) = entry?;
 
             let range = block.start().raw_address()..=block.last_address().raw_address();
@@ -73,6 +74,64 @@ impl CodeBlockTable {
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
+    }
+
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        CodeBlockTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) -> Result<(), EntityStorageError> {
+        let id = block.id();
+        if self.entries.try_get(&id)?.is_some() {
+            self.clear_entry(id)?;
+        }
+
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        self.index
+            .bounds
+            .entry(block.space())
+            .or_default()
+            .entry(range)
+            .or_default()
+            .insert(id);
+        self.index.next_index = self.index.next_index.max(id.index() + 1);
+        self.index.live_entries += 1;
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != id.index());
+        self.entries.try_put(id, block).map(|_| ())
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+        let Some(block) = self.entries.try_get(&id)? else {
+            return Ok(false);
+        };
+
+        let space = block.space();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        drop(block);
+
+        if let Some(Entry::Occupied(mut entry)) =
+            self.index.bounds.get_mut(&space).map(|m| m.entry(range))
+        {
+            let id_set = entry.get_mut();
+            id_set.remove(id);
+
+            if id_set.is_empty() {
+                entry.remove();
+            }
+        }
+
+        self.entries.try_remove(&id)?;
+        self.index.live_entries -= 1;
+        Ok(true)
     }
 
     pub(crate) fn insert<F>(

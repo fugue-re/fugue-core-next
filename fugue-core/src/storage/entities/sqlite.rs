@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::marker::PhantomData;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
@@ -130,6 +131,18 @@ fn build_select_all_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     query.push_str("SELECT key, value FROM ");
     push_table_name(&mut query, prefix);
     query.push_str(" ORDER BY key");
+    query
+}
+
+fn build_select_range_query(prefix: &EntityKeyPrefix, inclusive: bool) -> ArrayString<96> {
+    let mut query = ArrayString::new();
+    query.push_str("SELECT key, value FROM ");
+    push_table_name(&mut query, prefix);
+    if inclusive {
+        query.push_str(" WHERE key >= ?1 ORDER BY key");
+    } else {
+        query.push_str(" WHERE key > ?1 ORDER BY key");
+    }
     query
 }
 
@@ -461,6 +474,25 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         SqliteEntityBytesIterator::new(&self.pool, prefix)
     }
 
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        if prefix.len() != ENTITY_PREFIX_SIZE {
+            return Err(EntityStorageError::InvalidKeySize);
+        }
+
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+
+        if !self.table_exists(&prefix) {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
+        SqliteEntityBytesIterator::new_range(&self.pool, prefix, start)
+    }
+
     fn iter_prefix_as<'a, F, T>(
         &'a self,
         prefix: &[u8],
@@ -607,6 +639,37 @@ impl<'a> SqliteEntityBytesIterator<'a> {
             prefix,
             _marker: PhantomData,
         }))
+    }
+
+    #[allow(clippy::new_ret_no_self)]
+    fn new_range(
+        pool: &Pool<SqliteConnectionManager>,
+        prefix: EntityKeyPrefix,
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'a>, EntityStorageError> {
+        match start {
+            Bound::Unbounded => Self::new(pool, prefix),
+            Bound::Included(key) | Bound::Excluded(key) => {
+                let inclusive = matches!(start, Bound::Included(_));
+                let conn = pool.get().map_err(EntityStorageError::backing)?;
+                let query = build_select_range_query(&prefix, inclusive);
+                let key = key
+                    .strip_prefix(&prefix)
+                    .ok_or(EntityStorageError::InvalidKeyFormat)?
+                    .to_vec();
+
+                let inner = SqliteEntityBytesIteratorInner::try_new(conn, |conn| {
+                    let stmt = conn.prepare(&query)?;
+                    SqliteEntityBytesIteratorRows::try_new(stmt, |stmt| stmt.query(params![key]))
+                })?;
+
+                Ok(Box::new(Self {
+                    inner,
+                    prefix,
+                    _marker: PhantomData,
+                }))
+            }
+        }
     }
 }
 
@@ -944,6 +1007,62 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
     fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
         self.conn.execute_batch("COMMIT")?;
         self.committed = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Bound;
+
+    use super::SqliteEntityStorage;
+    use crate::ir::Address;
+    use crate::storage::TRANSIENT;
+    use crate::storage::entities::schema::EntityId;
+    use crate::storage::entities::{Entity, EntityStorage};
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        value: u64,
+    }
+
+    impl TestEntity {
+        fn new(value: u64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(126);
+    }
+
+    #[test]
+    fn sqlite_scan_range_respects_inclusive_and_exclusive_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?);
+
+        for value in 1..=4 {
+            storage.insert(&Address::from(value), &TestEntity::new(value))?;
+        }
+
+        let included = storage
+            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(included, vec![2, 3, 4]);
+
+        let excluded = storage
+            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(excluded, vec![3, 4]);
+
+        let unbounded = storage
+            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(unbounded, vec![1, 2, 3, 4]);
+
         Ok(())
     }
 }

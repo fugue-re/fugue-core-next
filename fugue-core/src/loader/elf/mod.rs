@@ -2171,8 +2171,7 @@ mod test {
         let mut loaded = Vec::new();
 
         while let Some(segment) = contents.next()? {
-            let mut writes = segment.into_writes(bank_base)?;
-            while let Some(write) = writes.next() {
+            for write in segment.into_writes(bank_base)? {
                 let placement = segments
                     .iter()
                     .find_map(|(address, backing, size)| {
@@ -2208,9 +2207,11 @@ mod test {
         Ok(loaded)
     }
 
+    type ImageWrite = (RawAddress, Vec<u8>);
+
     fn image_writes(
         loadable: &impl Loadable,
-    ) -> Result<Vec<(RawAddress, Vec<u8>)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<ImageWrite>, Box<dyn std::error::Error>> {
         let bank = ImageBankHandle::default();
         let bank_base = loadable
             .image_layout()
@@ -2223,8 +2224,7 @@ mod test {
         let mut contents = loadable.image_contents();
         let mut writes = Vec::new();
         while let Some(segment) = contents.next()? {
-            let mut segment_writes = segment.into_writes(bank_base)?;
-            while let Some(write) = segment_writes.next() {
+            for write in segment.into_writes(bank_base)? {
                 writes.push((write.offset(), write.bytes().to_owned()));
             }
         }
@@ -2303,7 +2303,7 @@ mod test {
         while let Some(segment) = contents.next()? {
             if header_addresses.contains(&segment.address()) {
                 saw_contents = true;
-                assert!(segment.len() > 0);
+                assert!(!segment.is_empty());
             }
         }
         assert!(saw_contents, "expected ELF header contents");
@@ -2810,10 +2810,10 @@ mod test {
     fn test_elf_sparse_uninitialised() -> Result<(), Box<dyn std::error::Error>> {
         let elf = Elf::new(BytesOrMapping::from_file("tests/overlapping-segments.so")?)?;
 
-        let materialised: usize = image_writes(&elf)?
+        let materialised = image_writes(&elf)?
             .iter()
             .map(|(_, bytes)| bytes.len())
-            .sum();
+            .sum::<usize>();
 
         assert!(
             materialised < 64 * 1024 * 1024,
