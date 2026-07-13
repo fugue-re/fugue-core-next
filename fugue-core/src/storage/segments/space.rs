@@ -4,7 +4,7 @@ use iset::IntervalMap;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
 #[derive(Debug, Error)]

@@ -1,24 +1,29 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RwLock};
 use thiserror::Error;
 
-use crate::engine::change::{ChangeSet, Revision};
+use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::ir::cfg::FlowGraph;
-use crate::ir::{Address, RawAddress, SegmentProperties, Symbol, SymbolEntry, SymbolProperties};
+use crate::ir::{
+    Address, AddressRangeSet, RawAddress, SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
+};
 use crate::project::Project;
 use crate::queries::read::ProjectRead;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
 
+mod cache;
+mod index;
 mod read;
-mod stamps;
 #[cfg(test)]
 mod tests;
 
-use stamps::{StampDatabase, StampDatabaseState};
+use cache::QueryCache;
+use index::ChangeIndex;
 
 const MAX_QUERY_PAGE_LEN: usize = 4096;
 
@@ -49,6 +54,64 @@ impl<T> QueryPage<T> {
 pub enum QueryError {
     #[error("analysis engine stopped")]
     Stopped,
+}
+
+const WALK_PAGE_LEN: usize = 256;
+
+pub struct Paged<T, F> {
+    fetch: F,
+    buffer: VecDeque<T>,
+    cursor: Option<T>,
+    exhausted: bool,
+}
+
+impl<T, F> Paged<T, F>
+where
+    T: Clone,
+    F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
+{
+    fn new(fetch: F) -> Self {
+        Self {
+            fetch,
+            buffer: VecDeque::new(),
+            cursor: None,
+            exhausted: false,
+        }
+    }
+}
+
+impl<T, F> Iterator for Paged<T, F>
+where
+    T: Clone,
+    F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
+{
+    type Item = Result<T, QueryError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.buffer.pop_front() {
+                return Some(Ok(item));
+            }
+
+            if self.exhausted {
+                return None;
+            }
+
+            match (self.fetch)(self.cursor.take()) {
+                Ok(page) => {
+                    self.buffer.extend(page.entries().iter().cloned());
+                    match page.next_cursor() {
+                        Some(cursor) => self.cursor = Some(cursor.clone()),
+                        None => self.exhausted = true,
+                    }
+                }
+                Err(error) => {
+                    self.exhausted = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -181,7 +244,8 @@ pub struct QueryReader {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
     project: Arc<RwLock<Project>>,
-    stamps: Arc<Mutex<StampDatabaseState>>,
+    cache: Arc<Mutex<QueryCache>>,
+    changes: Arc<Mutex<ChangeIndex>>,
 }
 
 impl QueryReader {
@@ -189,13 +253,15 @@ impl QueryReader {
         active: Arc<AtomicBool>,
         gate: Arc<RwLock<()>>,
         project: Arc<RwLock<Project>>,
-        stamps: Arc<Mutex<StampDatabaseState>>,
+        cache: Arc<Mutex<QueryCache>>,
+        changes: Arc<Mutex<ChangeIndex>>,
     ) -> Self {
         Self {
             active,
             gate,
             project,
-            stamps,
+            cache,
+            changes,
         }
     }
 
@@ -203,8 +269,41 @@ impl QueryReader {
         self.with_project(|read| read.project().revision())
     }
 
+    pub fn latest_change(
+        &self,
+        kinds: ChangeKinds,
+        region: &AddressRangeSet,
+    ) -> Result<Revision, QueryError> {
+        let _query_guard = self.enter_query()?;
+        Ok(self.changes.lock().latest_change(kinds, region))
+    }
+
+    pub fn changed_since(
+        &self,
+        since: Revision,
+        kinds: ChangeKinds,
+        region: &AddressRangeSet,
+    ) -> Result<bool, QueryError> {
+        let _query_guard = self.enter_query()?;
+        Ok(self.changes.lock().changed_since(since, kinds, region))
+    }
+
     pub fn flow_graph(&self, entry: Address) -> Result<Option<Arc<FlowGraph>>, QueryError> {
-        self.with_database(|database| database.flow_graph(entry))
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.lock().get(entry) {
+            return Ok(cached);
+        }
+
+        let graph = {
+            let project = self.project.read();
+            let read = ProjectRead::new(&project);
+            read.function(entry)
+                .map(|function| read.flow_graph(function))
+        };
+
+        self.cache.lock().insert(entry, graph.clone());
+        Ok(graph)
     }
 
     pub fn call_edges(
@@ -268,15 +367,54 @@ impl QueryReader {
         self.with_project(|read| read.symbols_at(address, after, limit))
     }
 
-    fn with_database<T>(&self, query: impl FnOnce(&StampDatabase) -> T) -> Result<T, QueryError> {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(QueryError::Stopped);
-        }
+    pub fn functions(
+        &self,
+        space: AddressSpaceId,
+    ) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor: Option<Address>| {
+            reader.function_page(
+                space,
+                cursor.map(|address| address.raw_address()),
+                WALK_PAGE_LEN,
+            )
+        })
+    }
 
-        let _query_guard = self.enter_query()?;
+    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRecord, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_LEN))
+    }
 
-        let database = self.stamps.lock().worker();
-        Ok(query(&database))
+    pub fn symbols_at_address(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = Result<SymbolRecord, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.symbols_at(address, cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn mappings(
+        &self,
+        space: AddressSpaceId,
+    ) -> impl Iterator<Item = Result<MappingRecord, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.call_edges(cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.callers_of(entry, cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.callees_of(entry, cursor, WALK_PAGE_LEN))
     }
 
     fn with_project<T>(&self, query: impl FnOnce(ProjectRead<'_>) -> T) -> Result<T, QueryError> {
@@ -299,16 +437,19 @@ pub(crate) struct QueryEngine {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
     project: Arc<RwLock<Project>>,
-    stamps: Arc<Mutex<StampDatabaseState>>,
+    cache: Arc<Mutex<QueryCache>>,
+    changes: Arc<Mutex<ChangeIndex>>,
 }
 
 impl QueryEngine {
     pub(crate) fn new(project: Arc<RwLock<Project>>) -> Self {
+        let revision = project.read().revision();
         Self {
             active: Arc::new(AtomicBool::new(true)),
             gate: Arc::new(RwLock::new(())),
-            project: project.clone(),
-            stamps: Arc::new(Mutex::new(StampDatabaseState::new(project))),
+            project,
+            cache: Arc::new(Mutex::new(QueryCache::new())),
+            changes: Arc::new(Mutex::new(ChangeIndex::new(revision))),
         }
     }
 
@@ -317,7 +458,8 @@ impl QueryEngine {
             self.active.clone(),
             self.gate.clone(),
             self.project.clone(),
-            self.stamps.clone(),
+            self.cache.clone(),
+            self.changes.clone(),
         )
     }
 
@@ -326,7 +468,18 @@ impl QueryEngine {
     }
 
     pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) {
-        self.stamps.lock().apply_changes(changes);
+        self.changes.lock().apply(changes);
+
+        let mut cache = self.cache.lock();
+        for record in changes.records() {
+            match record {
+                ChangeRecord::FunctionAdded { entry, .. }
+                | ChangeRecord::FunctionChanged { entry, .. }
+                | ChangeRecord::FunctionRemoved { entry, .. } => cache.evict(*entry),
+                ChangeRecord::Restored { .. } => cache.clear(),
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn mark_dead(&self) {

@@ -53,7 +53,6 @@ rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 rocksdb = { version = "0.24", features = ["serde1", "snappy"], optional = true }
 rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 rustc-hash = "2.1"
-salsa = { version = "0.27.2", default-features = false, features = ["inventory", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = "3.16"

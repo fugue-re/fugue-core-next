@@ -5,7 +5,7 @@ use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
 use crate::ir::block::table::CodeBlockRef;
 use crate::ir::cfg::{FlowGraph, FlowTarget};
 use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, AddressCoverage, CallGraphEdgeKey, RawAddress};
+use crate::ir::{Address, CallGraphEdgeKey, RawAddress};
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -75,15 +75,6 @@ impl<'p> ProjectRead<'p> {
             .filter_map(|(_, id)| self.project.blocks().get_by_id(id));
 
         Arc::new(FlowGraph::new(Self::flow_targets(blocks)))
-    }
-
-    pub(crate) fn function_coverage(&self, function: &FunctionRef<'_>) -> AddressCoverage {
-        let covered = self
-            .project
-            .blocks()
-            .coverage(function.blocks().map(|(_, id)| id));
-
-        AddressCoverage::from(&covered)
     }
 
     pub(crate) fn function_page(

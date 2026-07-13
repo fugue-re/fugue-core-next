@@ -10,7 +10,7 @@ use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,

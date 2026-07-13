@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use crate::ir::{Address, AddressRange};
+use crate::ir::{Address, AddressRangeExt};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::{

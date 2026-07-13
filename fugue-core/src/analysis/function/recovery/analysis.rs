@@ -521,7 +521,7 @@ impl FunctionRecovery {
     ) -> Result<(), AnalysisError> {
         for range in regions.ranges() {
             self.cancellation.check()?;
-            self.add_candidate(*range.start());
+            self.add_candidate(range.start_address());
         }
 
         if self.config().use_symbol_table_function_hints() {

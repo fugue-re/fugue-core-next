@@ -13,7 +13,7 @@ use super::{
     SegmentRangeOverlap, SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentView,
 };
-use crate::ir::{Address, AddressRange};
+use crate::ir::{Address, AddressRangeExt};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::AttributeMap;

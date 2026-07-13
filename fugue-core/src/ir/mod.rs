@@ -14,8 +14,8 @@ use tinyset::SetU64;
 
 pub mod address;
 pub use address::{
-    Address, AddressCoverage, AddressRange, AddressRangeSet, AddressWithContext,
-    CoveredAddressRange, RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
+    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, RawAddress,
+    RawAddressMap, RawAddressRangeSet, ToRawAddress,
 };
 
 pub mod block;

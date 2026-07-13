@@ -4,14 +4,12 @@ use parking_lot::RwLock;
 
 use super::{QueryEngine, QueryPage, QueryReader};
 use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-use crate::engine::change::{ChangeRecord, ChangeSet, Revision};
-use crate::ir::Address;
+use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
+use crate::ir::{Address, AddressRange, AddressRangeSet, RawAddress};
 use crate::loader::Loader;
 use crate::project::Project;
-use crate::queries::stamps::{
-    RANGE_STAMP_BUCKET_BITS, RANGE_STAMP_BUCKETS, RANGE_STAMP_WINDOW_CAP, RangeBucket,
-    RangeBuckets, STAMP_BUCKETS, STAMP_FAMILIES, STAMP_INPUTS, StampBucket,
-};
+use crate::queries::cache::QUERY_MEMO_CAPACITY;
+use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn test_query_page_exposes_entries_and_next_cursor() {
@@ -21,167 +19,12 @@ fn test_query_page_exposes_entries_and_next_cursor() {
     assert_eq!(page.next_cursor(), Some(&3));
 }
 
-#[test]
-fn test_query_stamps_have_fixed_cardinality() {
-    assert_eq!(
-        STAMP_INPUTS,
-        STAMP_BUCKETS * STAMP_FAMILIES + 2 * RANGE_STAMP_BUCKETS + 1
-    );
-    assert_eq!(STAMP_INPUTS, 2049);
-}
-
-#[test]
-fn test_query_stamp_cardinality_does_not_scale_with_function_count()
--> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::Arc;
-
-    use parking_lot::RwLock;
-
-    use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-    use crate::ir::Address;
-    use crate::loader::Loader;
-    use crate::project::Project;
-    use crate::queries::stamps::StampDatabase;
-
-    fn function_at(entry: Address) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            1,
-            Vec::new(),
-            Default::default(),
-        ));
-        function
-    }
-
-    fn project_with_functions(count: usize) -> Result<Project, Box<dyn std::error::Error>> {
-        let loader = Loader::from_file("tests/ls.elf")?;
-        let mut project = Project::new_transient(&loader)?;
-        let mut transaction = project.transaction("stamp cardinality test");
-
-        for index in 0..count {
-            let entry = Address::from(0x1_0000_0000u64 + (index as u64 * 0x10));
-            transaction.add_function(function_at(entry))?;
-        }
-
-        transaction.commit()?;
-        Ok(project)
-    }
-
-    for count in [1, 10, 100] {
-        let project = Arc::new(RwLock::new(project_with_functions(count)?));
-        let database = StampDatabase::new(project);
-
-        assert_eq!(database.stamp_input_count(), STAMP_INPUTS);
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_function_stamp_bucket_precision_groups_same_bucket_only()
--> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::Arc;
-
-    use parking_lot::RwLock;
-
-    use super::QueryEngine;
-    use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-    use crate::ir::Address;
-    use crate::loader::Loader;
-    use crate::project::Project;
-    use crate::queries::stamps::{RANGE_STAMP_BUCKET_BITS, RangeBucket, RangeBuckets};
-
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut project = Project::new_transient(&loader)?;
-    let changed = Address::from(0x1_0000_0000u64);
-    let changed_bucket = range_bucket_of(changed);
-    let same_bucket = Address::new(changed.space(), changed.offset() + 0x10);
-    let different_bucket = find_window_peer(changed, |bucket| bucket != changed_bucket)?;
-    let mut transaction = project.transaction("stamp precision test");
-
-    transaction.add_function(function_at(changed))?;
-    transaction.add_function(function_at(same_bucket))?;
-    transaction.add_function(function_at(different_bucket))?;
-    transaction.commit()?;
-
-    let project = Arc::new(RwLock::new(project));
-    let mut queries = QueryEngine::new(project.clone());
-    let reader = queries.reader();
-
-    assert_eq!(range_bucket_of(same_bucket), changed_bucket);
-    assert_ne!(range_bucket_of(different_bucket), changed_bucket);
-
-    let same_before = reader
-        .flow_graph(same_bucket)?
-        .ok_or("same-bucket function missing")?;
-    let different_before = reader
-        .flow_graph(different_bucket)?
-        .ok_or("different-bucket function missing")?;
-
-    let changes = {
-        let mut project = project.write();
-        let mut transaction = project.transaction("stamp precision edit");
-        transaction.add_function(function_with_len(changed, 2))?;
-        transaction.commit()?
-    };
-    queries.apply_changes(&changes);
-
-    let same_after = reader
-        .flow_graph(same_bucket)?
-        .ok_or("same-bucket function missing after edit")?;
-    let different_after = reader
-        .flow_graph(different_bucket)?
-        .ok_or("different-bucket function missing after edit")?;
-
-    assert!(!Arc::ptr_eq(&same_before, &same_after));
-    assert!(Arc::ptr_eq(&different_before, &different_after));
-
-    fn range_bucket_of(address: Address) -> RangeBucket {
-        RangeBucket::for_window(address.space(), RangeBuckets::window_of(address.offset()))
-    }
-
-    fn find_window_peer(
-        start: Address,
-        predicate: impl Fn(RangeBucket) -> bool,
-    ) -> Result<Address, Box<dyn std::error::Error>> {
-        for step in 1..0x10000u64 {
-            let candidate = Address::new(
-                start.space(),
-                start.offset() + (step << RANGE_STAMP_BUCKET_BITS),
-            );
-            if predicate(range_bucket_of(candidate)) {
-                return Ok(candidate);
-            }
-        }
-
-        Err("could not find address for requested range bucket".into())
-    }
-
-    fn function_at(entry: Address) -> PartialFunction {
-        function_with_len(entry, 1)
-    }
-
-    fn function_with_len(entry: Address, len: usize) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            len,
-            Vec::new(),
-            Default::default(),
-        ));
-        function
-    }
-
-    Ok(())
-}
-
-struct RangeStampFixture {
+struct Fixture {
     project: Arc<RwLock<Project>>,
     queries: QueryEngine,
 }
 
-impl RangeStampFixture {
+impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let loader = Loader::from_file("tests/ls.elf")?;
         let project = Arc::new(RwLock::new(Project::new_transient(&loader)?));
@@ -203,7 +46,7 @@ impl RangeStampFixture {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let changes = {
             let mut project = self.project.write();
-            let mut transaction = project.transaction("range stamp fixture");
+            let mut transaction = project.transaction("query fixture");
             transaction.add_function(function)?;
             transaction.commit()?
         };
@@ -214,7 +57,7 @@ impl RangeStampFixture {
     fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn std::error::Error>> {
         let changes = {
             let mut project = self.project.write();
-            let mut transaction = project.transaction("range stamp fixture");
+            let mut transaction = project.transaction("query fixture");
             transaction.remove_function(entry)?;
             transaction.commit()?
         };
@@ -224,11 +67,6 @@ impl RangeStampFixture {
 
     fn apply(&mut self, changes: &ChangeSet) {
         self.queries.apply_changes(changes);
-    }
-
-    fn address_range_revision(&self, bucket: RangeBucket) -> Revision {
-        let database = self.queries.stamps.lock().worker();
-        database.address_range_stamp(bucket).revision(&database)
     }
 
     fn function_at(entry: Address) -> PartialFunction {
@@ -245,115 +83,83 @@ impl RangeStampFixture {
         ));
         function
     }
-
-    fn function_with_body(entry: Address, body: Address) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        function.push_block(PartialCodeBlock::new(
-            body,
-            1,
-            Vec::new(),
-            Default::default(),
-        ));
-        function
-    }
-
-    fn wide_function(entry: Address, windows: u64) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        for index in 0..windows {
-            let address = Address::new(
-                entry.space(),
-                entry.offset() + (index << RANGE_STAMP_BUCKET_BITS),
-            );
-            function.push_block(PartialCodeBlock::new(
-                address,
-                1,
-                Vec::new(),
-                Default::default(),
-            ));
-        }
-        function
-    }
-
-    fn range_bucket_of(address: Address) -> RangeBucket {
-        RangeBucket::for_window(address.space(), RangeBuckets::window_of(address.offset()))
-    }
-
-    fn window_peer(
-        start: Address,
-        predicate: impl Fn(Address) -> bool,
-    ) -> Result<Address, Box<dyn std::error::Error>> {
-        for step in 1..0x20000u64 {
-            let candidate = Address::new(
-                start.space(),
-                start.offset() + (step << RANGE_STAMP_BUCKET_BITS),
-            );
-            if predicate(candidate) {
-                return Ok(candidate);
-            }
-        }
-
-        Err("could not find address for requested predicate".into())
-    }
 }
 
 #[test]
-fn test_function_replacement_touches_old_and_new_range_buckets()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
-    let entry = Address::from(0x1_0000_0000u64);
-    let old_neighbour = Address::new(entry.space(), entry.offset() + 0x10);
-    let entry_bucket = RangeStampFixture::range_bucket_of(entry);
-    let new_body = RangeStampFixture::window_peer(entry, |candidate| {
-        RangeStampFixture::range_bucket_of(candidate) != entry_bucket
-    })?;
-    let new_bucket = RangeStampFixture::range_bucket_of(new_body);
-    let new_neighbour = Address::new(new_body.space(), new_body.offset() + 0x10);
-    let unrelated = RangeStampFixture::window_peer(new_body, |candidate| {
-        let bucket = RangeStampFixture::range_bucket_of(candidate);
-        bucket != entry_bucket && bucket != new_bucket
-    })?;
+fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let edited = Address::from(0x1_0000_0000u64);
+    let same_window = Address::new(edited.space(), edited.offset() + 0x10);
+    let distant = Address::from(0x9_0000_0000u64);
 
-    fixture.commit_function(RangeStampFixture::function_at(entry))?;
-    fixture.commit_function(RangeStampFixture::function_at(old_neighbour))?;
-    fixture.commit_function(RangeStampFixture::function_at(new_neighbour))?;
-    fixture.commit_function(RangeStampFixture::function_at(unrelated))?;
+    fixture.commit_function(Fixture::function_at(edited))?;
+    fixture.commit_function(Fixture::function_at(same_window))?;
+    fixture.commit_function(Fixture::function_at(distant))?;
 
     let reader = fixture.reader();
-    let old_before = reader
-        .flow_graph(old_neighbour)?
-        .ok_or("old-range neighbour missing")?;
-    let new_before = reader
-        .flow_graph(new_neighbour)?
-        .ok_or("new-range neighbour missing")?;
-    let unrelated_before = reader
-        .flow_graph(unrelated)?
-        .ok_or("unrelated function missing")?;
+    let edited_before = reader.flow_graph(edited)?.ok_or("edited missing")?;
+    let neighbour_before = reader.flow_graph(same_window)?.ok_or("neighbour missing")?;
+    let distant_before = reader.flow_graph(distant)?.ok_or("distant missing")?;
 
-    fixture.commit_function(RangeStampFixture::function_with_body(entry, new_body))?;
+    fixture.commit_function(Fixture::function_with_len(edited, 2))?;
 
-    let old_after = reader
-        .flow_graph(old_neighbour)?
-        .ok_or("old-range neighbour missing after edit")?;
-    let new_after = reader
-        .flow_graph(new_neighbour)?
-        .ok_or("new-range neighbour missing after edit")?;
-    let unrelated_after = reader
-        .flow_graph(unrelated)?
-        .ok_or("unrelated function missing after edit")?;
+    let edited_after = reader.flow_graph(edited)?.ok_or("edited missing after")?;
+    let neighbour_after = reader
+        .flow_graph(same_window)?
+        .ok_or("neighbour missing after")?;
+    let distant_after = reader.flow_graph(distant)?.ok_or("distant missing after")?;
 
-    assert!(!Arc::ptr_eq(&old_before, &old_after));
-    assert!(!Arc::ptr_eq(&new_before, &new_after));
-    assert!(Arc::ptr_eq(&unrelated_before, &unrelated_after));
+    assert!(!Arc::ptr_eq(&edited_before, &edited_after));
+    assert!(Arc::ptr_eq(&neighbour_before, &neighbour_after));
+    assert!(Arc::ptr_eq(&distant_before, &distant_after));
+
+    Ok(())
+}
+
+#[test]
+fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let entries = (0..8u64)
+        .map(|index| Address::from(0x1_0000_0000u64 + index * 0x10))
+        .collect::<Vec<_>>();
+
+    for entry in &entries {
+        fixture.commit_function(Fixture::function_at(*entry))?;
+    }
+
+    let reader = fixture.reader();
+
+    for edited_index in 0..entries.len() {
+        let before = entries
+            .iter()
+            .map(|entry| Ok(reader.flow_graph(*entry)?.ok_or("function missing")?))
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+
+        fixture.commit_function(Fixture::function_with_len(
+            entries[edited_index],
+            2 + edited_index,
+        ))?;
+
+        for (index, entry) in entries.iter().enumerate() {
+            let after = reader.flow_graph(*entry)?.ok_or("function missing after")?;
+            let stable = Arc::ptr_eq(&before[index], &after);
+            assert_eq!(
+                stable,
+                index != edited_index,
+                "only the edited function's cached graph may be invalidated"
+            );
+        }
+    }
 
     Ok(())
 }
 
 #[test]
 fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
+    let mut fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
-    fixture.commit_function(RangeStampFixture::function_at(entry))?;
+    fixture.commit_function(Fixture::function_at(entry))?;
 
     let reader = fixture.reader();
     assert!(reader.flow_graph(entry)?.is_some());
@@ -366,16 +172,15 @@ fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_function_add_invalidates_missing_result_through_membership()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
+fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
     let reader = fixture.reader();
     assert!(reader.flow_graph(entry)?.is_none());
     assert!(reader.flow_graph(entry)?.is_none());
 
-    fixture.commit_function(RangeStampFixture::function_at(entry))?;
+    fixture.commit_function(Fixture::function_at(entry))?;
 
     assert!(reader.flow_graph(entry)?.is_some());
 
@@ -383,30 +188,20 @@ fn test_function_add_invalidates_missing_result_through_membership()
 }
 
 #[test]
-fn test_byte_writes_touch_address_ranges_and_leave_flow_graphs_cached()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
+fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
-    fixture.commit_function(RangeStampFixture::function_at(entry))?;
+    fixture.commit_function(Fixture::function_at(entry))?;
 
     let reader = fixture.reader();
     let before = reader.flow_graph(entry)?.ok_or("function missing")?;
 
-    let written = RangeStampFixture::range_bucket_of(entry);
-    let distant_address = RangeStampFixture::window_peer(entry, |candidate| {
-        RangeStampFixture::range_bucket_of(candidate) != written
-    })?;
-    let distant = RangeStampFixture::range_bucket_of(distant_address);
-    let written_before = fixture.address_range_revision(written);
-    let distant_before = fixture.address_range_revision(distant);
     let revision = fixture.next_revision();
-
     fixture.apply(&ChangeSet::with_records(
         revision,
         [ChangeRecord::BytesWritten {
-            space: entry.space(),
-            range: (entry.raw_address(), entry.raw_address()),
+            range: AddressRange::new(entry.space(), entry.raw_address(), entry.raw_address()),
         }],
     ));
 
@@ -415,107 +210,193 @@ fn test_byte_writes_touch_address_ranges_and_leave_flow_graphs_cached()
         .ok_or("function missing after write")?;
 
     assert!(Arc::ptr_eq(&before, &after));
-    assert_ne!(written_before, revision);
-    assert_eq!(fixture.address_range_revision(written), revision);
-    assert_eq!(fixture.address_range_revision(distant), distant_before);
 
     Ok(())
 }
 
 #[test]
-fn test_wide_function_coverage_uses_overflow_fallback() -> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
-    let entry = Address::from(0x1_0000_0000u64);
-    let windows = RANGE_STAMP_WINDOW_CAP as u64 + 1;
+fn test_query_memo_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let reader = fixture.reader();
 
-    fixture.commit_function(RangeStampFixture::wide_function(entry, windows))?;
+    for index in 0..(QUERY_MEMO_CAPACITY as u64 * 2) {
+        let _ = reader.flow_graph(Address::from(0x1_0000_0000u64 + index * 0x10))?;
+    }
+
+    assert_eq!(fixture.queries.cache.lock().len(), QUERY_MEMO_CAPACITY);
+
+    Ok(())
+}
+
+#[test]
+fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let entry = Address::from(0x1_0000_0000u64);
+
+    fixture.commit_function(Fixture::function_with_len(entry, 4))?;
 
     let reader = fixture.reader();
-    let before = reader.flow_graph(entry)?.ok_or("wide function missing")?;
+    let before = reader.flow_graph(entry)?.ok_or("function missing")?;
 
-    let far = Address::from(0x9_0000_0000u64);
-    fixture.commit_function(RangeStampFixture::function_at(far))?;
+    fixture.queries.cache.lock().clear();
 
     let after = reader
         .flow_graph(entry)?
-        .ok_or("wide function missing after unrelated edit")?;
+        .ok_or("function missing after clear")?;
 
     assert!(!Arc::ptr_eq(&before, &after));
+    assert_eq!(before.targets(), after.targets());
 
     Ok(())
 }
 
 #[test]
-fn test_entry_hash_collision_no_longer_invalidates_unrelated_function()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut fixture = RangeStampFixture::new()?;
-    let changed = Address::from(0x1_0000_0000u64);
-    let changed_stamp = StampBucket::for_address(changed);
-    let changed_range = RangeStampFixture::range_bucket_of(changed);
-    let collided = RangeStampFixture::window_peer(changed, |candidate| {
-        StampBucket::for_address(candidate) == changed_stamp
-            && RangeStampFixture::range_bucket_of(candidate) != changed_range
-    })?;
-
-    fixture.commit_function(RangeStampFixture::function_at(changed))?;
-    fixture.commit_function(RangeStampFixture::function_at(collided))?;
-
+fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
     let reader = fixture.reader();
-    let changed_before = reader
-        .flow_graph(changed)?
-        .ok_or("changed function missing")?;
-    let collided_before = reader
-        .flow_graph(collided)?
-        .ok_or("collided function missing")?;
 
-    fixture.commit_function(RangeStampFixture::function_with_len(changed, 2))?;
+    let inside = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    );
+    let outside = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x8000u64),
+        RawAddress::from(0x8fffu64),
+    );
+    let mut region = AddressRangeSet::new();
+    region.insert_range(inside);
 
-    let changed_after = reader
-        .flow_graph(changed)?
-        .ok_or("changed function missing after edit")?;
-    let collided_after = reader
-        .flow_graph(collided)?
-        .ok_or("collided function missing after edit")?;
+    let baseline = reader.revision()?;
+    assert!(!reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &region)?);
 
-    assert!(!Arc::ptr_eq(&changed_before, &changed_after));
-    assert!(Arc::ptr_eq(&collided_before, &collided_after));
+    let outside_revision = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        outside_revision,
+        [ChangeRecord::BytesWritten { range: outside }],
+    ));
+    assert!(!reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &region)?);
+
+    let inside_revision = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        inside_revision,
+        [ChangeRecord::BytesWritten { range: inside }],
+    ));
+    assert!(reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &region)?);
+    assert_eq!(
+        reader.latest_change(ChangeKinds::BYTES_WRITTEN, &region)?,
+        inside_revision
+    );
+    assert!(!reader.changed_since(baseline, ChangeKinds::FUNCTIONS, &region)?);
 
     Ok(())
 }
 
 #[test]
-fn test_range_bucket_classification_bounds() {
-    use crate::ir::{CoveredAddressRange, RawAddress};
-    use crate::storage::segments::space::AddressSpaceId;
+fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::storage::segments::mapping::SegmentMappingId;
+
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let range = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    );
+    let mut region = AddressRangeSet::new();
+    region.insert_range(range);
+
+    let baseline = reader.revision()?;
+    let mapped_revision = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        mapped_revision,
+        [ChangeRecord::SegmentMapped {
+            mapping: SegmentMappingId::new(0),
+            range,
+        }],
+    ));
+
+    assert!(!reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &region)?);
+    assert!(reader.changed_since(baseline, ChangeKinds::SEGMENTS, &region)?);
+    assert!(reader.changed_since(
+        baseline,
+        ChangeKinds::BYTES_WRITTEN | ChangeKinds::SEGMENTS,
+        &region
+    )?);
+
+    Ok(())
+}
+
+#[test]
+fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let baseline = reader.revision()?;
+    let restored_revision = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        restored_revision,
+        [ChangeRecord::Restored {
+            to: restored_revision,
+        }],
+    ));
+
+    let region = AddressRangeSet::new();
+    assert!(reader.changed_since(baseline, ChangeKinds::all(), &region)?);
+    assert!(reader.changed_since(baseline, ChangeKinds::FUNCTIONS, &region)?);
+
+    Ok(())
+}
+
+#[test]
+fn test_change_index_compaction_is_conservative() {
+    use crate::queries::index::{ChangeIndex, MAX_CHANGE_RUNS};
 
     let space = AddressSpaceId::from(0u8);
-    let range = |start: u64, end: u64| {
-        CoveredAddressRange::new(space, RawAddress::from(start), RawAddress::from(end))
-    };
+    let mut index = ChangeIndex::new(Revision::new(0));
+    let mut truth = Vec::new();
 
-    assert_eq!(RangeBuckets::covering(&[]), RangeBuckets::Overflow);
-    assert_eq!(
-        RangeBuckets::covering(&[range(0, u64::MAX)]),
-        RangeBuckets::Overflow
-    );
+    for step in 1..(MAX_CHANGE_RUNS as u64 + 512) {
+        let range = AddressRange::new(
+            space,
+            RawAddress::from(step * 0x400),
+            RawAddress::from(step * 0x400 + 0x3f),
+        );
+        let revision = Revision::new(step);
+        index.apply(&ChangeSet::with_records(
+            revision,
+            [ChangeRecord::BytesWritten { range }],
+        ));
+        truth.push((range, revision));
+    }
 
-    let cap_windows = RANGE_STAMP_WINDOW_CAP as u64;
-    let at_cap = range(0, (cap_windows << RANGE_STAMP_BUCKET_BITS) - 1);
-    let RangeBuckets::Buckets(buckets) = RangeBuckets::covering(&[at_cap]) else {
-        panic!("coverage of exactly the window cap must stay bucketed");
-    };
-    assert!(!buckets.is_empty());
-    assert!(buckets.len() <= RANGE_STAMP_WINDOW_CAP);
+    let probes = (0..16u64).map(|i| {
+        AddressRange::new(
+            space,
+            RawAddress::from(i * 0x4000),
+            RawAddress::from(i * 0x4000 + 0x1ff),
+        )
+    });
+    let snapshots = (0..8u64)
+        .map(|i| Revision::new(i * (MAX_CHANGE_RUNS as u64 / 8)))
+        .collect::<Vec<_>>();
 
-    assert_eq!(
-        RangeBuckets::covering(&[range(0, cap_windows << RANGE_STAMP_BUCKET_BITS)]),
-        RangeBuckets::Overflow
-    );
+    for probe in probes {
+        let mut region = AddressRangeSet::new();
+        region.insert_range(probe);
 
-    let RangeBuckets::Buckets(deduped) =
-        RangeBuckets::covering(&[range(0x1000, 0x1004), range(0x1008, 0x100c)])
-    else {
-        panic!("two sub-window ranges must stay bucketed");
-    };
-    assert_eq!(deduped.len(), 1);
+        for &snapshot in &snapshots {
+            let truly_changed = truth
+                .iter()
+                .any(|&(range, revision)| revision > snapshot && range.intersects(&probe));
+            if truly_changed {
+                assert!(
+                    index.changed_since(snapshot, ChangeKinds::BYTES_WRITTEN, &region),
+                    "compaction reported unchanged where a real change occurred"
+                );
+            }
+        }
+    }
 }

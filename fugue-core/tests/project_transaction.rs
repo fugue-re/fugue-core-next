@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 use fugue_core::engine::change::{ChangeRecord, FunctionChangeKind};
 use fugue_core::ir::{
-    Address, AddressCoverage, AddressRangeSet, SymbolEntry, SymbolIndex, SymbolProperties,
+    Address, AddressRange, AddressRangeSet, SymbolEntry, SymbolIndex, SymbolProperties,
     SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
@@ -83,8 +83,7 @@ fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::er
 
     assert!(changes.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping,
-        space,
-        range,
+        range: AddressRange::new(space, range.0, range.1),
     }));
 
     Ok(())
@@ -127,13 +126,11 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
 
     assert!(changes.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping,
-        space,
-        range: old_range,
+        range: AddressRange::new(space, old_range.0, old_range.1),
     }));
     assert!(changes.records().contains(&ChangeRecord::SegmentMapped {
         mapping,
-        space,
-        range: new_range,
+        range: AddressRange::new(space, new_range.0, new_range.1),
     }));
 
     Ok(())
@@ -307,12 +304,12 @@ fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error
     let changes = transaction.commit()?;
 
     let mut covered = AddressRangeSet::new();
-    covered.insert_range(entry..=entry);
+    covered.insert(entry);
     assert_eq!(
         changes.records(),
         &[ChangeRecord::FunctionAdded {
             entry,
-            coverage: AddressCoverage::from(&covered),
+            coverage: covered,
         }]
     );
     assert_eq!(project.blocks().len(), 1);
@@ -336,13 +333,16 @@ fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error
     let changes = transaction.commit()?;
 
     let mut covered = AddressRangeSet::new();
-    covered.insert_range(entry..=(entry + 1u64));
+    covered.insert_raw_range(
+        entry.space(),
+        entry.raw_address()..=(entry + 1u64).raw_address(),
+    );
     assert_eq!(
         changes.records(),
         &[ChangeRecord::FunctionChanged {
             entry,
             kind: FunctionChangeKind::Body,
-            coverage: AddressCoverage::from(&covered),
+            coverage: covered,
         }]
     );
     assert!(project.blocks().get_by_id(old_block).is_none());

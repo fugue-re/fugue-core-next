@@ -11,8 +11,8 @@ use crate::engine::change::{ChangeRecord, ChangeSet, FunctionChangeKind, Revisio
 use crate::ir::function::table::FunctionTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
-    Address, AddressCoverage, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable,
-    RawAddress, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
+    Address, AddressRange, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable, RawAddress,
+    Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -233,12 +233,12 @@ impl ProjectTransaction<'_> {
             self.records.push(ChangeRecord::FunctionChanged {
                 entry,
                 kind: FunctionChangeKind::Body,
-                coverage: AddressCoverage::from(&covered),
+                coverage: covered,
             });
         } else {
             self.records.push(ChangeRecord::FunctionAdded {
                 entry,
-                coverage: AddressCoverage::from(&covered),
+                coverage: covered,
             });
         }
         Ok(id)
@@ -280,7 +280,7 @@ impl ProjectTransaction<'_> {
         self.project.functions.remove_by_id(id);
         self.records.push(ChangeRecord::FunctionRemoved {
             entry,
-            coverage: AddressCoverage::from(&covered),
+            coverage: covered,
         });
 
         Ok(true)
@@ -614,11 +614,9 @@ impl ProjectTransaction<'_> {
         )?;
 
         if written == bytes.len() {
-            if let Some(range) = Self::bytes_range(addr.raw_address(), written as u64) {
-                self.records.push(ChangeRecord::BytesWritten {
-                    space: addr.space(),
-                    range,
-                });
+            if let Some(range) = Self::bytes_range(addr.space(), addr.raw_address(), written as u64)
+            {
+                self.records.push(ChangeRecord::BytesWritten { range });
             }
             self.segment_write_reverts.push(revert);
             Ok(())
@@ -638,25 +636,24 @@ impl ProjectTransaction<'_> {
         self.write_bytes(addr, bytes)
     }
 
-    fn mapping_range(start: Address, size: u64) -> (RawAddress, RawAddress) {
-        Self::bytes_range(start.raw_address(), size)
-            .unwrap_or_else(|| (start.raw_address(), start.raw_address()))
+    fn mapping_range(space: AddressSpaceId, start: Address, size: u64) -> AddressRange {
+        Self::bytes_range(space, start.raw_address(), size)
+            .unwrap_or_else(|| AddressRange::new(space, start.raw_address(), start.raw_address()))
     }
 
-    fn bytes_range(start: RawAddress, len: u64) -> Option<(RawAddress, RawAddress)> {
+    fn bytes_range(space: AddressSpaceId, start: RawAddress, len: u64) -> Option<AddressRange> {
         let end = len
             .checked_sub(1)
             .and_then(|last| start.checked_add(last))?;
 
-        Some((start, end))
+        Some(AddressRange::new(space, start, end))
     }
 
     fn record_mapping_added(&mut self, space: AddressSpaceId, id: SegmentMappingId) {
         if let Some(mapping) = self.project.storage.segments.mapping(id) {
             self.records.push(ChangeRecord::SegmentMapped {
                 mapping: id,
-                space,
-                range: Self::mapping_range(mapping.start(), mapping.size()),
+                range: Self::mapping_range(space, mapping.start(), mapping.size()),
             });
         }
     }
@@ -672,8 +669,7 @@ impl ProjectTransaction<'_> {
         for (space, range) in added {
             self.records.push(ChangeRecord::SegmentMapped {
                 mapping: id,
-                space,
-                range,
+                range: AddressRange::new(space, range.0, range.1),
             });
         }
     }
@@ -686,8 +682,7 @@ impl ProjectTransaction<'_> {
         for (space, range) in removed {
             self.records.push(ChangeRecord::SegmentUnmapped {
                 mapping: id,
-                space,
-                range,
+                range: AddressRange::new(space, range.0, range.1),
             });
         }
     }

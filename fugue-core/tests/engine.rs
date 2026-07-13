@@ -14,15 +14,15 @@ use fugue_core::analysis::function::recovery::{
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::Arch;
-use fugue_core::engine::change::{ChangeRecord, Revision};
+use fugue_core::engine::change::{ChangeKinds, ChangeRecord, Revision};
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisCx, AnalysisEngine, AnalysisMessageKind,
     DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
     Trigger,
 };
 use fugue_core::ir::{
-    Address, Endian, RawAddress, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Endian, RawAddress, SegmentProperties, SymbolEntry,
+    SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::resolve_language;
 use fugue_core::loader::{
@@ -294,7 +294,7 @@ impl Analyser for FailingTestAnalyser {
         let _ = cx;
 
         if self.mode == "mutating-error"
-            && let Some(address) = regions.ranges().next().map(|range| *range.start())
+            && let Some(address) = regions.ranges().next().map(|range| range.start_address())
         {
             transaction.insert_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(251), 0),
@@ -371,7 +371,7 @@ impl Analyser for PanickingTestAnalyser {
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
-        if let Some(address) = regions.ranges().next().map(|range| *range.start()) {
+        if let Some(address) = regions.ranges().next().map(|range| range.start_address()) {
             transaction.insert_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(252), 0),
                 SymbolEntry::new(
@@ -411,7 +411,7 @@ impl Analyser for CompletionTestAnalyser {
         let _ = transaction;
         let _ = cx;
         COMPLETION_ANALYSE_COUNT.fetch_add(1, Ordering::SeqCst);
-        self.address = regions.ranges().next().map(|range| *range.start());
+        self.address = regions.ranges().next().map(|range| range.start_address());
         Ok(())
     }
 
@@ -513,7 +513,7 @@ impl Analyser for DerivedSymbolAnalyser {
         let _ = cx;
 
         for range in regions.ranges() {
-            let address = *range.start();
+            let address = range.start_address();
             transaction.insert_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(253), self.next_index),
                 SymbolEntry::new(
@@ -555,7 +555,7 @@ impl Analyser for StormTestAnalyser {
         let _ = cx;
         STORM_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
 
-        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
             return Ok(());
         };
 
@@ -595,7 +595,7 @@ impl Analyser for CancellingTestAnalyser {
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
-        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
             return Err(Cancelled.into());
         };
 
@@ -640,7 +640,7 @@ impl Analyser for CancellationFollowUpAnalyser {
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
-        let Some(address) = regions.ranges().next().map(|range| *range.start()) else {
+        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
             return Ok(());
         };
 
@@ -831,7 +831,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
 
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.subscribe(4096)?;
+    let changes = engine.subscribe().capacity(4096).build()?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let mut engine_functions = BTreeSet::new();
@@ -1353,14 +1353,17 @@ fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let revision = reader.revision()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
 
     let written = engine.write_bytes(address, [0xcc])?;
 
     assert!(written.revision() > revision);
     assert!(written.records().contains(&ChangeRecord::BytesWritten {
-        space: address.space(),
-        range: (address.raw_address(), address.raw_address()),
+        range: AddressRange::new(
+            address.space(),
+            address.raw_address(),
+            address.raw_address()
+        ),
     }));
 
     let delivered = changes.recv_timeout(Duration::from_secs(1))?;
@@ -1384,7 +1387,7 @@ fn test_engine_partial_write_rolls_back_without_publishing()
     let engine = AnalysisEngine::new(project)?;
 
     engine.wait_until_idle()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
 
     assert!(engine.write_bytes(address, [0xcc, 0xdd]).is_err());
     assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
@@ -1404,7 +1407,7 @@ fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let revision = reader.revision()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
     let index = SymbolIndex::new(SymbolTableSelector::new(250), 0);
     let symbol = SymbolEntry::new(
         entry,
@@ -1515,7 +1518,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::erro
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
     assert!(reader.flow_graph(entry)?.is_some());
 
     let removed = engine.remove_function(entry)?;
@@ -1661,7 +1664,7 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
     assert!(
         run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
             .entries()
@@ -1708,8 +1711,11 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
 
     assert!(placed.records().contains(&ChangeRecord::SegmentMapped {
         mapping: created_id,
-        space: extra_space,
-        range: (created_start.raw_address(), created_start.raw_address()),
+        range: AddressRange::new(
+            extra_space,
+            created_start.raw_address(),
+            created_start.raw_address(),
+        ),
     }));
     assert!(
         run_query(|| reader.mapping_page(extra_space, None, 4096))?
@@ -1737,13 +1743,11 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
 
     assert!(remapped.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping: mapping_id,
-        space: DEFAULT_SPACE_ID,
-        range: old_range,
+        range: AddressRange::new(DEFAULT_SPACE_ID, old_range.0, old_range.1),
     }));
     assert!(remapped.records().contains(&ChangeRecord::SegmentMapped {
         mapping: mapping_id,
-        space: DEFAULT_SPACE_ID,
-        range: remapped_range,
+        range: AddressRange::new(DEFAULT_SPACE_ID, remapped_range.0, remapped_range.1),
     }));
     let mut delivered = false;
     for _ in 0..16 {
@@ -1765,13 +1769,11 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
 
     assert!(resized.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping: mapping_id,
-        space: DEFAULT_SPACE_ID,
-        range: remapped_range,
+        range: AddressRange::new(DEFAULT_SPACE_ID, remapped_range.0, remapped_range.1),
     }));
     assert!(resized.records().contains(&ChangeRecord::SegmentMapped {
         mapping: mapping_id,
-        space: DEFAULT_SPACE_ID,
-        range: resized_range,
+        range: AddressRange::new(DEFAULT_SPACE_ID, resized_range.0, resized_range.1),
     }));
     let mut delivered = false;
     for _ in 0..16 {
@@ -1793,8 +1795,7 @@ fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error:
 
     assert!(removed.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping: mapping_id,
-        space: DEFAULT_SPACE_ID,
-        range: resized_range,
+        range: AddressRange::new(DEFAULT_SPACE_ID, resized_range.0, resized_range.1),
     }));
     let mut delivered = false;
     for _ in 0..16 {
@@ -1957,7 +1958,7 @@ fn test_on_idle_persists_revision_and_reopen_sends_restored()
     assert_eq!(reopened.revision(), revision);
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
-    let changes = engine.subscribe(1)?;
+    let changes = engine.subscribe().capacity(1).build()?;
     let restored = changes.recv_timeout(Duration::from_secs(1))?;
 
     assert_eq!(restored.revision(), revision);
@@ -2022,7 +2023,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
     assert_eq!(reopened.revision(), revision);
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
-    let changes = engine.subscribe(2)?;
+    let changes = engine.subscribe().capacity(2).build()?;
     let restored = changes.recv_timeout(Duration::from_secs(1))?;
 
     assert_eq!(restored.revision(), revision);
@@ -2281,7 +2282,7 @@ fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn s
         .entry()
         .ok_or_else(|| io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.subscribe(4096)?;
+    let changes = engine.subscribe().capacity(4096).build()?;
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
@@ -2390,7 +2391,7 @@ fn test_analyser_error_rolls_back_without_publishing_records()
 
     engine.wait_until_idle()?;
     let revision = engine.query_reader()?.revision()?;
-    let changes = engine.subscribe(16)?;
+    let changes = engine.subscribe().capacity(16).build()?;
     trigger_test_analyser(&engine, address)?;
 
     assert_eq!(engine.query_reader()?.revision()?, revision);
@@ -2399,6 +2400,112 @@ fn test_analyser_error_rolls_back_without_publishing_records()
     assert!(engine.take_run_log().iter().any(|message| {
         message.analyser() == "mutating-error" && message.kind() == AnalysisMessageKind::Error
     }));
+
+    Ok(())
+}
+
+fn writable_start() -> Result<(Project, Address), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let address = project
+        .segments()
+        .iter_views(DEFAULT_SPACE_ID)?
+        .find(|view| view.properties().is_writable() && view.size() >= 0x20)
+        .map(|view| view.start())
+        .ok_or_else(|| io::Error::other("fixture writable segment missing"))?;
+    Ok((project, address))
+}
+
+#[test]
+fn test_subscription_kind_filter_wakes_only_on_matching_kinds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (project, address) = writable_start()?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let symbols = engine
+        .subscribe()
+        .kinds(ChangeKinds::SYMBOLS)
+        .capacity(16)
+        .build()?;
+
+    engine.write_bytes(address, [0xccu8])?;
+    assert!(symbols.recv_timeout(Duration::from_millis(100)).is_err());
+
+    engine.insert_symbol(
+        SymbolIndex::new(SymbolTableSelector::new(200), 0),
+        SymbolEntry::new(address, "scoped_symbol", SymbolProperties::LOCAL),
+    )?;
+    let delivered = symbols.recv_timeout(Duration::from_secs(1))?;
+    assert!(delivered.contains(ChangeKinds::SYMBOL_ADDED));
+
+    Ok(())
+}
+
+#[test]
+fn test_subscription_region_filter_wakes_only_inside_region()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (project, address) = writable_start()?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let mut region = AddressRangeSet::new();
+    region.insert_range(AddressRange::new(
+        address.space(),
+        address.raw_address(),
+        address.raw_address(),
+    ));
+    let outside = address + 8u64;
+
+    let inside_region = engine
+        .subscribe()
+        .kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::SPACE_CREATED)
+        .region(region)
+        .capacity(16)
+        .build()?;
+
+    engine.write_bytes(outside, [0xccu8])?;
+    assert!(
+        inside_region
+            .recv_timeout(Duration::from_millis(100))
+            .is_err()
+    );
+
+    engine.write_bytes(address, [0xccu8])?;
+    let delivered = inside_region.recv_timeout(Duration::from_secs(1))?;
+    assert!(delivered.contains(ChangeKinds::BYTES_WRITTEN));
+
+    engine.create_space()?;
+    let global = inside_region.recv_timeout(Duration::from_secs(1))?;
+    assert!(global.contains(ChangeKinds::SPACE_CREATED));
+
+    Ok(())
+}
+
+#[test]
+fn test_query_reader_symbol_iterator_equals_cursor_walk() -> Result<(), Box<dyn std::error::Error>>
+{
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+
+    let walked = reader.symbols().collect::<Result<Vec<_>, _>>()?;
+
+    let mut cursor = None;
+    let mut manual = Vec::new();
+    loop {
+        let page = reader.symbol_page(cursor, 256)?;
+        manual.extend(page.entries().iter().copied());
+        let Some(next) = page.next_cursor().copied() else {
+            break;
+        };
+        cursor = Some(next);
+    }
+
+    assert_eq!(walked, manual);
+    assert!(!walked.is_empty());
 
     Ok(())
 }

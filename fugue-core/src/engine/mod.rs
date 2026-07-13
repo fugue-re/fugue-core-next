@@ -4,12 +4,13 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
+use std::time::Duration;
 
-use flume::{Receiver, Sender, TryRecvError, TrySendError};
+use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use self::change::{ChangeRecord, ChangeSet, Revision};
+use self::change::{ChangeFilter, ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
@@ -26,6 +27,7 @@ use crate::storage::segments::mapping::{
 use crate::storage::segments::space::AddressSpaceId;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 const MAX_PENDING_REGION_RANGES: usize = 4096;
 pub const DEFAULT_ANALYSER_MAX_FAILURES: usize = 3;
 
@@ -823,18 +825,24 @@ struct AnalyserState {
 struct Subscriber {
     rx: Receiver<Arc<ChangeSet>>,
     tx: Sender<Arc<ChangeSet>>,
+    filter: ChangeFilter,
 }
 
 impl Subscriber {
-    fn new(tx: Sender<Arc<ChangeSet>>, rx: Receiver<Arc<ChangeSet>>) -> Self {
-        Self { rx, tx }
+    fn new(tx: Sender<Arc<ChangeSet>>, rx: Receiver<Arc<ChangeSet>>, filter: ChangeFilter) -> Self {
+        Self { rx, tx, filter }
     }
 
-    fn publish(&self, changes: Arc<ChangeSet>, resync: Arc<ChangeSet>) -> bool {
-        match self.tx.try_send(changes) {
+    fn publish(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
+        let scoped = match changes.scoped_to(&self.filter) {
+            Some(scoped) => Arc::new(scoped),
+            None => return true,
+        };
+
+        match self.tx.try_send(scoped) {
             Ok(()) => true,
             Err(TrySendError::Disconnected(_)) => false,
-            Err(TrySendError::Full(_)) => self.resync(resync),
+            Err(TrySendError::Full(_)) => self.resync(resync.clone()),
         }
     }
 
@@ -1256,15 +1264,23 @@ impl AnalysisEngine {
         self.progress.clone()
     }
 
-    pub fn subscribe(&self, capacity: usize) -> Result<Receiver<Arc<ChangeSet>>, EngineError> {
+    pub fn subscribe(&self) -> SubscriptionBuilder<'_> {
+        SubscriptionBuilder::new(self)
+    }
+
+    fn open_subscription(
+        &self,
+        filter: ChangeFilter,
+        capacity: usize,
+    ) -> Result<Subscription, EngineError> {
         self.poison_check()?;
 
         let (tx, rx) = flume::bounded(capacity.max(1));
         self.tx
-            .send(Intake::Subscribe(Subscriber::new(tx, rx.clone())))
+            .send(Intake::Subscribe(Subscriber::new(tx, rx.clone(), filter)))
             .map_err(|_| EngineError::Stopped)?;
 
-        Ok(rx)
+        Ok(Subscription { rx })
     }
 
     pub fn poison_check(&self) -> Result<(), EngineError> {
@@ -1272,6 +1288,67 @@ impl AnalysisEngine {
             Some(message) => Err(EngineError::Poisoned(message.clone())),
             None => Ok(()),
         }
+    }
+}
+
+pub struct SubscriptionBuilder<'a> {
+    engine: &'a AnalysisEngine,
+    filter: ChangeFilter,
+    capacity: usize,
+}
+
+impl<'a> SubscriptionBuilder<'a> {
+    fn new(engine: &'a AnalysisEngine) -> Self {
+        Self {
+            engine,
+            filter: ChangeFilter::new(),
+            capacity: DEFAULT_SUBSCRIPTION_CAPACITY,
+        }
+    }
+
+    pub fn kinds(mut self, kinds: ChangeKinds) -> Self {
+        self.filter = self.filter.with_kinds(kinds);
+        self
+    }
+
+    pub fn region(mut self, region: AddressRangeSet) -> Self {
+        self.filter = self.filter.with_region(region);
+        self
+    }
+
+    pub fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
+    pub fn build(self) -> Result<Subscription, EngineError> {
+        self.engine.open_subscription(self.filter, self.capacity)
+    }
+}
+
+pub struct Subscription {
+    rx: Receiver<Arc<ChangeSet>>,
+}
+
+impl Subscription {
+    pub fn recv(&self) -> Result<Arc<ChangeSet>, EngineError> {
+        self.rx.recv().map_err(|_| EngineError::Stopped)
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Arc<ChangeSet>, RecvTimeoutError> {
+        self.rx.recv_timeout(timeout)
+    }
+
+    pub fn try_recv(&self) -> Result<Arc<ChangeSet>, TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Arc<ChangeSet>> + '_ {
+        self.rx.iter()
+    }
+
+    pub fn try_iter(&self) -> impl Iterator<Item = Arc<ChangeSet>> + '_ {
+        self.rx.try_iter()
     }
 }
 
@@ -1577,9 +1654,9 @@ impl Worker {
 
     fn route_record(&mut self, record: &ChangeRecord) {
         match record {
-            ChangeRecord::BytesWritten { space, range } => {
+            ChangeRecord::BytesWritten { range } => {
                 let mut regions = AddressRangeSet::new();
-                regions.insert_raw_range(*space, range.0..=range.1);
+                regions.insert_range(*range);
                 self.route_direct(Trigger::BytesWritten, &regions);
             }
             ChangeRecord::FunctionAdded { entry, .. } => {
@@ -1598,17 +1675,17 @@ impl Worker {
                 self.route_direct(Trigger::FunctionRemoved, &regions);
             }
             ChangeRecord::Restored { .. } => {}
-            ChangeRecord::SegmentMapped { space, range, .. } => {
+            ChangeRecord::SegmentMapped { range, .. } => {
                 let mut regions = AddressRangeSet::new();
-                regions.insert_raw_range(*space, range.0..=range.1);
+                regions.insert_range(*range);
                 self.route_direct(Trigger::BytesMapped, &regions);
                 self.route_direct(Trigger::SegmentMapped, &regions);
             }
             ChangeRecord::SegmentMappingCreated { .. } => {}
             ChangeRecord::SegmentMappingChanged { .. } => {}
-            ChangeRecord::SegmentUnmapped { space, range, .. } => {
+            ChangeRecord::SegmentUnmapped { range, .. } => {
                 let mut regions = AddressRangeSet::new();
-                regions.insert_raw_range(*space, range.0..=range.1);
+                regions.insert_range(*range);
                 self.route_direct(Trigger::SegmentUnmapped, &regions);
             }
             ChangeRecord::SpaceCreated { .. } => {}
@@ -1902,7 +1979,7 @@ impl Worker {
         ));
         let changes = Arc::new(changes);
         self.subscribers
-            .retain(|subscriber| subscriber.publish(changes.clone(), resync.clone()));
+            .retain(|subscriber| subscriber.publish(&changes, &resync));
         self.route_changes(&changes);
         if self.persistence_policy == PersistencePolicy::OnCommit {
             self.persist_dirty()?;
@@ -1949,7 +2026,7 @@ impl Worker {
                 revision,
                 [ChangeRecord::Restored { to: revision }],
             ));
-            if !subscriber.publish(restored.clone(), restored) {
+            if !subscriber.publish(&restored, &restored) {
                 return;
             }
         }
@@ -1962,7 +2039,7 @@ impl Worker {
 mod tests {
     use std::sync::Arc;
 
-    use super::change::{ChangeRecord, ChangeSet, Revision};
+    use super::change::{ChangeFilter, ChangeRecord, ChangeSet, Revision};
     use super::{
         Analyser, AnalyserState, AnalysisCx, AnalysisQueue, Priority, Subscriber, Trigger,
     };
@@ -2047,9 +2124,19 @@ mod tests {
     #[test]
     fn test_lagged_subscriber_receives_resync_change() -> Result<(), Box<dyn std::error::Error>> {
         let (tx, rx) = flume::bounded(1);
-        let subscriber = Subscriber::new(tx, rx.clone());
-        let first = Arc::new(ChangeSet::new(Revision::new(1)));
-        let second = Arc::new(ChangeSet::new(Revision::new(2)));
+        let subscriber = Subscriber::new(tx, rx.clone(), ChangeFilter::new());
+        let first = Arc::new(ChangeSet::with_records(
+            Revision::new(1),
+            [ChangeRecord::SpaceCreated {
+                space: AddressSpaceId::from(0u8),
+            }],
+        ));
+        let second = Arc::new(ChangeSet::with_records(
+            Revision::new(2),
+            [ChangeRecord::SpaceCreated {
+                space: AddressSpaceId::from(0u8),
+            }],
+        ));
         let resync = Arc::new(ChangeSet::with_records(
             Revision::new(2),
             [ChangeRecord::Restored {
@@ -2057,8 +2144,8 @@ mod tests {
             }],
         ));
 
-        assert!(subscriber.publish(first, resync.clone()));
-        assert!(subscriber.publish(second, resync.clone()));
+        assert!(subscriber.publish(&first, &resync));
+        assert!(subscriber.publish(&second, &resync));
 
         let delivered = rx.try_recv()?;
         assert_eq!(&*delivered, &*resync);
