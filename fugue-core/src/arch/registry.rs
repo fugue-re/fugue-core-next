@@ -27,6 +27,14 @@ pub struct ArchProvider {
 }
 
 impl ArchProvider {
+    pub const fn new(name: &'static str, supports: ArchSupportsFn, create: ArchCreateFn) -> Self {
+        Self {
+            name,
+            supports,
+            create,
+        }
+    }
+
     pub fn supports(&self, language: &'static Language) -> bool {
         (self.supports)(language)
     }
@@ -50,6 +58,10 @@ pub struct LanguageProvider {
 }
 
 impl LanguageProvider {
+    pub const fn new(name: &'static str, provide: LanguageProvideFn) -> Self {
+        Self { name, provide }
+    }
+
     pub fn provide(
         &self,
         id: &LanguageId,

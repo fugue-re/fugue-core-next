@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 
-use super::{CodeBlockIndex, CodeBlockTableError};
+use super::{CodeBlockIndex, CodeBlockTableAllocation, CodeBlockTableError};
 use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
@@ -42,11 +43,10 @@ impl CodeBlockTable {
     ) -> Result<Self, EntityStorageError> {
         let mut bounds =
             BTreeMap::<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>::new();
-        let mut free_ids = Vec::new();
         let mut live_entries = 0;
-        let mut expected = 0u32;
+        let mut next_index = 0usize;
 
-        for entry in entries.try_iter()? {
+        for entry in entries.try_scan_range(Bound::Unbounded)? {
             let (id, block) = entry?;
 
             let range = block.start().raw_address()..=block.last_address().raw_address();
@@ -57,20 +57,16 @@ impl CodeBlockTable {
                 .or_default()
                 .insert(id);
 
-            let index = id.index() as u32;
-            while expected < index {
-                free_ids.push(Id::new(expected));
-                expected += 1;
-            }
-            expected = index + 1;
             live_entries += 1;
+            next_index = next_index.max(id.index() + 1);
         }
 
         Ok(Self {
             index: CodeBlockIndex {
                 bounds,
-                free_ids,
+                free_ids: Vec::new(),
                 live_entries,
+                next_index,
             },
             entries,
         })
@@ -78,6 +74,64 @@ impl CodeBlockTable {
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
+    }
+
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        CodeBlockTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) -> Result<(), EntityStorageError> {
+        let id = block.id();
+        if self.entries.try_get(&id)?.is_some() {
+            self.clear_entry(id)?;
+        }
+
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        self.index
+            .bounds
+            .entry(block.space())
+            .or_default()
+            .entry(range)
+            .or_default()
+            .insert(id);
+        self.index.next_index = self.index.next_index.max(id.index() + 1);
+        self.index.live_entries += 1;
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != id.index());
+        self.entries.try_put(id, block).map(|_| ())
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+        let Some(block) = self.entries.try_get(&id)? else {
+            return Ok(false);
+        };
+
+        let space = block.space();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        drop(block);
+
+        if let Some(Entry::Occupied(mut entry)) =
+            self.index.bounds.get_mut(&space).map(|m| m.entry(range))
+        {
+            let id_set = entry.get_mut();
+            id_set.remove(id);
+
+            if id_set.is_empty() {
+                entry.remove();
+            }
+        }
+
+        self.entries.try_remove(&id)?;
+        self.index.live_entries -= 1;
+        Ok(true)
     }
 
     pub(crate) fn insert<F>(
@@ -89,8 +143,7 @@ impl CodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id
-            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let block = f(id, addr)?;
 
@@ -109,6 +162,8 @@ impl CodeBlockTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         self.entries.put(id, block);
@@ -184,7 +239,7 @@ impl CodeBlockTable {
         }
 
         self.entries.try_remove(&id)?;
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.index.live_entries -= 1;
 
         Ok(true)
@@ -220,7 +275,7 @@ impl CodeBlockTable {
 
             for id in id_set.iter() {
                 self.entries.try_remove(&id)?;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -282,7 +337,7 @@ impl CodeBlockTable {
 
             for id in matching {
                 self.entries.try_remove(&id)?;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -365,7 +420,7 @@ impl CodeBlockTable {
             .filter(move |(range, _)| *range.start() == raw)
             .flat_map(|(_, id_set)| id_set.iter());
 
-        Box::new(self.entries.get_disjoint_mut(ids))
+        Box::new(self.entries.iter_disjoint_mut(ids))
     }
 
     pub(crate) fn get_by_address_and_context_mut<'a>(
@@ -387,7 +442,7 @@ impl CodeBlockTable {
 
         Box::new(
             self.entries
-                .get_disjoint_mut(ids)
+                .iter_disjoint_mut(ids)
                 .filter(move |block| block.context() == context),
         )
     }
@@ -404,7 +459,7 @@ impl CodeBlockTable {
             .flat_map(move |bounds| bounds.values(raw..=raw))
             .flat_map(|id_set| id_set.iter());
 
-        Box::new(self.entries.get_disjoint_mut(ids))
+        Box::new(self.entries.iter_disjoint_mut(ids))
     }
 
     pub(crate) fn iter(&self) -> Iter<'_> {
@@ -428,12 +483,11 @@ impl CodeBlockTable {
 mod test {
     use super::*;
     use crate::ir::InsnList;
+    use crate::storage::TRANSIENT;
+    use crate::storage::entities::SqliteEntityStorage;
 
     #[test]
     fn test_free_id_reuse_sqlite() {
-        use crate::storage::TRANSIENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
         let mut table = CodeBlockTable::new(storage, 64 * 1024).unwrap();
 
@@ -449,14 +503,16 @@ mod test {
         }
 
         assert!(table.remove_by_id(ids[1]));
-        assert_eq!(table.index.free_ids, [ids[1]]);
+        assert_eq!(table.index.free_ids, [ids[1].next_generation()]);
 
         let reused = table
             .insert(Address::from(0x4000), |id, start| {
                 Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
             })
             .unwrap();
-        assert_eq!(reused, ids[1]);
+        assert_eq!(reused.index(), ids[1].index());
+        assert_eq!(reused.generation(), ids[1].generation() + 1);
+        assert!(table.get_by_id(ids[1]).is_none());
         assert!(table.index.free_ids.is_empty());
 
         let fresh = table

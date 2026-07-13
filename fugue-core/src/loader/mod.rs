@@ -11,6 +11,7 @@ use crate::arch::Arch;
 use crate::ir::Address;
 use crate::ir::symbol::SymbolTable;
 use crate::lifter::LanguageError;
+use crate::platform::Platform;
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -251,6 +252,10 @@ pub trait Loadable {
 
     fn architecture(&self) -> Arch;
 
+    fn platform(&self) -> Platform {
+        self.architecture().platform()
+    }
+
     fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
         None
     }
@@ -397,6 +402,13 @@ impl Loadable for Loader<'_> {
         }
     }
 
+    fn platform(&self) -> Platform {
+        match self {
+            Self::Elf(elf) => elf.platform(),
+            Self::Pe(pe) => pe.platform(),
+        }
+    }
+
     fn metadata(&self) -> &LoadableMetadata {
         match self {
             Self::Elf(elf) => elf.metadata(),
@@ -472,6 +484,7 @@ mod test {
     use crate::attributes;
 
     #[test]
+    #[ignore = "requires local language data and binary fixtures"]
     fn test_loader() -> Result<(), LoaderError> {
         let loaded = Loader::from_file_with(
             "tests/ls.elf",

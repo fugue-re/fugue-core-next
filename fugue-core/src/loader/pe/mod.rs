@@ -34,7 +34,9 @@ use crate::loader::{
     LoaderError,
 };
 use crate::storage::segments::mapping::SegmentMappingProvenance;
-use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
+use crate::types::attributes::{
+    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
+};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -144,11 +146,13 @@ impl<'a> PeInner<'a> {
     fn from_bytes_or_recover(
         data: BytesOrMapping<'a>,
         attributes: &AttributeMap,
-    ) -> Result<Self, (BytesOrMapping<'a>, LoaderError)> {
+    ) -> Result<Self, PeRecoverError<'a>> {
         Self::try_new_or_recover(data, |data| PeLoadedRepr::parse(data, attributes))
-            .map_err(|(error, heads)| (heads.data, error))
+            .map_err(|(error, heads)| Box::new((heads.data, error)))
     }
 }
+
+type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
 
 pub struct Pe<'a> {
     object: PeInner<'a>,
@@ -171,7 +175,7 @@ impl<'a> Pe<'a> {
 
         let (data, error) = match PeInner::from_bytes_or_recover(data.into(), &attributes) {
             Ok(object) => return Ok(Self::from_inner(object, attributes)),
-            Err(failed) => failed,
+            Err(failed) => *failed,
         };
 
         if !config.is_permissive() {
@@ -198,6 +202,8 @@ impl<'a> Pe<'a> {
             slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
         }
 
+        slf.attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "pe");
+
         slf
     }
 
@@ -221,10 +227,6 @@ impl<'a> Pe<'a> {
         let state = &loaded.state;
         let entry = with_pe!(&loaded.view, pe | pe.entry());
         (entry != 0).then(|| RawAddress::from(state.rebase_offset(entry)))
-    }
-
-    pub fn convention(&self) -> Option<&'a str> {
-        None
     }
 
     pub fn loaded_view(&self) -> &PeFileRepr<'_, 'a> {
@@ -362,7 +364,7 @@ impl PeLoadState {
             BTreeMap::<RawAddress, SmallVec<[SymbolIndex; 1]>>::new();
         for (index, symbol) in &symbols {
             symbol_indices_by_offset
-                .entry(symbol.address.into())
+                .entry(symbol.address)
                 .or_default()
                 .push(*index);
         }
@@ -370,7 +372,7 @@ impl PeLoadState {
         let mut space_by_index = BTreeMap::<SymbolIndex, ImageSpaceHandle>::new();
         for placement in &placements {
             let start = placement.address.offset();
-            let Some(last) = start.checked_add(placement.size.saturating_sub(1) as u64) else {
+            let Some(last) = start.checked_add(placement.size.saturating_sub(1)) else {
                 continue;
             };
             let covered = symbol_indices_by_offset
@@ -937,10 +939,10 @@ where
     type Item = ImageSegmentContents<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        if self.config.load_headers() {
-            if let Some(header) = self.header_segment()? {
-                return Ok(Some(header));
-            }
+        if self.config.load_headers()
+            && let Some(header) = self.header_segment()?
+        {
+            return Ok(Some(header));
         }
         self.next_section()
     }
@@ -1048,17 +1050,17 @@ where
     }
 
     fn next_region(&mut self) -> Result<Option<PeRegion<'data>>, LoaderError> {
-        if self.config.load_headers() {
-            if let Some(header) = self.header.take() {
-                return Ok(Some(PeRegion {
-                    name: Cow::Borrowed("Headers"),
-                    address: self.base,
-                    size: header.size(),
-                    properties: SegmentProperties::PERM_READ,
-                    provenance: SegmentMappingProvenance::Section,
-                    source: PeRegionSource::header(),
-                }));
-            }
+        if self.config.load_headers()
+            && let Some(header) = self.header.take()
+        {
+            return Ok(Some(PeRegion {
+                name: Cow::Borrowed("Headers"),
+                address: self.base,
+                size: header.size(),
+                properties: SegmentProperties::PERM_READ,
+                provenance: SegmentMappingProvenance::Section,
+                source: PeRegionSource::header(),
+            }));
         }
 
         for sect in self.sects.by_ref() {
@@ -1161,13 +1163,13 @@ impl<'a> PeImageSegments<'a> {
 
     fn image_segment(&self, segment: &'a PeImageSegment) -> ImageSegment<'a> {
         let seg_start = segment.address.offset();
-        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1) as u64);
+        let seg_last = seg_start.checked_add(segment.size.saturating_sub(1));
 
         let (mapping_hints, function_hints) = seg_last
             .map(|seg_last| {
                 let mapping_hints = self
                     .mapping_hints
-                    .range(RawAddress::from(seg_start)..=RawAddress::from(seg_last))
+                    .range(seg_start..=seg_last)
                     .map(|(addr, hint)| (*addr, hint.clone()))
                     .collect::<BTreeMap<RawAddress, ContextHint>>();
 
@@ -1177,12 +1179,12 @@ impl<'a> PeImageSegments<'a> {
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
                     )
-                    .filter_map(|(_, entry)| {
+                    .filter(|(_, entry)| {
                         entry
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
-                            .then(|| entry.address().offset())
                     })
+                    .map(|(_, entry)| entry.address().offset())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
@@ -1384,8 +1386,7 @@ mod test {
         let mut loaded = Vec::new();
 
         while let Some(segment) = contents.next()? {
-            let mut writes = segment.into_writes(bank_base)?;
-            while let Some(write) = writes.next() {
+            for write in segment.into_writes(bank_base)? {
                 let placement = segments
                     .iter()
                     .find_map(|segment| segment.resolve(write.bank(), write.offset().offset()))
@@ -1486,6 +1487,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_exe() -> Result<(), Box<dyn std::error::Error>> {
         let pe = Pe::new(BytesOrMapping::from_file("tests/hello-pe.exe")?)?;
         let segments = load_segments(&pe)?;
@@ -1498,6 +1500,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_headers_default_disabled() -> Result<(), Box<dyn std::error::Error>> {
         let pe = Pe::new(BytesOrMapping::from_file("tests/hello-pe.exe")?)?;
         let mut segments = pe.image_segments();
@@ -1508,6 +1511,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_headers_enabled() -> Result<(), Box<dyn std::error::Error>> {
         let pe = Pe::new_with(
             BytesOrMapping::from_file("tests/hello-pe.exe")?,
@@ -1529,7 +1533,7 @@ mod test {
         while let Some(segment) = contents.next()? {
             if segment.address() == header_address {
                 saw_contents = true;
-                assert!(segment.len() > 0);
+                assert!(!segment.is_empty());
                 break;
             }
         }
@@ -1539,10 +1543,11 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_custom_image_base() -> Result<(), Box<dyn std::error::Error>> {
         let data = BytesOrMapping::from_file("tests/hello-pe.exe")?;
         let (preferred_base, slot_address, original_value) = first_dir64_relocation(&data)?;
-        let image_base = RawAddress::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x0001_8000_0000_u64);
         let pe = Pe::new_with(data, attributes![ATTRIBUTE_IMAGE_BASE => image_base])?;
         let segments = load_segments(&pe)?;
         let rebased_address = Address::in_default_space(
@@ -1560,6 +1565,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_import_slot_relocated_to_extern() -> Result<(), Box<dyn std::error::Error>> {
         let data = BytesOrMapping::from_file("tests/hello-pe.exe")?;
         let (symbol_name, slot_address) = first_import_slot(&data)?;
@@ -1581,7 +1587,7 @@ mod test {
 
     #[test]
     fn test_pe_custom_image_base_without_relocations() {
-        let image_base = RawAddress::from(0x1800_0000_0u64);
+        let image_base = RawAddress::from(0x0001_8000_0000_u64);
         let err = match Pe::new_with(
             BytesOrMapping::from_file("tests/hello-pe-fixed.exe").expect("fixture"),
             attributes![ATTRIBUTE_IMAGE_BASE => image_base],
@@ -1608,6 +1614,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires binary test fixtures"]
     fn test_pe_memory_dump() -> Result<(), Box<dyn std::error::Error>> {
         let path = "tests/135b5560b10894c9022d926a88210684eaeb0a541eeb3947ea50655df39471a0.bin";
 

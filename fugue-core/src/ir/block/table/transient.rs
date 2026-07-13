@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use iset::Entry;
 use smallvec::SmallVec;
 
-use super::{CodeBlockIndex, CodeBlockTableError};
+use super::{CodeBlockIndex, CodeBlockTableAllocation, CodeBlockTableError};
 use crate::ir::{Address, CodeBlock, Id};
 use crate::lifter::ContextSet;
 use crate::storage::EntityStorageError;
@@ -26,6 +26,7 @@ impl CodeBlockTable {
                 bounds: BTreeMap::new(),
                 free_ids: Vec::new(),
                 live_entries: 0,
+                next_index: 0,
             },
             entries: Vec::new(),
         }
@@ -35,8 +36,73 @@ impl CodeBlockTable {
         Ok(())
     }
 
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        CodeBlockTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) {
+        let id = block.id();
+        if self.get_by_id(id).is_some() {
+            self.clear_entry(id);
+        }
+
+        let index = id.index();
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+        self.index
+            .bounds
+            .entry(block.space())
+            .or_default()
+            .entry(range)
+            .or_default()
+            .insert(id);
+        self.index.next_index = self.index.next_index.max(index + 1);
+        self.index.live_entries += 1;
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != index);
+        self.entries[index] = Some(block);
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> bool {
+        let Some(block) = self.get_raw(id) else {
+            return false;
+        };
+
+        let space = block.space();
+        let range = block.start().raw_address()..=block.last_address().raw_address();
+
+        if let Some(Entry::Occupied(mut entry)) =
+            self.index.bounds.get_mut(&space).map(|m| m.entry(range))
+        {
+            let id_set = entry.get_mut();
+            id_set.remove(id);
+
+            if id_set.is_empty() {
+                entry.remove();
+            }
+        }
+
+        self.entries[id.index()] = None;
+        self.index.live_entries -= 1;
+        true
+    }
+
     fn get_raw(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
-        self.entries.get(id.index())?.as_ref()
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|block| block.id() == id)
     }
 
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
@@ -44,8 +110,7 @@ impl CodeBlockTable {
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
     {
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id
-            .unwrap_or_else(|| Id::from_index(self.index.live_entries + self.index.free_ids.len()));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let block = f(id, addr)?;
 
@@ -64,6 +129,8 @@ impl CodeBlockTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         let index = id.index();
@@ -89,7 +156,10 @@ impl CodeBlockTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<&mut CodeBlock> {
-        self.entries.get_mut(id.index())?.as_mut()
+        self.entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|block| block.id() == id)
     }
 
     pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
@@ -112,7 +182,7 @@ impl CodeBlockTable {
         }
 
         self.entries[id.index()] = None;
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.index.live_entries -= 1;
 
         true
@@ -140,7 +210,7 @@ impl CodeBlockTable {
 
             for id in id_set.iter() {
                 self.entries[id.index()] = None;
-                self.index.free_ids.push(id);
+                self.index.free_ids.push(id.next_generation());
                 self.index.live_entries -= 1;
                 removed += 1;
             }
@@ -194,7 +264,7 @@ impl CodeBlockTable {
 
         for id in matching {
             self.entries[id.index()] = None;
-            self.index.free_ids.push(id);
+            self.index.free_ids.push(id.next_generation());
             self.index.live_entries -= 1;
         }
 

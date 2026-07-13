@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
@@ -34,6 +35,7 @@ enum Message {
     Write(Bytes),
 }
 
+#[derive(Clone)]
 pub enum WriteBackAction {
     Insert(Bytes),
     Remove,
@@ -108,6 +110,41 @@ impl WriteBackWorker {
         })
     }
 
+    pub(crate) fn pending_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<Vec<(Bytes, WriteBackAction)>, EntityStorageError> {
+        self.poison_check()?;
+
+        let mut entries = self
+            .pending
+            .iter()
+            .filter_map(|entry| {
+                let key = entry.key();
+                if !key.starts_with(prefix) || !Self::includes_start(key, start) {
+                    return None;
+                }
+
+                let action = match &entry.value {
+                    Some(bytes) => WriteBackAction::Insert(bytes.clone()),
+                    None => WriteBackAction::Remove,
+                };
+                Some((key.clone(), action))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    }
+
+    fn includes_start(key: &[u8], start: Bound<&[u8]>) -> bool {
+        match start {
+            Bound::Included(start) => key >= start,
+            Bound::Excluded(start) => key > start,
+            Bound::Unbounded => true,
+        }
+    }
+
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         self.poison_check()?;
 
@@ -123,9 +160,7 @@ impl WriteBackWorker {
 
     pub fn poison_check(&self) -> Result<(), EntityStorageError> {
         match self.poison.get() {
-            Some(message) => Err(EntityStorageError::backing_with(format!(
-                "write-back worker poisoned: {message}"
-            ))),
+            Some(message) => Err(EntityStorageError::write_back_poisoned(message.clone())),
             None => Ok(()),
         }
     }
@@ -224,8 +259,9 @@ impl Worker {
                 "write-back commit of {} entries failed, poisoning worker: {error}",
                 snapshot.len()
             );
-            let _ = self.poison.set(error.to_string());
-            return Err(error);
+            let message = error.to_string();
+            let _ = self.poison.set(message.clone());
+            return Err(EntityStorageError::write_back_poisoned(message));
         }
 
         for write in snapshot {

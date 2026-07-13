@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 
-use crate::ir::{Address, Id, IdSet, InsnList};
+use crate::ir::{Address, AddressRange, AddressRangeSet, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
@@ -199,6 +199,26 @@ impl CodeBlock {
 
     pub fn range(&self) -> RangeInclusive<Address> {
         self.address()..=self.last_address()
+    }
+
+    pub fn address_range(&self) -> AddressRange {
+        AddressRange::new(
+            self.space(),
+            self.address().raw_address(),
+            self.last_address().raw_address(),
+        )
+    }
+
+    pub fn coverage(&self) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(&mut covered);
+        covered
+    }
+
+    pub fn coverage_into(&self, covered: &mut AddressRangeSet) {
+        if !self.is_empty() {
+            covered.insert_range(self.address_range());
+        }
     }
 
     pub fn instructions(&self) -> &InsnList {

@@ -25,6 +25,7 @@ pub const ATTRIBUTE_FILE_PATH: &str = "project.input_path";
 pub const ATTRIBUTE_PROJECT_PATH: &str = "project.path";
 pub const ATTRIBUTE_ENTRY_POINT: &str = "project.entry_point";
 pub const ATTRIBUTE_IMAGE_BASE: &str = "project.image_base";
+pub const ATTRIBUTE_LOADER_FORMAT: &str = "project.loader_format";
 pub const ATTRIBUTE_ADDRESS_SPACE: &str = "loader.address_space";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -344,6 +345,8 @@ where
     D::Error: Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<serde_json::Value, D::Error> {
+        let _ = &deserializer;
+
         Ok(match self {
             ArchivedJsonValue::Null => serde_json::Value::Null,
             ArchivedJsonValue::Bool(b) => serde_json::Value::Bool(*b),
@@ -574,7 +577,7 @@ mod test {
             "short" => "hi",
             "long" => "this string is definitely longer than the inline capacity, forcing out-of-line storage",
             "nested" => serde_json::json!({
-                "list": [1, "two", false, null, { "deep": [3.14] }]
+                "list": [1, "two", false, null, { "deep": [3.125] }]
             }),
         ];
 

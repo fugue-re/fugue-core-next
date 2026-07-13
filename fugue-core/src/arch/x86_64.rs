@@ -148,7 +148,7 @@ impl X86_64 {
             _ => {}
         }
         let lid = LanguageId::new_with("x86", false, 64, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 

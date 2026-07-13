@@ -5,7 +5,7 @@ authors = ["Sam Thomas <st@xv.ax>"]
 edition = "2024"
 
 [features]
-default = []
+default = ["static-lifters"]
 static-lifters = [
   "fugue-lifter/arm",
   "fugue-lifter/aarch64",
@@ -45,7 +45,7 @@ memmap2 = "0.9"
 object = "0.39"
 ouroboros = "0.18"
 quick_cache = "0.6"
-parking_lot = "0.12"
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 r2d2 = { version = "0.8", optional = true }
 r2d2_sqlite = { version = "0.32", optional = true }
 range-set-blaze = "0.4"
@@ -60,6 +60,7 @@ serde-yaml = { version = "0.0.12", package = "serde-saphyr" }
 sha2 = "0.10"
 skiplist = "0.6"
 smallvec = "1.15"
+smol_str = "0.3"
 thiserror = "2"
 tinyset = { version = "0.5", package = "fugue-tinyset", features = ["rkyv"] }
 tracing = "0.1"
@@ -75,6 +76,11 @@ zip = { version = "7", default-features = false, features = ["zstd"] }
 [dev-dependencies]
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[[bench]]
+name = "analysis_engine"
+harness = false
+required-features = ["static-lifters"]
 
 [lints]
 workspace = true

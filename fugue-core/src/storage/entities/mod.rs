@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::io;
 use std::mem::ManuallyDrop;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -69,6 +70,8 @@ pub enum EntityStorageError {
     InvalidKeyFormat,
     #[error("invalid key size")]
     InvalidKeySize,
+    #[error("write-back worker poisoned: {0}")]
+    WriteBackPoisoned(String),
     #[error("failed to load project data from `{0}`: {1}")]
     ProjectData(PathBuf, io::ErrorKind),
     #[error("no project path specified")]
@@ -99,6 +102,14 @@ impl EntityStorageError {
 
     pub fn project_data(path: impl Into<PathBuf>, kind: io::ErrorKind) -> Self {
         Self::ProjectData(path.into(), kind)
+    }
+
+    pub fn write_back_poisoned(message: impl Into<String>) -> Self {
+        Self::WriteBackPoisoned(message.into())
+    }
+
+    pub fn is_write_back_poisoned(&self) -> bool {
+        matches!(self, Self::WriteBackPoisoned(_))
     }
 
     pub fn unsupported<E: std::error::Error + Send + Sync + 'static>(err: E) -> Self {
@@ -434,6 +445,11 @@ pub trait EntityStorageProvider: Send + Sync {
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
     fn iter_prefix_as<'a, F, T>(
         &'a self,
         prefix: &[u8],
@@ -471,6 +487,11 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
     fn erased_iter_prefix(
         &self,
         prefix: &[u8],
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
+    fn erased_scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
     fn erased_iter_prefix_as<'a>(
         &'a self,
@@ -528,6 +549,14 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
         self.erased_iter_prefix(prefix)
+    }
+
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.erased_scan_range(prefix, start)
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -604,6 +633,14 @@ where
         self.iter_prefix(prefix)
     }
 
+    fn erased_scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        self.scan_range(prefix, start)
+    }
+
     fn erased_iter_prefix_as<'a>(
         &'a self,
         prefix: &[u8],
@@ -635,8 +672,11 @@ where
     }
 }
 
+type OutMapFn<'a> = dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a;
+type OutMapPairFn<'a> = dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a;
+
 pub struct OutMapper<'a> {
-    f: Box<dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a>,
+    f: Box<OutMapFn<'a>>,
 }
 
 impl<'a> OutMapper<'a> {
@@ -655,7 +695,7 @@ impl<'a> OutMapper<'a> {
 }
 
 pub struct OutMapper2<'a> {
-    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a>,
+    f: Box<OutMapPairFn<'a>>,
 }
 
 impl<'a> OutMapper2<'a> {
@@ -756,6 +796,35 @@ impl EntityStorage {
         })
     }
 
+    pub fn scan_range<K: EntityKey, E: Entity>(
+        &self,
+        start: Bound<&K>,
+    ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
+        let pfx = schema::make_prefix::<K, E>();
+        let start_key = match start {
+            Bound::Included(key) => Bound::Included(schema::make_key::<K, E>(key)),
+            Bound::Excluded(key) => Bound::Excluded(schema::make_key::<K, E>(key)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let start = match start_key.as_ref() {
+            Bound::Included(key) => Bound::Included(&key[..]),
+            Bound::Excluded(key) => Bound::Excluded(&key[..]),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        self.backing.scan_range(&pfx, start).map(|iter| {
+            Box::new(iter.map(|result| {
+                result.and_then(|(key, value)| {
+                    let key = schema::extract_key::<K, E>(key)
+                        .ok_or(EntityStorageError::InvalidKeyFormat)?;
+                    let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(value.as_slice())
+                        .map_err(EntityStorageError::decode)?;
+                    Ok((key, val))
+                })
+            })) as EntityIterator<'_, K, E>
+        })
+    }
+
     pub fn keys<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
@@ -841,61 +910,58 @@ mod test {
         assert!(!storage.contains::<_, TestEntity>(&address).unwrap());
 
         // add many entities
-        for i in 0..10 {
+        for i in 0u64..10 {
             let entity = TestEntity {
                 id: i,
                 name: format!("Entity {i}"),
             };
-            storage.insert(&Address::from(i as u64), &entity).unwrap();
+            storage.insert(&Address::from(i), &entity).unwrap();
         }
 
         // iterate over entities
         let iter = storage.iter::<Address, TestEntity>().unwrap();
-        let mut count = 0;
-        for val in iter {
+        for (count, val) in iter.enumerate() {
+            let count = count as u64;
             let (address, entity) = val.unwrap();
             let expected = TestEntity {
                 id: count,
                 name: format!("Entity {count}"),
             };
             assert_eq!(entity, expected);
-            assert_eq!(address, Address::from(count as u64));
-            count += 1;
+            assert_eq!(address, Address::from(count));
         }
 
         // iterate over keys
         let key_iter = storage.keys::<Address, TestEntity>().unwrap();
-        let mut key_count = 0;
-        for key in key_iter {
+        for (key_count, key) in key_iter.enumerate() {
             let address = key.unwrap();
             assert_eq!(address, Address::from(key_count as u64));
-            key_count += 1;
         }
 
         // test a cache
         let cache = EntityCache::<Address, TestEntity>::new(storage.clone(), 64 * 1024).unwrap();
 
-        for i in 0..5 {
+        for i in 0u64..5 {
             let entity = TestEntity {
                 id: i,
                 name: format!("Entity {i}"),
             };
-            let cached = cache.get(&Address::from(i as u64));
+            let cached = cache.get(&Address::from(i));
 
             assert!(cached.is_some());
             assert_eq!(*cached.unwrap(), entity);
         }
 
-        for i in 50..100 {
+        for i in 50u64..100 {
             let entity = TestEntity {
                 id: i,
                 name: format!("New Cached Entity {i}"),
             };
-            cache.put(Address::from(i as u64), entity);
+            cache.put(Address::from(i), entity);
         }
 
-        for i in 50..100 {
-            let cached = cache.get(&Address::from(i as u64));
+        for i in 50u64..100 {
+            let cached = cache.get(&Address::from(i));
             assert!(cached.is_some());
             assert_eq!(
                 *cached.unwrap(),

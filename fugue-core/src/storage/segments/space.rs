@@ -4,7 +4,7 @@ use iset::IntervalMap;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 
 #[derive(Debug, Error)]
@@ -92,12 +92,156 @@ pub enum AddressSpaceKind {
     Overlay { base: AddressSpaceId },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AddressSpace {
     id: AddressSpaceId,
     kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
+}
+
+pub(crate) struct AddressSpaceRevert {
+    priority: AddressSpacePriorityRevert,
+    ranges: Vec<AddressSpaceRangeRevert>,
+}
+
+struct AddressSpacePriorityRevert {
+    index: Option<usize>,
+    mapping: SegmentMappingId,
+    mapping_ref: Option<SegmentMappingRef>,
+}
+
+struct AddressSpaceRangeRevert {
+    end: Address,
+    start: Address,
+    submaps: Vec<SegmentSubMapping>,
+}
+
+impl AddressSpaceRevert {
+    pub(crate) fn capture_ranges(
+        space: &AddressSpace,
+        mapping: SegmentMappingId,
+        ranges: impl IntoIterator<Item = (RawAddress, RawAddress)>,
+    ) -> Self {
+        let priority = AddressSpacePriorityRevert::capture(space, mapping);
+        let ranges = ranges
+            .into_iter()
+            .filter_map(|(start, end)| AddressSpaceRangeRevert::capture(space, start, end))
+            .collect();
+
+        Self { priority, ranges }
+    }
+
+    pub(crate) fn capture_mapping(space: &AddressSpace, mapping: SegmentMappingId) -> Self {
+        let ranges = space
+            .submaps
+            .iter(..)
+            .filter(|(_, view)| view.mapping_ref().mapping_id() == mapping)
+            .map(|(_, view)| (view.start().raw_address(), view.end().raw_address()))
+            .collect::<SmallVec<[_; 8]>>();
+
+        Self::capture_ranges(space, mapping, ranges)
+    }
+
+    pub(crate) fn restore(self, space: &mut AddressSpace) {
+        self.priority.restore(space);
+
+        for range in self.ranges {
+            range.restore(space);
+        }
+    }
+}
+
+impl AddressSpacePriorityRevert {
+    fn capture(space: &AddressSpace, mapping: SegmentMappingId) -> Self {
+        let index = space
+            .priority_list
+            .iter()
+            .position(|mapping_ref| mapping_ref.mapping_id() == mapping);
+        let mapping_ref = index.map(|index| space.priority_list[index]);
+
+        Self {
+            index,
+            mapping,
+            mapping_ref,
+        }
+    }
+
+    fn restore(self, space: &mut AddressSpace) {
+        space
+            .priority_list
+            .retain(|mapping_ref| mapping_ref.mapping_id() != self.mapping);
+
+        if let (Some(index), Some(mapping_ref)) = (self.index, self.mapping_ref) {
+            space
+                .priority_list
+                .insert(index.min(space.priority_list.len()), mapping_ref);
+        }
+    }
+}
+
+impl AddressSpaceRangeRevert {
+    fn capture(space: &AddressSpace, start: RawAddress, end: RawAddress) -> Option<Self> {
+        if start >= end {
+            return None;
+        }
+
+        let start = Address::new(space.id, start);
+        let end = Address::new(space.id, end);
+        let last = end - 1usize;
+        let submaps = space
+            .submaps
+            .iter(start..=last)
+            .filter_map(|(_, view)| {
+                let view = if view.start() < start {
+                    view.with_start(start)?
+                } else {
+                    view.clone()
+                };
+
+                if view.end() > end {
+                    view.with_end(end)
+                } else {
+                    Some(view)
+                }
+            })
+            .collect();
+
+        Some(Self {
+            end,
+            start,
+            submaps,
+        })
+    }
+
+    fn restore(self, space: &mut AddressSpace) {
+        let last = self.end - 1usize;
+        let overlapping = space
+            .submaps
+            .iter(self.start..=last)
+            .map(|(iv, view)| (iv.clone(), view.clone()))
+            .collect::<SmallVec<[_; 8]>>();
+
+        for (iv, view) in overlapping {
+            space.submaps.remove(iv);
+
+            if view.start() < self.start
+                && let Some(left) = view.with_end(self.start)
+            {
+                space.submaps.insert(left.range(), left);
+            }
+
+            if view.end() > self.end
+                && let Some(right) = view.with_start(self.end)
+            {
+                space.submaps.insert(right.range(), right);
+            }
+        }
+
+        for view in self.submaps {
+            space.submaps.insert(view.range(), view);
+        }
+    }
 }
 
 impl AddressSpace {
@@ -283,10 +427,10 @@ impl AddressSpace {
             self.submaps.remove(iv);
 
             // preserve the portion before the rebuild range
-            if view.start() < range_start {
-                if let Some(left) = view.with_end(range_start) {
-                    self.submaps.insert(left.range(), left);
-                }
+            if view.start() < range_start
+                && let Some(left) = view.with_end(range_start)
+            {
+                self.submaps.insert(left.range(), left);
             }
             if view.last() > range_last {
                 // preserve the portion after the rebuild range
@@ -339,6 +483,19 @@ impl AddressSpace {
 
     pub fn iter(&self) -> impl Iterator<Item = &SegmentSubMapping> {
         self.submaps.iter(..).map(|(_, view)| view)
+    }
+
+    pub fn iter_from(
+        &self,
+        start: Option<Address>,
+    ) -> Box<dyn Iterator<Item = &SegmentSubMapping> + '_> {
+        match start {
+            Some(start) => {
+                let end = Address::new(self.id, RawAddress::MAX);
+                Box::new(self.submaps.iter(start..=end).map(|(_, view)| view))
+            }
+            None => Box::new(self.iter()),
+        }
     }
 
     pub fn clear(&mut self) {

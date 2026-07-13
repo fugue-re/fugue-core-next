@@ -1,11 +1,12 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Bound, Deref, DerefMut};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
+use rkyv::rancor::Error as RkyvError;
 
 use super::{
     Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
@@ -17,6 +18,7 @@ const ENTITY_CACHE_ENTRY_OVERHEAD: u32 = 64;
 const ENTITY_CACHE_ESTIMATED_ENTRY_SIZE: usize = 256;
 
 type EntityLru<K, E> = Cache<K, Cached<E>, ByteWeighter>;
+type PendingRange<'a, K, E> = Vec<(K, Option<CachedRef<'a, E>>)>;
 
 #[derive(Clone)]
 struct Cached<E> {
@@ -41,11 +43,13 @@ impl<K, E: Entity> Weighter<K, Cached<E>> for ByteWeighter {
     }
 }
 
+#[derive(Clone)]
 enum WriteSink {
     Worker(Arc<WriteBackWorker>),
     WriteThrough,
 }
 
+#[derive(Clone)]
 pub(crate) struct EntityCache<K: EntityKey, E: Entity> {
     entities: Arc<EntityLru<K, E>>,
     storage: EntityStorage,
@@ -62,7 +66,7 @@ impl<E> Display for CachedRef<'_, E>
 where
     E: Entity + Display,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         self.0.fmt(f)
     }
 }
@@ -291,7 +295,7 @@ where
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
                     WriteBackAction::Insert(bytes) => {
-                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
+                        let entity = rkyv::from_bytes::<E, RkyvError>(&bytes)
                             .map_err(EntityStorageError::decode)?;
                         Ok(Some(self.admit(
                             key.clone(),
@@ -371,6 +375,28 @@ where
         Ok(Box::new(iter))
     }
 
+    pub fn try_scan_range(
+        &self,
+        start: Bound<&K>,
+    ) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError>
+    where
+        K: Ord,
+    {
+        match &self.sink {
+            WriteSink::WriteThrough => self.scan_backing_range(start),
+            WriteSink::Worker(worker) => {
+                let prefix = schema::make_prefix::<K, E>();
+                let start_key = Self::range_start_key(start);
+                let pending_start = start_key.as_ref().map(|key| key.as_ref());
+                let pending = worker.pending_range(&prefix, pending_start)?;
+                let pending = self.decode_pending_range(pending)?;
+                let backing = self.storage.scan_range::<K, E>(start)?;
+
+                Ok(Box::new(self.merge_pending_range(backing, pending)))
+            }
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = CachedRef<'_, E>> + '_ {
         self.try_iter()
             .unwrap_or_else(|error| error.into_fatal())
@@ -386,36 +412,136 @@ where
 
     fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
         self.storage.get_as::<K, E, _, _>(key, |bytes| {
-            let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes)
-                .map_err(EntityStorageError::decode)?;
+            let entity =
+                rkyv::from_bytes::<E, RkyvError>(bytes).map_err(EntityStorageError::decode)?;
             Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
     }
 
-    fn try_get_uncached(&self, key: &K) -> Result<Option<Arc<E>>, EntityStorageError> {
-        if let Some(cached) = self.entities.get(key) {
-            return Ok(Some(cached.value));
-        }
-
-        if let WriteSink::Worker(worker) = &self.sink {
-            let key_bytes = schema::make_key::<K, E>(key);
-            if let Some(pending) = worker.pending(&key_bytes) {
-                return match pending {
-                    WriteBackAction::Insert(bytes) => Ok(Some(Arc::new(
-                        rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
-                            .map_err(EntityStorageError::decode)?,
-                    ))),
-                    WriteBackAction::Remove => Ok(None),
+    fn scan_backing_range(
+        &self,
+        start: Bound<&K>,
+    ) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError> {
+        let entities = self.entities.clone();
+        let iter = self.storage.scan_range::<K, E>(start)?.map(move |result| {
+            result.map(|(key, value)| {
+                let value = match entities.get(&key) {
+                    Some(cached) => CachedRef::from_arc(cached.value),
+                    None => CachedRef::new(value),
                 };
-            }
-        }
+                (key, value)
+            })
+        });
 
-        Ok(self.fetch(key)?.map(|(entity, _)| Arc::new(entity)))
+        Ok(Box::new(iter))
+    }
+
+    fn range_start_key(start: Bound<&K>) -> Bound<Bytes> {
+        match start {
+            Bound::Included(key) => Bound::Included(schema::make_key::<K, E>(key)),
+            Bound::Excluded(key) => Bound::Excluded(schema::make_key::<K, E>(key)),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
+    fn decode_pending_range(
+        &self,
+        pending: Vec<(Bytes, WriteBackAction)>,
+    ) -> Result<PendingRange<'_, K, E>, EntityStorageError> {
+        pending
+            .into_iter()
+            .map(|(key, action)| {
+                let key = schema::extract_key::<K, E>(BytesOrSlice::from(key))
+                    .ok_or(EntityStorageError::InvalidKeyFormat)?;
+                let value = match action {
+                    WriteBackAction::Insert(bytes) => {
+                        let weight = ByteWeighter::entry_weight(bytes.len());
+                        let entity = rkyv::from_bytes::<E, RkyvError>(&bytes)
+                            .map_err(EntityStorageError::decode)?;
+                        Some(self.admit(key.clone(), Arc::new(entity), weight))
+                    }
+                    WriteBackAction::Remove => None,
+                };
+                Ok((key, value))
+            })
+            .collect()
+    }
+
+    fn merge_pending_range<'a>(
+        &'a self,
+        mut backing: EntityIterator<'a, K, E>,
+        pending: Vec<(K, Option<CachedRef<'a, E>>)>,
+    ) -> impl Iterator<Item = Result<(K, CachedRef<'a, E>), EntityStorageError>> + 'a
+    where
+        K: Ord,
+    {
+        let entities = self.entities.clone();
+        let mut pending = pending.into_iter().peekable();
+        let mut buffered = None;
+
+        std::iter::from_fn(move || {
+            loop {
+                if buffered.is_none() {
+                    buffered = backing.next();
+                }
+
+                match (pending.peek(), buffered.as_ref()) {
+                    (None, None) => return None,
+                    (Some(_), None) => {
+                        let (key, value) = pending.next()?;
+                        if let Some(value) = value {
+                            return Some(Ok((key, value)));
+                        }
+                    }
+                    (None, Some(_)) => return Self::take_backing(&entities, &mut buffered),
+                    (Some((pending_key, _)), Some(Ok((backing_key, _)))) => {
+                        match pending_key.cmp(backing_key) {
+                            std::cmp::Ordering::Less => {
+                                let (key, value) = pending.next()?;
+                                if let Some(value) = value {
+                                    return Some(Ok((key, value)));
+                                }
+                            }
+                            std::cmp::Ordering::Equal => {
+                                let _ = buffered.take();
+                                let (key, value) = pending.next()?;
+                                if let Some(value) = value {
+                                    return Some(Ok((key, value)));
+                                }
+                            }
+                            std::cmp::Ordering::Greater => {
+                                return Self::take_backing(&entities, &mut buffered);
+                            }
+                        }
+                    }
+                    (Some(_), Some(Err(_))) => {
+                        let Some(Err(error)) = buffered.take() else {
+                            unreachable!("buffered value was checked as an error");
+                        };
+                        return Some(Err(error));
+                    }
+                }
+            }
+        })
+    }
+
+    fn take_backing<'a>(
+        entities: &EntityLru<K, E>,
+        buffered: &mut Option<Result<(K, E), EntityStorageError>>,
+    ) -> Option<Result<(K, CachedRef<'a, E>), EntityStorageError>> {
+        buffered.take().map(|result| {
+            result.map(|(key, value)| {
+                let value = match entities.get(&key) {
+                    Some(cached) => CachedRef::from_arc(cached.value),
+                    None => CachedRef::new(value),
+                };
+                (key, value)
+            })
+        })
     }
 
     fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        let encoded = rkyv::to_bytes::<RkyvError>(entity).map_err(EntityStorageError::encode)?;
         let weight = ByteWeighter::entry_weight(encoded.len());
 
         match &self.sink {
@@ -438,6 +564,23 @@ where
     K: EntityKey,
     E: MutableEntity<Key = K>,
 {
+    pub(crate) fn iter_disjoint_mut<'a>(
+        &'a self,
+        keys: impl IntoIterator<Item = K> + 'a,
+    ) -> impl Iterator<Item = CachedMut<'a, E>> + 'a {
+        keys.into_iter().filter_map(move |key| {
+            let current = self
+                .try_get(&key)
+                .unwrap_or_else(|error| error.into_fatal())?;
+
+            Some(CachedMut {
+                cache: self,
+                entity: current.into_arc(),
+                dirty: false,
+            })
+        })
+    }
+
     pub fn try_get_mut(&mut self, key: &K) -> Result<Option<CachedMut<'_, E>>, EntityStorageError> {
         let Some(current) = self.try_get(key)? else {
             return Ok(None);
@@ -453,25 +596,6 @@ where
     pub fn get_mut(&mut self, key: &K) -> Option<CachedMut<'_, E>> {
         self.try_get_mut(key)
             .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn get_disjoint_mut<'a>(
-        &'a mut self,
-        keys: impl IntoIterator<Item = K> + 'a,
-    ) -> impl Iterator<Item = CachedMut<'a, E>> + 'a {
-        let cache = &*self;
-
-        keys.into_iter().filter_map(move |key| {
-            let entity = cache
-                .try_get_uncached(&key)
-                .unwrap_or_else(|error| error.into_fatal())?;
-
-            Some(CachedMut {
-                cache,
-                entity,
-                dirty: false,
-            })
-        })
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = CachedMut<'_, E>> + '_ {
@@ -506,6 +630,9 @@ where
 
 #[cfg(test)]
 mod test {
+    use std::ops::Bound;
+    use std::time::Duration;
+
     use super::*;
     use crate::ir::Address;
     use crate::storage::entities::{
@@ -574,6 +701,14 @@ mod test {
             self.0.iter_prefix(prefix)
         }
 
+        fn scan_range(
+            &self,
+            prefix: &[u8],
+            start: Bound<&[u8]>,
+        ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+            self.0.scan_range(prefix, start)
+        }
+
         fn iter_prefix_as<'a, F, T>(
             &'a self,
             prefix: &[u8],
@@ -628,6 +763,25 @@ mod test {
             .get(&key)
             .expect("entry reloads from storage after eviction");
         assert_eq!(*retrieved, cache_entity(1, "one"));
+    }
+
+    #[test]
+    fn cache_scan_range_starts_at_cursor() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let cache = EntityCache::<Address, CacheEntity>::new(storage, 128).unwrap();
+
+        for value in 1..=4 {
+            cache.put(Address::from(value), cache_entity(value, "entry"));
+        }
+
+        let values = cache
+            .try_scan_range(Bound::Excluded(&Address::from(2u64)))
+            .unwrap()
+            .map(|entry| entry.map(|(_, entity)| entity.id))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(values, vec![3, 4]);
     }
 
     #[test]
@@ -732,6 +886,42 @@ mod test {
             .get(&key)
             .expect("value served from pending or storage");
         assert_eq!(*retrieved, cache_entity(1, "one"));
+    }
+
+    #[test]
+    fn write_back_scan_range_reflects_pending_writes() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let worker =
+            WriteBackWorker::with_options(storage.clone(), 16, 1024, Duration::from_secs(3600))
+                .unwrap();
+        let cache =
+            EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
+
+        cache.put(Address::from(1u64), cache_entity(1, "one"));
+        cache.put(Address::from(2u64), cache_entity(2, "two"));
+        cache.put(Address::from(3u64), cache_entity(3, "three"));
+        cache.try_remove(&Address::from(2u64)).unwrap();
+
+        let values = cache
+            .try_scan_range(Bound::Included(&Address::from(1u64)))
+            .unwrap()
+            .map(|entry| entry.map(|(_, entity)| entity.id))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(values, vec![1, 3]);
+        assert_eq!(
+            storage
+                .get::<Address, CacheEntity>(&Address::from(1u64))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .get::<Address, CacheEntity>(&Address::from(2u64))
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

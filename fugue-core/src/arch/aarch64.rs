@@ -135,7 +135,7 @@ impl AArch64 {
         }
         let variant = variant.or(Some("v8A"));
         let lid = LanguageId::new_with("AARCH64", is_be, 64, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 

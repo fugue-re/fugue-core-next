@@ -197,7 +197,7 @@ impl Arm {
         }
         let variant = variant.or(Some("v8"));
         let lid = LanguageId::new_with("ARM", is_be, 32, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 
@@ -314,7 +314,7 @@ impl DisassemblerT for ArmDisassembler {
     }
 }
 
-#[cfg(all(test, feature = "static-lifters"))]
+#[cfg(test)]
 mod test {
     use super::Arm;
     use crate::ir::RawAddress;

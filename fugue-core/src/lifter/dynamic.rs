@@ -84,7 +84,7 @@ impl LanguageLoader {
                         b.language()
                             .sla_file()
                             .canonicalize()
-                            .map_or(false, |p| p == canonical)
+                            .is_ok_and(|p| p == canonical)
                     })
                     .collect::<Vec<_>>();
 

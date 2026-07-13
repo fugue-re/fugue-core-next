@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::mem;
+use std::ops::Bound;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
@@ -165,6 +166,43 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         })))
     }
 
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        if prefix.len() != ENTITY_PREFIX_SIZE {
+            return Err(EntityStorageError::InvalidKeySize);
+        }
+
+        let prefix =
+            EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+        let start = match start {
+            Bound::Included(key) => Bound::Included(Bytes::copy_from_slice(
+                key.strip_prefix(&prefix)
+                    .ok_or(EntityStorageError::InvalidKeyFormat)?,
+            )),
+            Bound::Excluded(key) => Bound::Excluded(Bytes::copy_from_slice(
+                key.strip_prefix(&prefix)
+                    .ok_or(EntityStorageError::InvalidKeyFormat)?,
+            )),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+
+        let Some(map) = self.data.get(&prefix) else {
+            return Ok(Box::new(std::iter::empty()));
+        };
+
+        Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
+            let start = match &start {
+                Bound::Included(key) => Bound::Included(key),
+                Bound::Excluded(key) => Bound::Excluded(key),
+                Bound::Unbounded => Bound::Unbounded,
+            };
+            iter.range(start, Bound::Unbounded)
+        })))
+    }
+
     fn iter_prefix_as<'a, F, T>(
         &'a self,
         prefix: &[u8],
@@ -319,5 +357,57 @@ impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ops::Bound;
+
+    use super::*;
+    use crate::ir::Address;
+    use crate::storage::entities::schema::EntityId;
+    use crate::storage::entities::{Entity, EntityStorage};
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        value: u64,
+    }
+
+    impl TestEntity {
+        fn new(value: u64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(127);
+    }
+
+    #[test]
+    fn scan_range_respects_inclusive_and_exclusive_bounds() {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+
+        for value in 1..=4 {
+            storage
+                .insert(&Address::from(value), &TestEntity::new(value))
+                .unwrap();
+        }
+
+        let included = storage
+            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
+            .unwrap()
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(included, vec![2, 3, 4]);
+
+        let excluded = storage
+            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
+            .unwrap()
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(excluded, vec![3, 4]);
     }
 }

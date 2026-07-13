@@ -10,7 +10,7 @@ use fallible_iterator::FallibleIterator;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, RawAddress, SegmentProperties};
+use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,
@@ -29,7 +29,7 @@ pub mod view;
 
 use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
-    SegmentMappingKind, SegmentMappingProvenance,
+    SegmentMappingKind, SegmentMappingLocation, SegmentMappingMetadata, SegmentMappingProvenance,
 };
 use provider::SegmentStorageProviderRegistry;
 pub use provider::{
@@ -38,7 +38,7 @@ pub use provider::{
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
-use space::{AddressSpace, AddressSpaceId, AddressSpaceKind};
+use space::{AddressSpace, AddressSpaceId, AddressSpaceKind, AddressSpaceRevert};
 use view::SegmentMappingView;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
@@ -150,6 +150,201 @@ pub struct SegmentStorage {
     space_ctr: usize,
 }
 
+pub(crate) struct SegmentStorageRevert {
+    mapping_ctr: usize,
+    space_ctr: usize,
+    created_mappings: Vec<SegmentMappingId>,
+    created_spaces: Vec<AddressSpaceId>,
+    mappings: Vec<SegmentMappingRestore>,
+    spaces: Vec<(AddressSpaceId, AddressSpaceRevert)>,
+    touched_spaces: Vec<AddressSpaceId>,
+}
+
+enum SegmentMappingRestore {
+    Location(SegmentMappingId, SegmentMappingLocation),
+    Metadata(SegmentMappingId, SegmentMappingMetadata),
+    Removed(SegmentMappingId, SegmentMapping),
+}
+
+impl SegmentStorageRevert {
+    fn new(storage: &SegmentStorage) -> Self {
+        Self {
+            mapping_ctr: storage.mapping_ctr,
+            space_ctr: storage.space_ctr,
+            created_mappings: Vec::new(),
+            created_spaces: Vec::new(),
+            mappings: Vec::new(),
+            spaces: Vec::new(),
+            touched_spaces: Vec::new(),
+        }
+    }
+
+    fn capture_mapping_spaces(
+        &mut self,
+        storage: &SegmentStorage,
+        id: SegmentMappingId,
+        ranges: impl Clone + IntoIterator<Item = (RawAddress, RawAddress)>,
+    ) {
+        let spaces = storage
+            .spaces
+            .values()
+            .filter(|space| {
+                space
+                    .priority_list()
+                    .iter()
+                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
+            })
+            .map(|space| {
+                (
+                    space.id(),
+                    AddressSpaceRevert::capture_ranges(space, id, ranges.clone()),
+                )
+            })
+            .collect::<SmallVec<[_; 8]>>();
+
+        for (id, space) in spaces {
+            self.push_space(id, space);
+        }
+    }
+
+    fn capture_metadata(&mut self, storage: &SegmentStorage, id: SegmentMappingId) {
+        if let Some(mapping) = storage.mappings.get(&id) {
+            self.mappings.push(SegmentMappingRestore::Metadata(
+                id,
+                SegmentMappingMetadata::capture(mapping),
+            ));
+        }
+    }
+
+    fn push_removed_mapping(&mut self, id: SegmentMappingId, mapping: SegmentMapping) {
+        self.mappings
+            .push(SegmentMappingRestore::Removed(id, mapping));
+    }
+
+    fn capture_space_mapping(
+        &mut self,
+        storage: &SegmentStorage,
+        space_id: AddressSpaceId,
+        mapping_id: SegmentMappingId,
+    ) {
+        let Some(mapping) = storage.mappings.get(&mapping_id) else {
+            return;
+        };
+        let Some(space) = storage.spaces.get(&space_id) else {
+            return;
+        };
+
+        let space = AddressSpaceRevert::capture_ranges(
+            space,
+            mapping_id,
+            [(mapping.start().raw_address(), mapping.end().raw_address())],
+        );
+        self.push_space(space_id, space);
+    }
+
+    fn capture_removed_space_mapping(
+        &mut self,
+        storage: &SegmentStorage,
+        space_id: AddressSpaceId,
+        mapping_id: SegmentMappingId,
+    ) {
+        if let Some(space) = storage.spaces.get(&space_id) {
+            self.push_space(
+                space_id,
+                AddressSpaceRevert::capture_mapping(space, mapping_id),
+            );
+        }
+    }
+
+    fn push_space(&mut self, id: AddressSpaceId, space: AddressSpaceRevert) {
+        if self.touched_spaces.contains(&id) {
+            return;
+        }
+
+        self.spaces.push((id, space));
+        self.touched_spaces.push(id);
+    }
+
+    pub(crate) fn touch_mapping(&mut self, id: SegmentMappingId) {
+        self.created_mappings.push(id);
+    }
+
+    pub(crate) fn touch_space(&mut self, id: AddressSpaceId) {
+        self.created_spaces.push(id);
+    }
+
+    pub(crate) fn restore(self, storage: &mut SegmentStorage) {
+        for mapping in self.created_mappings {
+            storage.mappings.remove(&mapping);
+        }
+
+        for space in self.created_spaces {
+            storage.spaces.remove(&space);
+        }
+
+        storage.mapping_ctr = self.mapping_ctr;
+        storage.space_ctr = self.space_ctr;
+
+        for mapping in self.mappings {
+            match mapping {
+                SegmentMappingRestore::Location(id, location) => {
+                    if let Some(mapping) = storage.mappings.get_mut(&id) {
+                        mapping.restore_location(location);
+                    }
+                }
+                SegmentMappingRestore::Metadata(id, metadata) => {
+                    if let Some(mapping) = storage.mappings.get_mut(&id) {
+                        mapping.restore_metadata(metadata);
+                    }
+                }
+                SegmentMappingRestore::Removed(id, mapping) => {
+                    storage.mappings.insert(id, mapping);
+                }
+            }
+        }
+
+        for (id, space) in self.spaces {
+            if let Some(current) = storage.spaces.get_mut(&id) {
+                space.restore(current);
+            }
+        }
+    }
+}
+
+pub(crate) struct SegmentWriteRevert {
+    chunks: Vec<SegmentWriteRevertChunk>,
+}
+
+struct SegmentWriteRevertChunk {
+    provider: SegmentStorageProviderId,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+impl SegmentWriteRevert {
+    fn new() -> Self {
+        Self { chunks: Vec::new() }
+    }
+
+    fn push(&mut self, provider: SegmentStorageProviderId, offset: u64, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.chunks.push(SegmentWriteRevertChunk {
+                provider,
+                offset,
+                bytes,
+            });
+        }
+    }
+
+    pub(crate) fn restore(self, storage: &mut SegmentStorage) -> Result<(), SegmentStorageError> {
+        for chunk in self.chunks.into_iter().rev() {
+            storage.write_bytes_direct(chunk.provider, chunk.offset, &chunk.bytes)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl Default for SegmentStorage {
     fn default() -> Self {
         Self::empty()
@@ -196,6 +391,67 @@ impl SegmentStorage {
             mapping_ctr: 0,
             space_ctr: 1,
         }
+    }
+
+    pub(crate) fn empty_revert(&self) -> SegmentStorageRevert {
+        SegmentStorageRevert::new(self)
+    }
+
+    pub(crate) fn mapping_remap_revert(
+        &self,
+        mapping: SegmentMappingId,
+        new_start: Address,
+    ) -> SegmentStorageRevert {
+        let mut revert = SegmentStorageRevert::new(self);
+        if let Some(current) = self.mappings.get(&mapping) {
+            revert.mappings.push(SegmentMappingRestore::Location(
+                mapping,
+                SegmentMappingLocation::capture(current),
+            ));
+            let old_range = (current.start().raw_address(), current.end().raw_address());
+            let new_end = new_start + current.size();
+            let new_range = (new_start.raw_address(), new_end.raw_address());
+            revert.capture_mapping_spaces(self, mapping, [old_range, new_range]);
+        }
+        revert
+    }
+
+    pub(crate) fn mapping_resize_revert(
+        &self,
+        mapping: SegmentMappingId,
+        new_size: u64,
+    ) -> SegmentStorageRevert {
+        let mut revert = SegmentStorageRevert::new(self);
+        if let Some(current) = self.mappings.get(&mapping) {
+            revert.mappings.push(SegmentMappingRestore::Location(
+                mapping,
+                SegmentMappingLocation::capture(current),
+            ));
+            let old_range = (current.start().raw_address(), current.end().raw_address());
+            let new_end = current.start() + new_size;
+            let new_range = (current.start().raw_address(), new_end.raw_address());
+            revert.capture_mapping_spaces(self, mapping, [old_range, new_range]);
+        }
+        revert
+    }
+
+    pub(crate) fn mapping_metadata_revert(
+        &self,
+        mapping: SegmentMappingId,
+    ) -> SegmentStorageRevert {
+        let mut revert = SegmentStorageRevert::new(self);
+        revert.capture_metadata(self, mapping);
+        revert
+    }
+
+    pub(crate) fn space_mapping_revert(
+        &self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> SegmentStorageRevert {
+        let mut revert = SegmentStorageRevert::new(self);
+        revert.capture_space_mapping(self, space, mapping);
+        revert
     }
 
     pub fn from_loadable<S>(
@@ -300,8 +556,8 @@ impl SegmentStorage {
             let bank_base = *bank_bases
                 .get(&content.bank())
                 .ok_or(SegmentStorageError::UnknownBank(content.bank()))?;
-            let mut writes = content.into_writes(bank_base)?;
-            while let Some(write) = writes.next() {
+            let writes = content.into_writes(bank_base)?;
+            for write in writes {
                 let provider_id = resolution
                     .resolve_bank(write.bank())
                     .ok_or(SegmentStorageError::UnknownBank(write.bank()))?;
@@ -338,7 +594,7 @@ impl SegmentStorage {
                 segment.into_name_and_hints();
 
             let start = address.raw_address();
-            let end = address.raw_address() + size as u64;
+            let end = address.raw_address() + size;
 
             let extra_hints = discovered_hints.range(start..end).copied();
             let extra_mapping_hints = discovered_mapping_hints
@@ -725,6 +981,80 @@ impl SegmentStorage {
         Ok(())
     }
 
+    pub(crate) fn remove_mapping_tracked(
+        &mut self,
+        id: SegmentMappingId,
+    ) -> Result<SegmentStorageRevert, SegmentStorageError> {
+        if !self.mappings.contains_key(&id) {
+            return Err(SegmentStorageError::backing_with("mapping not found"));
+        }
+
+        let mut revert = SegmentStorageRevert::new(self);
+        let spaces = self
+            .spaces
+            .values()
+            .filter(|space| {
+                space
+                    .priority_list()
+                    .iter()
+                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
+            })
+            .map(|space| space.id())
+            .collect::<SmallVec<[_; 8]>>();
+
+        for space in spaces {
+            revert.capture_removed_space_mapping(self, space, id);
+        }
+
+        for space in self.spaces.values_mut() {
+            space.remove_mapping(id);
+        }
+
+        let mapping = self
+            .mappings
+            .remove(&id)
+            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+        revert.push_removed_mapping(id, mapping);
+
+        Ok(revert)
+    }
+
+    pub fn mapping(&self, id: SegmentMappingId) -> Option<&SegmentMapping> {
+        self.mappings.get(&id)
+    }
+
+    pub fn mapping_placements(
+        &self,
+        id: SegmentMappingId,
+    ) -> impl Iterator<Item = (AddressSpaceId, (RawAddress, RawAddress))> + '_ {
+        self.mappings.get(&id).into_iter().flat_map(move |mapping| {
+            let range = (mapping.start().raw_address(), mapping.last().raw_address());
+            self.spaces.values().filter_map(move |space| {
+                space
+                    .priority_list()
+                    .iter()
+                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
+                    .then_some((space.id(), range))
+            })
+        })
+    }
+
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
+        self.spaces.values().flat_map(move |space| {
+            space.iter().flat_map(move |submap| {
+                self.mappings
+                    .get(&submap.mapping_ref().mapping_id())
+                    .into_iter()
+                    .flat_map(move |mapping| {
+                        mapping.function_hints().filter_map(move |address| {
+                            let mapped = Address::new(space.id(), address.raw_address());
+                            submap.contains(mapped).then_some(mapped)
+                        })
+                    })
+            })
+        })
+    }
+
     pub fn remap_mapping(
         &mut self,
         id: SegmentMappingId,
@@ -1052,6 +1382,32 @@ impl SegmentStorage {
         addr: impl Into<Address>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
+        self.write_bytes_to_space_with_revert(space_id, addr, bytes, None)
+    }
+
+    pub(crate) fn write_bytes_to_space_tracked(
+        &mut self,
+        space_id: AddressSpaceId,
+        addr: impl Into<Address>,
+        bytes: &[u8],
+    ) -> Result<(usize, SegmentWriteRevert), SegmentStorageError> {
+        let mut revert = SegmentWriteRevert::new();
+        match self.write_bytes_to_space_with_revert(space_id, addr, bytes, Some(&mut revert)) {
+            Ok(written) => Ok((written, revert)),
+            Err(error) => {
+                revert.restore(self)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn write_bytes_to_space_with_revert(
+        &mut self,
+        space_id: AddressSpaceId,
+        addr: impl Into<Address>,
+        bytes: &[u8],
+        mut revert: Option<&mut SegmentWriteRevert>,
+    ) -> Result<usize, SegmentStorageError> {
         if bytes.is_empty() {
             return Ok(0);
         }
@@ -1122,14 +1478,27 @@ impl SegmentStorage {
                 }
             };
 
-            provider
+            if let Some(revert) = revert.as_deref_mut() {
+                let mut old_bytes = vec![0u8; write_data.len()];
+                let read = provider
+                    .provider()
+                    .read_bytes(phys_offset, &mut old_bytes)?;
+                old_bytes.truncate(read);
+                revert.push(provider_id, phys_offset, old_bytes);
+            }
+
+            let written = provider
                 .provider_mut()
                 .write_bytes(phys_offset, write_data)?;
 
-            total_written += write_size;
-            current_addr += write_size;
-            remaining -= write_size;
-            write_offset += write_size;
+            total_written += written;
+            current_addr += written;
+            remaining -= written;
+            write_offset += written;
+
+            if written != write_size {
+                break;
+            }
         }
 
         Ok(total_written)
@@ -1362,12 +1731,20 @@ impl SegmentStorage {
         &self,
         space_id: AddressSpaceId,
     ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
+        self.iter_views_from(space_id, None)
+    }
+
+    pub fn iter_views_from(
+        &self,
+        space_id: AddressSpaceId,
+        start: Option<Address>,
+    ) -> Result<impl Iterator<Item = SegmentMappingView<'_>> + '_, SegmentStorageError> {
         let space = self
             .spaces
             .get(&space_id)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
-        let views = space.iter().map(|submap| {
+        let views = space.iter_from(start).map(|submap| {
             let mapping_ref = submap.mapping_ref();
             let mapping = self
                 .mappings
@@ -1755,6 +2132,12 @@ mod test {
         assert!(
             hints.iter().any(|hint| hint.offset() == 0x1040),
             "relocation-discovered function hint should reach the covering mapping",
+        );
+        assert!(
+            storage
+                .function_hints()
+                .any(|hint| hint == Address::in_default_space(0x1040u64)),
+            "storage-level function hints should use mapped addresses",
         );
 
         assert_eq!(

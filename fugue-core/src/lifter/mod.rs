@@ -22,8 +22,8 @@ pub use dynamic::{
     resolve_language_with,
 };
 
-pub mod lifter;
-pub use lifter::{Lifter, LifterError};
+mod core;
+pub use core::{Lifter, LifterError};
 
 pub mod traits;
 

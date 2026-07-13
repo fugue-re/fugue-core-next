@@ -264,24 +264,7 @@ mod test {
     use super::*;
 
     fn x86_64_lifter() -> Lifter {
-        #[cfg(feature = "static-lifters")]
-        {
-            "x86:LE:64".parse::<Lifter>().unwrap()
-        }
-        #[cfg(not(feature = "static-lifters"))]
-        {
-            use std::path::PathBuf;
-
-            use fugue_sleigh_language::LanguageDB;
-
-            use crate::lifter::LanguageLoader;
-
-            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests")
-                .join("x86_64.flift");
-            let loader = LanguageLoader::from(LanguageDB::default());
-            loader.load_from(path).map(Lifter::new).unwrap()
-        }
+        "x86:LE:64".parse::<Lifter>().unwrap()
     }
 
     #[test]

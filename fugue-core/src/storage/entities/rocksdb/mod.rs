@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::{io, mem};
 
@@ -159,6 +160,14 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         Ok(RocksDbEntityBytesIterator::new(self, prefix))
     }
 
+    fn scan_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        Ok(RocksDbEntityRangeBytesIterator::new(self, prefix, start))
+    }
+
     fn iter_prefix_as<'a, F, T>(
         &'a self,
         prefix: &[u8],
@@ -216,6 +225,66 @@ impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
         self.iter.next();
 
         Some(Ok(key))
+    }
+}
+
+struct RocksDbEntityRangeBytesIterator<'a> {
+    iter: rocksdb::DBRawIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
+    prefix: Box<[u8]>,
+}
+
+impl<'a> RocksDbEntityRangeBytesIterator<'a> {
+    fn new(
+        storage: &'a RocksDbEntityStorage,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> EntityBytesIterator<'a> {
+        let mut opts = rocksdb::ReadOptions::default();
+
+        opts.set_prefix_same_as_start(true);
+        opts.set_iterate_range(rocksdb::PrefixRange(prefix.to_vec()));
+
+        let mut iter = storage.database.raw_iterator_opt(opts);
+        match start {
+            Bound::Included(key) => iter.seek(key),
+            Bound::Excluded(key) => {
+                iter.seek(key);
+                if iter.valid() && iter.key() == Some(key) {
+                    iter.next();
+                }
+            }
+            Bound::Unbounded => iter.seek(prefix),
+        }
+
+        Box::new(Self {
+            iter,
+            prefix: prefix.into(),
+        })
+    }
+}
+
+impl<'a> Iterator for RocksDbEntityRangeBytesIterator<'a> {
+    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.iter.valid() {
+            return None;
+        }
+
+        let key = self.iter.key()?;
+        if !key.starts_with(&self.prefix) {
+            return None;
+        }
+
+        let value = self.iter.value()?;
+        let item = (
+            BytesOrSlice::from(key.to_vec()),
+            BytesOrSlice::from(value.to_vec()),
+        );
+
+        self.iter.next();
+
+        Some(Ok(item))
     }
 }
 
@@ -390,5 +459,66 @@ impl<'a> EntityStorageTransactionalWriter<'a> for RocksDbEntityTransaction<'a> {
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
         self.txn.commit().map_err(EntityStorageError::backing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Bound;
+
+    use super::RocksDbEntityStorage;
+    use crate::ir::Address;
+    use crate::storage::entities::schema::EntityId;
+    use crate::storage::entities::{Entity, EntityStorage};
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestEntity {
+        value: u64,
+    }
+
+    impl TestEntity {
+        fn new(value: u64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl Entity for TestEntity {
+        const ID: EntityId = EntityId::new(125);
+    }
+
+    #[test]
+    fn rocksdb_scan_range_respects_inclusive_and_exclusive_bounds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = rocksdb::Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: rocksdb::OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+
+        for value in 1..=4 {
+            storage.insert(&Address::from(value), &TestEntity::new(value))?;
+        }
+
+        let included = storage
+            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(included, vec![2, 3, 4]);
+
+        let excluded = storage
+            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(excluded, vec![3, 4]);
+
+        let unbounded = storage
+            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .map(|entry| entry.map(|(_, entity)| entity.value))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(unbounded, vec![1, 2, 3, 4]);
+
+        Ok(())
     }
 }

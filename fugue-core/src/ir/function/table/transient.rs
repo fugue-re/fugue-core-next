@@ -1,8 +1,26 @@
 use std::collections::BTreeMap;
+use std::ops::{Bound, RangeBounds};
 
-use super::{FunctionIndex, FunctionTableError};
-use crate::ir::{Address, Function, Id};
+use super::{FunctionIndex, FunctionTableAllocation, FunctionTableError};
+use crate::ir::{Address, Function, Id, RawAddress};
 use crate::storage::EntityStorageError;
+use crate::storage::segments::space::AddressSpaceId;
+
+fn address_start_bound(space: AddressSpaceId, bound: Bound<&RawAddress>) -> Bound<Address> {
+    match bound {
+        Bound::Included(address) => Bound::Included(Address::new(space, *address)),
+        Bound::Excluded(address) => Bound::Excluded(Address::new(space, *address)),
+        Bound::Unbounded => Bound::Included(Address::new(space, RawAddress::zero())),
+    }
+}
+
+fn address_end_bound(space: AddressSpaceId, bound: Bound<&RawAddress>) -> Bound<Address> {
+    match bound {
+        Bound::Included(address) => Bound::Included(Address::new(space, *address)),
+        Bound::Excluded(address) => Bound::Excluded(Address::new(space, *address)),
+        Bound::Unbounded => Bound::Included(Address::new(space, RawAddress::MAX)),
+    }
+}
 
 pub struct FunctionTable {
     index: FunctionIndex,
@@ -21,6 +39,7 @@ impl FunctionTable {
             index: FunctionIndex {
                 addresses: BTreeMap::new(),
                 free_ids: Vec::new(),
+                next_index: 0,
             },
             entries: Vec::new(),
         }
@@ -28,6 +47,42 @@ impl FunctionTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         Ok(())
+    }
+
+    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> FunctionTableAllocation {
+        FunctionTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(super) fn restore_allocation(&mut self, allocation: FunctionTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids_tail);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(super) fn restore_entry(&mut self, function: Function) {
+        let id = function.id();
+        let index = id.index();
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+        self.index.addresses.insert(function.entry(), id);
+        self.index.next_index = self.index.next_index.max(index + 1);
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != index);
+        self.entries[index] = Some(function);
+    }
+
+    pub(super) fn clear_entry(&mut self, id: Id<Function>) -> bool {
+        let Some(function) = self.get_by_id(id) else {
+            return false;
+        };
+        let entry = function.entry();
+
+        self.index.addresses.remove(&entry);
+        self.entries[id.index()] = None;
+        true
     }
 
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
@@ -47,7 +102,7 @@ impl FunctionTable {
         }
 
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::new(self.index.addresses.len() as u32));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let function = f(id, addr)?;
 
@@ -59,6 +114,8 @@ impl FunctionTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         let index = id.index();
@@ -71,7 +128,10 @@ impl FunctionTable {
     }
 
     pub fn get_by_id(&self, id: Id<Function>) -> Option<&Function> {
-        self.entries.get(id.index())?.as_ref()
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|function| function.id() == id)
     }
 
     pub fn get_by_address(&self, addr: Address) -> Option<&Function> {
@@ -80,7 +140,10 @@ impl FunctionTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<&mut Function> {
-        self.entries.get_mut(id.index())?.as_mut()
+        self.entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|function| function.id() == id)
     }
 
     pub fn get_by_address_mut(&mut self, addr: Address) -> Option<&mut Function> {
@@ -110,7 +173,7 @@ impl FunctionTable {
         };
 
         self.index.addresses.remove(&function.entry());
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
 
         true
     }
@@ -123,13 +186,29 @@ impl FunctionTable {
         if let Some(slot) = self.entries.get_mut(id.index()) {
             *slot = None;
         }
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
 
         true
     }
 
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
         self.index.addresses.keys().copied()
+    }
+
+    pub fn addresses_in_range<R>(
+        &self,
+        space: AddressSpaceId,
+        range: R,
+    ) -> impl Iterator<Item = Address> + '_
+    where
+        R: RangeBounds<RawAddress>,
+    {
+        let start = address_start_bound(space, range.start_bound());
+        let end = address_end_bound(space, range.end_bound());
+        self.index
+            .addresses
+            .range((start, end))
+            .map(|(address, _)| *address)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {

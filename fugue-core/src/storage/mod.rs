@@ -133,9 +133,9 @@ impl StorageProviderError {
 }
 
 pub struct StorageContainer {
-    pub entities: EntityStorage,
-    pub image_resolution: Option<ImageResolution>,
-    pub segments: SegmentStorage,
+    pub(crate) entities: EntityStorage,
+    pub(crate) image_resolution: Option<ImageResolution>,
+    pub(crate) segments: SegmentStorage,
     write_back: Option<Arc<WriteBackWorker>>,
     cleanup_handler: StorageCleanupHandlerOneShot,
 }
@@ -240,14 +240,6 @@ impl StorageContainer {
 
     pub fn write_back(&self) -> Option<&Arc<WriteBackWorker>> {
         self.write_back.as_ref()
-    }
-
-    pub fn entities(&self) -> &EntityStorage {
-        &self.entities
-    }
-
-    pub fn entities_mut(&mut self) -> &mut EntityStorage {
-        &mut self.entities
     }
 
     pub fn segments(&self) -> &SegmentStorage {

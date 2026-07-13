@@ -1,13 +1,31 @@
 use std::collections::BTreeMap;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use super::{FunctionIndex, FunctionTableError};
-use crate::ir::{Address, Function, Id};
+use super::{FunctionIndex, FunctionTableAllocation, FunctionTableError};
+use crate::ir::{Address, Function, Id, RawAddress};
 use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 type Ref<'a> = CachedRef<'a, Function>;
 type RefMut<'a> = CachedMut<'a, Function>;
+
+fn address_start_bound(space: AddressSpaceId, bound: Bound<&RawAddress>) -> Bound<Address> {
+    match bound {
+        Bound::Included(address) => Bound::Included(Address::new(space, *address)),
+        Bound::Excluded(address) => Bound::Excluded(Address::new(space, *address)),
+        Bound::Unbounded => Bound::Included(Address::new(space, RawAddress::zero())),
+    }
+}
+
+fn address_end_bound(space: AddressSpaceId, bound: Bound<&RawAddress>) -> Bound<Address> {
+    match bound {
+        Bound::Included(address) => Bound::Included(Address::new(space, *address)),
+        Bound::Excluded(address) => Bound::Excluded(Address::new(space, *address)),
+        Bound::Unbounded => Bound::Included(Address::new(space, RawAddress::MAX)),
+    }
+}
 
 pub struct FunctionTable {
     index: FunctionIndex,
@@ -34,25 +52,19 @@ impl FunctionTable {
         entries: EntityCache<Id<Function>, Function>,
     ) -> Result<Self, EntityStorageError> {
         let mut addresses = BTreeMap::new();
-        let mut free_ids = Vec::new();
-        let mut expected = 0u32;
+        let mut next_index = 0usize;
 
-        for entry in entries.try_iter()? {
+        for entry in entries.try_scan_range(Bound::Unbounded)? {
             let (id, function) = entry?;
             addresses.insert(function.entry(), id);
-
-            let index = id.index() as u32;
-            while expected < index {
-                free_ids.push(Id::new(expected));
-                expected += 1;
-            }
-            expected = index + 1;
+            next_index = next_index.max(id.index() + 1);
         }
 
         Ok(Self {
             index: FunctionIndex {
                 addresses,
-                free_ids,
+                free_ids: Vec::new(),
+                next_index,
             },
             entries,
         })
@@ -60,6 +72,39 @@ impl FunctionTable {
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
+    }
+
+    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> FunctionTableAllocation {
+        FunctionTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+    }
+
+    pub(super) fn restore_allocation(&mut self, allocation: FunctionTableAllocation) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
+        self.index.free_ids.truncate(tail_start);
+        self.index.free_ids.extend(allocation.free_ids_tail);
+        self.index.next_index = allocation.next_index;
+    }
+
+    pub(super) fn restore_entry(&mut self, function: Function) -> Result<(), EntityStorageError> {
+        let id = function.id();
+        self.index.addresses.insert(function.entry(), id);
+        self.index.next_index = self.index.next_index.max(id.index() + 1);
+        self.index
+            .free_ids
+            .retain(|free_id| free_id.index() != id.index());
+        self.entries.try_put(id, function).map(|_| ())
+    }
+
+    pub(super) fn clear_entry(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
+        let Some(function) = self.entries.try_get(&id)? else {
+            return Ok(false);
+        };
+        let entry = function.entry();
+        drop(function);
+
+        self.index.addresses.remove(&entry);
+        self.entries.try_remove(&id)?;
+        Ok(true)
     }
 
     pub(crate) fn insert<F>(
@@ -83,7 +128,7 @@ impl FunctionTable {
         }
 
         let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::new(self.index.addresses.len() as u32));
+        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
 
         let function = f(id, addr)?;
 
@@ -95,6 +140,8 @@ impl FunctionTable {
 
         if reuse_id.is_some() {
             self.index.free_ids.pop();
+        } else {
+            self.index.next_index += 1;
         }
 
         self.entries.put(id, function);
@@ -208,7 +255,7 @@ impl FunctionTable {
         };
 
         self.index.addresses.remove(&addr);
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.entries.try_remove(&id)?;
 
         Ok(true)
@@ -227,7 +274,7 @@ impl FunctionTable {
             return Ok(false);
         };
 
-        self.index.free_ids.push(id);
+        self.index.free_ids.push(id.next_generation());
         self.entries.try_remove(&id)?;
 
         Ok(true)
@@ -235,6 +282,22 @@ impl FunctionTable {
 
     pub(crate) fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
         self.index.addresses.keys().copied()
+    }
+
+    pub(crate) fn addresses_in_range<R>(
+        &self,
+        space: AddressSpaceId,
+        range: R,
+    ) -> impl Iterator<Item = Address> + '_
+    where
+        R: RangeBounds<RawAddress>,
+    {
+        let start = address_start_bound(space, range.start_bound());
+        let end = address_end_bound(space, range.end_bound());
+        self.index
+            .addresses
+            .range((start, end))
+            .map(|(address, _)| *address)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
@@ -268,12 +331,11 @@ impl FunctionTable {
 #[cfg(all(test, feature = "sqlite"))]
 mod test {
     use super::*;
+    use crate::storage::TRANSIENT;
+    use crate::storage::entities::SqliteEntityStorage;
 
     #[test]
     fn test_free_id_reuse_sqlite() {
-        use crate::storage::TRANSIENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
         let mut table = FunctionTable::new(storage, 64 * 1024).unwrap();
 
@@ -296,14 +358,16 @@ mod test {
         assert_eq!([id0.index(), id1.index(), id2.index()], [0, 1, 2]);
 
         assert!(table.remove_by_address(Address::from(0x2000)));
-        assert_eq!(table.index.free_ids, [id1]);
+        assert_eq!(table.index.free_ids, [id1.next_generation()]);
 
         let reused = table
             .insert(Address::from(0x4000), |id, entry| {
                 Ok(Function::new(id, entry))
             })
             .unwrap();
-        assert_eq!(reused, id1);
+        assert_eq!(reused.index(), id1.index());
+        assert_eq!(reused.generation(), id1.generation() + 1);
+        assert!(table.get_by_id(id1).is_none());
         assert!(table.index.free_ids.is_empty());
 
         let fresh = table

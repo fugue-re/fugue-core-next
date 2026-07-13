@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
+use std::fmt::{Debug as FmtDebug, Display};
 use std::sync::Arc;
 
+use anyhow::Error as AnyhowError;
 use iset::IntervalMap;
 use thiserror::Error;
 
-use crate::ir::{Address, CodeBlock, Id, IdSet, RawAddress};
+use crate::ir::{Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
 use crate::storage::entities::{
@@ -35,6 +38,24 @@ struct CodeBlockIndex {
     bounds: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<CodeBlock>>>,
     free_ids: Vec<Id<CodeBlock>>,
     live_entries: usize,
+    next_index: usize,
+}
+
+pub(crate) struct CodeBlockTableAllocation {
+    free_ids_len: usize,
+    free_ids: Vec<Id<CodeBlock>>,
+    next_index: usize,
+}
+
+impl CodeBlockTableAllocation {
+    fn new(free_ids: &[Id<CodeBlock>], next_index: usize, max_pops: usize) -> Self {
+        let tail_start = free_ids.len().saturating_sub(max_pops);
+        Self {
+            free_ids_len: free_ids.len(),
+            free_ids: free_ids[tail_start..].to_vec(),
+            next_index,
+        }
+    }
 }
 
 pub enum CodeBlockTable {
@@ -47,7 +68,7 @@ pub enum CodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Other(anyhow::Error),
+    Other(AnyhowError),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
@@ -55,16 +76,16 @@ pub enum CodeBlockTableError {
 impl CodeBlockTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::new(error))
+        Self::Other(AnyhowError::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+        M: FmtDebug + Display + Send + Sync + 'static,
     {
-        Self::Other(anyhow::Error::msg(msg))
+        Self::Other(AnyhowError::msg(msg))
     }
 }
 
@@ -150,6 +171,37 @@ impl CodeBlockTable {
         }
     }
 
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+        match self {
+            Self::Persistent(p) => p.allocation_checkpoint(max_pops),
+            Self::Transient(t) => t.allocation_checkpoint(max_pops),
+        }
+    }
+
+    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
+        match self {
+            Self::Persistent(p) => p.restore_allocation(allocation),
+            Self::Transient(t) => t.restore_allocation(allocation),
+        }
+    }
+
+    pub(crate) fn restore_entry(&mut self, block: CodeBlock) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.restore_entry(block),
+            Self::Transient(t) => {
+                t.restore_entry(block);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.clear_entry(id),
+            Self::Transient(t) => Ok(t.clear_entry(id)),
+        }
+    }
+
     pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<CodeBlock>, CodeBlockTableError>
     where
         F: FnOnce(Id<CodeBlock>, Address) -> Result<CodeBlock, CodeBlockTableError>,
@@ -174,6 +226,24 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
             Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn coverage(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(blocks, &mut covered);
+        covered
+    }
+
+    pub fn coverage_into(
+        &self,
+        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
+        covered: &mut AddressRangeSet,
+    ) {
+        for id in blocks {
+            if let Some(block) = self.get_by_id(id) {
+                block.coverage_into(covered);
+            }
         }
     }
 
@@ -388,9 +458,16 @@ impl PersistableProjectEntity for CodeBlockTable {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "sqlite")]
+    use tempfile::TempDir;
+
     use super::*;
     use crate::ir::InsnList;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::PERSISTENT;
     use crate::storage::entities::InMemoryEntityStorage;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::entities::SqliteEntityStorage;
 
     fn table() -> CodeBlockTable {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
@@ -420,6 +497,34 @@ mod test {
         assert!(table.remove_by_id(blk_id));
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_reused_slot_invalidates_removed_id() {
+        let mut table = table();
+
+        let first = table
+            .insert(Address::from(0x1000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        assert!(table.remove_by_id(first));
+        assert!(table.get_by_id(first).is_none());
+
+        let second = table
+            .insert(Address::from(0x2000), |id, start| {
+                Ok(CodeBlock::try_new(id, start, 0x10, InsnList::new()).unwrap())
+            })
+            .unwrap();
+
+        assert_eq!(first.index(), second.index());
+        assert_eq!(first.generation() + 1, second.generation());
+        assert!(table.get_by_id(first).is_none());
+        assert_eq!(
+            table.get_by_id(second).unwrap().start(),
+            Address::from(0x2000)
+        );
     }
 
     #[test]
@@ -483,11 +588,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_free_id_rebuild_on_reopen_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
 
         {
@@ -536,17 +636,12 @@ mod test {
             })
             .unwrap();
 
-        assert_eq!([first.index(), second.index(), third.index()], [3, 1, 5]);
+        assert_eq!([first.index(), second.index(), third.index()], [5, 6, 7]);
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_get_by_id_mut_persists_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
         let addr = Address::from(0x1000);
         let successor = Id::<CodeBlock>::new(7);
@@ -583,11 +678,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_iter_mut_persists() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
         let successor = Id::<CodeBlock>::new(99);
 

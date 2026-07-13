@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use thiserror::Error;
 
 use super::{
@@ -70,6 +72,14 @@ impl EntityStorageProvider for DummyEntityStorage {
 
     fn iter_prefix(&self, _prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
         Err(DummyEntityStorageError("iter_prefix").into())
+    }
+
+    fn scan_range(
+        &self,
+        _prefix: &[u8],
+        _start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        Err(DummyEntityStorageError("scan_range").into())
     }
 
     fn iter_prefix_as<'a, F, T>(

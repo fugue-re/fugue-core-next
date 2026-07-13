@@ -1,3 +1,6 @@
+use std::error::Error as StdError;
+
+use anyhow::Error as AnyError;
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
@@ -6,7 +9,7 @@ use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
 pub mod analysis;
-pub use analysis::FunctionRecovery;
+pub use analysis::{FunctionRecovery, FunctionRecoveryExtension};
 
 pub mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
@@ -28,52 +31,47 @@ pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
-    // analysis pass errors
-    #[error("initialisation pass failed: {0}")]
-    InitialisationPass(AnalysisError),
-    #[error("post-lifting pass failed: {0}")]
-    PostLiftingPass(AnalysisError),
-    // hook errors
+    #[error("failed to create block: {0}")]
+    BlockCreation(AnyError),
     #[error("commit hook failed: {0}")]
     CommitHook(AnalysisError),
-    // creation issues due to table invariants or storage
-    #[error("failed to create block: {0}")]
-    BlockCreation(anyhow::Error),
-    #[error("failed to create function: {0}")]
-    FunctionCreation(anyhow::Error),
-    // translation and I/O errors
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
-    #[error(transparent)]
-    Lifting(#[from] LifterError),
-    #[error(transparent)]
-    SegmentStorage(#[from] SegmentStorageError),
-    // invariant violations
-    #[error("invalid function; failed to lift any instructions")]
-    InvalidFunction,
-    #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
-    InvalidFunctionSize(Address, usize, usize),
+    #[error("failed to create function: {0}")]
+    FunctionCreation(AnyError),
+    #[error("initialisation pass failed: {0}")]
+    InitialisationPass(AnalysisError),
     #[error("invalid block index: {0}")]
     InvalidBlockId(usize),
     #[error(
         "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
     )]
     InvalidBlockSize(Address, usize, usize),
+    #[error("invalid function; failed to lift any instructions")]
+    InvalidFunction,
+    #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
+    InvalidFunctionSize(Address, usize, usize),
     #[error("invalid instruction index: {0}")]
     InvalidInstructionId(usize),
+    #[error(transparent)]
+    Lifting(#[from] LifterError),
+    #[error("post-lifting pass failed: {0}")]
+    PostLiftingPass(AnalysisError),
+    #[error(transparent)]
+    SegmentStorage(#[from] SegmentStorageError),
 }
 
 impl FunctionRecoveryError {
     pub fn block_creation<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
         FunctionRecoveryError::BlockCreation(err.into())
     }
 
     pub fn function_creation<E>(err: E) -> Self
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: StdError + Send + Sync + 'static,
     {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
@@ -230,6 +228,7 @@ mod test {
     use crate::project::Project;
 
     #[test]
+    #[ignore = "requires local language data and binary fixtures"]
     fn test_control_flow_recovery_ls() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
@@ -252,6 +251,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires FUGUE_LANGUAGE_DIR"]
     fn test_control_flow_recovery_overlap() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())

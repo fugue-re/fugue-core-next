@@ -144,7 +144,7 @@ impl X86 {
             _ => {}
         }
         let lid = LanguageId::new_with("x86", false, 32, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 
