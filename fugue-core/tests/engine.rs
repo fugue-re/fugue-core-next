@@ -2509,3 +2509,51 @@ fn test_query_reader_symbol_iterator_equals_cursor_walk() -> Result<(), Box<dyn 
 
     Ok(())
 }
+
+#[test]
+fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn std::error::Error>>
+{
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let entries = reader
+        .functions(DEFAULT_SPACE_ID)
+        .take(32)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(!entries.is_empty());
+
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let handles = (0..8)
+            .map(|_| {
+                let reader = reader.clone();
+                let entries = entries.clone();
+                scope.spawn(move || -> Result<(), QueryError> {
+                    let anywhere = AddressRangeSet::new();
+                    for _ in 0..200 {
+                        for entry in &entries {
+                            reader.flow_graph(*entry)?;
+                            reader.latest_change(ChangeKinds::all(), &anywhere)?;
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("client thread panicked"))??;
+        }
+        Ok(())
+    })?;
+
+    let first = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
+    let second = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
+    assert!(Arc::ptr_eq(&first, &second));
+
+    Ok(())
+}

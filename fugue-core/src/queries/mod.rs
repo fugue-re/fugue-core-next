@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RwLock};
+use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
@@ -17,12 +17,14 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
 
 mod cache;
+mod derived;
 mod index;
 mod read;
 #[cfg(test)]
 mod tests;
 
 use cache::QueryCache;
+pub use derived::{Cached, Dependency};
 use index::ChangeIndex;
 
 const MAX_QUERY_PAGE_LEN: usize = 4096;
@@ -244,8 +246,8 @@ pub struct QueryReader {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
     project: Arc<RwLock<Project>>,
-    cache: Arc<Mutex<QueryCache>>,
-    changes: Arc<Mutex<ChangeIndex>>,
+    cache: Arc<QueryCache>,
+    changes: Arc<RwLock<ChangeIndex>>,
 }
 
 impl QueryReader {
@@ -253,8 +255,8 @@ impl QueryReader {
         active: Arc<AtomicBool>,
         gate: Arc<RwLock<()>>,
         project: Arc<RwLock<Project>>,
-        cache: Arc<Mutex<QueryCache>>,
-        changes: Arc<Mutex<ChangeIndex>>,
+        cache: Arc<QueryCache>,
+        changes: Arc<RwLock<ChangeIndex>>,
     ) -> Self {
         Self {
             active,
@@ -275,7 +277,7 @@ impl QueryReader {
         region: &AddressRangeSet,
     ) -> Result<Revision, QueryError> {
         let _query_guard = self.enter_query()?;
-        Ok(self.changes.lock().latest_change(kinds, region))
+        Ok(self.changes.read().latest_change(kinds, region))
     }
 
     pub fn changed_since(
@@ -285,13 +287,13 @@ impl QueryReader {
         region: &AddressRangeSet,
     ) -> Result<bool, QueryError> {
         let _query_guard = self.enter_query()?;
-        Ok(self.changes.lock().changed_since(since, kinds, region))
+        Ok(self.changes.read().changed_since(since, kinds, region))
     }
 
     pub fn flow_graph(&self, entry: Address) -> Result<Option<Arc<FlowGraph>>, QueryError> {
         let _query_guard = self.enter_query()?;
 
-        if let Some(cached) = self.cache.lock().get(entry) {
+        if let Some(cached) = self.cache.get(entry) {
             return Ok(cached);
         }
 
@@ -302,7 +304,7 @@ impl QueryReader {
                 .map(|function| read.flow_graph(function))
         };
 
-        self.cache.lock().insert(entry, graph.clone());
+        self.cache.insert(entry, graph.clone());
         Ok(graph)
     }
 
@@ -386,14 +388,6 @@ impl QueryReader {
         Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_LEN))
     }
 
-    pub fn symbols_at_address(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = Result<SymbolRecord, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.symbols_at(address, cursor, WALK_PAGE_LEN))
-    }
-
     pub fn mappings(
         &self,
         space: AddressSpaceId,
@@ -437,8 +431,8 @@ pub(crate) struct QueryEngine {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
     project: Arc<RwLock<Project>>,
-    cache: Arc<Mutex<QueryCache>>,
-    changes: Arc<Mutex<ChangeIndex>>,
+    cache: Arc<QueryCache>,
+    changes: Arc<RwLock<ChangeIndex>>,
 }
 
 impl QueryEngine {
@@ -448,8 +442,8 @@ impl QueryEngine {
             active: Arc::new(AtomicBool::new(true)),
             gate: Arc::new(RwLock::new(())),
             project,
-            cache: Arc::new(Mutex::new(QueryCache::new())),
-            changes: Arc::new(Mutex::new(ChangeIndex::new(revision))),
+            cache: Arc::new(QueryCache::new()),
+            changes: Arc::new(RwLock::new(ChangeIndex::new(revision))),
         }
     }
 
@@ -468,15 +462,14 @@ impl QueryEngine {
     }
 
     pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) {
-        self.changes.lock().apply(changes);
+        self.changes.write().apply(changes);
 
-        let mut cache = self.cache.lock();
         for record in changes.records() {
             match record {
                 ChangeRecord::FunctionAdded { entry, .. }
                 | ChangeRecord::FunctionChanged { entry, .. }
-                | ChangeRecord::FunctionRemoved { entry, .. } => cache.evict(*entry),
-                ChangeRecord::Restored { .. } => cache.clear(),
+                | ChangeRecord::FunctionRemoved { entry, .. } => self.cache.evict(*entry),
+                ChangeRecord::Restored { .. } => self.cache.clear(),
                 _ => {}
             }
         }

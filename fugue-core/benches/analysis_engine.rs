@@ -15,7 +15,7 @@ use fugue_core::ir::{
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::queries::QueryReader;
+use fugue_core::queries::{Cached, Dependency, QueryReader};
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use rustc_hash::FxHasher;
 
@@ -460,7 +460,7 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
 fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, _) = load_engine()?;
     let reader = engine.query_reader()?;
-    let (address, _) = writable_region(&reader)?;
+    let (address, available) = writable_region(&reader)?;
 
     let mut region = AddressRangeSet::new();
     region.insert_range(AddressRange::new(
@@ -477,9 +477,10 @@ fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Err
     })?;
     results.push(small);
 
+    let stride = (available / 4096).max(8);
     for index in 0..4096u64 {
         let scatter = address
-            .checked_add(0x10_000 + index * 0x400)
+            .checked_add((index * stride) % available.saturating_sub(4))
             .ok_or_else(|| std::io::Error::other("scatter write address overflow"))?;
         engine.write_bytes(scatter, vec![0u8; 4])?;
     }
@@ -558,6 +559,98 @@ fn bench_index_maintenance(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn
     Ok(())
 }
 
+fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (engine, entry) = load_engine()?;
+    let reader = engine.query_reader()?;
+
+    let mut region = AddressRangeSet::new();
+    region.insert_range(AddressRange::new(
+        entry.space(),
+        entry.raw_address(),
+        entry.raw_address() + 0xffffu64,
+    ));
+
+    let compute = |reader: &QueryReader| {
+        reader
+            .symbol_page(None, PAGE_LIMIT)
+            .map(|page| page.entries().len())
+    };
+    let mut cached = Cached::new(Dependency::on(ChangeKinds::FUNCTIONS).within(region));
+    black_box(cached.get(&reader, compute)?);
+
+    let (hit, _) = measure("cached_derived_hit", || {
+        black_box(cached.get(&reader, compute)?);
+        Ok(((), 1))
+    })?;
+    results.push(hit);
+
+    let new_entry = entry
+        .checked_add(0x40u64)
+        .ok_or_else(|| std::io::Error::other("cached derived function address overflow"))?;
+    add_empty_function(&engine, new_entry)?;
+
+    let (recompute, _) = measure("cached_derived_recompute", || {
+        black_box(cached.get(&reader, compute)?);
+        Ok(((), 1))
+    })?;
+    results.push(recompute);
+    Ok(())
+}
+
+fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (engine, entry) = load_engine()?;
+    let reader = engine.query_reader()?;
+    black_box(run_query(|| reader.flow_graph(entry))?);
+
+    let mut region = AddressRangeSet::new();
+    region.insert_range(AddressRange::new(
+        entry.space(),
+        entry.raw_address(),
+        entry.raw_address() + 0xffffu64,
+    ));
+
+    let client_count = 8usize;
+    let queries_per_client = 512usize;
+
+    let (result, _) = measure("multi_client_flow_graph_and_latest_change", || {
+        thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            let mut clients = Vec::new();
+            for _ in 0..client_count {
+                let reader = reader.clone();
+                let region = region.clone();
+                clients.push(scope.spawn(
+                    move || -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+                        for _ in 0..queries_per_client {
+                            black_box(
+                                reader
+                                    .flow_graph(entry)
+                                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+                            );
+                            black_box(
+                                reader
+                                    .latest_change(ChangeKinds::all(), &region)
+                                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+                            );
+                        }
+                        Ok(())
+                    },
+                ));
+            }
+
+            for client in clients {
+                client
+                    .join()
+                    .map_err(|_| std::io::Error::other("client thread panicked"))?
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+            Ok(())
+        })?;
+        Ok(((), client_count * queries_per_client))
+    })?;
+    results.push(result);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
 
@@ -570,6 +663,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     bench_latest_change(&mut results)?;
     bench_reader_latency(&mut results)?;
     bench_index_maintenance(&mut results)?;
+    bench_cached_derived(&mut results)?;
+    bench_multi_client(&mut results)?;
 
     for result in results {
         result.print();

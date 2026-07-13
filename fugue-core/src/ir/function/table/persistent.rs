@@ -331,12 +331,11 @@ impl FunctionTable {
 #[cfg(all(test, feature = "sqlite"))]
 mod test {
     use super::*;
+    use crate::storage::TRANSIENT;
+    use crate::storage::entities::SqliteEntityStorage;
 
     #[test]
     fn test_free_id_reuse_sqlite() {
-        use crate::storage::TRANSIENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
         let mut table = FunctionTable::new(storage, 64 * 1024).unwrap();
 

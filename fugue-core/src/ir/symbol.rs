@@ -1269,8 +1269,15 @@ where
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "sqlite")]
+    use tempfile::TempDir;
+
     use super::*;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::PERSISTENT;
     use crate::storage::entities::InMemoryEntityStorage;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::entities::SqliteEntityStorage;
 
     #[test]
     #[should_panic(expected = "invalid selector bits")]
@@ -1374,11 +1381,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_symbol_persist_reopen_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let sel = SymbolTableSelector::new(0);
         let dir = TempDir::new().unwrap();
 

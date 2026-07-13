@@ -455,8 +455,15 @@ impl PersistableProjectEntity for FunctionTable {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "sqlite")]
+    use tempfile::TempDir;
+
     use super::*;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::PERSISTENT;
     use crate::storage::entities::InMemoryEntityStorage;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::entities::SqliteEntityStorage;
 
     fn table() -> FunctionTable {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
@@ -584,11 +591,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_free_id_rebuild_on_reopen_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
 
         {

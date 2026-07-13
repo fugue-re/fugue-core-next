@@ -1,14 +1,17 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parking_lot::RwLock;
 
-use super::{QueryEngine, QueryPage, QueryReader};
+use super::{Cached, Dependency, QueryEngine, QueryPage, QueryReader};
 use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::ir::{Address, AddressRange, AddressRangeSet, RawAddress};
 use crate::loader::Loader;
 use crate::project::Project;
 use crate::queries::cache::QUERY_MEMO_CAPACITY;
+use crate::queries::index::{CENSUS_INTERVAL, ChangeIndex, MAX_CHANGE_RUNS};
+use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
@@ -223,7 +226,7 @@ fn test_query_memo_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
         let _ = reader.flow_graph(Address::from(0x1_0000_0000u64 + index * 0x10))?;
     }
 
-    assert_eq!(fixture.queries.cache.lock().len(), QUERY_MEMO_CAPACITY);
+    assert!(fixture.queries.cache.len() <= QUERY_MEMO_CAPACITY);
 
     Ok(())
 }
@@ -238,7 +241,7 @@ fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn std::error::Error>> 
     let reader = fixture.reader();
     let before = reader.flow_graph(entry)?.ok_or("function missing")?;
 
-    fixture.queries.cache.lock().clear();
+    fixture.queries.cache.clear();
 
     let after = reader
         .flow_graph(entry)?
@@ -295,8 +298,6 @@ fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn std::error
 
 #[test]
 fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::storage::segments::mapping::SegmentMappingId;
-
     let mut fixture = Fixture::new()?;
     let reader = fixture.reader();
 
@@ -330,6 +331,81 @@ fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn test_region_less_changes_are_observable() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let mut region = AddressRangeSet::new();
+    region.insert_range(AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    ));
+    let baseline = reader.revision()?;
+    let created = Revision::new(baseline.value() + 1);
+    let changed = Revision::new(baseline.value() + 2);
+    let space = Revision::new(baseline.value() + 3);
+
+    fixture.apply(&ChangeSet::with_records(
+        created,
+        [ChangeRecord::SegmentMappingCreated {
+            mapping: SegmentMappingId::new(0),
+        }],
+    ));
+    assert!(reader.changed_since(baseline, ChangeKinds::SEGMENT_MAPPING_CREATED, &region)?);
+    assert!(reader.changed_since(baseline, ChangeKinds::SEGMENTS, &region)?);
+    assert!(!reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &region)?);
+
+    fixture.apply(&ChangeSet::with_records(
+        changed,
+        [ChangeRecord::SegmentMappingChanged {
+            mapping: SegmentMappingId::new(0),
+        }],
+    ));
+    assert!(reader.changed_since(created, ChangeKinds::SEGMENT_MAPPING_CHANGED, &region)?);
+
+    fixture.apply(&ChangeSet::with_records(
+        space,
+        [ChangeRecord::SpaceCreated {
+            space: AddressSpaceId::from(7u8),
+        }],
+    ));
+    assert!(reader.changed_since(changed, ChangeKinds::SPACE_CREATED, &region)?);
+
+    Ok(())
+}
+
+#[test]
+fn test_region_bearing_precision_survives_region_less_kinds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let touched = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    );
+    let mut disjoint = AddressRangeSet::new();
+    disjoint.insert_range(AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x8000u64),
+        RawAddress::from(0x8fffu64),
+    ));
+
+    let baseline = reader.revision()?;
+    let write = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        write,
+        [ChangeRecord::BytesWritten { range: touched }],
+    ));
+
+    assert!(!reader.changed_since(baseline, ChangeKinds::BYTES_WRITTEN, &disjoint)?);
+
+    Ok(())
+}
+
+#[test]
 fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new()?;
     let reader = fixture.reader();
@@ -352,8 +428,6 @@ fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn test_change_index_compaction_is_conservative() {
-    use crate::queries::index::{ChangeIndex, MAX_CHANGE_RUNS};
-
     let space = AddressSpaceId::from(0u8);
     let mut index = ChangeIndex::new(Revision::new(0));
     let mut truth = Vec::new();
@@ -399,4 +473,165 @@ fn test_change_index_compaction_is_conservative() {
             }
         }
     }
+}
+
+#[test]
+fn test_change_index_census_bounds_run_count() {
+    let space = AddressSpaceId::from(0u8);
+    let mut index = ChangeIndex::new(Revision::new(0));
+
+    for step in 1..(MAX_CHANGE_RUNS as u64 * 4) {
+        let range = AddressRange::new(
+            space,
+            RawAddress::from(step * 0x400),
+            RawAddress::from(step * 0x400 + 0x3f),
+        );
+        index.apply(&ChangeSet::with_records(
+            Revision::new(step),
+            [ChangeRecord::BytesWritten { range }],
+        ));
+
+        assert!(
+            index.max_run_count() <= MAX_CHANGE_RUNS + CENSUS_INTERVAL,
+            "amortised census let a group exceed the run bound by more than one interval"
+        );
+    }
+}
+
+#[test]
+fn test_cached_recomputes_only_on_dependency_change() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let inside = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    );
+    let outside = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x8000u64),
+        RawAddress::from(0x8fffu64),
+    );
+    let mut region = AddressRangeSet::new();
+    region.insert_range(inside);
+
+    let calls = AtomicUsize::new(0);
+    let mut cached = Cached::new(Dependency::on(ChangeKinds::BYTES_WRITTEN).within(region));
+
+    let first = cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let second = cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(first, second);
+
+    let base = reader.revision()?;
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 1),
+        [ChangeRecord::BytesWritten { range: outside }],
+    ));
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 2),
+        [ChangeRecord::BytesWritten { range: inside }],
+    ));
+    let refreshed = cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_ne!(first, refreshed);
+
+    Ok(())
+}
+
+#[test]
+fn test_cached_composes_across_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let functions = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x1000u64),
+        RawAddress::from(0x1fffu64),
+    );
+    let bytes = AddressRange::new(
+        AddressSpaceId::from(0u8),
+        RawAddress::from(0x4000u64),
+        RawAddress::from(0x4fffu64),
+    );
+    let mut function_region = AddressRangeSet::new();
+    function_region.insert_range(functions);
+    let mut byte_region = AddressRangeSet::new();
+    byte_region.insert_range(bytes);
+
+    let calls = AtomicUsize::new(0);
+    let mut cached = Cached::new(
+        Dependency::on(ChangeKinds::FUNCTIONS)
+            .within(function_region)
+            .and(Dependency::on(ChangeKinds::BYTES_WRITTEN).within(byte_region)),
+    );
+
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let base = reader.revision()?;
+    let mut function_coverage = AddressRangeSet::new();
+    function_coverage.insert_range(functions);
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 1),
+        [ChangeRecord::FunctionChanged {
+            entry: functions.start_address(),
+            kind: crate::engine::change::FunctionChangeKind::Body,
+            coverage: function_coverage,
+        }],
+    ));
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 2),
+        [ChangeRecord::BytesWritten { range: bytes }],
+    ));
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 3),
+        [ChangeRecord::BytesWritten {
+            range: AddressRange::new(
+                AddressSpaceId::from(0u8),
+                RawAddress::from(0x9000u64),
+                RawAddress::from(0x9fffu64),
+            ),
+        }],
+    ));
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    Ok(())
+}
+
+#[test]
+fn test_cached_region_less_dependency() -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let calls = AtomicUsize::new(0);
+    let mut cached = Cached::new(Dependency::on(ChangeKinds::SEGMENT_MAPPING_CREATED));
+
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let base = reader.revision()?;
+    fixture.apply(&ChangeSet::with_records(
+        Revision::new(base.value() + 1),
+        [ChangeRecord::SegmentMappingCreated {
+            mapping: SegmentMappingId::new(0),
+        }],
+    ));
+    cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    Ok(())
 }

@@ -631,6 +631,7 @@ where
 #[cfg(test)]
 mod test {
     use std::ops::Bound;
+    use std::time::Duration;
 
     use super::*;
     use crate::ir::Address;
@@ -889,8 +890,6 @@ mod test {
 
     #[test]
     fn write_back_scan_range_reflects_pending_writes() {
-        use std::time::Duration;
-
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker =
             WriteBackWorker::with_options(storage.clone(), 16, 1024, Duration::from_secs(3600))

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use indexmap::IndexMap;
+use quick_cache::sync::Cache;
 
 use crate::ir::Address;
 use crate::ir::cfg::FlowGraph;
@@ -8,44 +8,29 @@ use crate::ir::cfg::FlowGraph;
 pub(crate) const QUERY_MEMO_CAPACITY: usize = 1024;
 
 pub(crate) struct QueryCache {
-    memo: IndexMap<Address, Option<Arc<FlowGraph>>>,
+    memo: Cache<Address, Option<Arc<FlowGraph>>>,
 }
 
 impl QueryCache {
     pub(crate) fn new() -> Self {
         Self {
-            memo: IndexMap::with_capacity(QUERY_MEMO_CAPACITY),
+            memo: Cache::new(QUERY_MEMO_CAPACITY),
         }
     }
 
-    pub(crate) fn get(&mut self, entry: Address) -> Option<Option<Arc<FlowGraph>>> {
-        let index = self.memo.get_index_of(&entry)?;
-        let last = self.memo.len() - 1;
-        self.memo.move_index(index, last);
-        self.memo.get(&entry).cloned()
+    pub(crate) fn get(&self, entry: Address) -> Option<Option<Arc<FlowGraph>>> {
+        self.memo.get(&entry)
     }
 
-    pub(crate) fn insert(&mut self, entry: Address, graph: Option<Arc<FlowGraph>>) {
-        if let Some(index) = self.memo.get_index_of(&entry) {
-            if let Some((_, slot)) = self.memo.get_index_mut(index) {
-                *slot = graph;
-            }
-            let last = self.memo.len() - 1;
-            self.memo.move_index(index, last);
-            return;
-        }
-
-        if self.memo.len() >= QUERY_MEMO_CAPACITY {
-            self.memo.shift_remove_index(0);
-        }
+    pub(crate) fn insert(&self, entry: Address, graph: Option<Arc<FlowGraph>>) {
         self.memo.insert(entry, graph);
     }
 
-    pub(crate) fn evict(&mut self, entry: Address) {
-        self.memo.shift_remove(&entry);
+    pub(crate) fn evict(&self, entry: Address) {
+        self.memo.remove(&entry);
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub(crate) fn clear(&self) {
         self.memo.clear();
     }
 

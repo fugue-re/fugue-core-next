@@ -458,9 +458,16 @@ impl PersistableProjectEntity for CodeBlockTable {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "sqlite")]
+    use tempfile::TempDir;
+
     use super::*;
     use crate::ir::InsnList;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::PERSISTENT;
     use crate::storage::entities::InMemoryEntityStorage;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::entities::SqliteEntityStorage;
 
     fn table() -> CodeBlockTable {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
@@ -581,11 +588,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_free_id_rebuild_on_reopen_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
 
         {
@@ -640,11 +642,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_get_by_id_mut_persists_sqlite() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
         let addr = Address::from(0x1000);
         let successor = Id::<CodeBlock>::new(7);
@@ -681,11 +678,6 @@ mod test {
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_iter_mut_persists() {
-        use tempfile::TempDir;
-
-        use crate::storage::PERSISTENT;
-        use crate::storage::entities::SqliteEntityStorage;
-
         let dir = TempDir::new().unwrap();
         let successor = Id::<CodeBlock>::new(99);
 
