@@ -14,7 +14,7 @@ use fugue_core::analysis::function::recovery::{
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::Arch;
-use fugue_core::engine::change::{ChangeKinds, ChangeRecord, Revision};
+use fugue_core::engine::change::{ChangeCategory, ChangeKinds, ChangeRecord, Revision};
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisCx, AnalysisEngine, AnalysisMessageKind,
     DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
@@ -2478,6 +2478,193 @@ fn test_subscription_region_filter_wakes_only_inside_region()
     engine.create_space()?;
     let global = inside_region.recv_timeout(Duration::from_secs(1))?;
     assert!(global.contains(ChangeKinds::SPACE_CREATED));
+
+    Ok(())
+}
+
+#[test]
+fn test_subscription_drain_coalesces_commit_burst() -> Result<(), Box<dyn std::error::Error>> {
+    let (project, address) = writable_start()?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let symbols = engine
+        .subscribe()
+        .kinds(ChangeKinds::SYMBOLS)
+        .capacity(16)
+        .build()?;
+
+    for index in 0..8usize {
+        engine.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(210), index),
+            SymbolEntry::new(
+                address + index as u64,
+                "burst_symbol",
+                SymbolProperties::LOCAL,
+            ),
+        )?;
+    }
+    engine.wait_until_idle()?;
+
+    let batch = symbols.drain().ok_or("burst produced no batch")?;
+    assert!(batch.contains(ChangeKinds::SYMBOL_ADDED));
+    assert_eq!(batch.records_matching(ChangeKinds::SYMBOL_ADDED).count(), 8);
+    assert!(symbols.drain().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn std::error::Error>> {
+    let (project, address) = writable_start()?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let symbols = engine
+        .subscribe()
+        .kinds(ChangeKinds::SYMBOLS)
+        .capacity(16)
+        .build()?;
+
+    for index in 0..4usize {
+        engine.insert_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(211), index),
+            SymbolEntry::new(
+                address + index as u64,
+                "batch_symbol",
+                SymbolProperties::LOCAL,
+            ),
+        )?;
+    }
+    engine.wait_until_idle()?;
+
+    let burst = symbols.recv_batch()?;
+    assert_eq!(burst.records_matching(ChangeKinds::SYMBOL_ADDED).count(), 4);
+
+    engine.insert_symbol(
+        SymbolIndex::new(SymbolTableSelector::new(211), 4),
+        SymbolEntry::new(address + 4u64, "batch_symbol", SymbolProperties::LOCAL),
+    )?;
+    engine.wait_until_idle()?;
+
+    let single = symbols.recv_batch()?;
+    assert_eq!(
+        single.records_matching(ChangeKinds::SYMBOL_ADDED).count(),
+        1
+    );
+    assert!(single.revision() > burst.revision());
+
+    Ok(())
+}
+
+#[test]
+fn test_subscription_changes_carry_provenance() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("derived-symbol")?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    let changes = engine.subscribe().capacity(4096).build()?;
+
+    engine.wait_until_idle()?;
+
+    let journal = changes.try_iter().collect::<Vec<_>>();
+    assert!(journal.iter().any(|changes| {
+        changes.provenance().contains("function-recovery")
+            && changes.provenance().includes(ChangeCategory::Analysis)
+            && changes.contains(ChangeKinds::FUNCTION_ADDED)
+    }));
+    assert!(journal.iter().any(|changes| {
+        changes.provenance().contains("derived-symbol")
+            && changes.records().iter().any(|record| {
+                matches!(
+                    record,
+                    ChangeRecord::SymbolAdded { symbol, .. }
+                        if symbol.as_str() == "derived_function"
+                )
+            })
+    }));
+
+    engine.insert_symbol(
+        SymbolIndex::new(SymbolTableSelector::new(212), 0),
+        SymbolEntry::new(entry, "provenance_symbol", SymbolProperties::LOCAL),
+    )?;
+    engine.wait_until_idle()?;
+
+    let update = changes
+        .drain()
+        .ok_or("update produced no provenance batch")?;
+    assert!(update.provenance().contains("update"));
+    assert!(update.provenance().includes(ChangeCategory::Agent));
+    assert!(!update.provenance().includes(ChangeCategory::Engine));
+
+    Ok(())
+}
+
+#[test]
+fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn std::error::Error>> {
+    let project = project_with_test_analyser("derived-symbol")?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let analysis_only = engine
+        .subscribe()
+        .kinds(ChangeKinds::SYMBOLS)
+        .category(ChangeCategory::Analysis)
+        .capacity(4096)
+        .build()?;
+    let user_only = engine
+        .subscribe()
+        .kinds(ChangeKinds::SYMBOLS)
+        .category(ChangeCategory::Agent)
+        .capacity(4096)
+        .build()?;
+    let derived_only = engine
+        .subscribe()
+        .source_label("derived-symbol")
+        .capacity(4096)
+        .build()?;
+
+    engine.insert_symbol(
+        SymbolIndex::new(SymbolTableSelector::new(213), 0),
+        SymbolEntry::new(entry, "actor_symbol", SymbolProperties::LOCAL),
+    )?;
+    engine.wait_until_idle()?;
+
+    let user_batch = user_only
+        .drain()
+        .ok_or("user subscription missed the update")?;
+    assert!(user_batch.provenance().contains("update"));
+    assert!(analysis_only.drain().is_none());
+    assert!(derived_only.drain().is_none());
+
+    let target = entry + 0x40u64;
+    let mut function = PartialFunction::new(target);
+    function.push_block(PartialCodeBlock::new(
+        target,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(function)?;
+    engine.wait_until_idle()?;
+
+    let analysis_batch = analysis_only
+        .drain()
+        .ok_or("analysis subscription missed analyser symbols")?;
+    assert!(analysis_batch.provenance().contains("derived-symbol"));
+    assert!(!analysis_batch.provenance().includes(ChangeCategory::Agent));
+
+    let derived_batch = derived_only
+        .drain()
+        .ok_or("label subscription missed analyser changes")?;
+    assert!(derived_batch.provenance().contains("derived-symbol"));
+    assert_eq!(derived_batch.provenance().sources().count(), 1);
+
+    assert!(user_only.drain().is_none());
 
     Ok(())
 }

@@ -60,6 +60,7 @@ serde-yaml = { version = "0.0.12", package = "serde-saphyr" }
 sha2 = "0.10"
 skiplist = "0.6"
 smallvec = "1.15"
+smol_str = "0.3"
 thiserror = "2"
 tinyset = { version = "0.5", package = "fugue-tinyset", features = ["rkyv"] }
 tracing = "0.1"

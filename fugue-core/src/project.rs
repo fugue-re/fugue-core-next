@@ -7,7 +7,7 @@ use tracing::Span;
 use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
 use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
-use crate::engine::change::{ChangeRecord, ChangeSet, FunctionChangeKind, Revision};
+use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
 use crate::ir::function::table::FunctionTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
@@ -141,6 +141,7 @@ pub struct ProjectTransaction<'p> {
     symbol_reverts: Vec<SymbolTableRevert>,
     segment_reverts: Vec<SegmentStorageRevert>,
     segment_write_reverts: Vec<SegmentWriteRevert>,
+    source: ChangeSource,
     abandoned: bool,
     committed: bool,
     span: Span,
@@ -706,10 +707,10 @@ impl ProjectTransaction<'_> {
             self.project.revision = revision;
         }
         self.committed = true;
-        Ok(ChangeSet::with_records(
-            self.project.revision,
-            std::mem::take(&mut self.records),
-        ))
+        Ok(
+            ChangeSet::with_records(self.project.revision, std::mem::take(&mut self.records))
+                .attributed_to(self.source.clone()),
+        )
     }
 
     pub fn rollback(mut self) -> Result<(), ProjectError> {
@@ -1118,8 +1119,9 @@ impl Project {
         self.persistable = false;
     }
 
-    pub fn transaction(&mut self, reason: impl AsRef<str>) -> ProjectTransaction<'_> {
-        let span = tracing::debug_span!("project_transaction", reason = reason.as_ref());
+    pub fn transaction(&mut self, source: impl Into<ChangeSource>) -> ProjectTransaction<'_> {
+        let source = source.into();
+        let span = tracing::debug_span!("project_transaction", reason = source.label());
         assert!(
             !self.transaction_active,
             "project transaction already active"
@@ -1132,6 +1134,7 @@ impl Project {
             symbol_reverts: Vec::new(),
             segment_reverts: Vec::new(),
             segment_write_reverts: Vec::new(),
+            source,
             abandoned: false,
             committed: false,
             span,

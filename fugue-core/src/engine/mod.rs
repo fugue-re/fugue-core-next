@@ -8,9 +8,12 @@ use std::time::Duration;
 
 use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
+use smol_str::SmolStr;
 use thiserror::Error;
 
-use self::change::{ChangeFilter, ChangeKinds, ChangeRecord, ChangeSet, Revision};
+use self::change::{
+    ChangeCategory, ChangeFilter, ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, Revision,
+};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
@@ -1316,6 +1319,16 @@ impl<'a> SubscriptionBuilder<'a> {
         self
     }
 
+    pub fn category(mut self, category: ChangeCategory) -> Self {
+        self.filter = self.filter.with_category(category);
+        self
+    }
+
+    pub fn source_label(mut self, label: impl Into<SmolStr>) -> Self {
+        self.filter = self.filter.with_source_label(label);
+        self
+    }
+
     pub fn capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
         self
@@ -1349,6 +1362,25 @@ impl Subscription {
 
     pub fn try_iter(&self) -> impl Iterator<Item = Arc<ChangeSet>> + '_ {
         self.rx.try_iter()
+    }
+
+    pub fn drain(&self) -> Option<ChangeSet> {
+        let mut merged = None::<ChangeSet>;
+        for changes in self.rx.try_iter() {
+            match merged.as_mut() {
+                Some(batch) => batch.merge(&changes),
+                None => merged = Some((*changes).clone()),
+            }
+        }
+        merged
+    }
+
+    pub fn recv_batch(&self) -> Result<ChangeSet, EngineError> {
+        let mut batch = (*self.recv()?).clone();
+        if let Some(rest) = self.drain() {
+            batch.merge(&rest);
+        }
+        Ok(batch)
     }
 }
 
@@ -1719,7 +1751,9 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction(self.analysers[index].analyser.name());
+        let mut transaction = project.transaction(ChangeSource::analysis(
+            self.analysers[index].analyser.name(),
+        ));
 
         // Catch only to poison and stop; the engine never resumes after a panic.
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1805,7 +1839,8 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction(format!("{name} completion"));
+        let mut transaction =
+            project.transaction(ChangeSource::analysis(format!("{name} completion")));
 
         // Catch only to poison and stop; the engine never resumes after a panic.
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1872,7 +1907,7 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction("update");
+        let mut transaction = project.transaction(ChangeSource::agent("update"));
         let result = update.apply(&mut transaction);
 
         match result {
@@ -1906,7 +1941,7 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction("update");
+        let mut transaction = project.transaction(ChangeSource::agent("update"));
         let result = transaction.create_mapping_from_builder(builder);
 
         match result {
@@ -1937,7 +1972,7 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction("update");
+        let mut transaction = project.transaction(ChangeSource::agent("update"));
         let result = transaction.create_space();
 
         match result {
@@ -1971,12 +2006,15 @@ impl Worker {
     }
 
     fn finish_publish(&mut self, changes: ChangeSet) -> Result<(), EngineError> {
-        let resync = Arc::new(ChangeSet::with_records(
-            changes.revision(),
-            [ChangeRecord::Restored {
-                to: changes.revision(),
-            }],
-        ));
+        let resync = Arc::new(
+            ChangeSet::with_records(
+                changes.revision(),
+                [ChangeRecord::Restored {
+                    to: changes.revision(),
+                }],
+            )
+            .attributed_to(ChangeSource::engine("resync")),
+        );
         let changes = Arc::new(changes);
         self.subscribers
             .retain(|subscriber| subscriber.publish(&changes, &resync));
@@ -2022,10 +2060,10 @@ impl Worker {
         drop(project);
 
         if let Some(revision) = restored_revision {
-            let restored = Arc::new(ChangeSet::with_records(
-                revision,
-                [ChangeRecord::Restored { to: revision }],
-            ));
+            let restored = Arc::new(
+                ChangeSet::with_records(revision, [ChangeRecord::Restored { to: revision }])
+                    .attributed_to(ChangeSource::engine("restore")),
+            );
             if !subscriber.publish(&restored, &restored) {
                 return;
             }
