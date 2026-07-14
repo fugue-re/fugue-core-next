@@ -463,7 +463,7 @@ impl<'a> EntityStorageTransactionalWriter<'a> for RocksDbEntityTransaction<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::ops::Bound;
 
     use super::RocksDbEntityStorage;

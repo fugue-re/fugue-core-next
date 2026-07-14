@@ -1012,7 +1012,7 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::ops::Bound;
 
     use super::SqliteEntityStorage;

@@ -21,8 +21,8 @@ use fugue_core::engine::{
     Trigger,
 };
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Endian, OperandSlot, RawAddress, Reference,
-    ReferenceKind, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
+    Address, AddressRange, AddressRangeSet, Endian, RawAddress, Reference, ReferenceKind,
+    ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
     SymbolTableSelector,
 };
 use fugue_core::lifter::resolve_language;
@@ -2793,12 +2793,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     engine.wait_until_idle()?;
 
     let to = entry + 0x40u64;
-    let changes = engine.add_reference(Reference::new(
-        entry,
-        OperandSlot::operand(0),
-        to,
-        ReferenceKind::read(),
-    ))?;
+    let changes = engine.add_reference(Reference::new(entry, to, ReferenceKind::read()))?;
     assert!(changes.contains(ChangeKinds::REFERENCE_ADDED));
 
     let outgoing = engine
@@ -2807,18 +2802,12 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
         .collect::<Result<Vec<_>, _>>()?;
     let asserted = outgoing
         .iter()
-        .find(|reference| reference.slot() == OperandSlot::operand(0))
+        .find(|reference| reference.target().address() == Some(to))
         .ok_or_else(|| io::Error::other("asserted reference missing"))?;
-    assert_eq!(asserted.target().address(), Some(to));
     assert!(asserted.kind().is_read());
     assert!(asserted.origin().is_asserted());
 
-    engine.add_reference(Reference::new(
-        entry,
-        OperandSlot::operand(0),
-        to,
-        ReferenceKind::write(),
-    ))?;
+    engine.add_reference(Reference::new(entry, to, ReferenceKind::write()))?;
     let merged = engine
         .query_reader()?
         .references_to(to, None, 64)?
@@ -2830,7 +2819,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     assert!(merged.kind().is_read());
     assert!(merged.kind().is_write());
 
-    engine.remove_reference(entry, OperandSlot::operand(0), ReferenceTarget::from(to))?;
+    engine.remove_reference(entry, ReferenceTarget::from(to))?;
     let after = engine
         .query_reader()?
         .outgoing_references(entry)
@@ -2838,7 +2827,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     assert!(
         after
             .iter()
-            .all(|reference| reference.slot() != OperandSlot::operand(0))
+            .all(|reference| reference.target().address() != Some(to))
     );
 
     Ok(())

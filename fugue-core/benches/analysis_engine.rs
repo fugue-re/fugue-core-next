@@ -10,8 +10,8 @@ use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeKinds;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, OperandSlot, Reference, ReferenceKind, SymbolEntry,
-    SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Reference, ReferenceKind, SymbolEntry, SymbolIndex,
+    SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
@@ -664,12 +664,7 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
             let from = entry
                 .checked_add(0x20_0000 + index as u64 * 0x10)
                 .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
-            engine.add_reference(Reference::new(
-                from,
-                OperandSlot::operand(0),
-                hot_target,
-                ReferenceKind::read(),
-            ))?;
+            engine.add_reference(Reference::new(from, hot_target, ReferenceKind::read()))?;
         }
         engine.wait_until_idle()?;
         Ok(((), HOT_TARGET_REFERENCES))

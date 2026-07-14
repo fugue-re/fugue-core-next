@@ -18,8 +18,8 @@ use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, OperandSlot, RawAddressRangeSet, Reference,
-    ReferenceTarget, SymbolEntry, SymbolIndex,
+    Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
+    SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{QueryEngine, QueryReader};
@@ -404,21 +404,16 @@ impl SymbolRemoval {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReferenceRemoval {
     from: Address,
-    slot: OperandSlot,
     target: ReferenceTarget,
 }
 
 impl ReferenceRemoval {
-    pub fn new(from: Address, slot: OperandSlot, target: ReferenceTarget) -> Self {
-        Self { from, slot, target }
+    pub fn new(from: Address, target: ReferenceTarget) -> Self {
+        Self { from, target }
     }
 
     pub fn from(&self) -> Address {
         self.from
-    }
-
-    pub fn slot(&self) -> OperandSlot {
-        self.slot
     }
 
     pub fn target(&self) -> ReferenceTarget {
@@ -733,8 +728,8 @@ impl ProjectUpdate {
         Self::AddReference(reference)
     }
 
-    pub fn remove_reference(from: Address, slot: OperandSlot, target: ReferenceTarget) -> Self {
-        Self::RemoveReference(ReferenceRemoval::new(from, slot, target))
+    pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
+        Self::RemoveReference(ReferenceRemoval::new(from, target))
     }
 
     pub fn remove_symbol(index: SymbolIndex) -> Self {
@@ -789,7 +784,7 @@ impl ProjectUpdate {
             Self::RemoveFunction(removal) => removal.apply(transaction),
             Self::RemoveMapping(removal) => transaction.remove_mapping(removal.mapping()),
             Self::RemoveReference(removal) => {
-                transaction.remove_reference(removal.from(), removal.slot(), removal.target())?;
+                transaction.remove_reference(removal.from(), removal.target())?;
                 Ok(())
             }
             Self::RemoveSymbol(removal) => {
@@ -1164,10 +1159,9 @@ impl AnalysisEngine {
     pub fn remove_reference(
         &self,
         from: Address,
-        slot: OperandSlot,
         target: ReferenceTarget,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remove_reference(from, slot, target))
+        self.apply_update(ProjectUpdate::remove_reference(from, target))
     }
 
     pub fn add_mapping_to_space(
@@ -2134,7 +2128,7 @@ impl Worker {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::sync::Arc;
 
     use super::change::{ChangeFilter, ChangeRecord, ChangeSet, Revision};

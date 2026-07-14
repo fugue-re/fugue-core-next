@@ -12,9 +12,9 @@ use crate::ir::function::table::FunctionTableRevert;
 use crate::ir::reference::ReferenceRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
-    Address, AddressRange, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable, OperandSlot,
-    RawAddress, Reference, ReferenceIndex, ReferenceOrigin, ReferenceTarget, Symbol, SymbolEntry,
-    SymbolId, SymbolIndex, SymbolTable,
+    Address, AddressRange, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable, RawAddress,
+    Reference, ReferenceIndex, ReferenceOrigin, ReferenceTarget, Symbol, SymbolEntry, SymbolId,
+    SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -237,7 +237,7 @@ impl ProjectTransaction<'_> {
             .map(|function| {
                 self.project
                     .blocks
-                    .references(function.blocks().map(|(_, id)| id), self.project.language)
+                    .references(function.blocks().map(|(_, id)| id))
             })
             .unwrap_or_default();
         let reference_revert = ReferenceRevert::capture(&self.project.references, &covered)?;
@@ -332,16 +332,15 @@ impl ProjectTransaction<'_> {
     pub fn add_reference(&mut self, reference: Reference) -> Result<bool, ProjectError> {
         let reference = reference.with_origin(ReferenceOrigin::Asserted);
         let from = reference.from();
-        let slot = reference.slot();
         let target = reference.target();
 
-        let existing = self.project.references.get(from, slot, target)?;
+        let existing = self.project.references.get(from, target)?;
         let resolved = match existing {
             Some(existing)
                 if existing.origin().is_asserted()
                     && existing.kind().class() == reference.kind().class() =>
             {
-                Reference::new(from, slot, target, existing.kind().merged(reference.kind()))
+                Reference::new(from, target, existing.kind().merged(reference.kind()))
             }
             _ => reference,
         };
@@ -368,15 +367,14 @@ impl ProjectTransaction<'_> {
     pub fn remove_reference(
         &mut self,
         from: Address,
-        slot: OperandSlot,
         target: ReferenceTarget,
     ) -> Result<bool, ProjectError> {
-        let Some(existing) = self.project.references.get(from, slot, target)? else {
+        let Some(existing) = self.project.references.get(from, target)? else {
             return Ok(false);
         };
 
         let revert = ReferenceRevert::point(&self.project.references, from)?;
-        self.project.references.remove(from, slot, target)?;
+        self.project.references.remove(from, target)?;
         self.reference_reverts.push(revert);
 
         self.records.push(ChangeRecord::ReferenceRemoved {
@@ -1011,10 +1009,8 @@ impl Project {
         call_graph.ensure_current(functions.iter(), &blocks, revision.value())?;
 
         let references = match storage.write_back() {
-            Some(worker) => {
-                ReferenceIndex::new_with(storage.entities.clone(), worker.clone(), language)
-            }
-            None => ReferenceIndex::new(storage.entities.clone(), language)?,
+            Some(worker) => ReferenceIndex::new_with(storage.entities.clone(), worker.clone()),
+            None => ReferenceIndex::new(storage.entities.clone())?,
         };
         references.ensure_current(functions.iter(), &blocks, revision.value())?;
 

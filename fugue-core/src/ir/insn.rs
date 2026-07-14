@@ -4,9 +4,7 @@ use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
 use crate::ir::cfg::FlowKind;
-use crate::ir::{
-    Address, Id, Location, OperandSlot, Reference, ReferenceKind, ReferenceOrigin, ToRawAddress,
-};
+use crate::ir::{Address, Id, Location, Reference, ReferenceKind, ReferenceOrigin, ToRawAddress};
 use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
@@ -281,27 +279,18 @@ impl Insn {
             }
             let flow = FlowKind::from_insn_target(self, target)?;
             Some(
-                Reference::new(
-                    self.address(),
-                    OperandSlot::Mnemonic,
-                    to,
-                    ReferenceKind::from_flow(flow),
-                )
-                .with_origin(ReferenceOrigin::Derived),
+                Reference::new(self.address(), to, ReferenceKind::from_flow(flow))
+                    .with_origin(ReferenceOrigin::Derived),
             )
         })
     }
 
-    pub fn data_references(
-        &self,
-        language: &'static Language,
-    ) -> impl Iterator<Item = Reference> + '_ {
-        let default_space = language.default_space();
+    pub fn data_references(&self) -> impl Iterator<Item = Reference> + '_ {
         let base = self.address;
         self.operations.iter().filter_map(move |operation| {
             let kind = match operation.op() {
-                Op::Load(space) if space == default_space => ReferenceKind::read(),
-                Op::Store(space) if space == default_space => ReferenceKind::write(),
+                Op::Load(_) => ReferenceKind::read(),
+                Op::Store(_) => ReferenceKind::write(),
                 _ => return None,
             };
             let pointer = operation.inputs().first()?;
@@ -309,13 +298,8 @@ impl Insn {
                 return None;
             }
             Some(
-                Reference::new(
-                    base,
-                    OperandSlot::Mnemonic,
-                    Address::new(base.space(), pointer.offset()),
-                    kind,
-                )
-                .with_origin(ReferenceOrigin::Derived),
+                Reference::new(base, Address::new(base.space(), pointer.offset()), kind)
+                    .with_origin(ReferenceOrigin::Derived),
             )
         })
     }

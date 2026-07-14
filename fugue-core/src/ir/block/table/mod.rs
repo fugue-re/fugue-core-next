@@ -11,7 +11,7 @@ use crate::ir::{
     Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress, Reference, ReferenceKey,
     ReferenceKind, ReferenceOrigin,
 };
-use crate::lifter::{ContextSet, Language};
+use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
@@ -250,21 +250,13 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn references(
-        &self,
-        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
-        language: &'static Language,
-    ) -> Vec<Reference> {
+    pub fn references(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> Vec<Reference> {
         let mut coalesced = BTreeMap::<ReferenceKey, ReferenceKind>::new();
         for id in blocks {
             if let Some(block) = self.get_by_id(id) {
                 for insn in block.instructions().iter() {
-                    for reference in insn.flow_references().chain(insn.data_references(language)) {
-                        let key = ReferenceKey::new(
-                            reference.from(),
-                            reference.slot(),
-                            reference.target(),
-                        );
+                    for reference in insn.flow_references().chain(insn.data_references()) {
+                        let key = ReferenceKey::new(reference.from(), reference.target());
                         coalesced
                             .entry(key)
                             .and_modify(|kind| *kind = kind.merged(reference.kind()))
@@ -277,8 +269,7 @@ impl CodeBlockTable {
         coalesced
             .into_iter()
             .map(|(key, kind)| {
-                Reference::new(key.from(), key.slot(), key.target(), kind)
-                    .with_origin(ReferenceOrigin::Derived)
+                Reference::new(key.from(), key.target(), kind).with_origin(ReferenceOrigin::Derived)
             })
             .collect()
     }

@@ -6,12 +6,10 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, BytesMut};
-use thiserror::Error;
 
 use crate::ir::cfg::FlowKind;
 use crate::ir::function::table::FunctionRef;
 use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, RawAddress};
-use crate::lifter::Language;
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID,
@@ -225,46 +223,6 @@ impl ReferenceKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum OperandSlot {
-    Mnemonic,
-    Operand(u8),
-}
-
-impl OperandSlot {
-    const MAX_OPERAND: u8 = u8::MAX - 1;
-
-    pub fn operand(index: u8) -> Self {
-        debug_assert!(index <= Self::MAX_OPERAND, "operand index out of range");
-        Self::Operand(index)
-    }
-
-    fn code(self) -> u8 {
-        match self {
-            Self::Mnemonic => 0,
-            Self::Operand(index) => index + 1,
-        }
-    }
-
-    fn from_code(code: u8) -> Self {
-        match code {
-            0 => Self::Mnemonic,
-            other => Self::Operand(other - 1),
-        }
-    }
-
-    pub(crate) fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.code());
-    }
-
-    pub(crate) fn decode(buf: &mut &[u8]) -> Option<Self> {
-        if buf.remaining() < 1 {
-            return None;
-        }
-        Some(Self::from_code(buf.get_u8()))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReferenceTarget {
     Address(Address),
 }
@@ -324,22 +282,15 @@ impl From<Address> for ReferenceTarget {
 #[derive(Debug, Clone, Copy)]
 pub struct Reference {
     from: Address,
-    slot: OperandSlot,
     target: ReferenceTarget,
     kind: ReferenceKind,
     origin: ReferenceOrigin,
 }
 
 impl Reference {
-    pub fn new(
-        from: Address,
-        slot: OperandSlot,
-        target: impl Into<ReferenceTarget>,
-        kind: ReferenceKind,
-    ) -> Self {
+    pub fn new(from: Address, target: impl Into<ReferenceTarget>, kind: ReferenceKind) -> Self {
         Self {
             from,
-            slot,
             target: target.into(),
             kind,
             origin: ReferenceOrigin::Asserted,
@@ -353,10 +304,6 @@ impl Reference {
 
     pub fn from(&self) -> Address {
         self.from
-    }
-
-    pub fn slot(&self) -> OperandSlot {
-        self.slot
     }
 
     pub fn target(&self) -> ReferenceTarget {
@@ -374,7 +321,7 @@ impl Reference {
 
 impl PartialEq for Reference {
     fn eq(&self, other: &Self) -> bool {
-        self.from == other.from && self.slot == other.slot && self.target == other.target
+        self.from == other.from && self.target == other.target
     }
 }
 
@@ -390,7 +337,6 @@ impl Ord for Reference {
     fn cmp(&self, other: &Self) -> Ordering {
         self.from
             .cmp(&other.from)
-            .then_with(|| self.slot.cmp(&other.slot))
             .then_with(|| self.target.cmp(&other.target))
     }
 }
@@ -398,7 +344,6 @@ impl Ord for Reference {
 impl Hash for Reference {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.from.hash(state);
-        self.slot.hash(state);
         self.target.hash(state);
     }
 }
@@ -406,21 +351,16 @@ impl Hash for Reference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReferenceKey {
     from: Address,
-    slot: OperandSlot,
     target: ReferenceTarget,
 }
 
 impl ReferenceKey {
-    pub fn new(from: Address, slot: OperandSlot, target: ReferenceTarget) -> Self {
-        Self { from, slot, target }
+    pub fn new(from: Address, target: ReferenceTarget) -> Self {
+        Self { from, target }
     }
 
     pub fn from(&self) -> Address {
         self.from
-    }
-
-    pub fn slot(&self) -> OperandSlot {
-        self.slot
     }
 
     pub fn target(&self) -> ReferenceTarget {
@@ -428,7 +368,7 @@ impl ReferenceKey {
     }
 
     fn minimum_for(from: Address) -> Self {
-        Self::new(from, OperandSlot::Mnemonic, ReferenceTarget::minimum())
+        Self::new(from, ReferenceTarget::minimum())
     }
 }
 
@@ -441,17 +381,15 @@ impl EntityKey for ReferenceKey {
         }
         let from = Address::decode(&buf[..ADDRESS_KEY_SIZE])?;
         let mut rest = &buf[ADDRESS_KEY_SIZE..];
-        let slot = OperandSlot::decode(&mut rest)?;
         let target = ReferenceTarget::decode(&mut rest)?;
         if !rest.is_empty() {
             return None;
         }
-        Some(Self { from, slot, target })
+        Some(Self { from, target })
     }
 
     fn encode(&self, buf: &mut BytesMut) {
         self.from.encode(buf);
-        self.slot.encode(buf);
         self.target.encode(buf);
     }
 }
@@ -460,20 +398,15 @@ impl EntityKey for ReferenceKey {
 pub struct InverseReferenceKey {
     target: ReferenceTarget,
     from: Address,
-    slot: OperandSlot,
 }
 
 impl InverseReferenceKey {
-    fn new(target: ReferenceTarget, from: Address, slot: OperandSlot) -> Self {
-        Self { target, from, slot }
+    fn new(target: ReferenceTarget, from: Address) -> Self {
+        Self { target, from }
     }
 
     fn minimum_for(target: ReferenceTarget) -> Self {
-        Self::new(
-            target,
-            Address::zero(AddressSpaceId::from(0u16)),
-            OperandSlot::Mnemonic,
-        )
+        Self::new(target, Address::zero(AddressSpaceId::from(0u16)))
     }
 }
 
@@ -483,22 +416,16 @@ impl EntityKey for InverseReferenceKey {
     fn decode(buf: &[u8]) -> Option<Self> {
         let mut rest = buf;
         let target = ReferenceTarget::decode(&mut rest)?;
-        if rest.len() < ADDRESS_KEY_SIZE {
+        if rest.len() != ADDRESS_KEY_SIZE {
             return None;
         }
-        let from = Address::decode(&rest[..ADDRESS_KEY_SIZE])?;
-        rest = &rest[ADDRESS_KEY_SIZE..];
-        let slot = OperandSlot::decode(&mut rest)?;
-        if !rest.is_empty() {
-            return None;
-        }
-        Some(Self { target, from, slot })
+        let from = Address::decode(rest)?;
+        Some(Self { target, from })
     }
 
     fn encode(&self, buf: &mut BytesMut) {
         self.target.encode(buf);
         self.from.encode(buf);
-        self.slot.encode(buf);
     }
 }
 
@@ -550,33 +477,18 @@ impl Entity for ReferenceIndexHeader {
     const ID: EntityId = ENTITY_REFERENCE_INDEX_HEADER_ID;
 }
 
-#[derive(Debug, Error)]
-pub enum ReferenceVerificationError {
-    #[error("reference storage error: {0}")]
-    Storage(#[from] EntityStorageError),
-    #[error("reference mismatch: forward_only={forward_only:?}, inverse_only={inverse_only:?}")]
-    Mismatch {
-        forward_only: Vec<ReferenceKey>,
-        inverse_only: Vec<ReferenceKey>,
-    },
-}
-
 #[derive(Clone)]
 pub struct ReferenceIndex {
     forward: EntityCache<ReferenceKey, ReferenceRecord>,
     inverse: EntityCache<InverseReferenceKey, ReferenceRecord>,
     storage: EntityStorage,
-    language: &'static Language,
 }
 
 impl ReferenceIndex {
     const CACHE_BYTES: usize = 16 * 1024 * 1024;
     const CLEAR_BATCH_LEN: usize = 256;
 
-    pub(crate) fn new(
-        storage: EntityStorage,
-        language: &'static Language,
-    ) -> Result<Self, EntityStorageError> {
+    pub(crate) fn new(storage: EntityStorage) -> Result<Self, EntityStorageError> {
         let forward = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
         let inverse = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
 
@@ -584,15 +496,10 @@ impl ReferenceIndex {
             forward,
             inverse,
             storage,
-            language,
         })
     }
 
-    pub(crate) fn new_with(
-        storage: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        language: &'static Language,
-    ) -> Self {
+    pub(crate) fn new_with(storage: EntityStorage, worker: Arc<WriteBackWorker>) -> Self {
         let forward = EntityCache::with_worker(storage.clone(), worker.clone(), Self::CACHE_BYTES);
         let inverse = EntityCache::with_worker(storage.clone(), worker, Self::CACHE_BYTES);
 
@@ -600,18 +507,17 @@ impl ReferenceIndex {
             forward,
             inverse,
             storage,
-            language,
         }
     }
 
     pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
         let record = ReferenceRecord::of(reference);
         self.forward.try_put(
-            ReferenceKey::new(reference.from(), reference.slot(), reference.target()),
+            ReferenceKey::new(reference.from(), reference.target()),
             record,
         )?;
         self.inverse.try_put(
-            InverseReferenceKey::new(reference.target(), reference.from(), reference.slot()),
+            InverseReferenceKey::new(reference.target(), reference.from()),
             record,
         )?;
 
@@ -621,28 +527,24 @@ impl ReferenceIndex {
     pub(crate) fn remove(
         &self,
         from: Address,
-        slot: OperandSlot,
         target: ReferenceTarget,
     ) -> Result<(), EntityStorageError> {
-        self.forward
-            .try_remove(&ReferenceKey::new(from, slot, target))?;
+        self.forward.try_remove(&ReferenceKey::new(from, target))?;
         self.inverse
-            .try_remove(&InverseReferenceKey::new(target, from, slot))
+            .try_remove(&InverseReferenceKey::new(target, from))
     }
 
     pub(crate) fn get(
         &self,
         from: Address,
-        slot: OperandSlot,
         target: ReferenceTarget,
     ) -> Result<Option<Reference>, EntityStorageError> {
-        let key = ReferenceKey::new(from, slot, target);
+        let key = ReferenceKey::new(from, target);
         let Some(cached) = self.forward.try_get(&key)? else {
             return Ok(None);
         };
         Ok(Some(Self::reference_from_record(
             from,
-            slot,
             target,
             cached.as_ref(),
         )))
@@ -657,7 +559,7 @@ impl ReferenceIndex {
         let start_key;
         let start = match after {
             Some(after) => {
-                start_key = ReferenceKey::new(after.from(), after.slot(), after.target());
+                start_key = ReferenceKey::new(after.from(), after.target());
                 Bound::Excluded(&start_key)
             }
             None => {
@@ -672,12 +574,7 @@ impl ReferenceIndex {
             .take_while(move |result| result.as_ref().map_or(true, |(key, _)| key.from() == from))
             .map(move |result| {
                 result.map(|(key, cached)| {
-                    Self::reference_from_record(
-                        key.from(),
-                        key.slot(),
-                        key.target(),
-                        cached.as_ref(),
-                    )
+                    Self::reference_from_record(key.from(), key.target(), cached.as_ref())
                 })
             }))
     }
@@ -691,7 +588,7 @@ impl ReferenceIndex {
         let start_key;
         let start = match after {
             Some(after) => {
-                start_key = InverseReferenceKey::new(after.target(), after.from(), after.slot());
+                start_key = InverseReferenceKey::new(after.target(), after.from());
                 Bound::Excluded(&start_key)
             }
             None => {
@@ -710,7 +607,7 @@ impl ReferenceIndex {
             })
             .map(move |result| {
                 result.map(|(key, cached)| {
-                    Self::reference_from_record(key.from, key.slot, key.target, cached.as_ref())
+                    Self::reference_from_record(key.from, key.target, cached.as_ref())
                 })
             }))
     }
@@ -742,32 +639,6 @@ impl ReferenceIndex {
         )
     }
 
-    pub fn verify(&self) -> Result<(), ReferenceVerificationError> {
-        for result in self.forward.try_scan_range(Bound::Unbounded)? {
-            let (key, _) = result?;
-            let inverse_key = InverseReferenceKey::new(key.target(), key.from(), key.slot());
-            if self.inverse.try_get(&inverse_key)?.is_none() {
-                return Err(ReferenceVerificationError::Mismatch {
-                    forward_only: vec![key],
-                    inverse_only: Vec::new(),
-                });
-            }
-        }
-
-        for result in self.inverse.try_scan_range(Bound::Unbounded)? {
-            let (key, _) = result?;
-            let forward_key = ReferenceKey::new(key.from, key.slot, key.target);
-            if self.forward.try_get(&forward_key)?.is_none() {
-                return Err(ReferenceVerificationError::Mismatch {
-                    forward_only: Vec::new(),
-                    inverse_only: vec![forward_key],
-                });
-            }
-        }
-
-        Ok(())
-    }
-
     fn rebuild<'a>(
         &self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
@@ -776,8 +647,8 @@ impl ReferenceIndex {
         let asserted = self.clear_derived()?;
 
         for function in functions {
-            for reference in blocks.references(function.blocks().map(|(_, id)| id), self.language) {
-                let key = ReferenceKey::new(reference.from(), reference.slot(), reference.target());
+            for reference in blocks.references(function.blocks().map(|(_, id)| id)) {
+                let key = ReferenceKey::new(reference.from(), reference.target());
                 if !asserted.contains(&key) {
                     self.insert(&reference)?;
                 }
@@ -807,7 +678,7 @@ impl ReferenceIndex {
 
             for (key, origin) in batch {
                 if origin.is_derived() {
-                    self.remove(key.from, key.slot, key.target)?;
+                    self.remove(key.from, key.target)?;
                 } else {
                     asserted.insert(key);
                 }
@@ -830,7 +701,7 @@ impl ReferenceIndex {
 
     pub(crate) fn clear_in(&self, coverage: &AddressRangeSet) -> Result<(), EntityStorageError> {
         for reference in self.references_in(coverage)? {
-            self.remove(reference.from(), reference.slot(), reference.target())?;
+            self.remove(reference.from(), reference.target())?;
         }
         Ok(())
     }
@@ -843,17 +714,13 @@ impl ReferenceIndex {
         let mut asserted = HashSet::new();
         for reference in current {
             if reference.origin().is_derived() {
-                self.remove(reference.from(), reference.slot(), reference.target())?;
+                self.remove(reference.from(), reference.target())?;
             } else {
-                asserted.insert(ReferenceKey::new(
-                    reference.from(),
-                    reference.slot(),
-                    reference.target(),
-                ));
+                asserted.insert(ReferenceKey::new(reference.from(), reference.target()));
             }
         }
         for reference in derived {
-            let key = ReferenceKey::new(reference.from(), reference.slot(), reference.target());
+            let key = ReferenceKey::new(reference.from(), reference.target());
             if !asserted.contains(&key) {
                 self.insert(&reference)?;
             }
@@ -875,7 +742,6 @@ impl ReferenceIndex {
             }
             references.push(Self::reference_from_record(
                 key.from(),
-                key.slot(),
                 key.target(),
                 cached.as_ref(),
             ));
@@ -885,11 +751,10 @@ impl ReferenceIndex {
 
     fn reference_from_record(
         from: Address,
-        slot: OperandSlot,
         target: ReferenceTarget,
         record: &ReferenceRecord,
     ) -> Reference {
-        Reference::new(from, slot, target, record.kind()).with_origin(record.origin())
+        Reference::new(from, target, record.kind()).with_origin(record.origin())
     }
 }
 
@@ -935,7 +800,7 @@ impl ReferenceRevert {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use fugue_lifter::runtime::pcode::Inputs;
     use fugue_lifter::{Op, PCodeOp, Varnode};
 
@@ -946,6 +811,20 @@ mod tests {
 
     fn address(space: u16, offset: u64) -> Address {
         Address::new(AddressSpaceId::from(space), offset)
+    }
+
+    fn index() -> Result<ReferenceIndex, EntityStorageError> {
+        ReferenceIndex::new(EntityStorage::new(InMemoryEntityStorage::new()))
+    }
+
+    fn flow_reference(from: Address, to: Address) -> Reference {
+        Reference::new(from, to, ReferenceKind::call()).with_origin(ReferenceOrigin::Derived)
+    }
+
+    fn single_point(address: Address) -> AddressRangeSet {
+        let mut coverage = AddressRangeSet::new();
+        coverage.insert_range(AddressRange::point(address));
+        coverage
     }
 
     #[test]
@@ -986,37 +865,12 @@ mod tests {
             ReferenceKind::write(),
         ] {
             for origin in [ReferenceOrigin::Derived, ReferenceOrigin::Asserted] {
-                let reference = Reference::new(
-                    address(0, 0x1000),
-                    OperandSlot::Mnemonic,
-                    address(0, 0x2000),
-                    kind,
-                )
-                .with_origin(origin);
+                let reference = Reference::new(address(0, 0x1000), address(0, 0x2000), kind)
+                    .with_origin(origin);
                 let record = ReferenceRecord::of(&reference);
                 assert_eq!(record.kind(), kind);
                 assert_eq!(record.origin(), origin);
             }
-        }
-    }
-
-    #[test]
-    fn test_operand_slot_encoding_orders_mnemonic_first() {
-        let mut mnemonic = BytesMut::new();
-        OperandSlot::Mnemonic.encode(&mut mnemonic);
-        let mut operand = BytesMut::new();
-        OperandSlot::operand(0).encode(&mut operand);
-        assert!(mnemonic.as_ref() < operand.as_ref());
-
-        for slot in [
-            OperandSlot::Mnemonic,
-            OperandSlot::operand(0),
-            OperandSlot::operand(7),
-        ] {
-            let mut buf = BytesMut::new();
-            slot.encode(&mut buf);
-            let mut slice = buf.as_ref();
-            assert_eq!(OperandSlot::decode(&mut slice), Some(slot));
         }
     }
 
@@ -1045,14 +899,12 @@ mod tests {
     fn test_reference_identity_ignores_payload() {
         let base = Reference::new(
             address(0, 0x1000),
-            OperandSlot::operand(1),
             address(0, 0x2000),
             ReferenceKind::call(),
         )
         .with_origin(ReferenceOrigin::Derived);
         let repainted = Reference::new(
             address(0, 0x1000),
-            OperandSlot::operand(1),
             address(0, 0x2000),
             ReferenceKind::jump(),
         );
@@ -1061,22 +913,11 @@ mod tests {
 
         let elsewhere = Reference::new(
             address(0, 0x1000),
-            OperandSlot::operand(2),
-            address(0, 0x2000),
+            address(0, 0x3000),
             ReferenceKind::call(),
         )
         .with_origin(ReferenceOrigin::Derived);
         assert!(base < elsewhere);
-    }
-
-    fn index() -> Result<ReferenceIndex, EntityStorageError> {
-        let language = resolve_language("x86:LE:64").expect("x86 language available");
-        ReferenceIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), language)
-    }
-
-    fn flow_reference(from: Address, to: Address) -> Reference {
-        Reference::new(from, OperandSlot::Mnemonic, to, ReferenceKind::call())
-            .with_origin(ReferenceOrigin::Derived)
     }
 
     #[test]
@@ -1086,26 +927,17 @@ mod tests {
         let b = address(0, 0x2000);
         let c = address(0, 0x3000);
 
-        index.insert(
-            &Reference::new(a, OperandSlot::Mnemonic, b, ReferenceKind::call())
-                .with_origin(ReferenceOrigin::Derived),
-        )?;
-        index.insert(&Reference::new(
-            a,
-            OperandSlot::operand(0),
-            c,
-            ReferenceKind::read(),
-        ))?;
+        index.insert(&flow_reference(a, b))?;
+        index.insert(&Reference::new(a, c, ReferenceKind::read()))?;
         index.insert(&flow_reference(c, b))?;
 
         let from_a = index
             .references_from(a, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_a.len(), 2);
-        assert_eq!(from_a[0].slot(), OperandSlot::Mnemonic);
         assert_eq!(from_a[0].target().address(), Some(b));
         assert!(from_a[0].kind().is_call());
-        assert_eq!(from_a[1].slot(), OperandSlot::operand(0));
+        assert_eq!(from_a[1].target().address(), Some(c));
         assert!(from_a[1].kind().is_read());
 
         let to_b = index
@@ -1114,8 +946,6 @@ mod tests {
         assert_eq!(to_b.len(), 2);
         assert_eq!(to_b[0].from(), a);
         assert_eq!(to_b[1].from(), c);
-
-        index.verify()?;
         Ok(())
     }
 
@@ -1123,18 +953,10 @@ mod tests {
     fn test_cross_space_references_scan_from_both_sides() -> Result<(), Box<dyn std::error::Error>>
     {
         let index = index()?;
-        let base_from = Address::new(AddressSpaceId::from(0u16), 0x1000u64);
-        let overlay_to = Address::new(AddressSpaceId::from(1u16), 0x2000u64);
+        let base_from = address(0, 0x1000);
+        let overlay_to = address(1, 0x2000);
 
-        index.insert(
-            &Reference::new(
-                base_from,
-                OperandSlot::Mnemonic,
-                overlay_to,
-                ReferenceKind::call(),
-            )
-            .with_origin(ReferenceOrigin::Derived),
-        )?;
+        index.insert(&flow_reference(base_from, overlay_to))?;
 
         let from_side = index
             .references_from(base_from, None)?
@@ -1147,8 +969,6 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(to_side.len(), 1);
         assert_eq!(to_side[0].from(), base_from);
-
-        index.verify()?;
         Ok(())
     }
 
@@ -1158,17 +978,12 @@ mod tests {
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
-        assert!(index.get(a, OperandSlot::Mnemonic, b.into())?.is_none());
+        assert!(index.get(a, b.into())?.is_none());
 
-        index.insert(&Reference::new(
-            a,
-            OperandSlot::Mnemonic,
-            b,
-            ReferenceKind::read().indirect(),
-        ))?;
+        index.insert(&Reference::new(a, b, ReferenceKind::read().indirect()))?;
 
         let stored = index
-            .get(a, OperandSlot::Mnemonic, b.into())?
+            .get(a, b.into())?
             .ok_or("reference absent after insert")?;
         assert!(stored.kind().is_read());
         assert!(stored.kind().is_indirect());
@@ -1183,7 +998,7 @@ mod tests {
         let b = address(0, 0x2000);
 
         index.insert(&flow_reference(a, b))?;
-        index.remove(a, OperandSlot::Mnemonic, b.into())?;
+        index.remove(a, b.into())?;
 
         assert!(
             index
@@ -1197,7 +1012,6 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()?
                 .is_empty()
         );
-        index.verify()?;
         Ok(())
     }
 
@@ -1238,11 +1052,10 @@ mod tests {
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
-        let language = resolve_language("x86:LE:64")?;
-        let writer = ReferenceIndex::new(storage.clone(), language)?;
+        let writer = ReferenceIndex::new(storage.clone())?;
         writer.insert(&flow_reference(a, b))?;
 
-        let reader = ReferenceIndex::new(storage.clone(), language)?;
+        let reader = ReferenceIndex::new(storage.clone())?;
         let from_a = reader
             .references_from(a, None)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1272,18 +1085,11 @@ mod tests {
         assert_eq!(derived[0].target().address(), Some(callee));
         assert!(derived[0].kind().is_call());
         assert!(derived[0].origin().is_derived());
-        index.verify()?;
         Ok(())
     }
 
-    fn single_point(address: Address) -> AddressRangeSet {
-        let mut coverage = AddressRangeSet::new();
-        coverage.insert_range(AddressRange::point(address));
-        coverage
-    }
-
     #[test]
-    fn test_replace_derived_in_preserves_asserted() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_replace_derived_preserves_asserted() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let from = address(0, 0x1000);
         let old_target = address(0, 0x2000);
@@ -1292,7 +1098,6 @@ mod tests {
 
         index.insert(&Reference::new(
             from,
-            OperandSlot::operand(0),
             asserted_target,
             ReferenceKind::read(),
         ))?;
@@ -1317,7 +1122,6 @@ mod tests {
                 .iter()
                 .all(|reference| reference.target().address() != Some(old_target))
         );
-        index.verify()?;
         Ok(())
     }
 
@@ -1334,7 +1138,6 @@ mod tests {
         index.clear_in(&single_point(from))?;
         index.insert(&Reference::new(
             from,
-            OperandSlot::operand(0),
             address(0, 0x9000),
             ReferenceKind::write(),
         ))?;
@@ -1347,7 +1150,6 @@ mod tests {
         assert_eq!(from_refs.len(), 1);
         assert_eq!(from_refs[0].target().address(), Some(original));
         assert!(from_refs[0].kind().is_call());
-        index.verify()?;
         Ok(())
     }
 
@@ -1368,7 +1170,7 @@ mod tests {
                 output: Varnode::new(language.register_space(), 0, 8),
             }],
         );
-        let derived = load.data_references(language).collect::<Vec<_>>();
+        let derived = load.data_references().collect::<Vec<_>>();
         assert_eq!(derived.len(), 1);
         assert_eq!(
             derived[0].target().address(),
@@ -1387,7 +1189,7 @@ mod tests {
                 output: Varnode::new(language.register_space(), 0, 8),
             }],
         );
-        assert!(register_relative.data_references(language).next().is_none());
+        assert!(register_relative.data_references().next().is_none());
 
         Ok(())
     }
@@ -1427,7 +1229,7 @@ mod tests {
                 .expect("block construction failed"))
         })?;
 
-        let derived = blocks.references([block_id], language);
+        let derived = blocks.references([block_id]);
         let data_references = derived
             .iter()
             .filter(|reference| reference.kind().is_data())
@@ -1456,18 +1258,13 @@ mod tests {
         let asserted_from = address(0, 0x5000);
         let asserted_to = address(0, 0x6000);
         index.insert(
-            &Reference::new(
-                asserted_from,
-                OperandSlot::operand(0),
-                asserted_to,
-                ReferenceKind::read(),
-            )
-            .with_origin(ReferenceOrigin::Asserted),
+            &Reference::new(asserted_from, asserted_to, ReferenceKind::read())
+                .with_origin(ReferenceOrigin::Asserted),
         )?;
 
         index.ensure_current(functions.iter(), &blocks, 7)?;
 
-        let survived = index.get(asserted_from, OperandSlot::operand(0), asserted_to.into())?;
+        let survived = index.get(asserted_from, asserted_to.into())?;
         assert!(survived.is_some_and(|reference| reference.origin().is_asserted()));
 
         let derived = index
@@ -1476,7 +1273,6 @@ mod tests {
         assert!(derived.iter().any(|reference| {
             reference.target().address() == Some(callee) && reference.origin().is_derived()
         }));
-        index.verify()?;
 
         Ok(())
     }
