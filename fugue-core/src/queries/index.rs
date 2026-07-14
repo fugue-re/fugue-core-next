@@ -13,14 +13,16 @@ enum RegionGroupKind {
     Functions,
     Symbols,
     Segments,
+    References,
 }
 
 impl RegionGroupKind {
-    const ALL: [RegionGroupKind; 4] = [
+    const ALL: [RegionGroupKind; 5] = [
         RegionGroupKind::Bytes,
         RegionGroupKind::Functions,
         RegionGroupKind::Symbols,
         RegionGroupKind::Segments,
+        RegionGroupKind::References,
     ];
 
     fn index(self) -> usize {
@@ -29,6 +31,7 @@ impl RegionGroupKind {
             RegionGroupKind::Functions => 1,
             RegionGroupKind::Symbols => 2,
             RegionGroupKind::Segments => 3,
+            RegionGroupKind::References => 4,
         }
     }
 
@@ -40,6 +43,7 @@ impl RegionGroupKind {
             RegionGroupKind::Segments => {
                 ChangeKinds::SEGMENT_MAPPED | ChangeKinds::SEGMENT_UNMAPPED
             }
+            RegionGroupKind::References => ChangeKinds::REFERENCES,
         }
     }
 

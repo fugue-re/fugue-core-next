@@ -40,6 +40,12 @@ pub use module::{Module, ModuleId};
 pub mod location;
 pub use location::Location;
 
+pub mod reference;
+pub use reference::{
+    OperandSlot, Reference, ReferenceClass, ReferenceFlags, ReferenceIndex, ReferenceKey,
+    ReferenceKind, ReferenceOrigin, ReferenceTarget,
+};
+
 pub mod segment;
 pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 

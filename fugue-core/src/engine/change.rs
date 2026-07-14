@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, Symbol};
+use crate::ir::{Address, AddressRange, AddressRangeSet, ReferenceKind, ReferenceTarget, Symbol};
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -214,6 +214,8 @@ bitflags::bitflags! {
         const SPACE_CREATED           = 0x0200;
         const SYMBOL_ADDED            = 0x0400;
         const SYMBOL_REMOVED          = 0x0800;
+        const REFERENCE_ADDED         = 0x1000;
+        const REFERENCE_REMOVED       = 0x2000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
@@ -223,6 +225,7 @@ bitflags::bitflags! {
             | Self::SEGMENT_UNMAPPED.bits()
             | Self::SEGMENT_MAPPING_CREATED.bits()
             | Self::SEGMENT_MAPPING_CHANGED.bits();
+        const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
     }
 }
 
@@ -272,6 +275,19 @@ pub enum ChangeRecord {
         address: Address,
         symbol: Symbol,
     },
+    ReferenceAdded {
+        from: Address,
+        target: ReferenceTarget,
+        kind: ReferenceKind,
+    },
+    ReferenceRemoved {
+        from: Address,
+        target: ReferenceTarget,
+        kind: ReferenceKind,
+    },
+    ReferencesChanged {
+        coverage: AddressRangeSet,
+    },
 }
 
 impl ChangeRecord {
@@ -289,6 +305,9 @@ impl ChangeRecord {
             Self::SpaceCreated { .. } => ChangeKinds::SPACE_CREATED,
             Self::SymbolAdded { .. } => ChangeKinds::SYMBOL_ADDED,
             Self::SymbolRemoved { .. } => ChangeKinds::SYMBOL_REMOVED,
+            Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
+            Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
+            Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
         }
     }
 
@@ -303,6 +322,16 @@ impl ChangeRecord {
             Self::SymbolAdded { address, .. } | Self::SymbolRemoved { address, .. } => {
                 [AddressRange::point(*address)].into_iter().collect()
             }
+            Self::ReferenceAdded { from, target, .. }
+            | Self::ReferenceRemoved { from, target, .. } => {
+                let mut ranges = SmallVec::new();
+                ranges.push(AddressRange::point(*from));
+                if let Some(address) = target.address() {
+                    ranges.push(AddressRange::point(address));
+                }
+                ranges
+            }
+            Self::ReferencesChanged { coverage } => coverage.ranges().collect(),
             Self::Restored { .. }
             | Self::SegmentMappingChanged { .. }
             | Self::SegmentMappingCreated { .. }

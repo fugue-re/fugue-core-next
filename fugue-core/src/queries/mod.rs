@@ -8,7 +8,8 @@ use thiserror::Error;
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::ir::cfg::FlowGraph;
 use crate::ir::{
-    Address, AddressRangeSet, RawAddress, SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
+    Address, AddressRangeSet, RawAddress, Reference, ReferenceTarget, SegmentProperties, Symbol,
+    SymbolEntry, SymbolProperties,
 };
 use crate::project::Project;
 use crate::queries::read::ProjectRead;
@@ -343,6 +344,24 @@ impl QueryReader {
         self.with_project(|read| read.callers_of(entry, after, limit))
     }
 
+    pub fn references_from(
+        &self,
+        from: Address,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> Result<QueryPage<Reference>, QueryError> {
+        self.with_project(|read| read.references_from(from, after, limit))
+    }
+
+    pub fn references_to(
+        &self,
+        to: Address,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> Result<QueryPage<Reference>, QueryError> {
+        self.with_project(|read| read.references_to(ReferenceTarget::from(to), after, limit))
+    }
+
     pub fn mapping_page(
         &self,
         space: AddressSpaceId,
@@ -409,6 +428,22 @@ impl QueryReader {
     pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
         Paged::new(move |cursor| reader.callees_of(entry, cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn outgoing_references(
+        &self,
+        from: Address,
+    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.references_from(from, cursor, WALK_PAGE_LEN))
+    }
+
+    pub fn incoming_references(
+        &self,
+        to: Address,
+    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.references_to(to, cursor, WALK_PAGE_LEN))
     }
 
     fn with_project<T>(&self, query: impl FnOnce(ProjectRead<'_>) -> T) -> Result<T, QueryError> {

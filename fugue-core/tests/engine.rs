@@ -21,8 +21,9 @@ use fugue_core::engine::{
     Trigger,
 };
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Endian, RawAddress, SegmentProperties, SymbolEntry,
-    SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Endian, OperandSlot, RawAddress, Reference,
+    ReferenceKind, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
+    SymbolTableSelector,
 };
 use fugue_core::lifter::resolve_language;
 use fugue_core::loader::{
@@ -2741,6 +2742,104 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
     let first = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
     let second = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
     assert!(Arc::ptr_eq(&first, &second));
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+
+    let callee = reader
+        .call_edges(None, 4096)?
+        .entries()
+        .iter()
+        .map(|edge| edge.callee())
+        .next()
+        .ok_or_else(|| io::Error::other("no call edges recovered"))?;
+
+    let incoming = reader
+        .incoming_references(callee)
+        .collect::<Result<Vec<_>, _>>()?;
+    let call_reference = incoming
+        .iter()
+        .find(|reference| reference.kind().is_call())
+        .ok_or_else(|| io::Error::other("no incoming call reference at callee"))?;
+    assert!(call_reference.origin().is_derived());
+    assert_eq!(call_reference.target().address(), Some(callee));
+
+    let outgoing = reader
+        .outgoing_references(call_reference.from())
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(outgoing.iter().any(
+        |reference| reference.target().address() == Some(callee) && reference.kind().is_call()
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let to = entry + 0x40u64;
+    let changes = engine.add_reference(Reference::new(
+        entry,
+        OperandSlot::operand(0),
+        to,
+        ReferenceKind::read(),
+    ))?;
+    assert!(changes.contains(ChangeKinds::REFERENCE_ADDED));
+
+    let outgoing = engine
+        .query_reader()?
+        .outgoing_references(entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    let asserted = outgoing
+        .iter()
+        .find(|reference| reference.slot() == OperandSlot::operand(0))
+        .ok_or_else(|| io::Error::other("asserted reference missing"))?;
+    assert_eq!(asserted.target().address(), Some(to));
+    assert!(asserted.kind().is_read());
+    assert!(asserted.origin().is_asserted());
+
+    engine.add_reference(Reference::new(
+        entry,
+        OperandSlot::operand(0),
+        to,
+        ReferenceKind::write(),
+    ))?;
+    let merged = engine
+        .query_reader()?
+        .references_to(to, None, 64)?
+        .entries()
+        .iter()
+        .copied()
+        .find(|reference| reference.from() == entry)
+        .ok_or_else(|| io::Error::other("merged reference missing"))?;
+    assert!(merged.kind().is_read());
+    assert!(merged.kind().is_write());
+
+    engine.remove_reference(entry, OperandSlot::operand(0), ReferenceTarget::from(to))?;
+    let after = engine
+        .query_reader()?
+        .outgoing_references(entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        after
+            .iter()
+            .all(|reference| reference.slot() != OperandSlot::operand(0))
+    );
 
     Ok(())
 }

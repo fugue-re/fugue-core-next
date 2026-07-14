@@ -6,7 +6,9 @@ use parking_lot::RwLock;
 use super::{Cached, Dependency, QueryEngine, QueryPage, QueryReader};
 use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
-use crate::ir::{Address, AddressRange, AddressRangeSet, RawAddress};
+use crate::ir::{
+    Address, AddressRange, AddressRangeSet, RawAddress, ReferenceKind, ReferenceTarget,
+};
 use crate::loader::Loader;
 use crate::project::Project;
 use crate::queries::cache::QUERY_MEMO_CAPACITY;
@@ -292,6 +294,40 @@ fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn std::error
         inside_revision
     );
     assert!(!reader.changed_since(baseline, ChangeKinds::FUNCTIONS, &region)?);
+
+    Ok(())
+}
+
+#[test]
+fn test_reference_change_is_observable_from_both_endpoints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = Fixture::new()?;
+    let reader = fixture.reader();
+
+    let from = Address::new(AddressSpaceId::from(0u8), 0x1000u64);
+    let to = Address::new(AddressSpaceId::from(0u8), 0x8000u64);
+    let disjoint = Address::new(AddressSpaceId::from(0u8), 0x9000u64);
+
+    let baseline = reader.revision()?;
+    let revision = fixture.next_revision();
+    fixture.apply(&ChangeSet::with_records(
+        revision,
+        [ChangeRecord::ReferenceAdded {
+            from,
+            target: ReferenceTarget::from(to),
+            kind: ReferenceKind::call(),
+        }],
+    ));
+
+    for observed in [from, to] {
+        let mut region = AddressRangeSet::new();
+        region.insert_range(AddressRange::point(observed));
+        assert!(reader.changed_since(baseline, ChangeKinds::REFERENCES, &region)?);
+    }
+
+    let mut disjoint_region = AddressRangeSet::new();
+    disjoint_region.insert_range(AddressRange::point(disjoint));
+    assert!(!reader.changed_since(baseline, ChangeKinds::REFERENCES, &disjoint_region)?);
 
     Ok(())
 }
