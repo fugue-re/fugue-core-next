@@ -10,8 +10,8 @@ use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeKinds;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Reference, ReferenceKind, SymbolEntry, SymbolIndex,
+    SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
@@ -651,6 +651,47 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+const HOT_TARGET_REFERENCES: usize = 8192;
+
+fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (engine, entry) = load_engine()?;
+    let hot_target = entry
+        .checked_add(0x10_0000u64)
+        .ok_or_else(|| std::io::Error::other("hot target address overflow"))?;
+
+    let (insert, _) = measure("reference_bulk_assert", || {
+        for index in 0..HOT_TARGET_REFERENCES {
+            let from = entry
+                .checked_add(0x20_0000 + index as u64 * 0x10)
+                .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
+            engine.add_reference(Reference::new(from, hot_target, ReferenceKind::read()))?;
+        }
+        engine.wait_until_idle()?;
+        Ok(((), HOT_TARGET_REFERENCES))
+    })?;
+    results.push(insert);
+
+    let reader = engine.query_reader()?;
+
+    let (first_page, _) = measure("reference_hot_target_first_page", || {
+        let page = run_query(|| reader.references_to(hot_target, None, PAGE_LIMIT))?;
+        Ok(((), page.entries().len()))
+    })?;
+    results.push(first_page);
+
+    let (full_walk, _) = measure("reference_hot_target_full_walk", || {
+        let mut count = 0usize;
+        for result in reader.incoming_references(hot_target) {
+            black_box(result?);
+            count += 1;
+        }
+        Ok(((), count))
+    })?;
+    results.push(full_walk);
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
 
@@ -665,6 +706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     bench_index_maintenance(&mut results)?;
     bench_cached_derived(&mut results)?;
     bench_multi_client(&mut results)?;
+    bench_reference_hot_target(&mut results)?;
 
     for result in results {
         result.print();

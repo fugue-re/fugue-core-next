@@ -66,6 +66,8 @@ pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = EntityKeyId::new(4);
 pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(5);
 pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
 pub const ENTITY_KEY_CALL_GRAPH_EDGE_ID: EntityKeyId = EntityKeyId::new(7);
+pub const ENTITY_KEY_REFERENCE_FORWARD_ID: EntityKeyId = EntityKeyId::new(8);
+pub const ENTITY_KEY_REFERENCE_INVERSE_ID: EntityKeyId = EntityKeyId::new(9);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -82,6 +84,8 @@ pub const ENTITY_CALL_GRAPH_FORWARD_EDGE_ID: EntityId = EntityId::new(9);
 pub const ENTITY_CALL_GRAPH_INVERSE_EDGE_ID: EntityId = EntityId::new(10);
 pub const ENTITY_CALL_GRAPH_INDEX_HEADER_ID: EntityId = EntityId::new(11);
 pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
+pub const ENTITY_REFERENCE_RECORD_ID: EntityId = EntityId::new(13);
+pub const ENTITY_REFERENCE_INDEX_HEADER_ID: EntityId = EntityId::new(14);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -106,6 +110,7 @@ pub enum ProjectEntity {
     CodeBlockTable = 0b0000_0100,
     CallGraphIndex = 0b0000_0101,
     Revision = 0b0000_0110,
+    ReferenceIndex = 0b0000_0111,
 }
 
 impl EntityKey for ProjectEntity {
@@ -121,6 +126,7 @@ impl EntityKey for ProjectEntity {
                 0b0000_0100 => Some(ProjectEntity::CodeBlockTable),
                 0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
                 0b0000_0110 => Some(ProjectEntity::Revision),
+                0b0000_0111 => Some(ProjectEntity::ReferenceIndex),
                 _ => None,
             }
         } else {

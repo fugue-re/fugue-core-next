@@ -18,7 +18,8 @@ use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, RawAddressRangeSet, SymbolEntry, SymbolIndex,
+    Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
+    SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{QueryEngine, QueryReader};
@@ -401,6 +402,26 @@ impl SymbolRemoval {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceRemoval {
+    from: Address,
+    target: ReferenceTarget,
+}
+
+impl ReferenceRemoval {
+    pub fn new(from: Address, target: ReferenceTarget) -> Self {
+        Self { from, target }
+    }
+
+    pub fn from(&self) -> Address {
+        self.from
+    }
+
+    pub fn target(&self) -> ReferenceTarget {
+        self.target
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappingPlacementMode {
     Bottom,
     Default,
@@ -632,12 +653,14 @@ impl SpaceCreationResult {
 pub enum ProjectUpdate {
     AddFunction(FunctionPatch),
     AddMappingToSpace(MappingPlacement),
+    AddReference(Reference),
     DeprioritiseMapping(MappingPriorityUpdate),
     InsertSymbol(SymbolPatch),
     PrioritiseMapping(MappingPriorityUpdate),
     RemapMapping(MappingRemap),
     RemoveFunction(FunctionRemoval),
     RemoveMapping(MappingRemoval),
+    RemoveReference(ReferenceRemoval),
     RemoveSymbol(SymbolRemoval),
     ResizeMapping(MappingResize),
     UpdateMappingMetadata(MappingMetadataUpdate),
@@ -701,6 +724,14 @@ impl ProjectUpdate {
         Self::RemoveMapping(MappingRemoval::new(mapping))
     }
 
+    pub fn add_reference(reference: Reference) -> Self {
+        Self::AddReference(reference)
+    }
+
+    pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
+        Self::RemoveReference(ReferenceRemoval::new(from, target))
+    }
+
     pub fn remove_symbol(index: SymbolIndex) -> Self {
         Self::RemoveSymbol(SymbolRemoval::new(index))
     }
@@ -737,6 +768,10 @@ impl ProjectUpdate {
             Self::DeprioritiseMapping(priority) => {
                 transaction.deprioritise_mapping(priority.space(), priority.mapping())
             }
+            Self::AddReference(reference) => {
+                transaction.add_reference(reference)?;
+                Ok(())
+            }
             Self::InsertSymbol(patch) => {
                 let (index, entry) = patch.into_parts();
                 transaction.insert_symbol(index, entry);
@@ -748,6 +783,10 @@ impl ProjectUpdate {
             Self::RemapMapping(remap) => transaction.remap_mapping(remap.mapping(), remap.start()),
             Self::RemoveFunction(removal) => removal.apply(transaction),
             Self::RemoveMapping(removal) => transaction.remove_mapping(removal.mapping()),
+            Self::RemoveReference(removal) => {
+                transaction.remove_reference(removal.from(), removal.target())?;
+                Ok(())
+            }
             Self::RemoveSymbol(removal) => {
                 transaction.remove_symbol_by_index(removal.index());
                 Ok(())
@@ -1111,6 +1150,18 @@ impl AnalysisEngine {
 
     pub fn add_function(&self, function: PartialFunction) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::add_function(function))
+    }
+
+    pub fn add_reference(&self, reference: Reference) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::add_reference(reference))
+    }
+
+    pub fn remove_reference(
+        &self,
+        from: Address,
+        target: ReferenceTarget,
+    ) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::remove_reference(from, target))
     }
 
     pub fn add_mapping_to_space(
@@ -1731,6 +1782,9 @@ impl Worker {
                 regions.insert(*address);
                 self.route_direct(Trigger::SymbolRemoved, &regions);
             }
+            ChangeRecord::ReferenceAdded { .. }
+            | ChangeRecord::ReferenceRemoved { .. }
+            | ChangeRecord::ReferencesChanged { .. } => {}
         }
     }
 
@@ -2074,7 +2128,7 @@ impl Worker {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::sync::Arc;
 
     use super::change::{ChangeFilter, ChangeRecord, ChangeSet, Revision};

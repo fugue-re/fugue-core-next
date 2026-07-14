@@ -7,7 +7,10 @@ use anyhow::Error as AnyhowError;
 use iset::IntervalMap;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress};
+use crate::ir::{
+    Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress, Reference, ReferenceKey,
+    ReferenceKind, ReferenceOrigin,
+};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
 use crate::storage::entities::{
@@ -245,6 +248,30 @@ impl CodeBlockTable {
                 block.coverage_into(covered);
             }
         }
+    }
+
+    pub fn references(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> Vec<Reference> {
+        let mut coalesced = BTreeMap::<ReferenceKey, ReferenceKind>::new();
+        for id in blocks {
+            if let Some(block) = self.get_by_id(id) {
+                for insn in block.instructions().iter() {
+                    for reference in insn.flow_references().chain(insn.data_references()) {
+                        let key = ReferenceKey::new(reference.from(), reference.target());
+                        coalesced
+                            .entry(key)
+                            .and_modify(|kind| *kind = kind.merged(reference.kind()))
+                            .or_insert_with(|| reference.kind());
+                    }
+                }
+            }
+        }
+
+        coalesced
+            .into_iter()
+            .map(|(key, kind)| {
+                Reference::new(key.from(), key.target(), kind).with_origin(ReferenceOrigin::Derived)
+            })
+            .collect()
     }
 
     pub fn modify_by_id<R>(

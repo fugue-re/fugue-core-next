@@ -5,7 +5,7 @@ use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
 use crate::ir::block::table::CodeBlockRef;
 use crate::ir::cfg::{FlowGraph, FlowTarget};
 use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, CallGraphEdgeKey, RawAddress};
+use crate::ir::{Address, CallGraphEdgeKey, RawAddress, Reference, ReferenceTarget};
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -197,6 +197,38 @@ impl<'p> ProjectRead<'p> {
         }
 
         flow_targets
+    }
+
+    pub(crate) fn references_from(
+        &self,
+        from: Address,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> QueryPage<Reference> {
+        let references = self
+            .project
+            .references()
+            .references_from(from, after.as_ref())
+            .unwrap_or_else(|err| err.into_fatal())
+            .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
+
+        Self::page(references, limit)
+    }
+
+    pub(crate) fn references_to(
+        &self,
+        target: ReferenceTarget,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> QueryPage<Reference> {
+        let references = self
+            .project
+            .references()
+            .references_to(target, after.as_ref())
+            .unwrap_or_else(|err| err.into_fatal())
+            .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
+
+        Self::page(references, limit)
     }
 
     pub(crate) fn function_callee_page(

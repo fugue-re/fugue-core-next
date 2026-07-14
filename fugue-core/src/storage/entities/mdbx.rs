@@ -601,7 +601,7 @@ impl<'a> EntityStorageTransactionalWriter<'a> for MdbxEntityWriter<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::ops::Bound;
 
     use super::MdbxEntityStorage;

@@ -9,10 +9,12 @@ use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
 use crate::ir::function::table::FunctionTableRevert;
+use crate::ir::reference::ReferenceRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable, RawAddress,
-    Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
+    Reference, ReferenceIndex, ReferenceOrigin, ReferenceTarget, Symbol, SymbolEntry, SymbolId,
+    SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -43,6 +45,7 @@ pub struct Project {
     pub(crate) functions: FunctionTable,
     pub(crate) blocks: CodeBlockTable,
     pub(crate) call_graph: CallGraphIndex,
+    pub(crate) references: ReferenceIndex,
     pub(crate) platform: Platform,
     restored_revision: Option<Revision>,
     pub(crate) attributes: AttributeMap,
@@ -141,6 +144,7 @@ pub struct ProjectTransaction<'p> {
     symbol_reverts: Vec<SymbolTableRevert>,
     segment_reverts: Vec<SegmentStorageRevert>,
     segment_write_reverts: Vec<SegmentWriteRevert>,
+    reference_reverts: Vec<ReferenceRevert>,
     source: ChangeSource,
     abandoned: bool,
     committed: bool,
@@ -226,6 +230,25 @@ impl ProjectTransaction<'_> {
         self.function_reverts.push(revert);
         self.project.call_graph.set_function_edges(entry, targets)?;
 
+        let derived = self
+            .project
+            .functions
+            .get_by_address(entry)
+            .map(|function| {
+                self.project
+                    .blocks
+                    .references(function.blocks().map(|(_, id)| id))
+            })
+            .unwrap_or_default();
+        let reference_revert = ReferenceRevert::capture(&self.project.references, &covered)?;
+        let references_touched = !derived.is_empty() || reference_revert.had_derived();
+        self.project
+            .references
+            .replace_derived(reference_revert.previous(), derived)?;
+        self.reference_reverts.push(reference_revert);
+
+        let reference_coverage = references_touched.then(|| covered.clone());
+
         if let Some(blocks) = old_blocks {
             for block in blocks {
                 self.project.blocks.remove_by_id(block);
@@ -241,6 +264,11 @@ impl ProjectTransaction<'_> {
                 entry,
                 coverage: covered,
             });
+        }
+
+        if let Some(coverage) = reference_coverage {
+            self.records
+                .push(ChangeRecord::ReferencesChanged { coverage });
         }
         Ok(id)
     }
@@ -274,6 +302,15 @@ impl ProjectTransaction<'_> {
         self.function_reverts.push(revert);
         self.project.call_graph.remove_function_edges(entry)?;
 
+        let reference_revert = ReferenceRevert::capture(&self.project.references, &covered)?;
+        let references_touched = reference_revert.had_derived();
+        self.project
+            .references
+            .replace_derived(reference_revert.previous(), [])?;
+        self.reference_reverts.push(reference_revert);
+
+        let reference_coverage = references_touched.then(|| covered.clone());
+
         for block in blocks {
             self.project.blocks.remove_by_id(block);
         }
@@ -284,6 +321,67 @@ impl ProjectTransaction<'_> {
             coverage: covered,
         });
 
+        if let Some(coverage) = reference_coverage {
+            self.records
+                .push(ChangeRecord::ReferencesChanged { coverage });
+        }
+
+        Ok(true)
+    }
+
+    pub fn add_reference(&mut self, reference: Reference) -> Result<bool, ProjectError> {
+        let reference = reference.with_origin(ReferenceOrigin::Asserted);
+        let from = reference.from();
+        let target = reference.target();
+
+        let existing = self.project.references.get(from, target)?;
+        let resolved = match existing {
+            Some(existing)
+                if existing.origin().is_asserted()
+                    && existing.kind().class() == reference.kind().class() =>
+            {
+                Reference::new(from, target, existing.kind().merged(reference.kind()))
+            }
+            _ => reference,
+        };
+
+        if let Some(existing) = existing
+            && existing.origin().is_asserted()
+            && existing.kind() == resolved.kind()
+        {
+            return Ok(false);
+        }
+
+        let revert = ReferenceRevert::point(&self.project.references, from)?;
+        self.project.references.insert(&resolved)?;
+        self.reference_reverts.push(revert);
+
+        self.records.push(ChangeRecord::ReferenceAdded {
+            from,
+            target,
+            kind: resolved.kind(),
+        });
+        Ok(true)
+    }
+
+    pub fn remove_reference(
+        &mut self,
+        from: Address,
+        target: ReferenceTarget,
+    ) -> Result<bool, ProjectError> {
+        let Some(existing) = self.project.references.get(from, target)? else {
+            return Ok(false);
+        };
+
+        let revert = ReferenceRevert::point(&self.project.references, from)?;
+        self.project.references.remove(from, target)?;
+        self.reference_reverts.push(revert);
+
+        self.records.push(ChangeRecord::ReferenceRemoved {
+            from,
+            target,
+            kind: existing.kind(),
+        });
         Ok(true)
     }
 
@@ -716,6 +814,9 @@ impl ProjectTransaction<'_> {
     pub fn rollback(mut self) -> Result<(), ProjectError> {
         let _entered = self.span.enter();
         self.committed = true;
+        while let Some(revert) = self.reference_reverts.pop() {
+            revert.restore(&self.project.references)?;
+        }
         while let Some(revert) = self.function_reverts.pop() {
             revert.restore(
                 &mut self.project.functions,
@@ -907,6 +1008,12 @@ impl Project {
         };
         call_graph.ensure_current(functions.iter(), &blocks, revision.value())?;
 
+        let references = match storage.write_back() {
+            Some(worker) => ReferenceIndex::new_with(storage.entities.clone(), worker.clone()),
+            None => ReferenceIndex::new(storage.entities.clone())?,
+        };
+        references.ensure_current(functions.iter(), &blocks, revision.value())?;
+
         Ok(Self {
             arch,
             language,
@@ -914,6 +1021,7 @@ impl Project {
             functions,
             blocks,
             call_graph,
+            references,
             platform,
             restored_revision,
             attributes,
@@ -1134,6 +1242,7 @@ impl Project {
             symbol_reverts: Vec::new(),
             segment_reverts: Vec::new(),
             segment_write_reverts: Vec::new(),
+            reference_reverts: Vec::new(),
             source,
             abandoned: false,
             committed: false,
@@ -1163,6 +1272,10 @@ impl Project {
 
     pub fn call_graph(&self) -> &CallGraphIndex {
         &self.call_graph
+    }
+
+    pub fn references(&self) -> &ReferenceIndex {
+        &self.references
     }
 
     pub fn functions_mut(&mut self) -> &mut FunctionTable {
@@ -1262,6 +1375,9 @@ impl Project {
 
         tracing::debug!("persisting call graph marker");
         self.call_graph.mark_current(self.revision.value())?;
+
+        tracing::debug!("persisting reference index marker");
+        self.references.mark_current(self.revision.value())?;
 
         tracing::debug!("persisting project revision");
         self.storage.entities.insert(

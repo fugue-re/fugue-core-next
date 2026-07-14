@@ -3,7 +3,8 @@ use std::fmt;
 use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
 
-use crate::ir::{Address, Id, Location, ToRawAddress};
+use crate::ir::cfg::FlowKind;
+use crate::ir::{Address, Id, Location, Reference, ReferenceKind, ReferenceOrigin, ToRawAddress};
 use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
@@ -268,6 +269,38 @@ impl Insn {
             InterBlk(taken) => Some((target, Local, taken)),
             InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((target, Global, taken)),
             _ => None,
+        })
+    }
+
+    pub fn flow_references(&self) -> impl Iterator<Item = Reference> + '_ {
+        self.iter_targets().filter_map(move |(target, kind, to)| {
+            if kind != InsnTargetKind::Global {
+                return None;
+            }
+            let flow = FlowKind::from_insn_target(self, target)?;
+            Some(
+                Reference::new(self.address(), to, ReferenceKind::from_flow(flow))
+                    .with_origin(ReferenceOrigin::Derived),
+            )
+        })
+    }
+
+    pub fn data_references(&self) -> impl Iterator<Item = Reference> + '_ {
+        let base = self.address;
+        self.operations.iter().filter_map(move |operation| {
+            let kind = match operation.op() {
+                Op::Load(_) => ReferenceKind::read(),
+                Op::Store(_) => ReferenceKind::write(),
+                _ => return None,
+            };
+            let pointer = operation.inputs().first()?;
+            if !pointer.is_constant() {
+                return None;
+            }
+            Some(
+                Reference::new(base, Address::new(base.space(), pointer.offset()), kind)
+                    .with_origin(ReferenceOrigin::Derived),
+            )
         })
     }
 

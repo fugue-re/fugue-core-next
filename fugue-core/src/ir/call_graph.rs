@@ -449,7 +449,7 @@ impl CallGraphIndex {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use fugue_lifter::runtime::pcode::Inputs;
     use fugue_lifter::{Op, PCodeOp, Varnode};
 
