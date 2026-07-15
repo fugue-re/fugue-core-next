@@ -250,12 +250,15 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn references(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> Vec<Reference> {
+    pub fn flow_references(
+        &self,
+        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
+    ) -> Vec<Reference> {
         let mut coalesced = BTreeMap::<ReferenceKey, ReferenceKind>::new();
         for id in blocks {
             if let Some(block) = self.get_by_id(id) {
                 for insn in block.instructions().iter() {
-                    for reference in insn.flow_references().chain(insn.data_references()) {
+                    for reference in insn.flow_references() {
                         let key = ReferenceKey::new(reference.from(), reference.target());
                         coalesced
                             .entry(key)

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use anyhow::Error as AnyhowError;
 use thiserror::Error;
 
-use crate::ir::{Address, CallGraphIndex, CodeBlock, CodeBlockTable, Function, Id, RawAddress};
+use crate::ir::block::table::CodeBlockTableAllocation;
+use crate::ir::{
+    Address, AddressRange, CallGraphIndex, CodeBlock, CodeBlockTable, Function, Id, RawAddress,
+};
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
@@ -67,7 +70,7 @@ pub enum FunctionTable {
 pub(crate) struct FunctionTableRevert {
     entry: Address,
     function_allocation: FunctionTableAllocation,
-    block_allocation: crate::ir::block::table::CodeBlockTableAllocation,
+    block_allocation: CodeBlockTableAllocation,
     previous_function: Option<Function>,
     previous_blocks: Vec<CodeBlock>,
 }
@@ -408,6 +411,23 @@ impl FunctionTable {
     ) -> Box<dyn Iterator<Item = Address> + '_> {
         let start = after.map_or(Bound::Unbounded, Bound::Excluded);
         self.addresses_in_range(space, (start, Bound::Unbounded))
+    }
+
+    pub fn ids_intersecting_range(
+        &self,
+        blocks: &CodeBlockTable,
+        range: &AddressRange,
+    ) -> Vec<Id<Function>> {
+        self.iter()
+            .filter(|function| {
+                function.blocks().any(|(_, block)| {
+                    blocks
+                        .get_by_id(block)
+                        .is_some_and(|block| block.address_range().intersects(range))
+                })
+            })
+            .map(|function| function.id())
+            .collect()
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {

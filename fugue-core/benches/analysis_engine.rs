@@ -15,7 +15,7 @@ use fugue_core::ir::{
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::queries::{Cached, Dependency, QueryReader};
+use fugue_core::queries::{Cached, Dependency, QueryError, QueryReader};
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use rustc_hash::FxHasher;
 
@@ -142,9 +142,7 @@ fn current_rss_kib() -> Option<u64> {
         .ok()
 }
 
-fn run_query<T>(
-    query: impl FnOnce() -> Result<T, fugue_core::queries::QueryError>,
-) -> Result<T, Box<dyn Error>> {
+fn run_query<T>(query: impl FnOnce() -> Result<T, QueryError>) -> Result<T, Box<dyn Error>> {
     Ok(query()?)
 }
 

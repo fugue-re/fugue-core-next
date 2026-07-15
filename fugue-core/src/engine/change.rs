@@ -1,7 +1,10 @@
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, ReferenceKind, ReferenceTarget, Symbol};
+use crate::il::common::IrLevel;
+use crate::ir::{
+    Address, AddressRange, AddressRangeSet, FunctionId, ReferenceKind, ReferenceTarget, Symbol,
+};
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -216,6 +219,8 @@ bitflags::bitflags! {
         const SYMBOL_REMOVED          = 0x0800;
         const REFERENCE_ADDED         = 0x1000;
         const REFERENCE_REMOVED       = 0x2000;
+        const IR_ARTEFACT_PUBLISHED   = 0x4000;
+        const IR_ARTEFACT_REMOVED     = 0x8000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
@@ -226,6 +231,8 @@ bitflags::bitflags! {
             | Self::SEGMENT_MAPPING_CREATED.bits()
             | Self::SEGMENT_MAPPING_CHANGED.bits();
         const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
+        const IR_ARTEFACTS = Self::IR_ARTEFACT_PUBLISHED.bits()
+            | Self::IR_ARTEFACT_REMOVED.bits();
     }
 }
 
@@ -288,6 +295,14 @@ pub enum ChangeRecord {
     ReferencesChanged {
         coverage: AddressRangeSet,
     },
+    IrArtefactPublished {
+        function: FunctionId,
+        level: IrLevel,
+    },
+    IrArtefactRemoved {
+        function: FunctionId,
+        level: IrLevel,
+    },
 }
 
 impl ChangeRecord {
@@ -308,7 +323,22 @@ impl ChangeRecord {
             Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
             Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
             Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
+            Self::IrArtefactPublished { .. } => ChangeKinds::IR_ARTEFACT_PUBLISHED,
+            Self::IrArtefactRemoved { .. } => ChangeKinds::IR_ARTEFACT_REMOVED,
         }
+    }
+
+    pub fn affects_ir_inputs(&self) -> bool {
+        !matches!(
+            self,
+            Self::IrArtefactPublished { .. }
+                | Self::IrArtefactRemoved { .. }
+                | Self::ReferencesChanged { .. }
+                | Self::ReferenceAdded { .. }
+                | Self::ReferenceRemoved { .. }
+                | Self::SymbolAdded { .. }
+                | Self::SymbolRemoved { .. }
+        )
     }
 
     pub fn ranges(&self) -> SmallVec<[AddressRange; 4]> {
@@ -333,6 +363,8 @@ impl ChangeRecord {
             }
             Self::ReferencesChanged { coverage } => coverage.ranges().collect(),
             Self::Restored { .. }
+            | Self::IrArtefactPublished { .. }
+            | Self::IrArtefactRemoved { .. }
             | Self::SegmentMappingChanged { .. }
             | Self::SegmentMappingCreated { .. }
             | Self::SpaceCreated { .. } => SmallVec::new(),

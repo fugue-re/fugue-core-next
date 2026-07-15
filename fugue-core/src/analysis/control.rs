@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::RwLock;
 use thiserror::Error;
 
+use crate::il::common::BuildCancellation;
+
 #[derive(Debug, Clone, Copy, Error)]
 #[error("analysis cancelled")]
 pub struct Cancelled;
@@ -52,6 +54,12 @@ impl CancellationToken {
         } else {
             Ok(())
         }
+    }
+}
+
+impl BuildCancellation for CancellationToken {
+    fn is_cancelled(&self) -> bool {
+        CancellationToken::is_cancelled(self)
     }
 }
 

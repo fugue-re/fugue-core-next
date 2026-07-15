@@ -21,6 +21,10 @@ impl EntityKeyId {
     const fn index(&self) -> usize {
         self.0 as usize
     }
+
+    pub(crate) const fn prefix(self, entity: EntityId) -> EntityKeyPrefix {
+        [self.0, entity.0]
+    }
 }
 
 impl TryFrom<usize> for EntityKeyId {
@@ -68,6 +72,7 @@ pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
 pub const ENTITY_KEY_CALL_GRAPH_EDGE_ID: EntityKeyId = EntityKeyId::new(7);
 pub const ENTITY_KEY_REFERENCE_FORWARD_ID: EntityKeyId = EntityKeyId::new(8);
 pub const ENTITY_KEY_REFERENCE_INVERSE_ID: EntityKeyId = EntityKeyId::new(9);
+pub const ENTITY_KEY_IR_ARTEFACT_ID: EntityKeyId = EntityKeyId::new(10);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -86,6 +91,7 @@ pub const ENTITY_CALL_GRAPH_INDEX_HEADER_ID: EntityId = EntityId::new(11);
 pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
 pub const ENTITY_REFERENCE_RECORD_ID: EntityId = EntityId::new(13);
 pub const ENTITY_REFERENCE_INDEX_HEADER_ID: EntityId = EntityId::new(14);
+pub const ENTITY_IR_ARTEFACT_ID: EntityId = EntityId::new(15);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 

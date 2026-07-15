@@ -6,6 +6,7 @@ use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryHandler};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
 use crate::project::Project;
+use crate::registry::submit;
 use crate::types::attributes::ATTRIBUTE_LOADER_FORMAT;
 
 mod specs;
@@ -60,7 +61,7 @@ impl<'a> LoadableAnalysers for ElfAnalysers<'a> {
     }
 }
 
-crate::registry::submit! {
+submit! {
     FunctionRecoveryExtension::new(
         "elf-loader-patterns",
         ElfAnalysers::add_project_function_recovery_patterns,

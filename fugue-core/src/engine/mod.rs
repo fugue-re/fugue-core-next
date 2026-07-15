@@ -17,6 +17,7 @@ use self::change::{
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
+use crate::il::common::{IlError, IrLevel, RawIrArtefact};
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
     SymbolEntry, SymbolIndex,
@@ -143,7 +144,6 @@ pub trait Analyser: Send {
 
     fn can_analyse(&self, project: &Project) -> bool;
 
-    /// Return recoverable failures as `Err`; panics are fatal and terminate the engine.
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
@@ -151,7 +151,6 @@ pub trait Analyser: Send {
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError>;
 
-    /// Return recoverable failures as `Err`; panics are fatal and terminate the engine.
     fn analysis_ended(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
@@ -626,6 +625,30 @@ impl MappingCreationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrEnsured {
+    changes: ChangeSet,
+    artefact: Arc<RawIrArtefact>,
+}
+
+impl IrEnsured {
+    pub fn new(changes: ChangeSet, artefact: Arc<RawIrArtefact>) -> Self {
+        Self { changes, artefact }
+    }
+
+    pub fn changes(&self) -> &ChangeSet {
+        &self.changes
+    }
+
+    pub fn artefact(&self) -> &Arc<RawIrArtefact> {
+        &self.artefact
+    }
+
+    pub fn into_artefact(self) -> Arc<RawIrArtefact> {
+        self.artefact
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceCreationResult {
     changes: ChangeSet,
     space: AddressSpaceId,
@@ -805,7 +828,7 @@ impl ProjectUpdate {
     }
 }
 
-enum Intake {
+pub(crate) enum Intake {
     Cancel,
     CreateMapping {
         builder: SegmentMappingBuilder,
@@ -815,6 +838,15 @@ enum Intake {
     Direct {
         regions: AddressRangeSet,
         trigger: Trigger,
+    },
+    EnsureIr {
+        function: FunctionId,
+        level: IrLevel,
+        reply: Sender<Result<IrEnsured, EngineError>>,
+    },
+    FlushIrReferences {
+        function: FunctionId,
+        reply: Sender<Result<ChangeSet, EngineError>>,
     },
     Update {
         update: ProjectUpdate,
@@ -864,7 +896,7 @@ struct AnalyserState {
     triggers: &'static [Trigger],
 }
 
-struct Subscriber {
+pub(crate) struct Subscriber {
     rx: Receiver<Arc<ChangeSet>>,
     tx: Sender<Arc<ChangeSet>>,
     filter: ChangeFilter,
@@ -1052,7 +1084,7 @@ impl AnalysisEngine {
         let progress = Progress::default();
         let project = Arc::new(RwLock::new(project));
         let queries = QueryEngine::new(project.clone());
-        let query_reader = queries.reader();
+        let query_reader = queries.reader().with_intake(tx.clone());
         let worker_cancellation = cancellation.clone();
         let worker_messages = messages.clone();
         let worker_poison = poison.clone();
@@ -1269,6 +1301,39 @@ impl AnalysisEngine {
         update: MappingMetadataUpdate,
     ) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::update_mapping_metadata(update))
+    }
+
+    pub fn ensure_ir(
+        &self,
+        function: FunctionId,
+        level: IrLevel,
+    ) -> Result<IrEnsured, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::EnsureIr {
+                function,
+                level,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        reply_rx.recv().map_err(|_| EngineError::Stopped)?
+    }
+
+    pub fn flush_ir_references(&self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::FlushIrReferences {
+                function,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        reply_rx.recv().map_err(|_| EngineError::Stopped)?
     }
 
     pub fn wait_until_idle(&self) -> Result<(), EngineError> {
@@ -1530,6 +1595,12 @@ impl Worker {
                 Ok(Intake::Update { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
+                Ok(Intake::EnsureIr { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
+                Ok(Intake::FlushIrReferences { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
                 Ok(Intake::Flush(reply)) | Ok(Intake::Save(reply)) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
@@ -1598,6 +1669,22 @@ impl Worker {
                             }
                         }
                     }
+                }
+                Intake::EnsureIr {
+                    function,
+                    level,
+                    reply,
+                } => {
+                    let result = self
+                        .drain_or_handle_cancelled()
+                        .and_then(|()| self.ensure_ir(function, level));
+                    let _ = reply.send(result);
+                }
+                Intake::FlushIrReferences { function, reply } => {
+                    let result = self
+                        .drain_or_handle_cancelled()
+                        .and_then(|()| self.flush_ir_references(function));
+                    let _ = reply.send(result);
                 }
                 Intake::Update { update, reply } => {
                     let result = self
@@ -1784,7 +1871,9 @@ impl Worker {
             }
             ChangeRecord::ReferenceAdded { .. }
             | ChangeRecord::ReferenceRemoved { .. }
-            | ChangeRecord::ReferencesChanged { .. } => {}
+            | ChangeRecord::ReferencesChanged { .. }
+            | ChangeRecord::IrArtefactPublished { .. }
+            | ChangeRecord::IrArtefactRemoved { .. } => {}
         }
     }
 
@@ -1966,6 +2055,76 @@ impl Worker {
 
         match result {
             Ok(()) => {
+                let changes = transaction.commit()?;
+                if !changes.is_empty() {
+                    self.begin_publish(&changes);
+                }
+                drop(project);
+                drop(query_write);
+
+                if !changes.is_empty() {
+                    self.finish_publish(changes.clone())?;
+                }
+
+                Ok(changes)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(self.poison_and_stop(rollback_error.to_string()));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn ensure_ir(
+        &mut self,
+        function: FunctionId,
+        level: IrLevel,
+    ) -> Result<IrEnsured, EngineError> {
+        let query_write = self.queries.write_guard();
+        let project_lock = self.project.clone();
+        let mut project = project_lock.write();
+        let mut transaction = project.transaction(ChangeSource::agent("ensure IR"));
+        let cancellation = self.cancellation.child();
+        let result = transaction.ensure_ir(function, level, &cancellation);
+
+        match result {
+            Ok(_) => {
+                let changes = transaction.commit()?;
+                let artefact = project
+                    .ir_artefact(function, level)?
+                    .ok_or_else(|| IlError::missing_artefact(function, level))
+                    .map_err(ProjectError::from)?;
+                if !changes.is_empty() {
+                    self.begin_publish(&changes);
+                }
+                drop(project);
+                drop(query_write);
+
+                if !changes.is_empty() {
+                    self.finish_publish(changes.clone())?;
+                }
+
+                Ok(IrEnsured::new(changes, Arc::new(artefact)))
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(self.poison_and_stop(rollback_error.to_string()));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn flush_ir_references(&mut self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+        let query_write = self.queries.write_guard();
+        let project_lock = self.project.clone();
+        let mut project = project_lock.write();
+        let mut transaction = project.transaction(ChangeSource::agent("flush IR references"));
+
+        match transaction.flush_ir_references(function) {
+            Ok(_) => {
                 let changes = transaction.commit()?;
                 if !changes.is_empty() {
                     self.begin_publish(&changes);

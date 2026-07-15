@@ -32,7 +32,7 @@ pub mod function;
 pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
 
 pub mod insn;
-pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
+pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
 pub mod module;
 pub use module::{Module, ModuleId};

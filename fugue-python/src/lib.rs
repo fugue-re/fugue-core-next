@@ -6,6 +6,7 @@ mod binary;
 mod convert;
 mod errors;
 mod lifter;
+mod project;
 mod segments;
 
 use pyo3::prelude::*;
@@ -17,6 +18,7 @@ fn fugue(module: &Bound<'_, PyModule>) -> PyResult<()> {
     binary::add_classes(module)?;
     errors::add_errors(module)?;
     lifter::add_classes(module)?;
+    project::add_classes(module)?;
     segments::add_classes(module)?;
 
     Ok(())

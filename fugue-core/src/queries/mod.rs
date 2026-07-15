@@ -2,16 +2,22 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use flume::Sender;
 use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
+use crate::engine::{EngineError, Intake};
+use crate::il::common::{IlError, IrArtefact, IrArtefactKey, IrLevel, RawIrArtefact};
+use crate::il::llil::LlilBody;
+use crate::il::llil::ssa::{Dominance, DominanceFrontier, Liveness, SsaBody, UseIndex};
+use crate::il::pcode::PCodeBody;
 use crate::ir::cfg::FlowGraph;
 use crate::ir::{
-    Address, AddressRangeSet, RawAddress, Reference, ReferenceTarget, SegmentProperties, Symbol,
-    SymbolEntry, SymbolProperties,
+    Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
+    SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
 };
-use crate::project::Project;
+use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -51,11 +57,33 @@ impl<T> QueryPage<T> {
     }
 }
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum QueryError {
     #[error("analysis engine stopped")]
     Stopped,
+    #[error(transparent)]
+    Project(#[from] ProjectError),
+    #[error(transparent)]
+    Engine(Box<EngineError>),
 }
+
+impl From<EngineError> for QueryError {
+    fn from(error: EngineError) -> Self {
+        match error {
+            EngineError::Stopped => Self::Stopped,
+            EngineError::Project(error) => Self::Project(error),
+            error => Self::Engine(Box::new(error)),
+        }
+    }
+}
+
+impl PartialEq for QueryError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Stopped, Self::Stopped))
+    }
+}
+
+impl Eq for QueryError {}
 
 const WALK_PAGE_LEN: usize = 256;
 
@@ -247,6 +275,7 @@ pub struct QueryReader {
     project: Arc<RwLock<Project>>,
     cache: Arc<QueryCache>,
     changes: Arc<RwLock<ChangeIndex>>,
+    intake: Option<Sender<Intake>>,
 }
 
 impl QueryReader {
@@ -263,7 +292,13 @@ impl QueryReader {
             project,
             cache,
             changes,
+            intake: None,
         }
+    }
+
+    pub(crate) fn with_intake(mut self, intake: Sender<Intake>) -> Self {
+        self.intake = Some(intake);
+        self
     }
 
     pub fn revision(&self) -> Result<Revision, QueryError> {
@@ -305,6 +340,149 @@ impl QueryReader {
 
         self.cache.insert(entry, graph.clone());
         Ok(graph)
+    }
+
+    fn cached_ir_artefact(
+        &self,
+        function: FunctionId,
+        level: IrLevel,
+    ) -> Result<Option<Arc<RawIrArtefact>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+        let key = IrArtefactKey::new(function, level);
+
+        if let Some(cached) = self.cache.get_ir(key) {
+            return Ok(cached);
+        }
+
+        let artefact = {
+            let project = self.project.read();
+            let read = ProjectRead::new(&project);
+            read.ir_artefact(function, level)?
+        }
+        .map(Arc::new);
+
+        self.cache.insert_ir(key, artefact.clone());
+        Ok(artefact)
+    }
+
+    fn cached_body<T>(&self, function: FunctionId) -> Result<Option<T>, QueryError>
+    where
+        T: IrArtefact,
+    {
+        if let Some(raw) = self.cached_ir_artefact(function, T::LEVEL)? {
+            return Self::decode_body(&raw).map(Some);
+        }
+
+        if !self.build_ir(function, T::LEVEL)? {
+            return Ok(None);
+        }
+
+        self.cached_ir_artefact(function, T::LEVEL)?
+            .map(|raw| Self::decode_body(&raw))
+            .transpose()
+    }
+
+    fn decode_body<T>(raw: &RawIrArtefact) -> Result<T, QueryError>
+    where
+        T: IrArtefact,
+    {
+        T::from_raw_artefact(raw.clone())
+            .map_err(ProjectError::from)
+            .map_err(QueryError::from)
+    }
+
+    fn build_ir(&self, function: FunctionId, level: IrLevel) -> Result<bool, QueryError> {
+        let Some(intake) = &self.intake else {
+            return Ok(false);
+        };
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        intake
+            .send(Intake::EnsureIr {
+                function,
+                level,
+                reply: reply_tx,
+            })
+            .map_err(|_| QueryError::Stopped)?;
+
+        match reply_rx.recv().map_err(|_| QueryError::Stopped)? {
+            Ok(_) => Ok(true),
+            Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
+                Ok(false)
+            }
+            Err(error) => Err(QueryError::from(error)),
+        }
+    }
+
+    pub fn ir_artefact(
+        &self,
+        function: FunctionId,
+        level: IrLevel,
+    ) -> Result<Option<RawIrArtefact>, QueryError> {
+        Ok(self
+            .cached_ir_artefact(function, level)?
+            .map(|raw| (*raw).clone()))
+    }
+
+    pub fn ir_body<T>(&self, function: FunctionId) -> Result<Option<T>, QueryError>
+    where
+        T: IrArtefact,
+    {
+        self.cached_body(function)
+    }
+
+    pub fn pcode_body(&self, function: FunctionId) -> Result<Option<PCodeBody>, QueryError> {
+        self.cached_body(function)
+    }
+
+    pub fn llil_body(&self, function: FunctionId) -> Result<Option<LlilBody>, QueryError> {
+        self.cached_body(function)
+    }
+
+    pub fn llil_ssa_body(&self, function: FunctionId) -> Result<Option<SsaBody>, QueryError> {
+        self.cached_body(function)
+    }
+
+    pub fn llil_ssa_use_index(&self, function: FunctionId) -> Result<Option<UseIndex>, QueryError> {
+        self.cached_body::<SsaBody>(function)?
+            .map(|body| body.use_index())
+            .transpose()
+            .map_err(ProjectError::from)
+            .map_err(QueryError::from)
+    }
+
+    pub fn llil_ssa_dominance(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<Dominance>, QueryError> {
+        self.cached_body::<SsaBody>(function)?
+            .map(|body| body.dominance())
+            .transpose()
+            .map_err(ProjectError::from)
+            .map_err(QueryError::from)
+    }
+
+    pub fn llil_ssa_dominance_frontiers(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<DominanceFrontier>, QueryError> {
+        self.cached_body::<SsaBody>(function)?
+            .map(|body| body.dominance_frontiers())
+            .transpose()
+            .map_err(ProjectError::from)
+            .map_err(QueryError::from)
+    }
+
+    pub fn llil_ssa_liveness(&self, function: FunctionId) -> Result<Option<Liveness>, QueryError> {
+        self.cached_body::<SsaBody>(function)?
+            .map(|body| body.liveness())
+            .transpose()
+            .map_err(ProjectError::from)
+            .map_err(QueryError::from)
+    }
+
+    pub fn function_id(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
+        self.with_project(|read| read.function_id(entry))
     }
 
     pub fn call_edges(
@@ -501,9 +679,19 @@ impl QueryEngine {
             match record {
                 ChangeRecord::FunctionAdded { entry, .. }
                 | ChangeRecord::FunctionChanged { entry, .. }
-                | ChangeRecord::FunctionRemoved { entry, .. } => self.cache.evict(*entry),
+                | ChangeRecord::FunctionRemoved { entry, .. } => {
+                    self.cache.evict(*entry);
+                }
+                ChangeRecord::IrArtefactPublished { function, level }
+                | ChangeRecord::IrArtefactRemoved { function, level } => {
+                    self.cache.evict_ir(*function, *level);
+                }
                 ChangeRecord::Restored { .. } => self.cache.clear(),
                 _ => {}
+            }
+
+            if record.affects_ir_inputs() {
+                self.cache.clear_ir();
             }
         }
     }
@@ -528,14 +716,24 @@ mod test {
 
     use parking_lot::RwLock;
 
-    use super::{Cached, Dependency, QueryEngine, QueryPage, QueryReader};
+    use super::{Cached, Dependency, QueryEngine, QueryError, QueryPage, QueryReader};
     use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-    use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
+    use crate::engine::change::{
+        ChangeKinds, ChangeRecord, ChangeSet, FunctionChangeKind, Revision,
+    };
+    use crate::il::common::{
+        ArtefactHeader, BlockId, BuildStatus, CommonBody, Finish, IlError, IrArtefact,
+        IrArtefactKey, IrLevel, PackedRange, RawIrArtefact, SourceRun, ValueId,
+    };
+    use crate::il::llil::ssa::{LLIL_SSA_SCHEMA_VERSION, SsaBody, SsaBuilder};
+    use crate::il::llil::{LLIL_SCHEMA_VERSION, LlilBody, LlilBuilder};
+    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBody, PCodeBuilder};
     use crate::ir::{
-        Address, AddressRange, AddressRangeSet, RawAddress, ReferenceKind, ReferenceTarget,
+        Address, AddressRange, AddressRangeSet, FunctionId, RawAddress, ReferenceKind,
+        ReferenceTarget,
     };
     use crate::loader::Loader;
-    use crate::project::Project;
+    use crate::project::{Project, ProjectError};
     use crate::queries::cache::QUERY_MEMO_CAPACITY;
     use crate::queries::index::{CENSUS_INTERVAL, ChangeIndex, MAX_CHANGE_RUNS};
     use crate::storage::segments::mapping::SegmentMappingId;
@@ -574,14 +772,21 @@ mod test {
             &mut self,
             function: PartialFunction,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let changes = {
+            self.commit_function_with_id(function).map(drop)
+        }
+
+        fn commit_function_with_id(
+            &mut self,
+            function: PartialFunction,
+        ) -> Result<FunctionId, Box<dyn std::error::Error>> {
+            let (changes, function) = {
                 let mut project = self.project.write();
                 let mut transaction = project.transaction("query fixture");
-                transaction.add_function(function)?;
-                transaction.commit()?
+                let function = transaction.add_function(function)?;
+                (transaction.commit()?, function)
             };
             self.queries.apply_changes(&changes);
-            Ok(())
+            Ok(function)
         }
 
         fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn std::error::Error>> {
@@ -592,6 +797,51 @@ mod test {
                 transaction.commit()?
             };
             self.queries.apply_changes(&changes);
+            Ok(())
+        }
+
+        fn publish_ir_artefact(
+            &mut self,
+            artefact: RawIrArtefact,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let changes = {
+                let mut project = self.project.write();
+                let mut transaction = project.transaction("query fixture");
+                if let Err(error) = transaction.publish_ir_artefact(artefact) {
+                    transaction.rollback()?;
+                    return Err(error.into());
+                }
+                transaction.commit()?
+            };
+            self.queries.apply_changes(&changes);
+            Ok(())
+        }
+
+        fn publish_ir_body<T>(&mut self, artefact: &mut T) -> Result<(), Box<dyn std::error::Error>>
+        where
+            T: IrArtefact,
+        {
+            let changes = {
+                let mut project = self.project.write();
+                let mut transaction = project.transaction("query fixture");
+                if let Err(error) = transaction.publish_ir_body(artefact) {
+                    transaction.rollback()?;
+                    return Err(error.into());
+                }
+                transaction.commit()?
+            };
+            self.queries.apply_changes(&changes);
+            Ok(())
+        }
+
+        fn insert_ir_artefact_direct(
+            &mut self,
+            artefact: &RawIrArtefact,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let project = self.project.write();
+            let key = IrArtefactKey::new(artefact.header().function(), artefact.header().level());
+
+            project.storage.entities.insert(&key, artefact)?;
             Ok(())
         }
 
@@ -613,6 +863,255 @@ mod test {
             ));
             function
         }
+
+        fn ir_artefact(payload: Vec<u8>) -> RawIrArtefact {
+            let tag = payload.first().copied().unwrap_or_default();
+            let header = ArtefactHeader::new(
+                FunctionId::default(),
+                IrLevel::PCode,
+                PCODE_SCHEMA_VERSION,
+                0,
+            );
+            let common = CommonBody::new(
+                Vec::new(),
+                Vec::new(),
+                vec![SourceRun::new(
+                    PackedRange::EMPTY,
+                    Address::new(AddressSpaceId::new(1), u64::from(tag)),
+                    u32::from(tag),
+                    u32::try_from(payload.len()).expect("test payload length should fit"),
+                )],
+                Vec::new(),
+            );
+
+            PCodeBuilder::new(header, common)
+                .finish(&BuildStatus::new())
+                .expect("test PCode artefact should verify")
+                .to_raw_artefact()
+                .expect("test PCode artefact should encode")
+        }
+
+        fn pcode_body_for(function: FunctionId) -> PCodeBody {
+            let header = ArtefactHeader::new(function, IrLevel::PCode, PCODE_SCHEMA_VERSION, 0);
+
+            PCodeBuilder::new(header, CommonBody::default())
+                .finish(&BuildStatus::new())
+                .expect("empty PCode body should verify")
+        }
+
+        fn pcode_body() -> PCodeBody {
+            Self::pcode_body_for(FunctionId::default())
+        }
+
+        fn llil_body(function: FunctionId, parent: &PCodeBody) -> LlilBody {
+            let mut header = ArtefactHeader::new(function, IrLevel::Llil, LLIL_SCHEMA_VERSION, 0);
+            header.set_parent_digest(
+                parent
+                    .to_raw_artefact()
+                    .expect("test PCode body should encode")
+                    .header()
+                    .content_digest(),
+            );
+
+            LlilBuilder::new(header, CommonBody::default())
+                .finish(&BuildStatus::new())
+                .expect("empty LLIL body should verify")
+        }
+
+        fn ssa_body(function: FunctionId, parent: &LlilBody) -> SsaBody {
+            let mut header =
+                ArtefactHeader::new(function, IrLevel::LlilSsa, LLIL_SSA_SCHEMA_VERSION, 0);
+            header.set_parent_digest(
+                parent
+                    .to_raw_artefact()
+                    .expect("test LLIL body should encode")
+                    .header()
+                    .content_digest(),
+            );
+
+            SsaBuilder::new(header, CommonBody::default())
+                .finish(&BuildStatus::new())
+                .expect("empty SSA body should verify")
+        }
+
+        fn publish_ssa_chain(
+            &mut self,
+            function: FunctionId,
+        ) -> Result<SsaBody, Box<dyn std::error::Error>> {
+            let mut pcode = Self::pcode_body_for(function);
+            let mut llil = Self::llil_body(function, &pcode);
+            let mut ssa = Self::ssa_body(function, &llil);
+
+            self.publish_ir_body(&mut pcode)?;
+            self.publish_ir_body(&mut llil)?;
+            self.publish_ir_body(&mut ssa)?;
+
+            Ok(ssa)
+        }
+    }
+
+    #[test]
+    fn test_query_reader_reads_ir_artefact() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let artefact = Fixture::ir_artefact(vec![7, 8, 9]);
+
+        fixture.publish_ir_artefact(artefact.clone())?;
+
+        let read = fixture
+            .reader()
+            .ir_artefact(FunctionId::default(), IrLevel::PCode)?
+            .expect("artefact should be visible to query reader");
+
+        assert_eq!(read.payload(), artefact.payload());
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_memoises_ir_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let entry = Address::from(0x1_0000_0000u64);
+        let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
+        let mut body = Fixture::pcode_body_for(function);
+        fixture.publish_ir_body(&mut body)?;
+        fixture.queries.cache.clear_ir();
+
+        let reader = fixture.reader();
+        assert_eq!(fixture.queries.cache.ir_len(), 0);
+
+        reader
+            .pcode_body(function)?
+            .expect("PCode body should be visible");
+        assert_eq!(fixture.queries.cache.ir_len(), 1);
+
+        reader
+            .ir_artefact(function, IrLevel::PCode)?
+            .expect("cached artefact should be visible");
+        assert_eq!(fixture.queries.cache.ir_len(), 1);
+
+        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+        assert_eq!(fixture.queries.cache.ir_len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_ir_artefact_snapshot_survives_invalidation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let entry = Address::from(0x1_0000_0000u64);
+        let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
+        let mut body = Fixture::pcode_body_for(function);
+        let artefact = body.to_raw_artefact()?;
+
+        fixture.publish_ir_body(&mut body)?;
+
+        let reader = fixture.reader();
+        let snapshot = reader
+            .ir_artefact(function, IrLevel::PCode)?
+            .expect("PCode artefact should be visible to query reader");
+
+        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+
+        assert!(reader.ir_artefact(function, IrLevel::PCode)?.is_none());
+        assert_eq!(snapshot.content_digest(), artefact.content_digest());
+        assert_eq!(snapshot.payload(), artefact.payload());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_reads_typed_ir_body() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let mut body = Fixture::pcode_body();
+
+        fixture.publish_ir_body(&mut body)?;
+
+        let read = fixture
+            .reader()
+            .ir_body::<PCodeBody>(FunctionId::default())?
+            .expect("PCode body should be visible to query reader");
+        let named = fixture
+            .reader()
+            .pcode_body(FunctionId::default())?
+            .expect("PCode body should be visible to named query reader");
+
+        assert_eq!(read.to_raw_artefact()?, body.to_raw_artefact()?);
+        assert_eq!(named.to_raw_artefact()?, body.to_raw_artefact()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_recovers_after_corrupt_ir_artefact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let function = FunctionId::default();
+        let pcode = Fixture::pcode_body_for(function);
+        let llil = Fixture::llil_body(function, &pcode);
+        let ssa = Fixture::ssa_body(function, &llil);
+        let valid = [
+            pcode.to_raw_artefact()?,
+            llil.to_raw_artefact()?,
+            ssa.to_raw_artefact()?,
+        ];
+
+        let reader = fixture.reader();
+        for artefact in valid {
+            let level = artefact.header().level();
+            let mut header = ArtefactHeader::new(function, level, artefact.header().schema(), 0);
+            header.set_parent_digest(artefact.header().parent_digest());
+            let corrupt = RawIrArtefact::new(header, CommonBody::default(), vec![1, 2, 3]);
+
+            fixture.insert_ir_artefact_direct(&corrupt)?;
+
+            assert!(matches!(
+                reader.ir_artefact(function, level),
+                Err(QueryError::Project(ProjectError::Il(
+                    IlError::ArtefactDecode { level: found }
+                ))) if found == level
+            ));
+
+            fixture.insert_ir_artefact_direct(&artefact)?;
+
+            let read = reader
+                .ir_artefact(function, level)?
+                .expect("valid artefact should be readable after corrupt artefact");
+
+            assert_eq!(read.content_digest(), artefact.content_digest());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let function = FunctionId::default();
+
+        fixture.publish_ssa_chain(function)?;
+
+        let reader = fixture.reader();
+        let use_index = reader
+            .llil_ssa_use_index(function)?
+            .expect("SSA use index should be available");
+        let dominance = reader
+            .llil_ssa_dominance(function)?
+            .expect("SSA dominance should be available");
+        let frontiers = reader
+            .llil_ssa_dominance_frontiers(function)?
+            .expect("SSA dominance frontiers should be available");
+        let liveness = reader
+            .llil_ssa_liveness(function)?
+            .expect("SSA liveness should be available");
+
+        let value = ValueId::try_from_index(0)?;
+        let block = BlockId::try_from_index(0)?;
+
+        assert!(use_index.uses_for(value).is_empty());
+        assert!(!dominance.is_reachable(block));
+        assert!(frontiers.frontier(block).is_empty());
+        assert!(liveness.live_in(block).is_empty());
+        assert!(liveness.live_out(block).is_empty());
+        Ok(())
     }
 
     #[test]
@@ -755,7 +1254,6 @@ mod test {
         }
 
         assert!(fixture.queries.cache.len() <= QUERY_MEMO_CAPACITY);
-
         Ok(())
     }
 
@@ -1145,7 +1643,7 @@ mod test {
             Revision::new(base.value() + 1),
             [ChangeRecord::FunctionChanged {
                 entry: functions.start_address(),
-                kind: crate::engine::change::FunctionChangeKind::Body,
+                kind: FunctionChangeKind::Body,
                 coverage: function_coverage,
             }],
         ));

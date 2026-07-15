@@ -76,6 +76,7 @@ fn convert_instruction(
     length: usize,
     operations: &[CorePCodeOp],
     disassembly: Option<String>,
+    text: String,
 ) -> Instruction {
     let pcode = operations
         .iter()
@@ -89,7 +90,7 @@ fn convert_instruction(
         properties: 0,
         disassembly,
         pcode,
-        text: language.display(&operations.to_vec()).to_string(),
+        text,
     }
 }
 
@@ -151,6 +152,7 @@ impl Lifter {
             length,
             &[],
             Some(disassembly),
+            String::new(),
         ))
     }
 
@@ -169,12 +171,15 @@ impl Lifter {
             .inner
             .lift_into(address, &bytes, &mut operations)
             .map_err(lifter_error)?;
+        let language = self.inner.language();
+
         Ok(convert_instruction(
-            self.inner.language(),
+            language,
             address,
             length,
             &operations,
             None,
+            language.display(&operations).to_string(),
         ))
     }
 }

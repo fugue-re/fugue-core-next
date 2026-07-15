@@ -1,16 +1,29 @@
 use std::fmt;
 
-use fugue_lifter::{Language, Op, PCodeOp};
+use fugue_lifter::Op;
+use fugue_lifter::runtime::language::Language;
 use smallvec::SmallVec;
+use thiserror::Error;
 
+use crate::il::pcode::PCodeOp;
 use crate::ir::cfg::FlowKind;
 use crate::ir::{Address, Id, Location, Reference, ReferenceKind, ReferenceOrigin, ToRawAddress};
-use crate::lifter::{Lifter, LifterError};
 
 pub type InsnId = Id<Insn>;
 
-// TODO: review the choice of Vec
 pub type InsnList = Vec<Insn>;
+
+#[derive(Debug, Error)]
+pub enum InsnError {
+    #[error("instruction length {length} exceeds retained limit")]
+    InstructionTooLong { length: usize },
+}
+
+impl InsnError {
+    pub const fn instruction_too_long(length: usize) -> Self {
+        Self::InstructionTooLong { length }
+    }
+}
 
 #[derive(
     Debug,
@@ -27,87 +40,171 @@ pub type InsnList = Vec<Insn>;
 pub struct Insn {
     address: Address,
     properties: InsnProperties,
-    operations: Vec<PCodeOp>,
     targets: SmallVec<[(u16, InsnTarget); 2]>,
     length: u8,
 }
 
 impl Insn {
-    pub(crate) fn from_lifted(
+    pub(crate) fn from_resolved_flow(
         language: &'static Language,
         address: Address,
         length: usize,
-        operations: Vec<PCodeOp>,
-    ) -> Self {
-        let naddress = address + length;
-
-        let targets = InsnTarget::from_lifted(language, address, naddress, &operations);
-
+        operations: &[PCodeOp],
+    ) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        Self::push_targets_for_operations(language, address, length, operations, &mut targets);
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
             properties |= InsnProperties::NOP;
         }
 
-        properties |= InsnProperties::LIFTED;
+        properties |= InsnProperties::FLOW_RESOLVED;
 
-        Self {
+        Ok(Self {
             address,
             properties,
-            operations,
             targets,
-            length: length
-                .try_into()
-                .expect("instruction length must not exceed 255 bytes"),
-        }
+            length: Self::checked_length(length)?,
+        })
     }
 
     pub(crate) fn from_disassembly(
         address: Address,
         length: usize,
         properties: InsnProperties,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, InsnError> {
+        Ok(Self {
             address,
             properties,
-            operations: Vec::new(),
             targets: SmallVec::new(),
-            length: length
-                .try_into()
-                .expect("instruction length must not exceed 255 bytes"),
-        }
+            length: Self::checked_length(length)?,
+        })
     }
 
-    pub fn ensure_lifted(&mut self, lifter: &mut Lifter, bytes: &[u8]) -> Result<(), LifterError> {
-        if self.is_lifted() {
-            return Ok(());
-        }
-
-        self.operations.clear();
-        self.targets.clear();
-
-        let length = lifter.lift_into(self.address.raw_address(), bytes, &mut self.operations)?;
-
-        self.length = length
+    fn checked_length(length: usize) -> Result<u8, InsnError> {
+        length
             .try_into()
-            .expect("instruction length must not exceed 255 bytes");
+            .map_err(|_| InsnError::instruction_too_long(length))
+    }
 
-        let naddress = self.next_address();
+    pub(crate) fn push_targets_for_operations(
+        language: &'static Language,
+        address: Address,
+        length: usize,
+        operations: &[PCodeOp],
+        targets: &mut SmallVec<[(u16, InsnTarget); 2]>,
+    ) {
+        let op_count = operations.len() as u16;
+        let next_address = address + length;
 
-        InsnTarget::from_lifted_into(
-            lifter.language(),
-            self.address,
-            naddress,
-            &self.operations,
-            &mut self.targets,
-        );
+        let is_local = |location: &Location| -> bool { location.address() == address };
+        let is_fall = |location: &Location| -> bool { location.address() == next_address };
 
-        self.properties = InsnProperties::from_targets(&self.targets) | InsnProperties::LIFTED;
+        let next_location = |index: u16| -> Location {
+            if index >= op_count {
+                Location::new(next_address, index - op_count)
+            } else {
+                Location::new(address, index)
+            }
+        };
 
-        if self.operations.is_empty() {
-            self.properties |= InsnProperties::NOP;
+        let push_call = |index: u16,
+                         location: Option<Location>,
+                         targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+            let Some(location) = location else {
+                targets.push((index, InsnTarget::InterSub(None)));
+                return;
+            };
+
+            if location.position() != 0 {
+                targets.push((index, InsnTarget::IntraIns(location, false)));
+            } else {
+                targets.push((index, InsnTarget::InterSub(Some(location.address()))));
+            }
+        };
+
+        let push_branch =
+            |index: u16,
+             location: Option<Location>,
+             targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+                let Some(location) = location else {
+                    targets.push((index, InsnTarget::Unresolved));
+                    return;
+                };
+
+                if is_local(&location) {
+                    targets.push((index, InsnTarget::IntraIns(location, false)));
+                } else if is_fall(&location) {
+                    targets.push((index, InsnTarget::IntraBlk(location, false)));
+                } else {
+                    targets.push((index, InsnTarget::InterBlk(location.address())));
+                }
+            };
+
+        let push_fall =
+            |index: u16, fall: Location, targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+                targets.push((
+                    index,
+                    if is_local(&fall) {
+                        InsnTarget::IntraIns(fall, true)
+                    } else {
+                        InsnTarget::IntraBlk(fall, true)
+                    },
+                ));
+            };
+
+        if op_count == 0 {
+            push_fall(0, next_location(1), targets);
+            return;
         }
 
-        Ok(())
+        for (index, operation) in operations.iter().enumerate() {
+            let index = index as u16;
+            let next = next_location(index + 1);
+            let inputs = operation.inputs();
+
+            match operation.op() {
+                Op::Branch => {
+                    let location = Location::absolute_from(language, address, inputs[0], index);
+                    push_branch(index, location, targets);
+                }
+                Op::CBranch => {
+                    let location = Location::absolute_from(language, address, inputs[0], index);
+                    push_branch(index, location, targets);
+                    push_fall(index, next, targets);
+                }
+                Op::IBranch => {
+                    push_branch(index, None, targets);
+                }
+                Op::Call => {
+                    let location = Location::absolute_from(language, address, inputs[0], index);
+                    push_call(index, location, targets);
+                    push_fall(index, next, targets);
+                }
+                Op::ICall => {
+                    push_call(index, None, targets);
+                    push_fall(index, next, targets);
+                }
+                Op::Return => {
+                    let return_address = inputs[0]
+                        .to_address(language)
+                        .map(|address_offset| Address::new(address.space(), address_offset));
+                    targets.push((
+                        index,
+                        InsnTarget::InterRet(return_address, index + 1 == op_count),
+                    ));
+                }
+                Op::UserOp(_, _) => {
+                    targets.push((index, InsnTarget::Intrinsic));
+                    push_fall(index, next, targets);
+                }
+                _ => {
+                    if index + 1 == op_count {
+                        push_fall(index, next, targets);
+                    }
+                }
+            }
+        }
     }
 
     pub fn address(&self) -> Address {
@@ -178,12 +275,12 @@ impl Insn {
         self.properties.remove(InsnProperties::INVALID);
     }
 
-    pub fn mark_lifted(&mut self) {
-        self.properties |= InsnProperties::LIFTED;
+    pub fn mark_flow_resolved(&mut self) {
+        self.properties |= InsnProperties::FLOW_RESOLVED;
     }
 
-    pub fn mark_needs_lifting(&mut self) {
-        self.properties |= InsnProperties::NEEDS_LIFTING;
+    pub fn mark_needs_flow_resolution(&mut self) {
+        self.properties |= InsnProperties::NEEDS_FLOW_RESOLUTION;
     }
 
     pub fn is_taken(&self) -> bool {
@@ -242,12 +339,13 @@ impl Insn {
         self.properties().contains(InsnProperties::FALL)
     }
 
-    pub fn is_lifted(&self) -> bool {
-        self.properties().intersects(InsnProperties::LIFTED)
+    pub fn has_resolved_flow(&self) -> bool {
+        self.properties().intersects(InsnProperties::FLOW_RESOLVED)
     }
 
-    pub fn needs_lifting(&self) -> bool {
-        self.properties().intersects(InsnProperties::NEEDS_LIFTING)
+    pub fn needs_flow_resolution(&self) -> bool {
+        self.properties()
+            .intersects(InsnProperties::NEEDS_FLOW_RESOLUTION)
     }
 
     pub fn len(&self) -> usize {
@@ -283,53 +381,6 @@ impl Insn {
                     .with_origin(ReferenceOrigin::Derived),
             )
         })
-    }
-
-    pub fn data_references(&self) -> impl Iterator<Item = Reference> + '_ {
-        let base = self.address;
-        self.operations.iter().filter_map(move |operation| {
-            let kind = match operation.op() {
-                Op::Load(_) => ReferenceKind::read(),
-                Op::Store(_) => ReferenceKind::write(),
-                _ => return None,
-            };
-            let pointer = operation.inputs().first()?;
-            if !pointer.is_constant() {
-                return None;
-            }
-            Some(
-                Reference::new(base, Address::new(base.space(), pointer.offset()), kind)
-                    .with_origin(ReferenceOrigin::Derived),
-            )
-        })
-    }
-
-    pub fn display(&self, language: &'static Language) -> InsnFormatter {
-        InsnFormatter::new(self, language)
-    }
-}
-
-pub struct InsnFormatter<'a> {
-    lifted: &'a Insn,
-    language: &'static Language,
-}
-
-impl<'a> InsnFormatter<'a> {
-    pub fn new(lifted: &'a Insn, language: &'static Language) -> Self {
-        Self { lifted, language }
-    }
-}
-
-impl fmt::Display for InsnFormatter<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lifted = self.lifted;
-        let language = self.language;
-
-        if !lifted.is_lifted() {
-            return write!(f, "<not lifted; length: {}>", lifted.len());
-        }
-
-        language.display(&lifted.operations).fmt(f)
     }
 }
 
@@ -368,11 +419,9 @@ bitflags::bitflags! {
         // instruction is a halt (e.g., HLT)
         const HALT          = 0b0001_0000_0000_0000;
 
-        // instruction has been lifted
-        const LIFTED        = 0b0010_0000_0000_0000;
+        const FLOW_RESOLVED = 0b0010_0000_0000_0000;
 
-        // instruction needs to be lifted
-        const NEEDS_LIFTING = 0b0100_0000_0000_0000;
+        const NEEDS_FLOW_RESOLUTION = 0b0100_0000_0000_0000;
 
         const UNVIABLE      = Self::TRAP.bits() | Self::INVALID.bits();
 
@@ -500,122 +549,14 @@ pub enum InsnTarget {
 }
 
 impl InsnTarget {
-    pub(crate) fn from_lifted(
-        language: &'static Language,
-        address: Address,
-        naddress: Address,
-        opns: &[PCodeOp],
-    ) -> SmallVec<[(u16, Self); 2]> {
-        let mut targets = SmallVec::new();
-        Self::from_lifted_into(language, address, naddress, opns, &mut targets);
-        targets
-    }
-
-    fn from_lifted_into(
-        language: &'static Language,
-        address: Address,
-        naddress: Address,
-        opns: &[PCodeOp],
-        targets: &mut SmallVec<[(u16, Self); 2]>,
-    ) {
-        let op_count = opns.len() as u16;
-
-        let is_local = |loc: &Location| -> bool { loc.address() == address };
-        let is_fall = |loc: &Location| -> bool { loc.address() == naddress };
-
-        let nlocation = |i: u16| -> Location {
-            if i >= op_count {
-                Location::new(naddress, i - op_count)
-            } else {
-                Location::new(address, i)
-            }
-        };
-
-        let ncall = |i: u16, loc: Option<Location>, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            let Some(loc) = loc else {
-                targets.push((i, Self::InterSub(None)));
-                return;
-            };
-
-            if loc.position() != 0 {
-                targets.push((i, Self::IntraIns(loc, false)));
-            } else {
-                targets.push((i, Self::InterSub(Some(loc.address()))));
-            }
-        };
-
-        let nbranch = |i: u16, loc: Option<Location>, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            let Some(loc) = loc else {
-                targets.push((i, Self::Unresolved));
-                return;
-            };
-
-            if is_local(&loc) {
-                targets.push((i, Self::IntraIns(loc, false)));
-            } else if is_fall(&loc) {
-                targets.push((i, Self::IntraBlk(loc, false)));
-            } else {
-                targets.push((i, Self::InterBlk(loc.address())));
-            }
-        };
-
-        let nfall = |i: u16, fall: Location, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            targets.push((
-                i,
-                if is_local(&fall) {
-                    Self::IntraIns(fall, true)
-                } else {
-                    Self::IntraBlk(fall, true)
-                },
-            ));
-        };
-
-        if op_count == 0 {
-            nfall(0, nlocation(1), targets);
-            return;
-        }
-
-        for (i, stmt) in opns.iter().enumerate() {
-            let i = i as u16;
-            let next = nlocation(i + 1);
-            let inputs = stmt.inputs();
-            match stmt.op() {
-                Op::Branch => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    nbranch(i, locn, targets);
-                }
-                Op::CBranch => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    nbranch(i, locn, targets);
-                    nfall(i, next, targets);
-                }
-                Op::IBranch => {
-                    nbranch(i, None, targets);
-                }
-                Op::Call => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    ncall(i, locn, targets);
-                    nfall(i, next, targets);
-                }
-                Op::ICall => {
-                    ncall(i, None, targets);
-                    nfall(i, next, targets);
-                }
-                Op::Return => {
-                    let ret_addr = inputs[0]
-                        .to_address(language)
-                        .map(|a| Address::new(address.space(), a));
-                    targets.push((i, Self::InterRet(ret_addr, i + 1 == op_count)));
-                }
-                Op::UserOp(_, _) => {
-                    targets.push((i, Self::Intrinsic));
-                    nfall(i, next, targets);
-                }
-                _ => {
-                    if i + 1 == op_count {
-                        nfall(i, next, targets);
-                    }
-                }
+    pub fn address(&self) -> Option<Address> {
+        match self {
+            Self::IntraIns(location, _) | Self::IntraBlk(location, _) => Some(location.address()),
+            Self::InterBlk(address)
+            | Self::InterSub(Some(address))
+            | Self::InterRet(Some(address), _) => Some(*address),
+            Self::InterSub(None) | Self::InterRet(None, _) | Self::Intrinsic | Self::Unresolved => {
+                None
             }
         }
     }

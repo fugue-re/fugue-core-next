@@ -240,14 +240,14 @@ impl DisassemblerT for AArch64Disassembler {
                     address,
                     size,
                     if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
+                        InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
                         InsnProperties::FALL
                     },
-                )
+                )?
             }
             Err(DecodeError::IncompleteDecoder) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));

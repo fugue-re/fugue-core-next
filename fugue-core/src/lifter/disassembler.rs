@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use thiserror::Error;
 
-use crate::ir::{Address, Insn};
+use crate::ir::{Address, Insn, InsnError};
 use crate::lifter::LiftingContext;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 
@@ -10,6 +10,8 @@ use crate::lifter::traits::Disassembler as DisassemblerT;
 pub enum DisassemblerError {
     #[error(transparent)]
     Disassembler(anyhow::Error),
+    #[error(transparent)]
+    Instruction(#[from] InsnError),
     #[error("invalid instruction at {0}")]
     InvalidInstruction(Address),
 }

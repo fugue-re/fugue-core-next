@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::ops::Bound;
@@ -647,7 +647,7 @@ impl ReferenceIndex {
         let asserted = self.clear_derived()?;
 
         for function in functions {
-            for reference in blocks.references(function.blocks().map(|(_, id)| id)) {
+            for reference in blocks.flow_references(function.blocks().map(|(_, id)| id)) {
                 let key = ReferenceKey::new(reference.from(), reference.target());
                 if !asserted.contains(&key) {
                     self.insert(&reference)?;
@@ -706,26 +706,56 @@ impl ReferenceIndex {
         Ok(())
     }
 
-    pub(crate) fn replace_derived(
+    pub(crate) fn replace_derived_in_class(
         &self,
         current: &[Reference],
         derived: impl IntoIterator<Item = Reference>,
+        class: ReferenceClass,
     ) -> Result<(), EntityStorageError> {
-        let mut asserted = HashSet::new();
+        let mut occupied = HashSet::new();
         for reference in current {
-            if reference.origin().is_derived() {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if reference.origin().is_derived() && reference.kind().class() == class {
                 self.remove(reference.from(), reference.target())?;
             } else {
-                asserted.insert(ReferenceKey::new(reference.from(), reference.target()));
+                occupied.insert(key);
             }
         }
         for reference in derived {
+            debug_assert_eq!(reference.kind().class(), class);
             let key = ReferenceKey::new(reference.from(), reference.target());
-            if !asserted.contains(&key) {
+            if !occupied.contains(&key) {
                 self.insert(&reference)?;
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn derived_class_matches(
+        current: &[Reference],
+        derived: &[Reference],
+        class: ReferenceClass,
+    ) -> bool {
+        let mut occupied = HashSet::new();
+        let mut existing = HashMap::new();
+        for reference in current {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if reference.origin().is_derived() && reference.kind().class() == class {
+                existing.insert(key, reference.kind());
+            } else {
+                occupied.insert(key);
+            }
+        }
+
+        let mut desired = HashMap::new();
+        for reference in derived {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if !occupied.contains(&key) {
+                desired.insert(key, reference.kind());
+            }
+        }
+
+        existing == desired
     }
 
     fn collect_range(
@@ -805,7 +835,16 @@ mod test {
     use fugue_lifter::{Op, PCodeOp, Varnode};
 
     use super::*;
-    use crate::ir::{CodeBlock, Function, FunctionTable, Insn};
+    use crate::il::common::{
+        ArtefactHeader, BuildStatus, CommonBody, Finish, IrLevel, OperationId, PackedRange,
+        SourceRun,
+    };
+    use crate::il::pcode::{
+        AddressAnnotation, AddressAnnotationPayload, PCODE_SCHEMA_VERSION, PCodeAddressContext,
+        PCodeBuilder,
+    };
+    use crate::ir::block::table::CodeBlockTableError;
+    use crate::ir::{CodeBlock, Function, FunctionId, FunctionTable, Insn};
     use crate::lifter::{Language, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
 
@@ -819,6 +858,47 @@ mod test {
 
     fn flow_reference(from: Address, to: Address) -> Reference {
         Reference::new(from, to, ReferenceKind::call()).with_origin(ReferenceOrigin::Derived)
+    }
+
+    fn derived_read(from: Address, to: Address) -> Reference {
+        Reference::new(from, to, ReferenceKind::read()).with_origin(ReferenceOrigin::Derived)
+    }
+
+    #[test]
+    fn test_derived_class_matches_ignores_class_and_shadowing() {
+        let from = address(0, 0x1000);
+        let data_target = address(0, 0x2000);
+        let flow_target = address(0, 0x3000);
+
+        let current = [
+            derived_read(from, data_target),
+            flow_reference(from, flow_target),
+        ];
+        let derived = [derived_read(from, data_target)];
+        assert!(ReferenceIndex::derived_class_matches(
+            &current,
+            &derived,
+            ReferenceClass::Data,
+        ));
+
+        let upgraded = [Reference::new(
+            from,
+            data_target,
+            ReferenceKind::read().merged(ReferenceKind::write()),
+        )
+        .with_origin(ReferenceOrigin::Derived)];
+        assert!(!ReferenceIndex::derived_class_matches(
+            &current,
+            &upgraded,
+            ReferenceClass::Data,
+        ));
+
+        let asserted = [derived_read(from, data_target).with_origin(ReferenceOrigin::Asserted)];
+        assert!(ReferenceIndex::derived_class_matches(
+            &asserted,
+            &derived,
+            ReferenceClass::Data,
+        ));
     }
 
     fn single_point(address: Address) -> AddressRangeSet {
@@ -1104,7 +1184,11 @@ mod test {
         index.insert(&flow_reference(from, old_target))?;
 
         let current = index.references_in(&single_point(from))?;
-        index.replace_derived(&current, [flow_reference(from, new_target)])?;
+        index.replace_derived_in_class(
+            &current,
+            [flow_reference(from, new_target)],
+            ReferenceClass::Flow,
+        )?;
 
         let from_refs = index
             .references_from(from, None)?
@@ -1158,89 +1242,136 @@ mod test {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
         let insn_address = address(0, 0x1000);
+        let data_space = insn_address.space();
         let data_address = 0x4000u64;
-
-        let load = Insn::from_lifted(
-            language,
-            insn_address,
-            1,
-            vec![PCodeOp {
-                op: Op::Load(default_space),
-                inputs: Inputs::one(Varnode::constant(data_address, 8)),
-                output: Varnode::new(language.register_space(), 0, 8),
-            }],
+        let register_value = Varnode::new(language.register_space(), 0, 8);
+        let load_operation = PCodeOp {
+            op: Op::Load(default_space),
+            inputs: Inputs::one(Varnode::constant(data_address, 8)),
+            output: register_value,
+        };
+        let store_operation = PCodeOp {
+            op: Op::Store(default_space),
+            inputs: Inputs([Varnode::constant(data_address, 8), register_value]),
+            output: Varnode::INVALID,
+        };
+        let header = ArtefactHeader::new(
+            FunctionId::default(),
+            IrLevel::PCode,
+            PCODE_SCHEMA_VERSION,
+            0,
         );
-        let derived = load.data_references().collect::<Vec<_>>();
-        assert_eq!(derived.len(), 1);
+        let common = CommonBody::new(
+            Vec::new(),
+            Vec::new(),
+            vec![SourceRun::new(
+                PackedRange::new(0, 2).unwrap(),
+                insn_address,
+                0,
+                2,
+            )],
+            Vec::new(),
+        );
+        let annotations = [
+            AddressAnnotation::new(
+                OperationId::try_from_index(0).unwrap(),
+                AddressAnnotationPayload::ComputedSpace(data_space),
+            ),
+            AddressAnnotation::new(
+                OperationId::try_from_index(1).unwrap(),
+                AddressAnnotationPayload::ComputedSpace(data_space),
+            ),
+        ];
+        let mut context = PCodeAddressContext::new(insn_address, &annotations);
+        let mut builder = PCodeBuilder::new(header, common);
+        builder.push_lifter_stream(&[load_operation, store_operation], language, &mut context)?;
+        let body = builder.finish(&BuildStatus::new())?;
+        let artefact_refs = body.data_references().collect::<Vec<_>>();
+
+        assert_eq!(artefact_refs.len(), 2);
+        assert_eq!(artefact_refs[0].from(), insn_address);
         assert_eq!(
-            derived[0].target().address(),
-            Some(address(0, data_address))
+            artefact_refs[0].target().address(),
+            Some(Address::new(data_space, data_address))
         );
-        assert!(derived[0].kind().is_read());
-        assert!(derived[0].origin().is_derived());
+        assert!(artefact_refs[0].kind().is_read());
+        assert!(artefact_refs[0].origin().is_derived());
+        assert_eq!(artefact_refs[1].from(), insn_address);
+        assert!(artefact_refs[1].kind().is_write());
+        assert_eq!(
+            artefact_refs[1].target().address(),
+            Some(Address::new(data_space, data_address))
+        );
 
-        let register_relative = Insn::from_lifted(
-            language,
-            insn_address,
-            1,
-            vec![PCodeOp {
-                op: Op::Load(default_space),
-                inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
-                output: Varnode::new(language.register_space(), 0, 8),
-            }],
+        let header = ArtefactHeader::new(
+            FunctionId::default(),
+            IrLevel::PCode,
+            PCODE_SCHEMA_VERSION,
+            0,
         );
-        assert!(register_relative.data_references().next().is_none());
+        let common = CommonBody::new(
+            Vec::new(),
+            Vec::new(),
+            vec![SourceRun::new(
+                PackedRange::new(0, 1).unwrap(),
+                insn_address,
+                0,
+                1,
+            )],
+            Vec::new(),
+        );
+        let annotations = [AddressAnnotation::new(
+            OperationId::try_from_index(0).unwrap(),
+            AddressAnnotationPayload::ComputedSpace(data_space),
+        )];
+        let mut context = PCodeAddressContext::new(insn_address, &annotations);
+        let mut builder = PCodeBuilder::new(header, common);
+        let register_relative = PCodeOp {
+            op: Op::Load(default_space),
+            inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
+            output: Varnode::new(language.register_space(), 0, 8),
+        };
+        builder.push_lifter_stream(&[register_relative], language, &mut context)?;
+        let body = builder.finish(&BuildStatus::new())?;
+        assert!(body.data_references().next().is_none());
 
         Ok(())
     }
 
     #[test]
-    fn test_derivation_merges_read_and_write_at_one_address()
+    fn test_block_reference_derivation_excludes_instruction_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
         let insn_address = address(0, 0x1000);
         let data = 0x4000u64;
 
-        let read_modify_write = Insn::from_lifted(
-            language,
-            insn_address,
-            1,
-            vec![
-                PCodeOp {
-                    op: Op::Load(default_space),
-                    inputs: Inputs::one(Varnode::constant(data, 8)),
-                    output: Varnode::new(language.register_space(), 0, 8),
-                },
-                PCodeOp {
-                    op: Op::Store(default_space),
-                    inputs: Inputs([
-                        Varnode::constant(data, 8),
-                        Varnode::new(language.register_space(), 0, 8),
-                    ]),
-                    output: Varnode::INVALID,
-                },
-            ],
-        );
+        let operations = [
+            PCodeOp {
+                op: Op::Load(default_space),
+                inputs: Inputs::one(Varnode::constant(data, 8)),
+                output: Varnode::new(language.register_space(), 0, 8),
+            },
+            PCodeOp {
+                op: Op::Store(default_space),
+                inputs: Inputs([
+                    Varnode::constant(data, 8),
+                    Varnode::new(language.register_space(), 0, 8),
+                ]),
+                output: Varnode::INVALID,
+            },
+        ];
+        let read_modify_write = Insn::from_resolved_flow(language, insn_address, 1, &operations)?;
 
         let mut blocks = CodeBlockTable::new_transient();
         let block_id = blocks.insert(insn_address, |id, address| {
-            Ok(CodeBlock::try_new(id, address, 1, vec![read_modify_write])
-                .expect("block construction failed"))
+            CodeBlock::try_new(id, address, 1, vec![read_modify_write])
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
-        let derived = blocks.references([block_id]);
-        let data_references = derived
-            .iter()
-            .filter(|reference| reference.kind().is_data())
-            .collect::<Vec<_>>();
-        assert_eq!(data_references.len(), 1);
-        assert!(data_references[0].kind().is_read());
-        assert!(data_references[0].kind().is_write());
-        assert_eq!(
-            data_references[0].target().address(),
-            Some(address(0, data))
-        );
+        let derived = blocks.flow_references([block_id]);
+
+        assert!(derived.iter().all(|reference| !reference.kind().is_data()));
 
         Ok(())
     }
@@ -1288,28 +1419,19 @@ mod test {
             .iter()
             .enumerate()
             .map(|(offset, target)| {
-                Insn::from_lifted(
-                    language,
-                    entry + offset,
-                    1,
-                    vec![PCodeOp {
-                        op: Op::Call,
-                        inputs: Inputs::one(Varnode::new(
-                            language.default_space(),
-                            target.offset(),
-                            8,
-                        )),
-                        output: Varnode::INVALID,
-                    }],
-                )
+                let operations = [PCodeOp {
+                    op: Op::Call,
+                    inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
+                    output: Varnode::INVALID,
+                }];
+
+                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let block_id = blocks.insert(entry, |id, address| {
-            Ok(
-                CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
-                    .expect("block construction failed"),
-            )
+            CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
         functions.insert(entry, |id, address| {

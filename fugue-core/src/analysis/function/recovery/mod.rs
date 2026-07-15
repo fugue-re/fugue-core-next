@@ -76,12 +76,20 @@ impl FunctionRecoveryError {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
 
+    pub fn invalid_block_id(id: usize) -> Self {
+        FunctionRecoveryError::InvalidBlockId(id)
+    }
+
     pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
         FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
     }
 
     pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
         FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
+    }
+
+    pub fn invalid_instruction_id(id: usize) -> Self {
+        FunctionRecoveryError::InvalidInstructionId(id)
     }
 }
 
