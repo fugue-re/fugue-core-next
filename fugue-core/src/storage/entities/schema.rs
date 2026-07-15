@@ -22,6 +22,7 @@ impl EntityKeyId {
         self.0 as usize
     }
 
+    #[cfg(feature = "sqlite")]
     pub(crate) const fn prefix(self, entity: EntityId) -> EntityKeyPrefix {
         [self.0, entity.0]
     }

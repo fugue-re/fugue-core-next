@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
@@ -34,6 +34,7 @@ use crate::storage::segments::space::AddressSpaceId;
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 const MAX_PENDING_REGION_RANGES: usize = 4096;
+const IDLE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 pub const DEFAULT_ANALYSER_MAX_FAILURES: usize = 3;
 
 pub mod change;
@@ -1514,6 +1515,7 @@ struct Worker {
     analysers: Vec<AnalyserState>,
     cancellation: CancellationToken,
     dirty_revision: Option<Revision>,
+    last_checkpoint: Option<Instant>,
     messages: Arc<RwLock<Vec<AnalysisMessage>>>,
     persistence_policy: PersistencePolicy,
     poison: Arc<OnceLock<String>>,
@@ -1548,6 +1550,7 @@ impl Worker {
             analysers,
             cancellation,
             dirty_revision: None,
+            last_checkpoint: None,
             messages,
             persistence_policy,
             poison,
@@ -1693,7 +1696,14 @@ impl Worker {
                     let _ = reply.send(result);
                 }
                 Intake::Flush(reply) => {
-                    let _ = reply.send(self.drain_or_handle_cancelled());
+                    let result = self.drain_or_handle_cancelled().and_then(|()| {
+                        if self.persistence_policy == PersistencePolicy::OnIdle {
+                            self.persist_dirty()
+                        } else {
+                            Ok(())
+                        }
+                    });
+                    let _ = reply.send(result);
                 }
                 Intake::Save(reply) => {
                     let result = self
@@ -1775,7 +1785,7 @@ impl Worker {
                 }
 
                 if self.persistence_policy == PersistencePolicy::OnIdle {
-                    self.persist_dirty()?;
+                    self.persist_dirty_debounced()?;
                 }
                 return Ok(());
             }
@@ -1953,8 +1963,10 @@ impl Worker {
             }
             Err(payload) => {
                 let poisoned = self.poison_and_stop(Self::panic_message(payload.as_ref()));
-                transaction.abandon();
-                drop(transaction);
+                if let Err(error) = transaction.rollback() {
+                    tracing::error!("failed to roll back transaction after panic: {error}");
+                }
+                project.abandon_persistence();
                 drop(project);
                 drop(query_write);
                 self.progress.clear_message();
@@ -2036,8 +2048,10 @@ impl Worker {
             }
             Err(payload) => {
                 let poisoned = self.poison_and_stop(Self::panic_message(payload.as_ref()));
-                transaction.abandon();
-                drop(transaction);
+                if let Err(error) = transaction.rollback() {
+                    tracing::error!("failed to roll back transaction after panic: {error}");
+                }
+                project.abandon_persistence();
                 drop(project);
                 drop(query_write);
                 self.progress.clear_message();
@@ -2252,6 +2266,17 @@ impl Worker {
         self.save_checkpoint()
     }
 
+    fn persist_dirty_debounced(&mut self) -> Result<(), EngineError> {
+        if self
+            .last_checkpoint
+            .is_some_and(|last| last.elapsed() < IDLE_PERSIST_INTERVAL)
+        {
+            return Ok(());
+        }
+
+        self.persist_dirty()
+    }
+
     fn save_checkpoint(&mut self) -> Result<(), EngineError> {
         if let Err(error) = self.project.write().save() {
             if error.is_write_back_poisoned() {
@@ -2264,6 +2289,7 @@ impl Worker {
         }
 
         self.dirty_revision = None;
+        self.last_checkpoint = Some(Instant::now());
         Ok(())
     }
 

@@ -64,6 +64,9 @@ pub const DEFAULT_FUNCTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
 pub const ATTRIBUTE_CODE_BLOCK_CACHE_SIZE: &str = "storage.entities.code_block.cache_size";
 pub const DEFAULT_CODE_BLOCK_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
+pub const ATTRIBUTE_SYMBOL_CACHE_SIZE: &str = "storage.entities.symbol.cache_size";
+pub const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
     #[error("failed to create or load project: {0}")]

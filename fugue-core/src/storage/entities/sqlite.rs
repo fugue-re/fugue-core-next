@@ -58,8 +58,6 @@ const STORED_TABLE_PREFIXES: &[EntityKeyPrefix] = &[
 
 #[derive(Debug, Error)]
 pub enum SqliteEntityStorageError {
-    #[error("sqlite connection initialisation failed: {0}")]
-    ConnectionInit(rusqlite::Error),
     #[error("sqlite database initialisation failed: {0}")]
     DatabaseInit(rusqlite::Error),
     #[error("sqlite pool error: {0}")]
@@ -353,7 +351,6 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
             extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
-
         let query = build_insert_query(&prefix);
         let mut stmt = conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest, value.as_slice()])?;
@@ -769,8 +766,8 @@ impl<'a, const P: StoragePersistence> EntityStorageBulkInserter<'a>
 }
 
 struct SqliteEntityReader<'a, const P: StoragePersistence> {
-    storage: &'a SqliteEntityStorage<P>,
     conn: r2d2::PooledConnection<SqliteConnectionManager>,
+    _marker: PhantomData<&'a SqliteEntityStorage<P>>,
 }
 
 impl<'a, const P: StoragePersistence> SqliteEntityReader<'a, P> {
@@ -781,7 +778,10 @@ impl<'a, const P: StoragePersistence> SqliteEntityReader<'a, P> {
         let conn = storage.pool.get().map_err(EntityStorageError::backing)?;
         conn.execute_batch("BEGIN TRANSACTION")?;
 
-        Ok(Box::new(Self { storage, conn }))
+        Ok(Box::new(Self {
+            conn,
+            _marker: PhantomData,
+        }))
     }
 }
 
@@ -823,9 +823,9 @@ impl<const P: StoragePersistence> Drop for SqliteEntityReader<'_, P> {
 }
 
 struct SqliteEntityWriter<'a, const P: StoragePersistence> {
-    storage: &'a SqliteEntityStorage<P>,
     conn: r2d2::PooledConnection<SqliteConnectionManager>,
     committed: bool,
+    _marker: PhantomData<&'a SqliteEntityStorage<P>>,
 }
 
 impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
@@ -837,9 +837,9 @@ impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
         conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
         Ok(Box::new(Self {
-            storage,
             conn,
             committed: false,
+            _marker: PhantomData,
         }))
     }
 }

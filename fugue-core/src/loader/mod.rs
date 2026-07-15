@@ -9,7 +9,7 @@ use crate::analysis::AnalysisError;
 use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::Address;
-use crate::ir::symbol::SymbolTable;
+use crate::ir::symbol::TransientSymbolTable;
 use crate::lifter::LanguageError;
 use crate::platform::Platform;
 use crate::types::{AttributeMap, BytesOrMapping};
@@ -256,7 +256,7 @@ pub trait Loadable {
         self.architecture().platform()
     }
 
-    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         None
     }
 
@@ -416,7 +416,7 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         match self {
             Self::Elf(elf) => Loadable::image_symbols(elf),
             Self::Pe(pe) => Loadable::image_symbols(pe),

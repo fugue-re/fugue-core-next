@@ -788,9 +788,16 @@ impl ReferenceIndex {
     }
 }
 
-pub(crate) struct ReferenceRevert {
-    coverage: AddressRangeSet,
-    previous: Vec<Reference>,
+pub(crate) enum ReferenceRevert {
+    Coverage {
+        coverage: AddressRangeSet,
+        previous: Vec<Reference>,
+    },
+    Edge {
+        from: Address,
+        target: ReferenceTarget,
+        previous: Option<Reference>,
+    },
 }
 
 impl ReferenceRevert {
@@ -798,34 +805,55 @@ impl ReferenceRevert {
         index: &ReferenceIndex,
         coverage: &AddressRangeSet,
     ) -> Result<Self, EntityStorageError> {
-        Ok(Self {
+        Ok(Self::Coverage {
             coverage: coverage.clone(),
             previous: index.references_in(coverage)?,
         })
     }
 
-    pub(crate) fn point(index: &ReferenceIndex, from: Address) -> Result<Self, EntityStorageError> {
-        let mut coverage = AddressRangeSet::new();
-        coverage.insert_range(AddressRange::point(from));
-        Self::capture(index, &coverage)
+    pub(crate) fn edge(
+        from: Address,
+        target: ReferenceTarget,
+        previous: Option<Reference>,
+    ) -> Self {
+        Self::Edge {
+            from,
+            target,
+            previous,
+        }
     }
 
     pub(crate) fn had_derived(&self) -> bool {
-        self.previous
+        self.previous()
             .iter()
             .any(|reference| reference.origin().is_derived())
     }
 
     pub(crate) fn previous(&self) -> &[Reference] {
-        &self.previous
+        match self {
+            Self::Coverage { previous, .. } => previous,
+            Self::Edge { previous, .. } => previous.as_slice(),
+        }
     }
 
     pub(crate) fn restore(self, index: &ReferenceIndex) -> Result<(), EntityStorageError> {
-        index.clear_in(&self.coverage)?;
-        for reference in self.previous {
-            index.insert(&reference)?;
+        match self {
+            Self::Coverage { coverage, previous } => {
+                index.clear_in(&coverage)?;
+                for reference in previous {
+                    index.insert(&reference)?;
+                }
+                Ok(())
+            }
+            Self::Edge {
+                from,
+                target,
+                previous,
+            } => match previous {
+                Some(reference) => index.insert(&reference),
+                None => index.remove(from, target),
+            },
         }
-        Ok(())
     }
 }
 
