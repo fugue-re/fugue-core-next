@@ -140,7 +140,7 @@ impl<'p> ProjectRead<'p> {
             .project
             .symbols()
             .range_by_address((start, Bound::Unbounded))
-            .map(|(_, entry)| SymbolRecord::from_entry(entry));
+            .map(|(_, entry)| SymbolRecord::from_entry(&entry));
 
         let mut records = Vec::with_capacity(limit + 1);
         let mut group = Vec::new();
@@ -175,7 +175,7 @@ impl<'p> ProjectRead<'p> {
             .project
             .symbols()
             .get_by_address(address)
-            .map(|(_, entry)| SymbolRecord::from_entry(entry))
+            .map(|(_, entry)| SymbolRecord::from_entry(&entry))
             .filter(|record| after.is_none_or(|after| *record > after))
             .collect::<Vec<_>>();
         records.sort();

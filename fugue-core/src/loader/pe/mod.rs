@@ -22,7 +22,7 @@ use smallvec::{SmallVec, smallvec};
 use crate::arch::Arch;
 use crate::ir::{
     Endian, ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, SymbolIndex,
-    SymbolProperties, SymbolTable, SymbolTableSelector,
+    SymbolProperties, SymbolTableSelector, TransientSymbolTable,
 };
 use crate::lifter::ContextHint;
 use crate::loader::pe::extensions::ImageContext;
@@ -237,7 +237,7 @@ impl<'a> Pe<'a> {
         &self.object.borrow_loaded().state.mapping_hints
     }
 
-    pub fn image_symbols(&self) -> &SymbolTable<ImageAddress> {
+    pub fn image_symbols(&self) -> &TransientSymbolTable<ImageAddress> {
         &self.object.borrow_loaded().state.symbols
     }
 
@@ -270,7 +270,7 @@ struct PeLoadState {
     entry: Option<ImageAddress>,
     layout: ImageLayout,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    symbols: SymbolTable<ImageAddress>,
+    symbols: TransientSymbolTable<ImageAddress>,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<RawAddress, RawAddress>,
     segments: Vec<PeImageSegment>,
@@ -389,7 +389,7 @@ impl PeLoadState {
             }
         }
 
-        let mut image_symbols = SymbolTable::<ImageAddress>::new();
+        let mut image_symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, symbol) in symbols {
             let space = space_by_index.get(&index).copied().unwrap_or_default();
             image_symbols.insert(
@@ -1145,14 +1145,14 @@ where
 struct PeImageSegments<'a> {
     segments: std::slice::Iter<'a, PeImageSegment>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-    image_symbols: &'a SymbolTable<ImageAddress>,
+    image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
 
 impl<'a> PeImageSegments<'a> {
     fn new(
         segments: &'a [PeImageSegment],
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-        image_symbols: &'a SymbolTable<ImageAddress>,
+        image_symbols: &'a TransientSymbolTable<ImageAddress>,
     ) -> Self {
         Self {
             segments: segments.iter(),
@@ -1260,7 +1260,7 @@ impl Loadable for Pe<'_> {
         self.object.borrow_loaded().state.architecture.clone()
     }
 
-    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         Some(&self.object.borrow_loaded().state.symbols)
     }
 

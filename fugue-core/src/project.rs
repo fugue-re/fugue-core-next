@@ -29,9 +29,10 @@ use crate::storage::segments::mapping::{
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageRevert, SegmentWriteRevert};
 use crate::storage::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES,
-    DEFAULT_FUNCTION_CACHE_BYTES, DefaultProjectStorageProvider, SegmentStorageError,
-    StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_SYMBOL_CACHE_SIZE,
+    DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES, DEFAULT_SYMBOL_CACHE_BYTES,
+    DefaultProjectStorageProvider, SegmentStorageError, StorageContainer, StorageProvider,
+    StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
@@ -146,7 +147,6 @@ pub struct ProjectTransaction<'p> {
     segment_write_reverts: Vec<SegmentWriteRevert>,
     reference_reverts: Vec<ReferenceRevert>,
     source: ChangeSource,
-    abandoned: bool,
     committed: bool,
     span: Span,
 }
@@ -155,7 +155,7 @@ impl Drop for ProjectTransaction<'_> {
     fn drop(&mut self) {
         let span = self.span.clone();
         let _entered = span.enter();
-        if !self.abandoned && !std::thread::panicking() {
+        if !std::thread::panicking() {
             debug_assert!(self.committed, "project transaction dropped without commit");
         }
         self.project.transaction_active = false;
@@ -165,11 +165,6 @@ impl Drop for ProjectTransaction<'_> {
 impl ProjectTransaction<'_> {
     pub fn project(&self) -> &Project {
         self.project
-    }
-
-    pub(crate) fn abandon(&mut self) {
-        self.abandoned = true;
-        self.project.abandon_persistence();
     }
 
     pub(crate) fn analyse_with<S>(
@@ -352,7 +347,7 @@ impl ProjectTransaction<'_> {
             return Ok(false);
         }
 
-        let revert = ReferenceRevert::point(&self.project.references, from)?;
+        let revert = ReferenceRevert::edge(from, target, existing);
         self.project.references.insert(&resolved)?;
         self.reference_reverts.push(revert);
 
@@ -373,7 +368,7 @@ impl ProjectTransaction<'_> {
             return Ok(false);
         };
 
-        let revert = ReferenceRevert::point(&self.project.references, from)?;
+        let revert = ReferenceRevert::edge(from, target, Some(existing));
         self.project.references.remove(from, target)?;
         self.reference_reverts.push(revert);
 
@@ -825,7 +820,7 @@ impl ProjectTransaction<'_> {
             )?;
         }
         while let Some(revert) = self.symbol_reverts.pop() {
-            revert.restore(&mut self.project.symbols);
+            revert.restore(&mut self.project.symbols)?;
         }
         while let Some(revert) = self.segment_write_reverts.pop() {
             revert.restore(&mut self.project.storage.segments)?;
@@ -921,41 +916,45 @@ impl Project {
 
         tracing::trace!("loading project symbols");
 
-        let symbols_builder = || match SymbolTable::from_entity_storage(&storage.entities)? {
-            Some(symbols) => Ok(symbols),
-            None => {
-                let Some(loadable) = loadable else {
-                    tracing::error!("project not standalone and no loadable instance available");
-                    return Err(StorageProviderError::NotAStandaloneProject.into());
-                };
+        let symbol_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_SYMBOL_CACHE_SIZE)
+            .unwrap_or(DEFAULT_SYMBOL_CACHE_BYTES);
 
-                let mut symbols = SymbolTable::default_from_entity_storage(&storage.entities)?;
+        let mut symbols = if storage.entities.is_transient() {
+            SymbolTable::new_transient()
+        } else {
+            match storage.write_back() {
+                Some(worker) => SymbolTable::new_with(
+                    storage.entities.clone(),
+                    worker.clone(),
+                    symbol_cache_bytes,
+                ),
+                None => SymbolTable::new(storage.entities.clone(), symbol_cache_bytes),
+            }
+            .inspect_err(|e| tracing::error!("failed to load symbol table: {e}"))?
+        };
 
-                if let (Some(loadable_symbols), Some(resolution)) =
-                    (loadable.image_symbols(), storage.image_resolution.as_ref())
-                {
-                    tracing::trace!(
-                        "transfering {} symbols from loadable",
-                        loadable_symbols.len()
-                    );
+        if !SymbolTable::persisted(&storage.entities)? {
+            let Some(loadable) = loadable else {
+                tracing::error!("project not standalone and no loadable instance available");
+                return Err(StorageProviderError::NotAStandaloneProject.into());
+            };
 
-                    for (index, _, entry) in loadable_symbols.iter_by_index() {
-                        if let Some(address) = resolution.resolve_address(entry.address()) {
-                            symbols.insert(index, address, entry.symbol(), entry.properties());
-                        }
+            if let (Some(loadable_symbols), Some(resolution)) =
+                (loadable.image_symbols(), storage.image_resolution.as_ref())
+            {
+                tracing::trace!(
+                    "transfering {} symbols from loadable",
+                    loadable_symbols.len()
+                );
+
+                for (index, _, entry) in loadable_symbols.iter_by_index() {
+                    if let Some(address) = resolution.resolve_address(entry.address()) {
+                        symbols.insert(index, address, entry.symbol(), entry.properties());
                     }
                 }
-                Ok(symbols)
             }
-        };
-
-        let symbols = match symbols_builder() {
-            Ok(table) => table,
-            Err(e) => {
-                tracing::error!("failed to load symbol table: {e}");
-                return Err(e);
-            }
-        };
+        }
 
         tracing::trace!("loading project functions");
 
@@ -1244,7 +1243,6 @@ impl Project {
             segment_write_reverts: Vec::new(),
             reference_reverts: Vec::new(),
             source,
-            abandoned: false,
             committed: false,
             span,
         }

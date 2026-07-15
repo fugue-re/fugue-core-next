@@ -4,7 +4,7 @@ use object::{
 };
 
 use crate::arch::Arch;
-use crate::ir::{Address, RawAddress, SymbolEntry, SymbolIndex, SymbolTable};
+use crate::ir::{Address, RawAddress, SymbolEntry, SymbolIndex, TransientSymbolTable};
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::RelocationContext;
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
@@ -27,7 +27,7 @@ where
     elf: &'file ElfFile<'data, Elf, R>,
     arch: &'file Arch,
     base: RawAddress,
-    symbols: &'file SymbolTable<ImageAddress>,
+    symbols: &'file TransientSymbolTable<ImageAddress>,
     is_object: bool,
 }
 
@@ -41,7 +41,7 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         arch: &'file Arch,
         base: RawAddress,
-        symbols: &'file SymbolTable<ImageAddress>,
+        symbols: &'file TransientSymbolTable<ImageAddress>,
         is_object: bool,
     ) -> Self {
         Self {

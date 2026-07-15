@@ -23,7 +23,7 @@ use smallvec::{SmallVec, smallvec};
 use crate::arch::Arch;
 use crate::ir::{
     ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, Symbol, SymbolIndex,
-    SymbolProperties, SymbolTable, SymbolTableSelector,
+    SymbolProperties, SymbolTableSelector, TransientSymbolTable,
 };
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::ImageContext;
@@ -123,7 +123,7 @@ pub struct Elf<'a> {
     preferred_base: RawAddress,
     entry: Option<ImageAddress>,
     layout: ImageLayout,
-    image_symbols: SymbolTable<ImageAddress>,
+    image_symbols: TransientSymbolTable<ImageAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     segments: Vec<ElfImageSegment>,
     region_bank: ElfRegionBankMap,
@@ -259,7 +259,7 @@ impl<'a> Elf<'a> {
             }
         }
 
-        let mut image_symbols = SymbolTable::<ImageAddress>::new();
+        let mut image_symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, symbol) in symbols {
             let space = space_by_index.get(&index).copied().unwrap_or_default();
             image_symbols.insert(
@@ -314,7 +314,7 @@ impl<'a> Elf<'a> {
         &self.mapping_hints
     }
 
-    pub fn image_symbols(&self) -> &SymbolTable<ImageAddress> {
+    pub fn image_symbols(&self) -> &TransientSymbolTable<ImageAddress> {
         &self.image_symbols
     }
 
@@ -1054,13 +1054,13 @@ where
 struct ElfImageSegments<'a> {
     segments: std::slice::Iter<'a, ElfImageSegment>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-    image_symbols: &'a SymbolTable<ImageAddress>,
+    image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
 
 impl<'a> ElfImageSegments<'a> {
     fn new(
         segments: &'a [ElfImageSegment],
-        image_symbols: &'a SymbolTable<ImageAddress>,
+        image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
     ) -> Self {
         Self {
@@ -1643,7 +1643,7 @@ where
     // the binary's preferred load address
     pub(crate) preferred_base: RawAddress,
     // mapping of local and external symbols
-    pub(crate) symbols: &'file SymbolTable<ImageAddress>,
+    pub(crate) symbols: &'file TransientSymbolTable<ImageAddress>,
     // assigned base address per section index (relocatable objects)
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
@@ -1668,7 +1668,7 @@ where
         arch: &'file Arch,
         base: RawAddress,
         preferred_base: RawAddress,
-        symbols: &'file SymbolTable<ImageAddress>,
+        symbols: &'file TransientSymbolTable<ImageAddress>,
         sections: &'file ElfSectionMap,
         externs: &'file ExternSegment,
         region_bank: &'file ElfRegionBankMap,
@@ -2070,7 +2070,7 @@ impl Loadable for Elf<'_> {
         self.architecture.clone()
     }
 
-    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         Some(&self.image_symbols)
     }
 

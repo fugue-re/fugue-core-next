@@ -19,6 +19,17 @@ use fugue_core::queries::{Cached, Dependency, QueryReader};
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use rustc_hash::FxHasher;
 
+#[cfg(feature = "sqlite")]
+use fugue_core::attributes;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::PersistentStorageProvider;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::entities::DefaultPersistentEntityStorage;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
+#[cfg(feature = "sqlite")]
+use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const STAMP_BUCKETS: usize = 256;
@@ -692,6 +703,98 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
+const SCALE_REFERENCES: usize = 1_048_576;
+#[cfg(feature = "sqlite")]
+const SCALE_HOT_REFERENCES: usize = 65_536;
+
+#[cfg(feature = "sqlite")]
+fn load_persistent_engine(
+    project_path: &std::path::Path,
+) -> Result<(AnalysisEngine, Address), Box<dyn Error>> {
+    let project_path = project_path
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("project path is not valid UTF-8"))?;
+    let project = Project::from_file_with_provider_and_attributes::<
+        PersistentStorageProvider<DefaultPersistentEntityStorage, DefaultPersistentSegmentStorage>,
+    >(
+        fixture_path(),
+        attributes![ATTRIBUTE_PROJECT_PATH => project_path],
+    )?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| std::io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+    Ok((engine, entry))
+}
+
+#[cfg(feature = "sqlite")]
+fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let (engine, entry) = load_persistent_engine(&dir.path().join("scale.fdbz"))?;
+    let hot_target = entry
+        .checked_add(0x10_0000u64)
+        .ok_or_else(|| std::io::Error::other("hot target address overflow"))?;
+
+    let (insert, _) = measure("reference_scale_bulk_assert", || {
+        for index in 0..SCALE_REFERENCES {
+            let from = entry
+                .checked_add(0x100_0000 + index as u64 * 0x10)
+                .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
+            let target = if index < SCALE_HOT_REFERENCES {
+                hot_target
+            } else {
+                entry
+                    .checked_add(0x2000_0000 + index as u64 * 0x10)
+                    .ok_or_else(|| std::io::Error::other("reference target address overflow"))?
+            };
+            engine.add_reference(Reference::new(from, target, ReferenceKind::read()))?;
+        }
+        engine.wait_until_idle()?;
+        Ok(((), SCALE_REFERENCES))
+    })?;
+    results.push(insert);
+
+    let reader = engine.query_reader()?;
+
+    let (first_page, _) = measure("reference_scale_hot_first_page", || {
+        let page = run_query(|| reader.references_to(hot_target, None, PAGE_LIMIT))?;
+        Ok(((), page.entries().len()))
+    })?;
+    results.push(first_page);
+
+    let (full_walk, _) = measure("reference_scale_hot_full_walk", || {
+        let mut count = 0usize;
+        for result in reader.incoming_references(hot_target) {
+            black_box(result?);
+            count += 1;
+        }
+        Ok(((), count))
+    })?;
+    results.push(full_walk);
+
+    let spread_target = entry
+        .checked_add(0x2000_0000 + (SCALE_REFERENCES as u64 - 1) * 0x10)
+        .ok_or_else(|| std::io::Error::other("spread target address overflow"))?;
+    let (spread_page, _) = measure("reference_scale_spread_first_page", || {
+        let page = run_query(|| reader.references_to(spread_target, None, PAGE_LIMIT))?;
+        Ok(((), page.entries().len()))
+    })?;
+    results.push(spread_page);
+
+    let spread_from = entry
+        .checked_add(0x100_0000 + (SCALE_REFERENCES as u64 - 1) * 0x10)
+        .ok_or_else(|| std::io::Error::other("spread source address overflow"))?;
+    let (outgoing_page, _) = measure("reference_scale_outgoing_page", || {
+        let page = run_query(|| reader.references_from(spread_from, None, PAGE_LIMIT))?;
+        Ok(((), page.entries().len()))
+    })?;
+    results.push(outgoing_page);
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
 
@@ -707,6 +810,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     bench_cached_derived(&mut results)?;
     bench_multi_client(&mut results)?;
     bench_reference_hot_target(&mut results)?;
+    #[cfg(feature = "sqlite")]
+    bench_reference_million_scale(&mut results)?;
 
     for result in results {
         result.print();
