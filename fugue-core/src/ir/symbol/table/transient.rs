@@ -1,403 +1,35 @@
 use std::collections::BTreeMap;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::mem;
 use std::ops::RangeBounds;
 use std::slice::Iter;
-use std::sync::LazyLock;
 
-use rkyv::bytecheck::CheckBytes;
-use rkyv::rancor::Fallible;
-use rkyv::traits::NoUndef;
-use rkyv::{Archive, Deserialize, Place, Portable, Serialize};
 use smallvec::SmallVec;
-pub use ustr::{
-    Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
-};
 
-use crate::ir::{Address, Id};
-use crate::storage::entities::schema::{ENTITY_SYMBOL_ID, ENTITY_SYMBOL_TABLE_ID};
-use crate::storage::entities::{Entity, EntityId, ProjectEntity};
-use crate::storage::project::{PersistableProjectEntity, ProjectEntityFromStorage};
-use crate::storage::{EntityStorage, EntityStorageError};
+use super::super::{SymbolEntry, SymbolIndex, SymbolMap, SymbolProperties, SymbolTableSelector};
+use crate::ir::{Address, Id, symbol::Symbol};
 
-pub type SymbolId = Id<Symbol>;
-pub type LazySymbol = LazyLock<Symbol>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SymbolTableSelector(usize);
-
-impl SymbolTableSelector {
-    pub const fn new(selector: usize) -> Self {
-        Self(selector)
-    }
-
-    pub const fn index(&self) -> usize {
-        self.0
-    }
+pub(super) struct Allocation {
+    symbols_len: usize,
+    generations_len: usize,
+    free_ids_len: usize,
+    free_ids_tail: Vec<Id<Symbol>>,
 }
 
-impl Display for SymbolTableSelector {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{:02x}", self.0)
-    }
-}
-
-#[macro_export]
-macro_rules! lazy_symbol {
-    ($value:literal) => {
-        ::std::sync::LazyLock::new(|| ::fugue_core::ir::symbol::symbol($value))
-    };
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub struct SymbolEntry<A = Address> {
-    address: A,
-    symbol: Symbol,
-    properties: SymbolProperties,
-    indices: SmallVec<[SymbolIndex; 2]>,
-}
-
-impl<A> AsRef<SymbolEntry<A>> for SymbolEntry<A> {
-    fn as_ref(&self) -> &SymbolEntry<A> {
-        self
-    }
-}
-
-impl<A> AsMut<SymbolEntry<A>> for SymbolEntry<A> {
-    fn as_mut(&mut self) -> &mut SymbolEntry<A> {
-        self
-    }
-}
-
-impl<A> Display for SymbolEntry<A>
-where
-    A: Display + Copy,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let address = self.address;
-        let properties = self.properties;
-        if !self.symbol.is_empty() {
-            let symbol = self.symbol;
-            write!(f, "{symbol} at {address}; {properties}")
-        } else {
-            write!(f, "<unnamed> at {address}; {properties}")
-        }
-    }
-}
-
-impl<A> SymbolEntry<A>
-where
-    A: Copy + Eq,
-{
-    pub fn new(
-        address: impl Into<A>,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
+impl Allocation {
+    fn new(
+        free_ids: &[Id<Symbol>],
+        symbols_len: usize,
+        generations_len: usize,
+        max_pops: usize,
     ) -> Self {
+        let tail_start = free_ids.len().saturating_sub(max_pops);
         Self {
-            address: address.into(),
-            symbol: symbol.into(),
-            properties,
-            indices: SmallVec::new(),
+            symbols_len,
+            generations_len,
+            free_ids_len: free_ids.len(),
+            free_ids_tail: free_ids[tail_start..].to_vec(),
         }
     }
-
-    pub fn address(&self) -> A {
-        self.address
-    }
-
-    pub fn symbol(&self) -> Symbol {
-        self.symbol
-    }
-
-    pub fn properties(&self) -> SymbolProperties {
-        self.properties
-    }
-
-    fn add_index(&mut self, index: SymbolIndex) {
-        if !self.indices.contains(&index) {
-            self.indices.push(index);
-        }
-    }
-
-    fn with_index(mut self, index: SymbolIndex) -> Self {
-        self.add_index(index);
-        self
-    }
-
-    pub(crate) fn indices(&self) -> &[SymbolIndex] {
-        &self.indices
-    }
-
-    pub fn mark_as_extern(&mut self) {
-        self.properties |= SymbolProperties::EXTERN;
-        self.properties.remove(SymbolProperties::LOCAL);
-    }
-
-    pub fn mark_as_local(&mut self) {
-        self.properties |= SymbolProperties::LOCAL;
-        self.properties.remove(SymbolProperties::EXTERN);
-    }
-
-    pub fn mark_as_export(&mut self) {
-        self.properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
-        self.properties.remove(SymbolProperties::EXTERN);
-    }
-
-    pub fn mark_as_function(&mut self) {
-        self.properties |= SymbolProperties::FUNCTION;
-        self.properties.remove(SymbolProperties::DATA);
-    }
-
-    pub fn mark_as_data(&mut self) {
-        self.properties |= SymbolProperties::DATA;
-        self.properties.remove(SymbolProperties::FUNCTION);
-    }
-
-    pub fn is_extern(&self) -> bool {
-        self.properties.is_extern()
-    }
-
-    pub fn is_local(&self) -> bool {
-        self.properties.is_local()
-    }
-
-    pub fn is_function(&self) -> bool {
-        self.properties.is_function()
-    }
-
-    pub fn is_data(&self) -> bool {
-        self.properties.is_data()
-    }
-
-    fn is_valid(&self) -> bool {
-        self.properties != SymbolProperties::INVALID
-    }
-
-    pub fn kind(&self) -> SymbolProperties {
-        self.properties & SymbolProperties::KIND
-    }
-
-    pub fn visibility(&self) -> SymbolProperties {
-        self.properties & SymbolProperties::VISIBILITY
-    }
-
-    pub fn update_kind(&mut self, properties: SymbolProperties) {
-        let kind = properties & SymbolProperties::KIND;
-        self.properties.remove(SymbolProperties::KIND);
-        self.properties |= kind;
-    }
-
-    pub fn update_visibility(&mut self, properties: SymbolProperties) {
-        let visibility = properties & SymbolProperties::VISIBILITY;
-        self.properties.remove(SymbolProperties::VISIBILITY);
-        self.properties |= visibility;
-    }
-
-    pub fn has_same_referent(&self, other: &SymbolEntry<A>) -> bool {
-        self.address == other.address && self.symbol == other.symbol && self.kind() == other.kind()
-    }
-}
-
-impl Entity for SymbolEntry {
-    const ID: EntityId = ENTITY_SYMBOL_ID;
-}
-
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct SymbolProperties: u8 {
-        const NONE     = 0b0000_0000;
-        const EXTERN   = 0b0000_0001;
-        const EXPORT   = 0b0000_0010;
-        const LOCAL    = 0b0000_0100;
-        const FUNCTION = 0b0000_1000;
-        const DATA     = 0b0001_0000;
-
-        // aliases
-        const IMPORT = Self::EXTERN.bits();
-
-        // groups
-        const KIND       = Self::FUNCTION.bits() | Self::DATA.bits();
-        const VISIBILITY = Self::EXTERN.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
-
-        // invalid (marker)
-        const INVALID = 0b1111_1111;
-    }
-}
-
-impl Default for SymbolProperties {
-    fn default() -> Self {
-        Self::INVALID
-    }
-}
-
-#[repr(transparent)]
-pub struct ArchivedSymbolProperties(u8);
-
-unsafe impl Portable for ArchivedSymbolProperties {}
-unsafe impl NoUndef for ArchivedSymbolProperties {}
-
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedSymbolProperties
-where
-    u8: CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { u8::check_bytes(value.cast(), context) }
-    }
-}
-
-impl Archive for SymbolProperties {
-    type Archived = ArchivedSymbolProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _resolver: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedSymbolProperties(self.bits()));
-    }
-}
-
-impl<S: Fallible + ?Sized> Serialize<S> for SymbolProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: Fallible + ?Sized> Deserialize<SymbolProperties, D> for ArchivedSymbolProperties {
-    fn deserialize(&self, _deserializer: &mut D) -> Result<SymbolProperties, D::Error> {
-        Ok(SymbolProperties::from_bits_truncate(self.0))
-    }
-}
-
-impl Display for SymbolProperties {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let mut names = self.iter_names();
-
-        let Some((name, _)) = names.next() else {
-            return f.write_str("NONE");
-        };
-
-        f.write_str(name)?;
-
-        for (name, _) in names {
-            write!(f, "|{name}")?;
-        }
-
-        Ok(())
-    }
-}
-
-impl SymbolProperties {
-    pub fn new() -> Self {
-        Self::NONE
-    }
-
-    pub fn is_import(self) -> bool {
-        self.is_extern()
-    }
-
-    pub fn is_export(self) -> bool {
-        self.contains(SymbolProperties::EXPORT)
-    }
-
-    pub fn is_extern(self) -> bool {
-        self.contains(SymbolProperties::EXTERN)
-    }
-
-    pub fn is_local(self) -> bool {
-        self.contains(SymbolProperties::LOCAL)
-    }
-
-    pub fn is_function(self) -> bool {
-        self.contains(SymbolProperties::FUNCTION)
-    }
-
-    pub fn is_data(self) -> bool {
-        self.contains(SymbolProperties::DATA)
-    }
-}
-
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
-#[repr(transparent)]
-pub struct SymbolIndex(u64);
-
-impl Debug for SymbolIndex {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("SymbolIndex")
-            .field("selector", &self.selector())
-            .field("index", &self.index())
-            .finish()
-    }
-}
-
-impl SymbolIndex {
-    // Index mask is the upper bits used to determine the symbol index provenance.
-    const INDEX_MASK: u64 = !(Self::SELECTOR_MASK << Self::SELECTOR_SHIFT);
-    // Selector bits is the number of upper bits used to encode symbol index provenance;
-    // for ELF we have two possibilities: the global symbol table, and the dynamic symbol
-    // table.
-    const SELECTOR_BITS: u32 = 8;
-    // Selector bits mask is the mask for the selector bits.
-    const SELECTOR_MASK: u64 = (1u64 << Self::SELECTOR_BITS).wrapping_sub(1);
-    // Selector bits shift is the number of bits to shift the selector bits to the upper bits.
-    const SELECTOR_SHIFT: u32 = u64::BITS.wrapping_sub(Self::SELECTOR_BITS);
-
-    pub fn new(selector: SymbolTableSelector, index: usize) -> Self {
-        let selector = selector.index() as u64;
-        let index = index as u64;
-
-        assert_eq!(selector & !Self::SELECTOR_MASK, 0, "invalid selector bits");
-        assert_eq!(index & !Self::INDEX_MASK, 0, "symbol index out of range");
-
-        Self((selector << Self::SELECTOR_SHIFT) | index)
-    }
-
-    pub fn index(self) -> usize {
-        (self.0 & Self::INDEX_MASK)
-            .try_into()
-            .expect("symbol index out of range")
-    }
-
-    pub fn selector(self) -> SymbolTableSelector {
-        SymbolTableSelector::new(
-            ((self.0 >> Self::SELECTOR_SHIFT) & Self::SELECTOR_MASK)
-                .try_into()
-                .expect("selector out of range"),
-        )
-    }
-}
-
-const SYMBOL_TABLE_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct SymbolTableHeader {
-    version: u32,
-}
-
-impl Entity for SymbolTableHeader {
-    const ID: EntityId = ENTITY_SYMBOL_TABLE_ID;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -415,203 +47,14 @@ pub struct SymbolTable<A = Address> {
     free_ids: Vec<Id<Symbol>>,
 }
 
-pub(crate) struct SymbolTableRevert<A = Address> {
-    allocation: SymbolTableAllocation,
-    entries: Vec<(Id<Symbol>, SymbolEntry<A>)>,
-    touched: Vec<Id<Symbol>>,
-}
-
-struct SymbolTableAllocation {
-    symbols_len: usize,
-    generations_len: usize,
-    free_ids_len: usize,
-    free_ids_tail: Vec<Id<Symbol>>,
-}
-
-impl SymbolTableAllocation {
-    fn new(
-        free_ids: &[Id<Symbol>],
-        symbols_len: usize,
-        generations_len: usize,
-        max_pops: usize,
-    ) -> Self {
-        let tail_start = free_ids.len().saturating_sub(max_pops);
-        Self {
-            symbols_len,
-            generations_len,
-            free_ids_len: free_ids.len(),
-            free_ids_tail: free_ids[tail_start..].to_vec(),
-        }
-    }
-}
-
-impl<A> SymbolTableRevert<A>
-where
-    A: Copy + Default + Ord + Eq,
-{
-    fn new(
-        table: &SymbolTable<A>,
-        ids: impl IntoIterator<Item = Id<Symbol>>,
-        max_pops: usize,
-    ) -> Self {
-        let mut touched = Vec::new();
-        let mut entries = Vec::new();
-
-        for id in ids {
-            if touched.contains(&id) {
-                continue;
-            }
-
-            if let Some(entry) = table.get_by_id(id) {
-                entries.push((id, entry.clone()));
-            }
-            touched.push(id);
-        }
-
-        Self {
-            allocation: table.allocation_checkpoint(max_pops),
-            entries,
-            touched,
-        }
-    }
-
-    pub(crate) fn touch(&mut self, id: Id<Symbol>) {
-        if !self.touched.contains(&id) {
-            self.touched.push(id);
-        }
-    }
-
-    pub(crate) fn restore(self, table: &mut SymbolTable<A>) {
-        for id in self.touched {
-            table.clear_entry(id);
-        }
-
-        table.restore_allocation(self.allocation);
-
-        for (id, entry) in self.entries {
-            table.restore_entry(id, entry);
-        }
-    }
-}
-
-impl SymbolTable {
-    fn load_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry) {
-        let index = id.index();
-
-        while self.symbols.len() < index {
-            self.symbols.push(SymbolEntry::default());
-            self.generations.push(0);
-        }
-
-        if self.symbols.len() == index {
-            self.symbols.push(entry);
-            self.generations.push(id.generation());
-        } else {
-            self.symbols[index] = entry;
-            self.generations[index] = id.generation();
-        }
-
-        let entry = &self.symbols[index];
-        if !entry.is_valid() {
-            return;
-        }
-
-        self.names.entry(entry.symbol()).or_default().push(id);
-        self.addresses.entry(entry.address()).or_default().push(id);
-
-        for &symbol_index in entry.indices() {
-            self.indices.insert(symbol_index, id);
-        }
-    }
-
-    fn rebuild_free_ids(&mut self) {
-        self.free_ids = self
-            .symbols
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.is_valid())
-            .map(|(index, _)| Id::with_generation(index as u32, self.generations[index]))
-            .collect();
-    }
-
-    fn write_entries<P, D>(&self, mut put: P, mut delete: D) -> Result<(), EntityStorageError>
-    where
-        P: FnMut(&Id<Symbol>, &SymbolEntry) -> Result<(), EntityStorageError>,
-        D: FnMut(&Id<Symbol>) -> Result<(), EntityStorageError>,
-    {
-        for (index, entry) in self.symbols.iter().enumerate() {
-            let generation = self.generations[index];
-            for previous_generation in 0..generation {
-                let previous = Id::<Symbol>::with_generation(index as u32, previous_generation);
-                delete(&previous)?;
-            }
-
-            let id = Id::<Symbol>::with_generation(index as u32, generation);
-            put(&id, entry)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl ProjectEntityFromStorage for SymbolTable {
-    fn from_entity_storage(storage: &EntityStorage) -> Result<Option<Self>, EntityStorageError> {
-        tracing::trace!("loading symbol table from entity storage");
-
-        if !storage.contains::<ProjectEntity, SymbolTableHeader>(&ProjectEntity::SymbolTable)? {
-            return Ok(None);
-        }
-
-        let mut table = SymbolTable::new();
-        for entry in storage.iter::<Id<Symbol>, SymbolEntry>()? {
-            let (id, entry) = entry?;
-            table.load_entry(id, entry);
-        }
-        table.rebuild_free_ids();
-
-        Ok(Some(table))
-    }
-
-    fn default_from_entity_storage(_storage: &EntityStorage) -> Result<Self, EntityStorageError> {
-        tracing::trace!("creating default (empty) symbol table from entity storage");
-        Ok(Self::default())
-    }
-}
-
-impl PersistableProjectEntity for SymbolTable {
-    fn persist(&self, storage: &EntityStorage) -> Result<(), EntityStorageError> {
-        tracing::trace!("persisting symbol table with {} entries", self.len());
-
-        let header = SymbolTableHeader {
-            version: SYMBOL_TABLE_VERSION,
-        };
-
-        if storage.is_transient() {
-            storage.insert(&ProjectEntity::SymbolTable, &header)?;
-            return self.write_entries(
-                |id, entry| storage.insert(id, entry),
-                |id| storage.remove::<Id<Symbol>, SymbolEntry>(id),
-            );
-        }
-
-        let writer = storage.transactional_writer()?;
-        writer.insert(&ProjectEntity::SymbolTable, &header)?;
-        self.write_entries(
-            |id, entry| writer.insert(id, entry),
-            |id| writer.remove::<Id<Symbol>, SymbolEntry>(id),
-        )?;
-        writer.commit()
-    }
-}
-
 #[derive(Clone)]
-pub struct SymbolEntryIter<'a, A = Address> {
+pub(super) struct SymbolEntryIter<'a, A = Address> {
     ids: Iter<'a, Id<Symbol>>,
     symbols: &'a [SymbolEntry<A>],
 }
 
 impl<'a, A> SymbolEntryIter<'a, A> {
-    pub(crate) fn new(ids: &'a [Id<Symbol>], symbols: &'a [SymbolEntry<A>]) -> Self {
+    pub(super) fn new(ids: &'a [Id<Symbol>], symbols: &'a [SymbolEntry<A>]) -> Self {
         Self {
             ids: ids.iter(),
             symbols,
@@ -634,13 +77,13 @@ impl<'a, A> Iterator for SymbolEntryIter<'a, A> {
 
 impl<'a, A> ExactSizeIterator for SymbolEntryIter<'a, A> {}
 
-pub struct SymbolEntryIterMut<'a, A = Address> {
+pub(super) struct SymbolEntryIterMut<'a, A = Address> {
     ids: Iter<'a, Id<Symbol>>,
     symbols: &'a mut [SymbolEntry<A>],
 }
 
 impl<'a, A> SymbolEntryIterMut<'a, A> {
-    pub(crate) fn new(ids: &'a [Id<Symbol>], symbols: &'a mut [SymbolEntry<A>]) -> Self {
+    pub(super) fn new(ids: &'a [Id<Symbol>], symbols: &'a mut [SymbolEntry<A>]) -> Self {
         Self {
             ids: ids.iter(),
             symbols,
@@ -671,8 +114,8 @@ where
         Self::default()
     }
 
-    fn allocation_checkpoint(&self, max_pops: usize) -> SymbolTableAllocation {
-        SymbolTableAllocation::new(
+    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> Allocation {
+        Allocation::new(
             &self.free_ids,
             self.symbols.len(),
             self.generations.len(),
@@ -680,7 +123,7 @@ where
         )
     }
 
-    fn restore_allocation(&mut self, allocation: SymbolTableAllocation) {
+    pub(super) fn restore_allocation(&mut self, allocation: Allocation) {
         let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
         self.free_ids.truncate(tail_start);
         self.free_ids.extend(allocation.free_ids_tail);
@@ -688,7 +131,7 @@ where
         self.generations.truncate(allocation.generations_len);
     }
 
-    fn restore_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry<A>) {
+    pub(super) fn restore_entry(&mut self, id: Id<Symbol>, entry: SymbolEntry<A>) {
         self.clear_entry(id);
 
         let index = id.index();
@@ -714,7 +157,7 @@ where
             .retain(|free_id| free_id.index() != id.index());
     }
 
-    fn clear_entry(&mut self, id: Id<Symbol>) -> bool {
+    pub(super) fn clear_entry(&mut self, id: Id<Symbol>) -> bool {
         use std::collections::btree_map::Entry as AddrsEntry;
         use std::collections::hash_map::Entry as NamesEntry;
 
@@ -754,11 +197,11 @@ where
         true
     }
 
-    pub(crate) fn insert_revert(
+    pub(super) fn touched_by_insert(
         &self,
         index: SymbolIndex,
         entry: &SymbolEntry<A>,
-    ) -> SymbolTableRevert<A> {
+    ) -> Vec<Id<Symbol>> {
         let mut touched = Vec::new();
         if let Some(id) = self.indices.get(&index).copied() {
             touched.push(id);
@@ -771,31 +214,25 @@ where
             touched.push(id);
         }
 
-        SymbolTableRevert::new(self, touched, 1)
+        touched
     }
 
-    pub(crate) fn remove_symbol_revert(&self, symbol: impl AsRef<str>) -> SymbolTableRevert<A> {
-        let ids = Symbol::from_existing(symbol.as_ref())
+    pub(super) fn ids_by_symbol(&self, symbol: impl AsRef<str>) -> Vec<Id<Symbol>> {
+        Symbol::from_existing(symbol.as_ref())
             .and_then(|symbol| self.names.get(&symbol))
-            .into_iter()
-            .flatten()
-            .copied();
-
-        SymbolTableRevert::new(self, ids, 0)
+            .map(|ids| ids.to_vec())
+            .unwrap_or_default()
     }
 
-    pub(crate) fn remove_address_revert(&self, address: A) -> SymbolTableRevert<A> {
-        let ids = self.addresses.get(&address).into_iter().flatten().copied();
-
-        SymbolTableRevert::new(self, ids, 0)
+    pub(super) fn ids_by_address(&self, address: A) -> Vec<Id<Symbol>> {
+        self.addresses
+            .get(&address)
+            .map(|ids| ids.to_vec())
+            .unwrap_or_default()
     }
 
-    pub(crate) fn remove_id_revert(&self, id: Id<Symbol>) -> SymbolTableRevert<A> {
-        SymbolTableRevert::new(self, [id], 0)
-    }
-
-    pub(crate) fn remove_index_revert(&self, index: SymbolIndex) -> SymbolTableRevert<A> {
-        SymbolTableRevert::new(self, self.indices.get(&index).copied(), 0)
+    pub(super) fn id_by_index(&self, index: SymbolIndex) -> Option<Id<Symbol>> {
+        self.indices.get(&index).copied()
     }
 
     pub fn get<'a>(
@@ -1044,7 +481,7 @@ where
                 // we just remove this one, and create a new symbol entry.
                 if existing.indices().len() > 1 {
                     // remove the index from existing
-                    existing.indices.retain(|idx| *idx != index);
+                    existing.remove_index(index);
 
                     let (is_new, symbol_id) = Self::insert_or_update(
                         &mut self.addresses,
@@ -1269,41 +706,12 @@ where
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "sqlite")]
-    use tempfile::TempDir;
-
     use super::*;
-    #[cfg(feature = "sqlite")]
-    use crate::storage::PERSISTENT;
-    use crate::storage::entities::InMemoryEntityStorage;
-    #[cfg(feature = "sqlite")]
-    use crate::storage::entities::SqliteEntityStorage;
-
-    #[test]
-    #[should_panic(expected = "invalid selector bits")]
-    fn test_symbol_index_invalid_selector() {
-        let sel = SymbolTableSelector::new(0xffff);
-        let _ = SymbolIndex::new(sel, 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "symbol index out of range")]
-    fn test_symbol_index_invalid_index() {
-        let sel = SymbolTableSelector::new(1);
-        let _ = SymbolIndex::new(sel, usize::MAX);
-    }
-
-    #[test]
-    fn test_symbol_index_valid() {
-        let sel = SymbolTableSelector::new(1);
-        let index = SymbolIndex::new(sel, 42);
-        assert_eq!(index.index(), 42);
-        assert_eq!(index.selector().index(), 1);
-    }
+    use crate::ir::symbol::SymbolTableSelector;
 
     #[test]
     fn test_symbol_index_free_list() {
-        let mut table = SymbolTable::new();
+        let mut table = SymbolTable::<Address>::new();
         let sel = SymbolTableSelector::new(0);
 
         let (inserted1, id1) = table.insert_local(
@@ -1370,40 +778,5 @@ mod test {
         // check we remove id3, id4, and id5, which will be two distinct symbols
         assert_eq!(ntable.remove_by_address(Address::from(0x3000u32)), 2);
         assert_eq!(ntable.len(), 1);
-
-        let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        table.persist(&storage).unwrap();
-        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
-
-        assert_eq!(table, reloaded);
-    }
-
-    #[cfg(feature = "sqlite")]
-    #[test]
-    fn test_symbol_persist_reopen_sqlite() {
-        let sel = SymbolTableSelector::new(0);
-        let dir = TempDir::new().unwrap();
-
-        let mut table = SymbolTable::new();
-        let (_, hole) =
-            table.insert_local(SymbolIndex::new(sel, 1), Address::from(0x1000u32), "alpha");
-        table.insert_local(SymbolIndex::new(sel, 2), Address::from(0x2000u32), "beta");
-        table.insert_local(SymbolIndex::new(sel, 3), Address::from(0x3000u32), "gamma");
-        assert!(table.remove_by_id(hole));
-
-        {
-            let storage =
-                EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
-            table.persist(&storage).unwrap();
-        }
-
-        let storage =
-            EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
-        let reloaded = SymbolTable::from_entity_storage(&storage).unwrap().unwrap();
-
-        assert_eq!(table, reloaded);
-        assert_eq!(reloaded.len(), 2);
-        assert!(reloaded.get_first("beta").is_some());
-        assert!(reloaded.get_first("alpha").is_none());
     }
 }

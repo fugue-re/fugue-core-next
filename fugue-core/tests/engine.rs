@@ -381,6 +381,12 @@ impl Analyser for PanickingTestAnalyser {
                     SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
                 ),
             );
+            let target = address
+                .checked_add(0x100u64)
+                .expect("torn reference target");
+            transaction
+                .add_reference(Reference::new(address, target, ReferenceKind::read()))
+                .expect("torn reference asserted");
         }
         panic!("test analyser panic");
     }
@@ -2215,9 +2221,11 @@ fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn s
     ));
     drop(engine);
 
+    let mut reopen_attributes = AttributeMap::new();
+    reopen_attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path);
     let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
         "tests/ls.elf",
-        attributes,
+        reopen_attributes,
     )?;
     assert!(
         reopened
@@ -2225,6 +2233,19 @@ fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn s
             .get_first("panicked_torn_symbol")
             .is_none()
     );
+
+    let torn_target = entry
+        .checked_add(0x100u64)
+        .ok_or_else(|| io::Error::other("torn reference target overflow"))?;
+    let reopened_engine = AnalysisEngine::new(reopened)?;
+    reopened_engine.wait_until_idle()?;
+    let reader = reopened_engine.query_reader()?;
+    let torn_reference = reader
+        .outgoing_references(entry)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|reference| reference.target().address() == Some(torn_target));
+    assert!(torn_reference.is_none());
 
     Ok(())
 }

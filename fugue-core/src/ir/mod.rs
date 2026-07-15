@@ -51,8 +51,8 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 
 pub mod symbol;
 pub use symbol::{
-    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties,
-    SymbolTable, SymbolTableSelector,
+    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties, SymbolRef,
+    SymbolTable, SymbolTableSelector, TransientSymbolTable,
 };
 
 pub struct Id<T> {

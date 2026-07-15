@@ -21,6 +21,10 @@ impl EntityKeyId {
     const fn index(&self) -> usize {
         self.0 as usize
     }
+
+    pub(crate) const fn prefix(self, entity: EntityId) -> EntityKeyPrefix {
+        [self.0, entity.0]
+    }
 }
 
 impl TryFrom<usize> for EntityKeyId {
