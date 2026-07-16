@@ -1,6 +1,5 @@
 use std::error::Error as StdError;
 
-use anyhow::Error as AnyError;
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
@@ -32,13 +31,13 @@ pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
     #[error("failed to create block: {0}")]
-    BlockCreation(AnyError),
+    BlockCreation(anyhow::Error),
     #[error("commit hook failed: {0}")]
     CommitHook(AnalysisError),
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
     #[error("failed to create function: {0}")]
-    FunctionCreation(AnyError),
+    FunctionCreation(anyhow::Error),
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
     #[error("invalid block index: {0}")]

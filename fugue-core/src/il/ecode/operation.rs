@@ -1,22 +1,11 @@
-use crate::il::common::{ExpressionId, PackedRange};
+use crate::il::common::{IlExprId, IlIndexRange};
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 #[repr(u16)]
-pub enum StatementOpcode {
+pub enum ECodeStmtOpcode {
     WriteRegister = 0,
     WriteFlag = 1,
     Store = 2,
@@ -30,19 +19,19 @@ pub enum StatementOpcode {
     Trap = 10,
 }
 
-impl StatementOpcode {
+impl ECodeStmtOpcode {
     pub const fn mnemonic(&self) -> &'static str {
         match self {
-            Self::WriteRegister => "write_register",
+            Self::WriteRegister => "write_reg",
             Self::WriteFlag => "write_flag",
             Self::Store => "store",
             Self::Intrinsic => "intrinsic",
-            Self::Branch => "branch",
-            Self::BranchIndirect => "branch_indirect",
-            Self::ConditionalBranch => "conditional_branch",
+            Self::Branch => "br",
+            Self::BranchIndirect => "ibr",
+            Self::ConditionalBranch => "cbr",
             Self::Call => "call",
-            Self::CallIndirect => "call_indirect",
-            Self::Return => "return",
+            Self::CallIndirect => "icall",
+            Self::Return => "ret",
             Self::Trap => "trap",
         }
     }
@@ -76,32 +65,21 @@ impl StatementOpcode {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub struct Statement {
-    opcode: StatementOpcode,
-    operands: PackedRange,
-    value: Option<ExpressionId>,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ECodeStmt {
+    opcode: ECodeStmtOpcode,
+    operands: IlIndexRange,
+    value: Option<IlExprId>,
     immediate: u64,
     address: Option<Address>,
     address_space: Option<AddressSpaceId>,
 }
 
-impl Statement {
-    pub const fn new(
-        opcode: StatementOpcode,
-        operands: PackedRange,
-        value: Option<ExpressionId>,
+impl ECodeStmt {
+    pub(crate) const fn new(
+        opcode: ECodeStmtOpcode,
+        operands: IlIndexRange,
+        value: Option<IlExprId>,
         address: Option<Address>,
         address_space: Option<AddressSpaceId>,
     ) -> Self {
@@ -120,15 +98,15 @@ impl Statement {
         self
     }
 
-    pub const fn opcode(&self) -> StatementOpcode {
+    pub const fn opcode(&self) -> ECodeStmtOpcode {
         self.opcode
     }
 
-    pub const fn operands(&self) -> PackedRange {
+    pub const fn operands(&self) -> IlIndexRange {
         self.operands
     }
 
-    pub const fn value(&self) -> Option<ExpressionId> {
+    pub const fn value(&self) -> Option<IlExprId> {
         self.value
     }
 
@@ -146,13 +124,13 @@ impl Statement {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::mem::size_of;
 
     use super::*;
 
     #[test]
     fn statement_records_stay_compact() {
-        assert!(size_of::<Statement>() <= 64);
+        assert!(size_of::<ECodeStmt>() <= 64);
     }
 }

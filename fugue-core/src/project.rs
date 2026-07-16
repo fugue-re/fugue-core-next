@@ -1,33 +1,25 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 use thiserror::Error;
 use tracing::Span;
 
+use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
 use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
-use crate::il::common::{
-    ArtefactDigest, ArtefactHeader, Block, BlockId, BuildCancellation, CommonBody, Finish, IlError,
-    IrArtefact, IrArtefactKey, IrLevel, PackedRange, RawIrArtefact, Scratch, SourceRun, Transform,
-    TransformContext, Verify,
-};
-use crate::il::llil::LlilBody;
-use crate::il::llil::ssa::transform::LlilToSsa;
-use crate::il::llil::ssa::{Dominance, DominanceFrontier, Liveness, SsaBody, UseIndex};
-use crate::il::llil::transform::PCodeToLlil;
-use crate::il::pcode::{
-    PCODE_SCHEMA_VERSION, PCodeAddressContext, PCodeBody, PCodeBuilder, PCodeCanonicaliser,
-    PCodeError, PCodeOp,
-};
+use crate::il::common::{IlArtefact, IlError, IlLevel};
+use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa};
+use crate::il::ecode::{ECodeIr, PCodeToECode};
+use crate::il::pcode::{PCodeCanonicaliser, PCodeError, PCodeIr};
+use crate::il::storage::{IlPersist, IlRevert, IlStorageError};
 use crate::ir::function::table::FunctionTableRevert;
 use crate::ir::reference::ReferenceRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphIndex, CodeBlockTable, FunctionId,
-    FunctionTable, RawAddress, Reference, ReferenceClass, ReferenceIndex, ReferenceOrigin,
+    FunctionTable, RawAddress, Reference, ReferenceIndex, ReferenceKind, ReferenceOrigin,
     ReferenceTarget, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter, LifterError};
@@ -68,6 +60,7 @@ pub struct Project {
     semantic_revision: Revision,
     transaction_active: bool,
     persistable: bool,
+    canonicaliser: PCodeCanonicaliser,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
 }
@@ -155,6 +148,21 @@ pub enum ProjectError {
     StorageProvider(#[from] StorageProviderError),
 }
 
+impl From<Cancelled> for ProjectError {
+    fn from(cancelled: Cancelled) -> Self {
+        Self::Il(IlError::from(cancelled))
+    }
+}
+
+impl From<IlStorageError> for ProjectError {
+    fn from(error: IlStorageError) -> Self {
+        match error {
+            IlStorageError::Il(error) => Self::Il(error),
+            IlStorageError::Storage(error) => Self::EntityStorage(error),
+        }
+    }
+}
+
 impl ProjectError {
     pub(crate) fn is_write_back_poisoned(&self) -> bool {
         match self {
@@ -170,41 +178,15 @@ impl ProjectError {
 pub struct ProjectTransaction<'p> {
     project: &'p mut Project,
     records: Vec<ChangeRecord>,
-    ir_artefact_reverts: Vec<IrArtefactRevert>,
+    ir_reverts: Vec<IlRevert>,
     function_reverts: Vec<FunctionTableRevert>,
     symbol_reverts: Vec<SymbolTableRevert>,
     segment_reverts: Vec<SegmentStorageRevert>,
     segment_write_reverts: Vec<SegmentWriteRevert>,
     reference_reverts: Vec<ReferenceRevert>,
-    scratch: Scratch,
     source: ChangeSource,
     committed: bool,
     span: Span,
-}
-
-const IR_TRANSFORM_SCRATCH_CAP: usize = 64 * 1024;
-
-struct IrArtefactRevert {
-    key: IrArtefactKey,
-    previous: Option<RawIrArtefact>,
-}
-
-impl IrArtefactRevert {
-    fn new(key: IrArtefactKey, previous: Option<RawIrArtefact>) -> Self {
-        Self { key, previous }
-    }
-
-    fn restore(self, project: &mut Project) -> Result<(), ProjectError> {
-        match self.previous {
-            Some(artefact) => project.storage.entities.insert(&self.key, &artefact)?,
-            None => project
-                .storage
-                .entities
-                .remove::<IrArtefactKey, RawIrArtefact>(&self.key)?,
-        }
-
-        Ok(())
-    }
 }
 
 impl Drop for ProjectTransaction<'_> {
@@ -223,47 +205,30 @@ impl ProjectTransaction<'_> {
         self.project
     }
 
-    pub fn publish_ir_artefact(
-        &mut self,
-        mut artefact: RawIrArtefact,
-    ) -> Result<ArtefactHeader, ProjectError> {
-        if self.records.iter().any(ChangeRecord::affects_ir_inputs) {
-            return Err(IlError::publish_after_semantic_mutation().into());
+    pub(crate) fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), ProjectError>
+    where
+        T: IlArtefact,
+        IlRevert: From<(FunctionId, Option<T>)>,
+    {
+        if self.records.iter().any(ChangeRecord::affects_lifted_inputs) {
+            return Err(IlError::PublishAfterSemanticMutation.into());
         }
 
-        artefact.set_input_revision(self.project.semantic_revision.value());
-        artefact.verify()?;
-        self.project.verify_ir_artefact_payload(&artefact)?;
+        ir.header_mut()
+            .set_input_revision(self.project.semantic_revision.value());
 
-        let key = IrArtefactKey::new(artefact.header().function(), artefact.header().level());
-        let previous = self
-            .project
-            .stored_ir_artefact(key.function(), key.level())?;
-
-        self.project.storage.entities.insert(&key, &artefact)?;
-        self.ir_artefact_reverts
-            .push(IrArtefactRevert::new(key, previous));
-        self.records.push(ChangeRecord::IrArtefactPublished {
-            function: key.function(),
-            level: key.level(),
+        let revert = ir.persist(&self.project.storage.entities)?;
+        self.ir_reverts.push(revert);
+        self.records.push(ChangeRecord::LiftedMaterialised {
+            function: ir.header().function(),
+            level: T::LEVEL,
         });
-
-        Ok(*artefact.header())
-    }
-
-    pub fn publish_ir_body<T>(&mut self, artefact: &mut T) -> Result<(), ProjectError>
-    where
-        T: IrArtefact,
-    {
-        let raw = artefact.to_raw_artefact()?;
-        let header = self.publish_ir_artefact(raw)?;
-        *artefact.header_mut() = header;
 
         Ok(())
     }
 
-    pub fn flush_ir_references(&mut self, function: FunctionId) -> Result<bool, ProjectError> {
-        let Some(body) = self.ir_body_for_output::<PCodeBody>(function)? else {
+    pub fn flush_derived_references(&mut self, function: FunctionId) -> Result<bool, ProjectError> {
+        let Some(body) = self.current_lifted::<PCodeIr>(function)? else {
             return Ok(false);
         };
 
@@ -278,18 +243,14 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
-    fn replace_ir_derived_references<T>(
+    fn replace_ir_derived_references(
         &mut self,
-        artefact: &T,
-    ) -> Result<Option<(ReferenceRevert, AddressRangeSet)>, ProjectError>
-    where
-        T: IrArtefact,
-    {
+        artefact: &PCodeIr,
+    ) -> Result<Option<(ReferenceRevert, AddressRangeSet)>, ProjectError> {
         let mut coverage = AddressRangeSet::new();
-        let mut derived = Vec::new();
+        let derived = artefact.data_references().collect::<Vec<_>>();
 
-        artefact.collect_reference_coverage(&mut coverage);
-        artefact.collect_derived_references(&mut derived);
+        artefact.reference_coverage_into(&mut coverage);
 
         let function = artefact.header().function();
         if function != FunctionId::INVALID
@@ -312,15 +273,14 @@ impl ProjectTransaction<'_> {
 
         let revert = ReferenceRevert::capture(&self.project.references, &coverage)?;
 
-        if ReferenceIndex::derived_class_matches(revert.previous(), &derived, ReferenceClass::Data)
-        {
+        if ReferenceIndex::derived_kind_matches(revert.previous(), &derived, ReferenceKind::Data) {
             return Ok(None);
         }
 
-        if let Err(error) = self.project.references.replace_derived_in_class(
+        if let Err(error) = self.project.references.replace_derived_of_kind(
             revert.previous(),
             derived,
-            ReferenceClass::Data,
+            ReferenceKind::Data,
         ) {
             revert.restore(&self.project.references)?;
             return Err(error.into());
@@ -329,40 +289,54 @@ impl ProjectTransaction<'_> {
         Ok(Some((revert, coverage)))
     }
 
-    pub fn remove_ir_artefact(
+    pub fn remove_lifted(
         &mut self,
         function: FunctionId,
-        level: IrLevel,
+        level: IlLevel,
     ) -> Result<bool, ProjectError> {
-        let key = IrArtefactKey::new(function, level);
-        let Some(previous) = self.project.stored_ir_artefact(function, level)? else {
-            return Ok(false);
+        let removed = match level {
+            IlLevel::PCode => {
+                let Some((previous, revert)) =
+                    PCodeIr::remove(&self.project.storage.entities, function)?
+                else {
+                    return Ok(false);
+                };
+
+                self.remove_references_derived_from(&previous)?;
+                self.ir_reverts.push(revert);
+                true
+            }
+            IlLevel::ECode => {
+                let Some((_, revert)) = ECodeIr::remove(&self.project.storage.entities, function)?
+                else {
+                    return Ok(false);
+                };
+
+                self.ir_reverts.push(revert);
+                true
+            }
+            IlLevel::ECodeSsa => {
+                let Some((_, revert)) =
+                    ECodeSsaIr::remove(&self.project.storage.entities, function)?
+                else {
+                    return Ok(false);
+                };
+
+                self.ir_reverts.push(revert);
+                true
+            }
         };
 
-        self.remove_references_derived_from(&previous)?;
-        self.project
-            .storage
-            .entities
-            .remove::<IrArtefactKey, RawIrArtefact>(&key)?;
-        self.ir_artefact_reverts
-            .push(IrArtefactRevert::new(key, Some(previous)));
         self.records
-            .push(ChangeRecord::IrArtefactRemoved { function, level });
+            .push(ChangeRecord::LiftedRemoved { function, level });
 
-        Ok(true)
+        Ok(removed)
     }
 
-    fn remove_references_derived_from(
-        &mut self,
-        artefact: &RawIrArtefact,
-    ) -> Result<(), ProjectError> {
-        if artefact.header().level() != IrLevel::PCode {
-            return Ok(());
-        }
-
+    fn remove_references_derived_from(&mut self, previous: &PCodeIr) -> Result<(), ProjectError> {
         let mut coverage = AddressRangeSet::new();
-        for run in artefact.body().source_runs() {
-            coverage.insert_range(AddressRange::point(run.machine_address()));
+        for run in previous.source_spans() {
+            coverage.insert_range(AddressRange::point(run.address()));
         }
 
         if coverage.is_empty() {
@@ -373,16 +347,16 @@ impl ProjectTransaction<'_> {
         let touched = revert
             .previous()
             .iter()
-            .any(|reference| reference.origin().is_derived() && reference.kind().is_data());
+            .any(|reference| reference.origin().is_derived() && reference.is_data());
 
         if !touched {
             return Ok(());
         }
 
-        self.project.references.replace_derived_in_class(
+        self.project.references.replace_derived_of_kind(
             revert.previous(),
             [],
-            ReferenceClass::Data,
+            ReferenceKind::Data,
         )?;
         self.reference_reverts.push(revert);
         self.records
@@ -391,15 +365,15 @@ impl ProjectTransaction<'_> {
         Ok(())
     }
 
-    pub fn remove_ir_artefacts_from(
+    pub fn remove_lifted_from(
         &mut self,
         function: FunctionId,
-        first_invalid: IrLevel,
+        first_invalid: IlLevel,
     ) -> Result<usize, ProjectError> {
         let mut removed = 0usize;
 
         for level in first_invalid.descendants_from() {
-            if self.remove_ir_artefact(function, level)? {
+            if self.remove_lifted(function, level)? {
                 removed += 1;
             }
         }
@@ -407,255 +381,137 @@ impl ProjectTransaction<'_> {
         Ok(removed)
     }
 
-    pub fn remove_ir_artefacts_in_range(
+    pub fn remove_lifted_in_range(
         &mut self,
         range: &AddressRange,
-        first_invalid: IrLevel,
+        first_invalid: IlLevel,
     ) -> Result<usize, ProjectError> {
         let functions = self
             .project
             .functions
-            .ids_intersecting_range(&self.project.blocks, range);
+            .overlaps(&self.project.blocks, range)
+            .collect::<SmallVec<[_; 8]>>();
         let mut removed = 0usize;
 
         for function in functions {
-            removed += self.remove_ir_artefacts_from(function, first_invalid)?;
+            removed += self.remove_lifted_from(function, first_invalid)?;
         }
 
         Ok(removed)
     }
 
-    pub fn ensure_ir(
+    pub fn ensure_lifted(
         &mut self,
         function: FunctionId,
-        level: IrLevel,
-        status: &dyn BuildCancellation,
+        level: IlLevel,
+        cancellation: &CancellationToken,
     ) -> Result<bool, ProjectError> {
-        if status.is_cancelled() {
-            return Err(IlError::cancelled().into());
-        }
+        cancellation.check()?;
 
         match level {
-            IrLevel::PCode => self.ensure_pcode(function, status),
-            IrLevel::Llil => self.ensure_llil(function, status),
-            IrLevel::LlilSsa => self.ensure_llil_ssa(function, status),
-            IrLevel::MappedMlil | IrLevel::Mlil => {
-                Err(IlError::mlil_build_scheduling_unsupported().into())
-            }
+            IlLevel::PCode => self.ensure_pcode(function, cancellation),
+            IlLevel::ECode => self.ensure_ecode(function, cancellation),
+            IlLevel::ECodeSsa => self.ensure_ecode_ssa(function, cancellation),
         }
     }
 
     pub fn ensure_pcode(
         &mut self,
         function: FunctionId,
-        status: &dyn BuildCancellation,
+        cancellation: &CancellationToken,
     ) -> Result<bool, ProjectError> {
-        if status.is_cancelled() {
-            return Err(IlError::cancelled().into());
-        }
+        cancellation.check()?;
 
-        self.ensure_pcode_body(function, status)
-            .map(|(published, _)| published)
+        self.ensure_pcode_ir(function, cancellation)
+            .map(|(materialised, _)| materialised)
     }
 
-    fn ensure_pcode_body(
+    fn ensure_pcode_ir(
         &mut self,
         function: FunctionId,
-        status: &dyn BuildCancellation,
-    ) -> Result<(bool, PCodeBody), ProjectError> {
-        if let Some(body) = self.ir_body_for_output::<PCodeBody>(function)? {
-            return Ok((false, body));
+        cancellation: &CancellationToken,
+    ) -> Result<(bool, PCodeIr), ProjectError> {
+        if let Some(ir) = self.current_lifted::<PCodeIr>(function)? {
+            return Ok((false, ir));
         }
 
         if function.is_invalid() {
-            return Err(IlError::missing_artefact(function, IrLevel::PCode).into());
+            return Err(IlError::missing_artefact(function, IlLevel::PCode).into());
         }
 
-        let body = self.build_pcode(function, status);
-        self.scratch.reset();
-        let mut body = body?;
-        self.publish_ir_body(&mut body)?;
-        Ok((true, body))
-    }
-
-    fn build_pcode(
-        &mut self,
-        function: FunctionId,
-        status: &dyn BuildCancellation,
-    ) -> Result<PCodeBody, ProjectError> {
-        let Some(function_body) = self.project.functions.get_by_id(function) else {
-            return Err(IlError::missing_artefact(function, IrLevel::PCode).into());
-        };
-
-        let mut lifter = Lifter::new(self.project.language);
-        let mut code_block_ids = Vec::new();
-        let mut block_id_by_code_block = BTreeMap::new();
-
-        for (_, code_block) in function_body.blocks() {
-            let block_id = BlockId::try_from_index(code_block_ids.len())?;
-            block_id_by_code_block.insert(code_block, block_id);
-            code_block_ids.push(code_block);
-        }
-
-        let header = ArtefactHeader::new(
+        let mut ir = self.project.canonicaliser.build_function(
+            self.project.language,
+            &self.project.functions,
+            &self.project.blocks,
+            &self.project.storage.segments,
             function,
-            IrLevel::PCode,
-            PCODE_SCHEMA_VERSION,
             self.project.semantic_revision.value(),
-        );
-        let mut builder = PCodeBuilder::new(header, CommonBody::default());
-        let mut blocks = Vec::new();
-        let mut successors = Vec::new();
-        let mut source_runs = Vec::new();
-        let mut annotations = Vec::new();
-        let mut operations = Vec::<PCodeOp>::new();
+            cancellation,
+        )?;
 
-        for code_block_id in code_block_ids {
-            if status.is_cancelled() {
-                return Err(IlError::cancelled().into());
-            }
-
-            let Some(code_block) = self.project.blocks.get_by_id(code_block_id) else {
-                return Err(IlError::missing_artefact(function, IrLevel::PCode).into());
-            };
-
-            let block_start = builder.operation_count();
-
-            for insn in code_block.instructions() {
-                operations.clear();
-                let bytes = self.scratch.bytes_with_len(insn.len());
-                self.project
-                    .storage
-                    .segments
-                    .read_bytes(insn.address(), bytes)?;
-                let lifted_len = lifter.lift_into(insn.address(), bytes, &mut operations)?;
-                let source_start = builder.operation_count();
-
-                annotations.clear();
-                let emitted = PCodeCanonicaliser::push_direct_target_annotations(
-                    self.project.language,
-                    insn.address(),
-                    lifted_len,
-                    &operations,
-                    source_start,
-                    &mut annotations,
-                )?;
-                let mut context = PCodeAddressContext::new(insn.address(), &annotations);
-                builder.push_lifter_stream_next(
-                    &operations,
-                    self.project.language,
-                    &mut context,
-                )?;
-
-                source_runs.push(SourceRun::new(
-                    PackedRange::new(source_start, builder.operation_count())?,
-                    insn.address(),
-                    0,
-                    u32::try_from(emitted)
-                        .map_err(|_| IlError::integer_overflow("PCode source run count"))?,
-                ));
-            }
-
-            let successor_start = successors.len();
-
-            for successor in code_block.successors().iter() {
-                if let Some(successor) = block_id_by_code_block.get(&successor).copied() {
-                    successors.push(successor);
-                }
-            }
-
-            let mut flags = 0u16;
-            if code_block.address() == function_body.entry() {
-                flags |= Block::ENTRY;
-            }
-            if code_block.successors().is_empty() {
-                flags |= Block::EXIT;
-            }
-
-            blocks.push(Block::new(
-                PackedRange::new(block_start, builder.operation_count())?,
-                PackedRange::new(successor_start, successors.len())?,
-                flags,
-            ));
-        }
-
-        let common = CommonBody::new(blocks, successors, source_runs, Vec::new());
-        builder.replace_common(common);
-
-        Ok(builder.finish(status)?)
+        self.materialise_lifted(&mut ir)?;
+        Ok((true, ir))
     }
 
-    pub fn ensure_llil(
+    pub fn ensure_ecode(
         &mut self,
         function: FunctionId,
-        status: &dyn BuildCancellation,
+        cancellation: &CancellationToken,
     ) -> Result<bool, ProjectError> {
-        if status.is_cancelled() {
-            return Err(IlError::cancelled().into());
-        }
+        cancellation.check()?;
 
-        self.ensure_llil_body(function, status)
-            .map(|(published, _)| published)
+        self.ensure_ecode_ir(function, cancellation)
+            .map(|(materialised, _)| materialised)
     }
 
-    fn ensure_llil_body(
+    fn ensure_ecode_ir(
         &mut self,
         function: FunctionId,
-        status: &dyn BuildCancellation,
-    ) -> Result<(bool, LlilBody), ProjectError> {
-        if let Some(body) = self.ir_body_for_output::<LlilBody>(function)? {
-            return Ok((false, body));
+        cancellation: &CancellationToken,
+    ) -> Result<(bool, ECodeIr), ProjectError> {
+        if let Some(ir) = self.current_lifted::<ECodeIr>(function)? {
+            return Ok((false, ir));
         }
 
-        let (_, source) = self.ensure_pcode_body(function, status)?;
-        let mut body = {
-            let mut context = TransformContext::new(status, &mut self.scratch);
-            let mut transform = PCodeToLlil;
-            transform.transform(&source, &mut context)?
-        };
+        let (_, source) = self.ensure_pcode_ir(function, cancellation)?;
+        let mut ir = PCodeToECode.transform(&source, cancellation)?;
 
-        self.publish_ir_body(&mut body)?;
+        self.materialise_lifted(&mut ir)?;
 
-        Ok((true, body))
+        Ok((true, ir))
     }
 
-    pub fn ensure_llil_ssa(
+    pub fn ensure_ecode_ssa(
         &mut self,
         function: FunctionId,
-        status: &dyn BuildCancellation,
+        cancellation: &CancellationToken,
     ) -> Result<bool, ProjectError> {
-        if self.ir_body_for_output::<SsaBody>(function)?.is_some() {
-            return self.ensure_llil(function, status);
+        if self.current_lifted::<ECodeSsaIr>(function)?.is_some() {
+            return self.ensure_ecode(function, cancellation);
         }
 
-        let (_, source) = self.ensure_llil_body(function, status)?;
-        let mut body = {
-            let mut context = TransformContext::new(status, &mut self.scratch);
-            let mut transform = LlilToSsa;
-            transform.transform(&source, &mut context)?
-        };
+        let (_, source) = self.ensure_ecode_ir(function, cancellation)?;
+        let mut ir = ECodeToSsa.transform(&source, cancellation)?;
 
-        self.publish_ir_body(&mut body)?;
+        self.materialise_lifted(&mut ir)?;
 
         Ok(true)
     }
 
-    fn ir_body_for_output<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
+    fn current_lifted<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
     where
-        T: IrArtefact,
+        T: IlArtefact,
     {
-        match self
-            .project
-            .ir_body_at_revision::<T>(function, self.project.semantic_revision)
-        {
-            Ok(Some(artefact)) => T::from_raw_artefact(artefact)
-                .map(Some)
-                .map_err(ProjectError::from),
-            Ok(None) => Ok(None),
-            Err(ProjectError::Il(IlError::MissingArtefact { .. })) => Ok(None),
-            Err(ProjectError::Il(IlError::StaleArtefact { .. })) => Ok(None),
-            Err(ProjectError::Il(IlError::ParentDigestMismatch { .. })) => Ok(None),
-            Err(error) => Err(error),
+        match T::load_current(
+            &self.project.storage.entities,
+            function,
+            self.project.semantic_revision.value(),
+        ) {
+            Ok(ir) => Ok(ir),
+            Err(IlStorageError::Il(
+                IlError::StaleArtefact { .. } | IlError::SchemaMismatch { .. },
+            )) => Ok(None),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -716,7 +572,7 @@ impl ProjectTransaction<'_> {
             .unwrap_or_default();
         self.function_reverts.push(revert);
         self.project.call_graph.set_function_edges(entry, targets)?;
-        self.remove_ir_artefacts_from(id, IrLevel::PCode)?;
+        self.remove_lifted_from(id, IlLevel::PCode)?;
 
         let derived = self
             .project
@@ -730,10 +586,10 @@ impl ProjectTransaction<'_> {
             .unwrap_or_default();
         let reference_revert = ReferenceRevert::capture(&self.project.references, &covered)?;
         let references_touched = !derived.is_empty() || reference_revert.had_derived();
-        self.project.references.replace_derived_in_class(
+        self.project.references.replace_derived_of_kind(
             reference_revert.previous(),
             derived,
-            ReferenceClass::Flow,
+            ReferenceKind::Flow,
         )?;
         self.reference_reverts.push(reference_revert);
 
@@ -796,11 +652,11 @@ impl ProjectTransaction<'_> {
         let references_touched = reference_revert
             .previous()
             .iter()
-            .any(|reference| reference.origin().is_derived() && reference.kind().is_flow());
-        self.project.references.replace_derived_in_class(
+            .any(|reference| reference.origin().is_derived() && reference.is_flow());
+        self.project.references.replace_derived_of_kind(
             reference_revert.previous(),
             [],
-            ReferenceClass::Flow,
+            ReferenceKind::Flow,
         )?;
         self.reference_reverts.push(reference_revert);
 
@@ -811,7 +667,7 @@ impl ProjectTransaction<'_> {
         }
 
         self.project.functions.remove_by_id(id);
-        self.remove_ir_artefacts_from(id, IrLevel::PCode)?;
+        self.remove_lifted_from(id, IlLevel::PCode)?;
         self.records.push(ChangeRecord::FunctionRemoved {
             entry,
             coverage: covered,
@@ -833,10 +689,9 @@ impl ProjectTransaction<'_> {
         let existing = self.project.references.get(from, target)?;
         let resolved = match existing {
             Some(existing)
-                if existing.origin().is_asserted()
-                    && existing.kind().class() == reference.kind().class() =>
+                if existing.origin().is_asserted() && existing.kind() == reference.kind() =>
             {
-                Reference::new(from, target, existing.kind().merged(reference.kind()))
+                existing.with_merged_properties(reference.properties())
             }
             _ => reference,
         };
@@ -844,6 +699,7 @@ impl ProjectTransaction<'_> {
         if let Some(existing) = existing
             && existing.origin().is_asserted()
             && existing.kind() == resolved.kind()
+            && existing.properties() == resolved.properties()
         {
             return Ok(false);
         }
@@ -1032,7 +888,7 @@ impl ProjectTransaction<'_> {
             .add_mapping_to_space(space, mapping)?;
         self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
-        self.remove_ir_artefacts_for_mapping(space, mapping)?;
+        self.remove_lifted_for_mapping(space, mapping)?;
 
         Ok(())
     }
@@ -1053,7 +909,7 @@ impl ProjectTransaction<'_> {
             .add_mapping_to_space_top(space, mapping)?;
         self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
-        self.remove_ir_artefacts_for_mapping(space, mapping)?;
+        self.remove_lifted_for_mapping(space, mapping)?;
 
         Ok(())
     }
@@ -1074,7 +930,7 @@ impl ProjectTransaction<'_> {
             .add_mapping_to_space_bottom(space, mapping)?;
         self.segment_reverts.push(revert);
         self.record_mapping_added(space, mapping);
-        self.remove_ir_artefacts_for_mapping(space, mapping)?;
+        self.remove_lifted_for_mapping(space, mapping)?;
 
         Ok(())
     }
@@ -1090,7 +946,7 @@ impl ProjectTransaction<'_> {
         let revert = self.project.storage.segments.remove_mapping_tracked(id)?;
         self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed.iter().copied());
-        self.remove_ir_artefacts_for_placements(removed)?;
+        self.remove_lifted_for_placements(removed)?;
 
         Ok(())
     }
@@ -1116,9 +972,9 @@ impl ProjectTransaction<'_> {
         self.project.storage.segments.remap_mapping(id, new_start)?;
         self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed.iter().copied());
-        self.remove_ir_artefacts_for_placements(removed)?;
+        self.remove_lifted_for_placements(removed)?;
         self.record_mapping_added_to_placements(id);
-        self.remove_ir_artefacts_for_mapping_placements(id)?;
+        self.remove_lifted_for_mapping_placements(id)?;
 
         Ok(())
     }
@@ -1143,9 +999,9 @@ impl ProjectTransaction<'_> {
         self.project.storage.segments.resize_mapping(id, new_size)?;
         self.segment_reverts.push(revert);
         self.record_mapping_removed(id, removed.iter().copied());
-        self.remove_ir_artefacts_for_placements(removed)?;
+        self.remove_lifted_for_placements(removed)?;
         self.record_mapping_added_to_placements(id);
-        self.remove_ir_artefacts_for_mapping_placements(id)?;
+        self.remove_lifted_for_mapping_placements(id)?;
 
         Ok(())
     }
@@ -1185,7 +1041,7 @@ impl ProjectTransaction<'_> {
             .prioritise_mapping(space, id)?;
         self.segment_reverts.push(revert);
         self.record_mapping_added(space, id);
-        self.remove_ir_artefacts_for_mapping(space, id)?;
+        self.remove_lifted_for_mapping(space, id)?;
 
         Ok(())
     }
@@ -1206,7 +1062,7 @@ impl ProjectTransaction<'_> {
             .deprioritise_mapping(space, id)?;
         self.segment_reverts.push(revert);
         self.record_mapping_added(space, id);
-        self.remove_ir_artefacts_for_mapping(space, id)?;
+        self.remove_lifted_for_mapping(space, id)?;
 
         Ok(())
     }
@@ -1223,7 +1079,7 @@ impl ProjectTransaction<'_> {
             if let Some(range) = Self::bytes_range(addr.space(), addr.raw_address(), written as u64)
             {
                 self.records.push(ChangeRecord::BytesWritten { range });
-                self.remove_ir_artefacts_in_range(&range, IrLevel::PCode)?;
+                self.remove_lifted_in_range(&range, IlLevel::PCode)?;
             }
             Ok(())
         } else {
@@ -1255,7 +1111,7 @@ impl ProjectTransaction<'_> {
         Some(AddressRange::new(space, start, end))
     }
 
-    fn remove_ir_artefacts_for_mapping(
+    fn remove_lifted_for_mapping(
         &mut self,
         space: AddressSpaceId,
         id: SegmentMappingId,
@@ -1265,10 +1121,10 @@ impl ProjectTransaction<'_> {
         };
 
         let range = Self::mapping_range(space, mapping.start(), mapping.size());
-        self.remove_ir_artefacts_in_range(&range, IrLevel::PCode)
+        self.remove_lifted_in_range(&range, IlLevel::PCode)
     }
 
-    fn remove_ir_artefacts_for_mapping_placements(
+    fn remove_lifted_for_mapping_placements(
         &mut self,
         id: SegmentMappingId,
     ) -> Result<usize, ProjectError> {
@@ -1279,10 +1135,10 @@ impl ProjectTransaction<'_> {
             .mapping_placements(id)
             .collect::<SmallVec<[_; 4]>>();
 
-        self.remove_ir_artefacts_for_placements(placements)
+        self.remove_lifted_for_placements(placements)
     }
 
-    fn remove_ir_artefacts_for_placements(
+    fn remove_lifted_for_placements(
         &mut self,
         placements: impl IntoIterator<Item = (AddressSpaceId, (RawAddress, RawAddress))>,
     ) -> Result<usize, ProjectError> {
@@ -1290,7 +1146,7 @@ impl ProjectTransaction<'_> {
 
         for (space, range) in placements {
             let range = AddressRange::new(space, range.0, range.1);
-            removed += self.remove_ir_artefacts_in_range(&range, IrLevel::PCode)?;
+            removed += self.remove_lifted_in_range(&range, IlLevel::PCode)?;
         }
 
         Ok(removed)
@@ -1350,7 +1206,7 @@ impl ProjectTransaction<'_> {
         let _entered = span.enter();
         if !self.records.is_empty() {
             let revision = self.project.revision.next();
-            if self.records.iter().any(ChangeRecord::affects_ir_inputs) {
+            if self.records.iter().any(ChangeRecord::affects_lifted_inputs) {
                 self.project.semantic_revision = revision;
             }
             self.project.revision = revision;
@@ -1365,8 +1221,8 @@ impl ProjectTransaction<'_> {
     pub fn rollback(mut self) -> Result<(), ProjectError> {
         let _entered = self.span.enter();
         self.committed = true;
-        while let Some(revert) = self.ir_artefact_reverts.pop() {
-            revert.restore(self.project)?;
+        while let Some(revert) = self.ir_reverts.pop() {
+            revert.restore(&self.project.storage.entities)?;
         }
         while let Some(revert) = self.reference_reverts.pop() {
             revert.restore(&self.project.references)?;
@@ -1592,6 +1448,7 @@ impl Project {
             revision,
             semantic_revision,
             transaction_active: false,
+            canonicaliser: PCodeCanonicaliser::default(),
             persistable: true,
             storage,
         })
@@ -1792,166 +1649,31 @@ impl Project {
         self.restored_revision
     }
 
-    pub fn ir_artefact(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-    ) -> Result<Option<RawIrArtefact>, ProjectError> {
-        self.ir_artefact_at_revision(function, level, self.semantic_revision)
+    pub fn pcode(&self, function: FunctionId) -> Result<Option<PCodeIr>, ProjectError> {
+        PCodeIr::load_current(
+            &self.storage.entities,
+            function,
+            self.semantic_revision.value(),
+        )
+        .map_err(ProjectError::from)
     }
 
-    fn ir_artefact_at_revision(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-        revision: Revision,
-    ) -> Result<Option<RawIrArtefact>, ProjectError> {
-        let Some(artefact) = self.stored_ir_artefact(function, level)? else {
-            return Ok(None);
-        };
-
-        artefact.header().verify_input_revision(revision.value())?;
-        self.verify_ir_artefact_payload(&artefact)?;
-
-        Ok(Some(artefact))
+    pub fn ecode(&self, function: FunctionId) -> Result<Option<ECodeIr>, ProjectError> {
+        ECodeIr::load_current(
+            &self.storage.entities,
+            function,
+            self.semantic_revision.value(),
+        )
+        .map_err(ProjectError::from)
     }
 
-    fn stored_ir_artefact(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-    ) -> Result<Option<RawIrArtefact>, ProjectError> {
-        let key = IrArtefactKey::new(function, level);
-        let Some(artefact) = self
-            .storage
-            .entities
-            .get_as::<IrArtefactKey, RawIrArtefact, _, _>(&key, |bytes| {
-                RawIrArtefact::verify_archived(bytes).map_err(EntityStorageError::decode)?;
-
-                rkyv::from_bytes::<RawIrArtefact, rkyv::rancor::Error>(bytes)
-                    .map_err(EntityStorageError::decode)
-            })?
-        else {
-            return Ok(None);
-        };
-
-        artefact.verify_identity(function, level)?;
-        artefact.verify()?;
-
-        Ok(Some(artefact))
-    }
-
-    fn verify_ir_artefact_payload(&self, artefact: &RawIrArtefact) -> Result<(), ProjectError> {
-        let level = artefact.header().level();
-
-        match level {
-            IrLevel::PCode => artefact.verify_as::<PCodeBody>()?,
-            IrLevel::Llil => artefact.verify_as::<LlilBody>()?,
-            IrLevel::LlilSsa => artefact.verify_as::<SsaBody>()?,
-            IrLevel::MappedMlil | IrLevel::Mlil => {
-                return Err(IlError::artefact_level_unsupported(level).into());
-            }
-        }
-
-        self.verify_ir_parent_digest(artefact)?;
-
-        Ok(())
-    }
-
-    fn verify_ir_parent_digest(&self, artefact: &RawIrArtefact) -> Result<(), ProjectError> {
-        let level = artefact.header().level();
-        let Some(parent_level) = level.parent() else {
-            return Ok(());
-        };
-
-        let parent_digest = artefact.header().parent_digest();
-        if parent_digest == ArtefactDigest::ZERO {
-            return Err(IlError::missing_parent_digest(level).into());
-        }
-
-        let function = artefact.header().function();
-        let Some(parent) = self.stored_ir_artefact(function, parent_level)? else {
-            return Err(IlError::missing_artefact(function, parent_level).into());
-        };
-
-        if parent.header().content_digest() != parent_digest {
-            return Err(IlError::parent_digest_mismatch(level).into());
-        }
-
-        Ok(())
-    }
-
-    fn ir_body_at_revision<T>(
-        &self,
-        function: FunctionId,
-        revision: Revision,
-    ) -> Result<Option<RawIrArtefact>, ProjectError>
-    where
-        T: IrArtefact,
-    {
-        self.ir_artefact_at_revision(function, T::LEVEL, revision)
-    }
-
-    pub fn ir_body<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
-    where
-        T: IrArtefact,
-    {
-        self.ir_artefact(function, T::LEVEL)?
-            .map(T::from_raw_artefact)
-            .transpose()
-            .map_err(ProjectError::from)
-    }
-
-    pub fn pcode_body(&self, function: FunctionId) -> Result<Option<PCodeBody>, ProjectError> {
-        self.ir_body(function)
-    }
-
-    pub fn llil_body(&self, function: FunctionId) -> Result<Option<LlilBody>, ProjectError> {
-        self.ir_body(function)
-    }
-
-    pub fn llil_ssa_body(&self, function: FunctionId) -> Result<Option<SsaBody>, ProjectError> {
-        self.ir_body(function)
-    }
-
-    pub fn llil_ssa_use_index(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<UseIndex>, ProjectError> {
-        self.llil_ssa_body(function)?
-            .map(|body| body.use_index())
-            .transpose()
-            .map_err(ProjectError::from)
-    }
-
-    pub fn llil_ssa_dominance(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<Dominance>, ProjectError> {
-        self.llil_ssa_body(function)?
-            .map(|body| body.dominance())
-            .transpose()
-            .map_err(ProjectError::from)
-    }
-
-    pub fn llil_ssa_dominance_frontiers(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<DominanceFrontier>, ProjectError> {
-        self.llil_ssa_body(function)?
-            .map(|body| body.dominance_frontiers())
-            .transpose()
-            .map_err(ProjectError::from)
-    }
-
-    pub fn llil_ssa_liveness(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<Liveness>, ProjectError> {
-        self.llil_ssa_body(function)?
-            .map(|body| body.liveness())
-            .transpose()
-            .map_err(ProjectError::from)
+    pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<ECodeSsaIr>, ProjectError> {
+        ECodeSsaIr::load_current(
+            &self.storage.entities,
+            function,
+            self.semantic_revision.value(),
+        )
+        .map_err(ProjectError::from)
     }
 
     pub(crate) fn abandon_persistence(&mut self) {
@@ -1969,13 +1691,12 @@ impl Project {
         ProjectTransaction {
             project: self,
             records: Vec::new(),
-            ir_artefact_reverts: Vec::new(),
+            ir_reverts: Vec::new(),
             function_reverts: Vec::new(),
             symbol_reverts: Vec::new(),
             segment_reverts: Vec::new(),
             segment_write_reverts: Vec::new(),
             reference_reverts: Vec::new(),
-            scratch: Scratch::new(IR_TRANSFORM_SCRATCH_CAP),
             source,
             committed: false,
             span,
@@ -2126,22 +1847,25 @@ mod test {
     use std::io;
 
     use fugue_lifter::runtime::pcode::Inputs;
+    use fugue_lifter::{Op, PCodeOp as RawPCodeOp, Varnode};
 
     use super::*;
     use crate::analysis::function::recovery::{InsnEntry, PartialCodeBlock};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::attributes;
     use crate::il::common::{
-        ArtefactHeader, BuildStatus, CommonBody, Finish, PackedRange, SchemaVersion, Scratch,
-        SourceRun, Transform, TransformContext,
+        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange, IlSchemaVersion,
+        IlSourceSpan, IlValueId,
     };
-    use crate::il::llil::StatementOpcode;
-    use crate::il::llil::transform::PCodeToLlil;
+    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeStmtOpcode};
     use crate::il::pcode::{
-        AddressAnnotationRole, LifterSpaceHandle, Location, Op, Opcode, Operation,
-        PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeError, PCodeOp, Varnode,
+        AddressAnnotationRole, LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder,
+        PCodeLocation, PCodeLocationProperties, PCodeOp, PCodeOpcode,
     };
-    use crate::ir::{Insn, InsnProperties, ReferenceTarget};
+    use crate::ir::{
+        Insn, InsnProperties, ReferenceProperties, SymbolProperties, SymbolTableSelector,
+    };
     use crate::lifter::{ContextSet, resolve_language};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::storage::DefaultPersistentEntityStorage;
@@ -2154,7 +1878,6 @@ mod test {
     #[cfg(feature = "rocksdb")]
     use crate::storage::entities::RocksDbEntityStorage;
     use crate::storage::segments::DEFAULT_SPACE_ID;
-    use crate::types::BytesOrSlice;
 
     fn with_logging(
         f: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
@@ -2169,83 +1892,89 @@ mod test {
         tracing::subscriber::with_default(subscriber, f)
     }
 
-    fn pcode_reference_body(
+    fn pcode_reference_ir(
         function: FunctionId,
         source: Address,
         target_space: AddressSpaceId,
         target_offset: u64,
-        opcode: Opcode,
-    ) -> Result<PCodeBody, IlError> {
-        let header = ArtefactHeader::new(function, IrLevel::PCode, PCODE_SCHEMA_VERSION, 0);
-        let common = CommonBody::new(
-            Vec::new(),
-            Vec::new(),
-            vec![SourceRun::new(PackedRange::new(0, 1)?, source, 0, 1)],
-            Vec::new(),
-        );
-        let mut builder = PCodeBuilder::new(header, common);
-        let pointer = builder.push_location(Location::new(
+        opcode: PCodeOpcode,
+    ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
+        let language = resolve_language("x86:LE:64")?;
+        let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+
+        builder.replace_source_spans(vec![IlSourceSpan::new(
+            IlIndexRange::new(0, 1)?,
+            source,
+            0,
+            1,
+        )]);
+
+        let pointer = builder.push_location(PCodeLocation::new(
             LifterSpaceHandle::new(0),
             target_offset,
             8,
-            Location::CONSTANT,
+            PCodeLocationProperties::CONSTANT,
         ))?;
-        let value = builder.push_location(Location::new(
+        let value = builder.push_location(PCodeLocation::new(
             LifterSpaceHandle::new(1),
             0,
             8,
-            Location::REGISTER,
+            PCodeLocationProperties::REGISTER,
         ))?;
         let operands = match opcode {
-            Opcode::Store => builder.push_operands([pointer, value])?,
+            PCodeOpcode::Store => builder.push_operands([pointer, value])?,
             _ => builder.push_operands([pointer])?,
         };
         let output = opcode.requires_output().then_some(value);
 
-        builder.push_operation(Operation::new(
+        builder.push_operation(PCodeOp::new(
             opcode,
             output,
             operands,
             0,
             Some(target_space),
         ));
-        builder.finish(&BuildStatus::new())
+
+        Ok(builder.build(&CancellationToken::default())?)
     }
 
-    fn pcode_copy_body(function: FunctionId, source: Address) -> Result<PCodeBody, IlError> {
-        let header = ArtefactHeader::new(function, IrLevel::PCode, PCODE_SCHEMA_VERSION, 0);
-        let common = CommonBody::new(
-            Vec::new(),
-            Vec::new(),
-            vec![SourceRun::new(PackedRange::new(0, 1)?, source, 0, 1)],
-            Vec::new(),
-        );
-        let mut builder = PCodeBuilder::new(header, common);
-        let location = builder.push_location(Location::new(
+    fn pcode_copy_ir(
+        function: FunctionId,
+        source: Address,
+    ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
+        let language = resolve_language("x86:LE:64")?;
+        let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+
+        builder.replace_source_spans(vec![IlSourceSpan::new(
+            IlIndexRange::new(0, 1)?,
+            source,
+            0,
+            1,
+        )]);
+
+        let location = builder.push_location(PCodeLocation::new(
             LifterSpaceHandle::new(1),
             0,
             8,
-            Location::REGISTER,
+            PCodeLocationProperties::REGISTER,
         ))?;
         let operands = builder.push_operands([location])?;
 
-        builder.push_operation(Operation::new(
-            Opcode::Copy,
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
             Some(location),
             operands,
             0,
             None,
         ));
-        builder.finish(&BuildStatus::new())
+
+        Ok(builder.build(&CancellationToken::default())?)
     }
 
-    fn lower_test_llil(source: &PCodeBody) -> Result<LlilBody, IlError> {
-        let mut scratch = Scratch::new(1024);
-        let status = BuildStatus::new();
-        let mut context = TransformContext::new(&status, &mut scratch);
-        let mut transform = PCodeToLlil;
-
-        transform.transform(source, &mut context)
+    fn lift_test_ecode(source: &PCodeIr) -> Result<ECodeIr, IlError> {
+        PCodeToECode.transform(source, &CancellationToken::default())
     }
 
     fn flow_resolved_load_function(
@@ -2253,7 +1982,7 @@ mod test {
         data_offset: u64,
     ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let operation = PCodeOp {
+        let operation = RawPCodeOp {
             op: Op::Load(language.default_space()),
             inputs: Inputs::one(Varnode::constant(data_offset, 8)),
             output: Varnode::new(language.register_space(), 0, 8),
@@ -2287,7 +2016,7 @@ mod test {
         length: usize,
     ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let operation = PCodeOp {
+        let operation = RawPCodeOp {
             op: Op::Call,
             inputs: Inputs::one(Varnode::new(language.default_space(), callee.offset(), 8)),
             output: Varnode::INVALID,
@@ -2350,120 +2079,124 @@ mod test {
             .ok_or_else(|| io::Error::other("fixture writable segment missing").into())
     }
 
-    #[test]
-    fn project_ir_artefact_rejects_digest_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-        let project = Project::from_file_transient("tests/ls.elf")?;
-        let function = FunctionId::default();
-        let level = IrLevel::PCode;
-        let key = IrArtefactKey::new(function, level);
-        let header = ArtefactHeader::new(function, level, SchemaVersion::new(1), 0);
-        let artefact = RawIrArtefact::new(header, CommonBody::default(), vec![1, 2, 3]);
-        let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&artefact)?.to_vec();
-        let payload = bytes
-            .windows(3)
-            .position(|window| window == [1, 2, 3])
-            .expect("payload bytes should be present");
-
-        bytes[payload] = 9;
-        project
-            .storage
-            .entities
-            .insert_bytes::<IrArtefactKey, RawIrArtefact>(&key, BytesOrSlice::from(bytes))?;
-
-        assert!(matches!(
-            project.ir_artefact(function, level),
-            Err(ProjectError::Il(IlError::DigestMismatch))
+    fn partial_function(entry: Address, len: usize) -> PartialFunction {
+        let mut function = PartialFunction::new(entry);
+        function.push_block(PartialCodeBlock::new(
+            entry,
+            len,
+            Vec::new(),
+            ContextSet::default(),
         ));
 
-        Ok(())
+        function
+    }
+
+    fn tagged_source_spans(payload: &[u8]) -> Vec<IlSourceSpan> {
+        let tag = payload.first().copied().unwrap_or_default();
+        vec![IlSourceSpan::new(
+            IlIndexRange::EMPTY,
+            Address::new(DEFAULT_SPACE_ID, u64::from(tag)),
+            u32::from(tag),
+            u32::try_from(payload.len()).expect("test payload length should fit"),
+        )]
+    }
+
+    fn single_block_graph() -> IlGraph {
+        IlGraph::new(
+            vec![IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::EMPTY,
+                IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
+            )],
+            Vec::new(),
+        )
+    }
+
+    fn test_pcode(function: FunctionId, graph: IlGraph) -> PCodeIr {
+        let language = resolve_language("x86:LE:64").expect("test language should resolve");
+        PCodeBuilder::new(
+            language,
+            IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+            graph,
+        )
+        .build(&CancellationToken::default())
+        .expect("test PCode IR should verify")
+    }
+
+    fn test_tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
+        let language = resolve_language("x86:LE:64").expect("test language should resolve");
+        let mut builder = PCodeBuilder::new(
+            language,
+            IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+            IlGraph::default(),
+        );
+        builder.replace_source_spans(tagged_source_spans(payload));
+        builder
+            .build(&CancellationToken::default())
+            .expect("test PCode IR should verify")
+    }
+
+    fn test_ecode(function: FunctionId, graph: IlGraph) -> ECodeIr {
+        ECodeBuilder::new(IlHeader::new(function, ECODE_SCHEMA_VERSION, 0), graph)
+            .build(&CancellationToken::default())
+            .expect("test LIR should verify")
+    }
+
+    fn test_ecode_ssa(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
+        ECodeSsaBuilder::new(IlHeader::new(function, ECODE_SSA_SCHEMA_VERSION, 0), graph)
+            .build(&CancellationToken::default())
+            .expect("test LIR SSA should verify")
+    }
+
+    fn first_mapping_placement(
+        project: &Project,
+    ) -> (AddressSpaceId, SegmentMappingId, (RawAddress, RawAddress)) {
+        let (space, mapping) = project
+            .segments()
+            .spaces()
+            .find_map(|space| {
+                space
+                    .priority_list()
+                    .first()
+                    .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
+            })
+            .expect("fixture should contain at least one mapping");
+        let range = project
+            .segments()
+            .mapping_placements(mapping)
+            .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+            .expect("mapping should have a placement in its priority space");
+
+        (space, mapping, range)
     }
 
     #[test]
-    fn project_ir_artefact_rejects_corrupt_dialect_payload()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let project = Project::from_file_transient("tests/ls.elf")?;
-        let function = FunctionId::default();
-        let level = IrLevel::PCode;
-        let key = IrArtefactKey::new(function, level);
-        let header = ArtefactHeader::new(function, level, PCODE_SCHEMA_VERSION, 0);
-        let artefact = RawIrArtefact::new(header, CommonBody::default(), vec![1, 2, 3]);
-
-        project.storage.entities.insert(&key, &artefact)?;
-
-        assert!(matches!(
-            project.ir_artefact(function, level),
-            Err(ProjectError::Il(IlError::ArtefactDecode {
-                level: IrLevel::PCode
-            }))
-        ));
-
-        Ok(())
-    }
-
-    #[test]
-    fn project_ir_artefact_rejects_unsupported_dialect_payload()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let project = Project::from_file_transient("tests/ls.elf")?;
-        let function = FunctionId::default();
-
-        for level in [IrLevel::MappedMlil, IrLevel::Mlil] {
-            let key = IrArtefactKey::new(function, level);
-            let header = ArtefactHeader::new(function, level, SchemaVersion::new(1), 0);
-            let artefact = RawIrArtefact::new(header, CommonBody::default(), Vec::new());
-
-            project.storage.entities.insert(&key, &artefact)?;
-
-            assert!(matches!(
-                project.ir_artefact(function, level),
-                Err(ProjectError::Il(IlError::ArtefactLevelUnsupported { level: found }))
-                    if found == level
-            ));
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn project_ir_artefact_rejects_stale_input_revision() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
-        let level = IrLevel::PCode;
-        let stale_revision = project.revision().value();
+        let stale_revision = project.semantic_revision().value();
         {
             let mut transaction = project.transaction("test");
             transaction.create_space()?;
             transaction.commit()?;
         }
 
-        let key = IrArtefactKey::new(function, level);
-        let header = ArtefactHeader::new(function, level, SchemaVersion::new(1), stale_revision);
-        let artefact = RawIrArtefact::new(header, CommonBody::default(), Vec::new());
-        project.storage.entities.insert(&key, &artefact)?;
+        let ir = PCodeIr::new(
+            IlHeader::new(function, PCODE_SCHEMA_VERSION, stale_revision),
+            IlGraph::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        project.storage.entities.insert(&function, &ir)?;
 
         assert!(matches!(
-            project.ir_artefact(function, level),
-            Err(ProjectError::Il(IlError::StaleArtefact { .. }))
-        ));
-
-        Ok(())
-    }
-
-    #[test]
-    fn project_ir_artefact_rejects_wrong_stored_level() -> Result<(), Box<dyn std::error::Error>> {
-        let project = Project::from_file_transient("tests/ls.elf")?;
-        let function = FunctionId::default();
-        let key = IrArtefactKey::new(function, IrLevel::PCode);
-        let header = ArtefactHeader::new(function, IrLevel::Llil, SchemaVersion::new(1), 0);
-        let artefact = RawIrArtefact::new(header, CommonBody::default(), Vec::new());
-
-        project.storage.entities.insert(&key, &artefact)?;
-
-        assert!(matches!(
-            project.ir_artefact(function, IrLevel::PCode),
-            Err(ProjectError::Il(IlError::UnexpectedLevel {
-                expected: IrLevel::PCode,
-                found: IrLevel::Llil,
+            project.pcode(function),
+            Err(ProjectError::Il(IlError::StaleArtefact {
+                level: IlLevel::PCode,
+                ..
             }))
         ));
 
@@ -2471,52 +2204,49 @@ mod test {
     }
 
     #[test]
-    fn project_ir_artefact_rejects_wrong_stored_function() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let mut project = Project::from_file_transient("tests/ls.elf")?;
-        let entry = writable_address(&project)?;
-        let function = {
-            let mut transaction = project.transaction("test");
-            let function = transaction.add_function(disassembled_function(entry, 1)?)?;
-
-            transaction.commit()?;
-
-            function
-        };
-        let key = IrArtefactKey::new(function, IrLevel::PCode);
-        let header = ArtefactHeader::new(
-            FunctionId::default(),
-            IrLevel::PCode,
-            SchemaVersion::new(1),
-            0,
+    fn project_pcode_rejects_schema_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+        let project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+        let schema = IlSchemaVersion::new(PCODE_SCHEMA_VERSION.value() + 1);
+        let ir = PCodeIr::new(
+            IlHeader::new(function, schema, project.semantic_revision().value()),
+            IlGraph::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
-        let artefact = RawIrArtefact::new(header, CommonBody::default(), Vec::new());
 
-        project.storage.entities.insert(&key, &artefact)?;
+        project.storage.entities.insert(&function, &ir)?;
 
         assert!(matches!(
-            project.ir_artefact(function, IrLevel::PCode),
-            Err(ProjectError::Il(IlError::UnexpectedFunction { expected, found }))
-                if expected == function && found == FunctionId::default()
+            project.pcode(function),
+            Err(ProjectError::Il(IlError::SchemaMismatch {
+                level: IlLevel::PCode,
+                expected,
+                found,
+            })) if expected == PCODE_SCHEMA_VERSION.value() && found == schema.value()
         ));
 
         Ok(())
     }
 
     #[test]
-    fn project_remove_ir_artefact_clears_derived_data_references()
+    fn project_remove_lifted_clears_derived_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let mut load = pcode_reference_body(function, source, target_space, 0x4000, Opcode::Load)?;
+        let mut load =
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut load)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut load)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
@@ -2529,7 +2259,7 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            assert!(transaction.remove_ir_artefact(function, IrLevel::PCode)?);
+            assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
             transaction.commit()?;
         }
 
@@ -2542,14 +2272,14 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut load)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut load)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
         {
             let mut transaction = project.transaction("test");
-            assert!(transaction.remove_ir_artefact(function, IrLevel::PCode)?);
+            assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
             transaction.rollback()?;
         }
 
@@ -2557,30 +2287,31 @@ mod test {
             .references
             .get(source, ReferenceTarget::from(target))?
             .expect("rollback should restore the artefact's derived data reference");
-        assert!(restored.kind().is_read());
-        assert!(project.ir_artefact(function, IrLevel::PCode)?.is_some());
+        assert!(restored.is_read());
+        assert!(project.pcode(function)?.is_some());
 
         Ok(())
     }
 
     #[test]
-    fn project_flush_ir_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_flush_derived_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
-        let mut load = pcode_reference_body(function, source, target_space, 0x4000, Opcode::Load)?;
+        let mut load =
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut load)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut load)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
         let changes = {
             let mut transaction = project.transaction("test");
-            assert!(!transaction.flush_ir_references(function)?);
+            assert!(!transaction.flush_derived_references(function)?);
             transaction.commit()?
         };
         assert!(
@@ -2594,21 +2325,22 @@ mod test {
     }
 
     #[test]
-    fn project_flush_ir_references_replaces_derived_data_references()
+    fn project_flush_derived_references_replaces_derived_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let mut load = pcode_reference_body(function, source, target_space, 0x4000, Opcode::Load)?;
-        let mut copy = pcode_copy_body(function, source)?;
+        let mut load =
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
+        let mut copy = pcode_copy_ir(function, source)?;
 
         let changes = {
             let mut transaction = project.transaction("test");
-            assert!(!transaction.flush_ir_references(function)?);
-            transaction.publish_ir_body(&mut load)?;
-            assert!(transaction.flush_ir_references(function)?);
+            assert!(!transaction.flush_derived_references(function)?);
+            transaction.materialise_lifted(&mut load)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?
         };
 
@@ -2616,7 +2348,7 @@ mod test {
             .references
             .get(source, ReferenceTarget::from(target))?
             .expect("flushing PCode references should install a derived data reference");
-        assert!(reference.kind().is_read());
+        assert!(reference.is_read());
         assert!(reference.origin().is_derived());
 
         let incoming = project
@@ -2626,7 +2358,7 @@ mod test {
         assert!(
             incoming
                 .iter()
-                .any(|reference| reference.from() == source && reference.kind().is_read()),
+                .any(|reference| reference.from() == source && reference.is_read()),
             "inverse query should observe the flushed data reference"
         );
 
@@ -2644,8 +2376,8 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut copy)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut copy)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
@@ -2660,27 +2392,28 @@ mod test {
     }
 
     #[test]
-    fn project_flush_ir_references_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_flush_derived_references_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let mut load = pcode_reference_body(function, source, target_space, 0x4000, Opcode::Load)?;
+        let mut load =
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
         let mut store =
-            pcode_reference_body(function, source, target_space, 0x4000, Opcode::Store)?;
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Store)?;
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut load)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut load)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut store)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut store)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.rollback()?;
         }
 
@@ -2688,14 +2421,14 @@ mod test {
             .references
             .get(source, ReferenceTarget::from(target))?
             .expect("rollback should restore the previous derived reference");
-        assert!(reference.kind().is_read());
-        assert!(!reference.kind().is_write());
+        assert!(reference.is_read());
+        assert!(!reference.is_write());
 
         Ok(())
     }
 
     #[test]
-    fn project_function_add_does_not_publish_flow_resolved_data_references()
+    fn project_function_add_does_not_materialise_flow_resolved_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = Address::new(AddressSpaceId::new(7), 0x1000u64);
@@ -2742,12 +2475,12 @@ mod test {
             .references
             .get(entry, ReferenceTarget::from(callee))?
             .expect("function add should derive the call flow reference");
-        assert!(flow.kind().is_call());
+        assert!(flow.is_call());
 
         {
             let mut transaction = project.transaction("test");
             transaction
-                .ensure_pcode(function, &BuildStatus::new())
+                .ensure_pcode(function, &CancellationToken::default())
                 .expect("ensure pcode");
             transaction.commit()?;
         }
@@ -2755,8 +2488,8 @@ mod test {
         let preserved = project
             .references
             .get(entry, ReferenceTarget::from(callee))?
-            .expect("publishing PCode should preserve the call flow reference");
-        assert!(preserved.kind().is_call());
+            .expect("materialising PCode should preserve the call flow reference");
+        assert!(preserved.is_call());
 
         Ok(())
     }
@@ -2776,34 +2509,35 @@ mod test {
             function
         };
 
-        let published_pcode = {
+        let materialised_pcode = {
             let mut transaction = project.transaction("test");
-            let published = transaction.ensure_pcode(function, &BuildStatus::new())?;
+            let materialised = transaction.ensure_pcode(function, &CancellationToken::default())?;
             transaction.commit()?;
-            published
+            materialised
         };
-        let published_llil = {
+        let materialised_ecode = {
             let mut transaction = project.transaction("test");
-            let published = transaction.ensure_llil(function, &BuildStatus::new())?;
+            let materialised = transaction.ensure_ecode(function, &CancellationToken::default())?;
             transaction.commit()?;
-            published
+            materialised
         };
-        let body = project
-            .pcode_body(function)?
-            .expect("PCode body should be published");
-        let llil = project
-            .llil_body(function)?
-            .expect("LLIL body should be published");
+        let pcode = project
+            .pcode(function)?
+            .expect("pcode should be materialised");
+        let ecode = project
+            .ecode(function)?
+            .expect("ecode should be materialised");
 
-        assert!(published_pcode);
-        assert!(published_llil);
-        assert!(!body.operations().is_empty());
-        assert_eq!(body.common().source_runs().len(), 1);
-        assert_eq!(body.common().source_runs()[0].machine_address(), entry);
+        assert!(materialised_pcode);
+        assert!(materialised_ecode);
+        assert!(!pcode.operations().is_empty());
+        assert_eq!(pcode.source_spans().len(), 1);
+        assert_eq!(pcode.source_spans()[0].address(), entry);
         assert!(
-            llil.statements()
+            ecode
+                .statements()
                 .iter()
-                .any(|statement| statement.opcode() == StatementOpcode::WriteRegister)
+                .any(|statement| statement.opcode() == ECodeStmtOpcode::WriteRegister)
         );
 
         Ok(())
@@ -2826,20 +2560,20 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.ensure_pcode(function, &BuildStatus::new())?;
+            transaction.ensure_pcode(function, &CancellationToken::default())?;
             transaction.commit()?;
         }
 
-        let body = project
-            .pcode_body(function)?
-            .expect("PCode body should be published");
-        let source_runs = body.common().source_runs();
+        let pcode = project
+            .pcode(function)?
+            .expect("pcode should be materialised");
+        let source_spans = pcode.source_spans();
 
-        assert!(body.operations().is_empty());
-        assert_eq!(source_runs.len(), 1);
-        assert_eq!(source_runs[0].machine_address(), entry);
-        assert!(source_runs[0].destination().is_empty());
-        assert_eq!(source_runs[0].pcode_count(), 0);
+        assert!(pcode.operations().is_empty());
+        assert_eq!(source_spans.len(), 1);
+        assert_eq!(source_spans[0].address(), entry);
+        assert!(source_spans[0].destination().is_empty());
+        assert_eq!(source_spans[0].pcode_count(), 0);
 
         Ok(())
     }
@@ -2860,7 +2594,7 @@ mod test {
         };
 
         let mut transaction = project.transaction("test");
-        let result = transaction.ensure_pcode(function, &BuildStatus::new());
+        let result = transaction.ensure_pcode(function, &CancellationToken::default());
 
         match result {
             Err(ProjectError::PCode(PCodeError::MissingAnnotation {
@@ -2870,46 +2604,45 @@ mod test {
             other => panic!("unexpected ensure_pcode result: {other:?}"),
         }
 
-        assert_eq!(transaction.scratch.bytes().len(), 0);
-
         transaction.rollback()?;
 
         Ok(())
     }
 
     #[test]
-    fn project_llil_publish_preserves_flushed_references() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn project_ecode_materialise_preserves_flushed_references()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let mut pcode = pcode_reference_body(function, source, target_space, 0x4000, Opcode::Load)?;
+        let mut pcode =
+            pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut pcode)?;
-            assert!(transaction.flush_ir_references(function)?);
+            transaction.materialise_lifted(&mut pcode)?;
+            assert!(transaction.flush_derived_references(function)?);
             transaction.commit()?;
         }
 
         let pcode = project
-            .pcode_body(function)?
-            .expect("PCode body should be published");
-        let mut llil = lower_test_llil(&pcode)?;
+            .pcode(function)?
+            .expect("pcode should be materialised");
+        let mut ecode = lift_test_ecode(&pcode)?;
 
         {
             let mut transaction = project.transaction("test");
-            transaction.publish_ir_body(&mut llil)?;
+            transaction.materialise_lifted(&mut ecode)?;
             transaction.commit()?;
         }
 
         let reference = project
             .references
             .get(source, ReferenceTarget::from(target))?
-            .expect("LLIL publication should not remove PCode-derived references");
-        assert!(reference.kind().is_read());
+            .expect("ecode publication should not remove PCode-derived references");
+        assert!(reference.is_read());
         assert!(reference.origin().is_derived());
 
         Ok(())
@@ -2988,5 +2721,678 @@ mod test {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn test_lifted_materialise_remove_and_rollback() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+        let mut materialised = test_tagged_pcode(function, &[1, 2, 3]);
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut materialised)?;
+            transaction.commit()?
+        };
+
+        assert!(
+            changes
+                .records()
+                .contains(&ChangeRecord::LiftedMaterialised {
+                    function,
+                    level: IlLevel::PCode,
+                })
+        );
+        assert_eq!(project.pcode(function)?.as_ref(), Some(&materialised));
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[4, 5, 6]))?;
+            transaction.rollback()?;
+        }
+
+        assert_eq!(project.pcode(function)?.as_ref(), Some(&materialised));
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
+            transaction.commit()?
+        };
+
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::PCode,
+        }));
+        assert!(project.pcode(function)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_lifted_materialise_and_read() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let mut body = test_pcode(FunctionId::default(), IlGraph::default());
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut body)?;
+            transaction.commit()?;
+        }
+
+        let read = project
+            .pcode(FunctionId::default())?
+            .expect("PCode IR should be materialised");
+
+        assert_eq!(read.operations(), body.operations());
+        assert_eq!(
+            read.header().input_revision(),
+            project.semantic_revision().value()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_reads_ecode_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_pcode(function, single_block_graph()))?;
+            transaction.materialise_lifted(&mut test_ecode(function, single_block_graph()))?;
+            transaction.materialise_lifted(&mut test_ecode_ssa(function, single_block_graph()))?;
+            transaction.commit()?;
+        }
+
+        let entry = IlBlockId::try_from_index(0)?;
+        let value = IlValueId::try_from_index(0)?;
+        let ir = project
+            .ecode_ssa(function)?
+            .expect("SSA IR should be available");
+        let uses = ir.uses();
+        let dominance = ir.dominance();
+        let frontiers = ir.dominance_frontiers();
+        let liveness = ir.liveness();
+
+        assert!(uses.uses_for(value).is_empty());
+        assert!(dominance.dominates(entry, entry));
+        assert!(frontiers.frontier(entry).is_empty());
+        assert!(liveness.live_in(entry).is_empty());
+        assert!(liveness.live_out(entry).is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+        let mut body = test_pcode(function, IlGraph::default());
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut body)?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(!transaction.ensure_pcode(function, &CancellationToken::default())?);
+            assert!(transaction.ensure_ecode(function, &CancellationToken::default())?);
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_some());
+        assert!(project.ecode(function)?.is_some());
+        assert!(
+            changes
+                .records()
+                .contains(&ChangeRecord::LiftedMaterialised {
+                    function,
+                    level: IlLevel::ECode,
+                })
+        );
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(!transaction.ensure_ecode(function, &CancellationToken::default())?);
+            transaction.commit()?
+        };
+
+        assert!(changes.records().is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+        let mut body = test_pcode(function, IlGraph::default());
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut body)?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.ensure_ecode_ssa(function, &CancellationToken::default())?);
+            transaction.commit()?
+        };
+
+        assert!(project.ecode(function)?.is_some());
+        assert!(project.ecode_ssa(function)?.is_some());
+        assert!(
+            changes
+                .records()
+                .contains(&ChangeRecord::LiftedMaterialised {
+                    function,
+                    level: IlLevel::ECode,
+                })
+        );
+        assert!(
+            changes
+                .records()
+                .contains(&ChangeRecord::LiftedMaterialised {
+                    function,
+                    level: IlLevel::ECodeSsa,
+                })
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
+            transaction.materialise_lifted(&mut test_ecode_ssa(function, IlGraph::default()))?;
+            transaction.commit()?;
+        }
+
+        {
+            let mut transaction = project.transaction("test");
+            assert_eq!(transaction.remove_lifted_from(function, IlLevel::ECode)?, 2);
+            transaction.rollback()?;
+        }
+
+        assert!(project.ecode(function)?.is_some());
+        assert!(project.ecode_ssa(function)?.is_some());
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert_eq!(transaction.remove_lifted_from(function, IlLevel::ECode)?, 2);
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_some());
+        assert!(project.ecode(function)?.is_none());
+        assert!(project.ecode_ssa(function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::ECode,
+        }));
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::ECodeSsa,
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_replacing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::from(0x4000u64);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert_eq!(
+                transaction.add_function(partial_function(entry, 2))?,
+                function
+            );
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_none());
+        assert!(project.ecode(function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::PCode,
+        }));
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::ECode,
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_function_replacement_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::from(0x4000u64);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+        let mut materialised = test_tagged_pcode(function, &[1]);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut materialised)?;
+            transaction.commit()?;
+        }
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.add_function(partial_function(entry, 2))?;
+            transaction.rollback()?;
+        }
+
+        assert_eq!(project.pcode(function)?, Some(materialised));
+
+        let block = project
+            .functions()
+            .get_by_id(function)
+            .and_then(|function| function.blocks().next().map(|(_, block)| block))
+            .and_then(|block| project.blocks().get_by_id(block))
+            .expect("function body should be restored");
+        assert_eq!(block.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::from(0x4000u64);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.remove_function_by_id(function)?);
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::PCode,
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_write_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = writable_address(&project)?;
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 2))?;
+            transaction.commit()?;
+            function
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.write_bytes(entry + 1u64, &[0xa5])?;
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::PCode,
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = writable_address(&project)?;
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 2))?;
+            transaction.commit()?;
+            function
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
+            transaction.materialise_lifted(&mut test_ecode_ssa(function, IlGraph::default()))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.write_bytes(entry + 1u64, &[0xa5])?;
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_none());
+        assert!(project.ecode(function)?.is_none());
+        assert!(project.ecode_ssa(function)?.is_none());
+        for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+            assert!(
+                changes
+                    .records()
+                    .contains(&ChangeRecord::LiftedRemoved { function, level })
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = writable_address(&project)?;
+        let index = SymbolIndex::new(SymbolTableSelector::new(253), 250);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 2))?;
+            transaction.insert_symbol(
+                index,
+                SymbolEntry::new(entry, "old_display_name", SymbolProperties::FUNCTION),
+            );
+            transaction.commit()?;
+            function
+        };
+
+        let mut pcode = test_tagged_pcode(function, &[1]);
+        let mut ecode = test_ecode(function, IlGraph::default());
+        let mut ssa = test_ecode_ssa(function, IlGraph::default());
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut pcode)?;
+            transaction.materialise_lifted(&mut ecode)?;
+            transaction.materialise_lifted(&mut ssa)?;
+            transaction.commit()?;
+        }
+
+        let semantic_revision = project.semantic_revision();
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.insert_symbol(
+                index,
+                SymbolEntry::new(entry, "new_display_name", SymbolProperties::FUNCTION),
+            );
+            transaction.commit()?
+        };
+
+        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert!(
+            !changes
+                .records()
+                .iter()
+                .any(|record| matches!(record, ChangeRecord::LiftedRemoved { .. }))
+        );
+        assert_eq!(project.pcode(function)?, Some(pcode));
+        assert_eq!(project.ecode(function)?, Some(ecode));
+        assert_eq!(project.ecode_ssa(function)?, Some(ssa));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = writable_address(&project)?;
+        let target = entry + 0x10u64;
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 2))?;
+            transaction.commit()?;
+            function
+        };
+
+        let mut pcode = test_tagged_pcode(function, &[1]);
+        let mut ecode = test_ecode(function, IlGraph::default());
+        let mut ssa = test_ecode_ssa(function, IlGraph::default());
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut pcode)?;
+            transaction.materialise_lifted(&mut ecode)?;
+            transaction.materialise_lifted(&mut ssa)?;
+            transaction.commit()?;
+        }
+
+        let semantic_revision = project.semantic_revision();
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.add_reference(Reference::data(
+                entry,
+                target,
+                ReferenceProperties::READ
+            ))?);
+            transaction.commit()?
+        };
+
+        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert!(
+            !changes
+                .records()
+                .iter()
+                .any(|record| matches!(record, ChangeRecord::LiftedRemoved { .. }))
+        );
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.remove_reference(entry, ReferenceTarget::from(target))?);
+            transaction.commit()?
+        };
+
+        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert!(
+            !changes
+                .records()
+                .iter()
+                .any(|record| matches!(record, ChangeRecord::LiftedRemoved { .. }))
+        );
+        assert_eq!(project.pcode(function)?, Some(pcode));
+        assert_eq!(project.ecode(function)?, Some(ecode));
+        assert_eq!(project.ecode_ssa(function)?, Some(ssa));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_write_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = writable_address(&project)?;
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+        let mut materialised = test_tagged_pcode(function, &[1]);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut materialised)?;
+            transaction.commit()?;
+        }
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.write_bytes(entry, &[0xa5])?;
+            transaction.rollback()?;
+        }
+
+        assert_eq!(project.pcode(function)?, Some(materialised));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let (space, mapping, range) = first_mapping_placement(&project);
+        let entry = Address::new(space, range.0);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.remove_mapping(mapping)?;
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function,
+            level: IlLevel::PCode,
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mapping_removal_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let (space, mapping, range) = first_mapping_placement(&project);
+        let entry = Address::new(space, range.0);
+
+        let function = {
+            let mut transaction = project.transaction("test");
+            let function = transaction.add_function(partial_function(entry, 1))?;
+            transaction.commit()?;
+            function
+        };
+        let mut materialised = test_tagged_pcode(function, &[1]);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut materialised)?;
+            transaction.commit()?;
+        }
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.remove_mapping(mapping)?;
+            transaction.rollback()?;
+        }
+
+        assert_eq!(project.pcode(function)?, Some(materialised));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let (space, mapping, old_range) = first_mapping_placement(&project);
+        let old_entry = Address::new(space, old_range.0);
+        let new_start = project
+            .segments()
+            .mapping(mapping)
+            .expect("mapping should exist")
+            .start()
+            + 0x1000000u64;
+        let new_entry = Address::new(space, new_start.raw_address());
+
+        let (old_function, new_function) = {
+            let mut transaction = project.transaction("test");
+            let old_function = transaction.add_function(partial_function(old_entry, 1))?;
+            let new_function = transaction.add_function(partial_function(new_entry, 1))?;
+            transaction.commit()?;
+            (old_function, new_function)
+        };
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.materialise_lifted(&mut test_tagged_pcode(old_function, &[1]))?;
+            transaction.materialise_lifted(&mut test_tagged_pcode(new_function, &[2]))?;
+            transaction.commit()?;
+        }
+
+        let changes = {
+            let mut transaction = project.transaction("test");
+            transaction.remap_mapping(mapping, new_start)?;
+            transaction.commit()?
+        };
+
+        assert!(project.pcode(old_function)?.is_none());
+        assert!(project.pcode(new_function)?.is_none());
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function: old_function,
+            level: IlLevel::PCode,
+        }));
+        assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+            function: new_function,
+            level: IlLevel::PCode,
+        }));
+
+        Ok(())
     }
 }

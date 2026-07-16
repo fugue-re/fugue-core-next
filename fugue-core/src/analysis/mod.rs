@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 use std::error::Error as StdError;
 use std::marker::PhantomData;
 
-use anyhow::Error as AnyhowError;
 use downcast_rs::{Downcast, impl_downcast};
 use indexmap::IndexMap;
 use thiserror::Error;
@@ -27,9 +26,9 @@ pub enum AnalysisError {
     #[error("analysis pass forms a cyclic dependency: {0} -> {1}")]
     CyclicDependency(String, String),
     #[error("analysis pass configuration failed: {0}")]
-    PassConfigurationFailed(String, AnyhowError),
+    PassConfigurationFailed(String, anyhow::Error),
     #[error("analysis pass failed: {0}")]
-    PassFailed(String, AnyhowError),
+    PassFailed(String, anyhow::Error),
     #[error("analysis pass not found: {0}")]
     PassNotFound(String),
 }

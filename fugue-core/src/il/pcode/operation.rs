@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use fugue_lifter::runtime::language::Language;
 use fugue_lifter::{Op, Varnode};
 
-use crate::il::common::{IlError, OperationId, PackedRange};
+use crate::il::common::{IlError, IlIndexRange, IlOpId};
 use crate::il::pcode::PCodeError;
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
@@ -17,8 +17,6 @@ use crate::storage::segments::space::AddressSpaceId;
     PartialOrd,
     Ord,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
@@ -28,7 +26,7 @@ use crate::storage::segments::space::AddressSpaceId;
 pub struct LifterSpaceHandle(u8);
 
 impl LifterSpaceHandle {
-    pub const fn new(value: u8) -> Self {
+    pub(crate) const fn new(value: u8) -> Self {
         Self(value)
     }
 
@@ -46,17 +44,15 @@ impl LifterSpaceHandle {
     PartialOrd,
     Ord,
     Hash,
-    serde::Serialize,
-    serde::Deserialize,
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
 #[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
-pub struct LocationId(NonZeroU32);
+pub struct PCodeLocationId(NonZeroU32);
 
-impl LocationId {
+impl PCodeLocationId {
     pub fn try_from_index(index: usize) -> Result<Self, IlError> {
         let value = index
             .checked_add(1)
@@ -77,53 +73,98 @@ impl LocationId {
 }
 
 #[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
+    Debug, Copy, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 #[rkyv(derive(Debug, PartialEq, Eq))]
-pub struct Location {
+pub struct PCodeLocation {
     offset: u64,
     width: u16,
-    flags: u16,
+    properties: PCodeLocationProperties,
     lifter_space: LifterSpaceHandle,
 }
 
-impl Location {
-    pub const CONSTANT: u16 = 0x0001;
-    pub const REGISTER: u16 = 0x0002;
-    pub const UNIQUE: u16 = 0x0004;
+bitflags::bitflags! {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+    pub struct PCodeLocationProperties: u16 {
+        const CONSTANT = 0x0001;
+        const REGISTER = 0x0002;
+        const UNIQUE   = 0x0004;
+    }
+}
 
-    pub const fn new(lifter_space: LifterSpaceHandle, offset: u64, width: u16, flags: u16) -> Self {
+#[derive(Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ArchivedPCodeLocationProperties(u16);
+
+unsafe impl rkyv::Portable for ArchivedPCodeLocationProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedPCodeLocationProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedPCodeLocationProperties
+where
+    u16: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { u16::check_bytes(value.cast(), context) }
+    }
+}
+
+impl rkyv::Archive for PCodeLocationProperties {
+    type Archived = ArchivedPCodeLocationProperties;
+    type Resolver = ();
+
+    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedPCodeLocationProperties(self.bits()));
+    }
+}
+
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for PCodeLocationProperties {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<PCodeLocationProperties, D>
+    for ArchivedPCodeLocationProperties
+{
+    fn deserialize(&self, _deserializer: &mut D) -> Result<PCodeLocationProperties, D::Error> {
+        Ok(PCodeLocationProperties::from_bits_retain(self.0))
+    }
+}
+
+impl PCodeLocation {
+    pub(crate) const fn new(
+        lifter_space: LifterSpaceHandle,
+        offset: u64,
+        width: u16,
+        properties: PCodeLocationProperties,
+    ) -> Self {
         Self {
             offset,
             width,
-            flags,
+            properties,
             lifter_space,
         }
     }
 
-    pub fn from_varnode(varnode: &Varnode, language: &'static Language) -> Self {
+    pub fn from_varnode(language: &'static Language, varnode: &Varnode) -> Self {
         let lifter_space = LifterSpaceHandle::new(varnode.space());
-        let flags = if varnode.space() == language.constant_space() {
-            Self::CONSTANT
+        let properties = if varnode.space() == language.constant_space() {
+            PCodeLocationProperties::CONSTANT
         } else if varnode.space() == language.register_space() {
-            Self::REGISTER
+            PCodeLocationProperties::REGISTER
         } else if varnode.space() == language.unique_space() {
-            Self::UNIQUE
+            PCodeLocationProperties::UNIQUE
         } else {
-            0
+            PCodeLocationProperties::empty()
         };
 
-        Self::new(lifter_space, varnode.offset(), varnode.size() as u16, flags)
+        Self::new(
+            lifter_space,
+            varnode.offset(),
+            varnode.size() as u16,
+            properties,
+        )
     }
 
     pub const fn lifter_space(&self) -> LifterSpaceHandle {
@@ -138,38 +179,27 @@ impl Location {
         self.width
     }
 
-    pub const fn flags(&self) -> u16 {
-        self.flags
+    pub const fn properties(&self) -> PCodeLocationProperties {
+        self.properties
     }
 
     pub const fn is_constant(&self) -> bool {
-        self.flags & Self::CONSTANT != 0
+        self.properties.contains(PCodeLocationProperties::CONSTANT)
     }
 
     pub const fn is_register(&self) -> bool {
-        self.flags & Self::REGISTER != 0
+        self.properties.contains(PCodeLocationProperties::REGISTER)
     }
 
     pub const fn is_unique(&self) -> bool {
-        self.flags & Self::UNIQUE != 0
+        self.properties.contains(PCodeLocationProperties::UNIQUE)
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 #[repr(u16)]
-pub enum Opcode {
+pub enum PCodeOpcode {
     Copy = 0,
     Load = 1,
     Store = 2,
@@ -233,7 +263,7 @@ pub enum Opcode {
     UserOp = 60,
 }
 
-impl TryFrom<Op> for Opcode {
+impl TryFrom<Op> for PCodeOpcode {
     type Error = ();
 
     fn try_from(op: Op) -> Result<Self, Self::Error> {
@@ -304,7 +334,7 @@ impl TryFrom<Op> for Opcode {
     }
 }
 
-impl Opcode {
+impl PCodeOpcode {
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Copy => "copy",
@@ -521,65 +551,41 @@ impl Opcode {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub struct Operation {
-    opcode: Opcode,
-    operands: PackedRange,
-    output: u32,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct PCodeOp {
+    opcode: PCodeOpcode,
+    operands: IlIndexRange,
+    output: Option<PCodeLocationId>,
     immediate: u32,
-    effect_space: u16,
+    effect_space: Option<AddressSpaceId>,
 }
 
-impl Operation {
-    const NO_LOCATION: u32 = 0;
-    const NO_SPACE: u16 = u16::MAX;
-
-    pub const fn new(
-        opcode: Opcode,
-        output: Option<LocationId>,
-        operands: PackedRange,
+impl PCodeOp {
+    pub(crate) const fn new(
+        opcode: PCodeOpcode,
+        output: Option<PCodeLocationId>,
+        operands: IlIndexRange,
         immediate: u32,
         effect_space: Option<AddressSpaceId>,
     ) -> Self {
         Self {
             opcode,
             operands,
-            output: match output {
-                Some(output) => output.value(),
-                None => Self::NO_LOCATION,
-            },
+            output,
             immediate,
-            effect_space: match effect_space {
-                Some(space) => space.index() as u16,
-                None => Self::NO_SPACE,
-            },
+            effect_space,
         }
     }
 
-    pub const fn opcode(&self) -> Opcode {
+    pub const fn opcode(&self) -> PCodeOpcode {
         self.opcode
     }
 
-    pub fn output(&self) -> Option<LocationId> {
-        if self.output == Self::NO_LOCATION {
-            None
-        } else {
-            NonZeroU32::new(self.output).map(LocationId)
-        }
+    pub const fn output(&self) -> Option<PCodeLocationId> {
+        self.output
     }
 
-    pub const fn operands(&self) -> PackedRange {
+    pub const fn operands(&self) -> IlIndexRange {
         self.operands
     }
 
@@ -587,12 +593,8 @@ impl Operation {
         self.immediate
     }
 
-    pub fn effect_space(&self) -> Option<AddressSpaceId> {
-        if self.effect_space == Self::NO_SPACE {
-            None
-        } else {
-            Some(AddressSpaceId::new(self.effect_space as usize))
-        }
+    pub const fn effect_space(&self) -> Option<AddressSpaceId> {
+        self.effect_space
     }
 }
 
@@ -604,13 +606,13 @@ pub enum AddressAnnotationRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddressAnnotationPayload<'a> {
+pub enum AddressAnnotationValue<'a> {
     DirectTarget(Address),
     ComputedSpace(AddressSpaceId),
     KnownTargets(&'a [Address]),
 }
 
-impl AddressAnnotationPayload<'_> {
+impl AddressAnnotationValue<'_> {
     pub const fn role(&self) -> AddressAnnotationRole {
         match self {
             Self::DirectTarget(_) => AddressAnnotationRole::DirectTarget,
@@ -622,21 +624,21 @@ impl AddressAnnotationPayload<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressAnnotation<'a> {
-    ordinal: OperationId,
-    payload: AddressAnnotationPayload<'a>,
+    ordinal: IlOpId,
+    value: AddressAnnotationValue<'a>,
 }
 
 impl<'a> AddressAnnotation<'a> {
-    pub const fn new(ordinal: OperationId, payload: AddressAnnotationPayload<'a>) -> Self {
-        Self { ordinal, payload }
+    pub(crate) const fn new(ordinal: IlOpId, value: AddressAnnotationValue<'a>) -> Self {
+        Self { ordinal, value }
     }
 
-    pub const fn ordinal(&self) -> OperationId {
+    pub const fn ordinal(&self) -> IlOpId {
         self.ordinal
     }
 
-    pub const fn payload(&self) -> &AddressAnnotationPayload<'a> {
-        &self.payload
+    pub const fn value(&self) -> &AddressAnnotationValue<'a> {
+        &self.value
     }
 }
 
@@ -648,7 +650,7 @@ pub struct PCodeAddressContext<'a> {
 }
 
 impl<'a> PCodeAddressContext<'a> {
-    pub const fn new(source: Address, annotations: &'a [AddressAnnotation<'a>]) -> Self {
+    pub(crate) const fn new(source: Address, annotations: &'a [AddressAnnotation<'a>]) -> Self {
         Self {
             source,
             annotations,
@@ -662,9 +664,9 @@ impl<'a> PCodeAddressContext<'a> {
 
     pub fn take(
         &mut self,
-        ordinal: OperationId,
+        ordinal: IlOpId,
         role: AddressAnnotationRole,
-    ) -> Result<AddressAnnotationPayload<'a>, PCodeError> {
+    ) -> Result<AddressAnnotationValue<'a>, PCodeError> {
         let Some(annotation) = self.annotations.get(self.cursor) else {
             return Err(PCodeError::missing_annotation(ordinal.value(), role));
         };
@@ -672,34 +674,34 @@ impl<'a> PCodeAddressContext<'a> {
         if annotation.ordinal() < ordinal {
             Err(PCodeError::out_of_order_annotation(
                 annotation.ordinal().value(),
-                annotation.payload().role(),
+                annotation.value().role(),
             ))
-        } else if annotation.ordinal() == ordinal && annotation.payload().role() == role {
+        } else if annotation.ordinal() == ordinal && annotation.value().role() == role {
             if let Some(next) = self.annotations.get(self.cursor + 1)
                 && next.ordinal() == ordinal
-                && next.payload().role() == role
+                && next.value().role() == role
             {
                 return Err(PCodeError::duplicate_annotation(ordinal.value(), role));
             }
 
             self.cursor += 1;
-            Ok(annotation.payload().clone())
+            Ok(annotation.value().clone())
         } else if annotation.ordinal() == ordinal {
             Err(PCodeError::wrong_annotation_role(
                 ordinal.value(),
                 role,
-                annotation.payload().role(),
+                annotation.value().role(),
             ))
         } else {
             Err(PCodeError::missing_annotation(ordinal.value(), role))
         }
     }
 
-    pub fn finish(&self) -> Result<(), PCodeError> {
+    pub fn ensure_consumed(&self) -> Result<(), PCodeError> {
         if let Some(annotation) = self.annotations.get(self.cursor) {
             Err(PCodeError::unused_annotation(
                 annotation.ordinal().value(),
-                annotation.payload().role(),
+                annotation.value().role(),
             ))
         } else {
             Ok(())
@@ -708,7 +710,7 @@ impl<'a> PCodeAddressContext<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::mem::size_of;
 
     use super::*;
@@ -717,36 +719,36 @@ mod tests {
 
     #[test]
     fn pcode_records_stay_compact() {
-        assert_eq!(size_of::<LocationId>(), 4);
-        assert_eq!(size_of::<Option<LocationId>>(), 4);
-        assert!(size_of::<Location>() <= 16);
-        assert!(size_of::<Operation>() <= 24);
+        assert_eq!(size_of::<PCodeLocationId>(), 4);
+        assert_eq!(size_of::<Option<PCodeLocationId>>(), 4);
+        assert!(size_of::<PCodeLocation>() <= 16);
+        assert!(size_of::<PCodeOp>() <= 24);
     }
 
     #[test]
     fn address_context_consumes_annotations_in_order() {
-        let ordinal = OperationId::try_from_index(0).unwrap();
+        let ordinal = IlOpId::try_from_index(0).unwrap();
         let target = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationPayload::DirectTarget(target),
+            AddressAnnotationValue::DirectTarget(target),
         )];
         let mut context = PCodeAddressContext::new(target, &annotations);
 
-        assert_eq!(
+        assert!(matches!(
             context.take(ordinal, AddressAnnotationRole::DirectTarget),
-            Ok(AddressAnnotationPayload::DirectTarget(target))
-        );
-        assert_eq!(context.finish(), Ok(()));
+            Ok(AddressAnnotationValue::DirectTarget(taken)) if taken == target
+        ));
+        assert!(context.ensure_consumed().is_ok());
     }
 
     #[test]
     fn address_context_rejects_wrong_role() {
-        let ordinal = OperationId::try_from_index(0).unwrap();
+        let ordinal = IlOpId::try_from_index(0).unwrap();
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationPayload::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -758,11 +760,11 @@ mod tests {
 
     #[test]
     fn address_context_rejects_duplicate_role() {
-        let ordinal = OperationId::try_from_index(0).unwrap();
+        let ordinal = IlOpId::try_from_index(0).unwrap();
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [
-            AddressAnnotation::new(ordinal, AddressAnnotationPayload::DirectTarget(source)),
-            AddressAnnotation::new(ordinal, AddressAnnotationPayload::DirectTarget(source)),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
         ];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -774,12 +776,12 @@ mod tests {
 
     #[test]
     fn address_context_rejects_out_of_order_annotation() {
-        let first = OperationId::try_from_index(0).unwrap();
-        let second = OperationId::try_from_index(1).unwrap();
+        let first = IlOpId::try_from_index(0).unwrap();
+        let second = IlOpId::try_from_index(1).unwrap();
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             first,
-            AddressAnnotationPayload::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 

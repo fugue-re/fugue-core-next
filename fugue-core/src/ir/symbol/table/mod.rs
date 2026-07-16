@@ -2,7 +2,8 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use super::{SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector};
-use crate::ir::{Address, Id, symbol::Symbol};
+use crate::ir::symbol::Symbol;
+use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;

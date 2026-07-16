@@ -14,7 +14,7 @@ use fugue_core::arch::x86_64::X86_64;
 use fugue_core::arch::Arch;
 use fugue_core::ir::{
     Address, AddressWithContext, ExternSegment, FlowKind, RawAddress, SegmentProperties,
-    SymbolIndex, SymbolProperties, SymbolTable, SymbolTableSelector,
+    SymbolIndex, SymbolProperties, SymbolTableSelector, TransientSymbolTable,
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
@@ -37,7 +37,7 @@ const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
 pub struct IDABinary {
     database: Rc<IDB>,
     architecture: Arch,
-    symbols: SymbolTable<ImageAddress>,
+    symbols: TransientSymbolTable<ImageAddress>,
     extern_segm: Option<ExternSegment>,
     bank_base: RawAddress,
     layout: ImageLayout,
@@ -46,8 +46,11 @@ pub struct IDABinary {
     attributes: AttributeMap,
 }
 
-fn ida_symbols(arch: &Arch, db: &IDB) -> Result<(SymbolTable, Option<ExternSegment>), LoaderError> {
-    let mut symbols = SymbolTable::new();
+fn ida_symbols(
+    arch: &Arch,
+    db: &IDB,
+) -> Result<(TransientSymbolTable, Option<ExternSegment>), LoaderError> {
+    let mut symbols = TransientSymbolTable::new();
     let mut externs = db.segment_by_name("extern").map(|segm| {
         let addr = segm.start_address();
         let templ = arch.external_thunk_template();
@@ -164,7 +167,7 @@ impl IDABinary {
         &self.database
     }
 
-    pub fn symbols(&self) -> &SymbolTable<ImageAddress> {
+    pub fn symbols(&self) -> &TransientSymbolTable<ImageAddress> {
         &self.symbols
     }
 
@@ -228,7 +231,7 @@ impl LoadableFromFile for IDABinary {
         let layout =
             ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()))?;
 
-        let mut symbols = SymbolTable::<ImageAddress>::new();
+        let mut symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, _, symbol) in address_symbols.iter_by_index() {
             symbols.insert(
                 index,
@@ -283,7 +286,7 @@ impl Loadable for IDABinary {
         &self.metadata
     }
 
-    fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         Some(&self.symbols)
     }
 

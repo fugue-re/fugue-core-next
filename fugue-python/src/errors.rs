@@ -46,7 +46,7 @@ impl BindingError {
         Self::InvalidInstruction(address)
     }
 
-    pub(crate) fn invalid_ir_level(level: impl Into<String>) -> Self {
+    pub(crate) fn invalid_level(level: impl Into<String>) -> Self {
         Self::InvalidIrLevel(level.into())
     }
 

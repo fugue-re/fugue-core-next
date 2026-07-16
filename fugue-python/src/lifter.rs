@@ -1,6 +1,8 @@
-use fugue_core::il::pcode::{Op as CoreOp, PCodeOp as CorePCodeOp, Varnode as CoreVarnode};
 use fugue_core::ir::Address as CoreAddress;
-use fugue_core::lifter::{Language as CoreLanguage, Lifter as CoreLifter};
+use fugue_core::lifter::{
+    Language as CoreLanguage, Lifter as CoreLifter, Op as CoreOp, PCodeOp as CorePCodeOp,
+    Varnode as CoreVarnode,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 

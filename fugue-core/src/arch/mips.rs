@@ -4,10 +4,11 @@ pub use fugue_lifter::mips::*;
 use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
 use crate::ir::ExternFunctionTemplate;
 use crate::lifter::dynamic::LanguageSource;
-use crate::lifter::{Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter};
+use crate::lifter::{
+    Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter, Varnode,
+};
 
 #[derive(Clone)]
 struct ArchData {

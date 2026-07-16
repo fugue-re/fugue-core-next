@@ -20,13 +20,11 @@ use fugue_core::engine::{
     DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
     Trigger,
 };
-use fugue_core::il::common::{IlError, IrLevel};
-use fugue_core::il::llil::LlilBody;
-use fugue_core::il::llil::ssa::SsaBody;
+use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, Endian, FunctionId, RawAddress, Reference,
-    ReferenceKind, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    ReferenceProperties, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex,
+    SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::resolve_language;
 use fugue_core::loader::{
@@ -35,7 +33,9 @@ use fugue_core::loader::{
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
 use fugue_core::project::{Project, ProjectError, ProjectTransaction};
-use fugue_core::queries::{CallEdge, MappingRecord, QueryError, QueryPage, SymbolRecord};
+use fugue_core::queries::{
+    CallEdge, MappingRecord, QueryError, QueryPage, QueryReader, SymbolRecord,
+};
 use fugue_core::registry;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
@@ -389,7 +389,7 @@ impl Analyser for PanickingTestAnalyser {
                 .checked_add(0x100u64)
                 .expect("torn reference target");
             transaction
-                .add_reference(Reference::new(address, target, ReferenceKind::read()))
+                .add_reference(Reference::data(address, target, ReferenceProperties::READ))
                 .expect("torn reference asserted");
         }
         panic!("test analyser panic");
@@ -778,6 +778,14 @@ fn trigger_test_analyser(
     engine.schedule_ranges(Trigger::BytesWritten, regions)?;
     engine.wait_until_idle()?;
     Ok(())
+}
+
+fn function_id_at(reader: &QueryReader, entry: Address) -> Result<Option<FunctionId>, QueryError> {
+    Ok(reader
+        .project()?
+        .functions()
+        .get_by_address(entry)
+        .map(|function| function.id()))
 }
 
 fn symbol_exists(
@@ -1350,7 +1358,7 @@ fn test_function_recovery_cancel_before_seeding_leaves_project_unchanged()
 }
 
 #[test]
-fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let address = project
@@ -1384,7 +1392,8 @@ fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_engine_ensure_ir_publishes_requested_chain() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dyn std::error::Error>>
+{
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1404,37 +1413,35 @@ fn test_engine_ensure_ir_publishes_requested_chain() -> Result<(), Box<dyn std::
     engine.wait_until_idle()?;
     let function = {
         let reader = engine.query_reader()?;
-        reader
-            .function_id(entry)?
+        function_id_at(&reader, entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
-    let ensured = engine.ensure_ir(function, IrLevel::LlilSsa)?;
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
 
-    for level in [IrLevel::PCode, IrLevel::Llil, IrLevel::LlilSsa] {
+    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
         assert!(
             ensured
-                .changes()
                 .records()
-                .contains(&ChangeRecord::IrArtefactPublished { function, level })
+                .contains(&ChangeRecord::LiftedMaterialised { function, level })
         );
     }
-    assert_eq!(ensured.artefact().header().level(), IrLevel::LlilSsa);
-    assert_eq!(ensured.artefact().header().function(), function);
 
     let reader = engine.query_reader()?;
-    assert!(reader.ir_body::<LlilBody>(function)?.is_some());
-    assert!(reader.ir_body::<SsaBody>(function)?.is_some());
+    assert!(reader.ecode(function)?.is_some());
+    let ssa = reader
+        .ecode_ssa(function)?
+        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
+    assert_eq!(ssa.header().function(), function);
 
-    let ensured = engine.ensure_ir(function, IrLevel::LlilSsa)?;
-    assert!(ensured.changes().records().is_empty());
-    assert_eq!(ensured.artefact().header().level(), IrLevel::LlilSsa);
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    assert!(ensured.records().is_empty());
 
     Ok(())
 }
 
 #[test]
-fn test_engine_ensure_ir_cancelled_rolls_back_without_publishing()
+fn test_engine_ensure_lifted_cancelled_rolls_back_without_materialising()
 -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1454,8 +1461,7 @@ fn test_engine_ensure_ir_cancelled_rolls_back_without_publishing()
     engine.add_function(partial)?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let function = reader
-        .function_id(entry)?
+    let function = function_id_at(&reader, entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
     let revision = reader.revision()?;
 
@@ -1463,39 +1469,35 @@ fn test_engine_ensure_ir_cancelled_rolls_back_without_publishing()
     cancellation.cancel();
 
     assert!(matches!(
-        engine.ensure_ir(function, IrLevel::LlilSsa),
+        engine.ensure_lifted(function, IlLevel::ECodeSsa),
         Err(EngineError::Project(ProjectError::Il(IlError::Cancelled)))
     ));
 
     let reader = engine.query_reader()?;
     assert_eq!(reader.revision()?, revision);
-    assert!(reader.ir_artefact(function, IrLevel::PCode)?.is_none());
-    assert!(reader.ir_artefact(function, IrLevel::Llil)?.is_none());
-    assert!(reader.ir_artefact(function, IrLevel::LlilSsa)?.is_none());
+    let snapshot = reader.project()?;
+    assert!(snapshot.pcode(function)?.is_none());
+    assert!(snapshot.ecode(function)?.is_none());
+    assert!(snapshot.ecode_ssa(function)?.is_none());
+    drop(snapshot);
 
     cancellation.clear();
-    let ensured = engine.ensure_ir(function, IrLevel::LlilSsa)?;
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
     assert!(
         ensured
-            .changes()
             .records()
-            .contains(&ChangeRecord::IrArtefactPublished {
+            .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IrLevel::PCode,
+                level: IlLevel::PCode,
             })
     );
-    assert!(
-        engine
-            .query_reader()?
-            .ir_artefact(function, IrLevel::LlilSsa)?
-            .is_some()
-    );
+    assert!(engine.query_reader()?.ecode_ssa(function)?.is_some());
 
     Ok(())
 }
 
 #[test]
-fn test_query_reader_ir_body_reads_build_on_miss() -> Result<(), Box<dyn std::error::Error>> {
+fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1515,24 +1517,23 @@ fn test_query_reader_ir_body_reads_build_on_miss() -> Result<(), Box<dyn std::er
     engine.wait_until_idle()?;
 
     let reader = engine.query_reader()?;
-    let function = reader
-        .function_id(entry)?
+    let function = function_id_at(&reader, entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
-    assert!(reader.ir_artefact(function, IrLevel::PCode)?.is_none());
+    assert!(reader.project()?.pcode(function)?.is_none());
 
-    assert!(reader.pcode_body(function)?.is_some());
-    assert!(reader.ir_artefact(function, IrLevel::PCode)?.is_some());
+    assert!(reader.pcode(function)?.is_some());
+    assert!(reader.project()?.pcode(function)?.is_some());
 
-    assert!(reader.llil_ssa_body(function)?.is_some());
-    assert!(reader.ir_artefact(function, IrLevel::Llil)?.is_some());
-    assert!(reader.ir_artefact(function, IrLevel::LlilSsa)?.is_some());
+    assert!(reader.ecode_ssa(function)?.is_some());
+    assert!(reader.project()?.ecode(function)?.is_some());
+    assert!(reader.project()?.ecode_ssa(function)?.is_some());
 
     Ok(())
 }
 
 #[test]
-fn test_engine_flush_ir_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1552,14 +1553,13 @@ fn test_engine_flush_ir_references_is_idempotent() -> Result<(), Box<dyn std::er
     engine.wait_until_idle()?;
     let function = {
         let reader = engine.query_reader()?;
-        reader
-            .function_id(entry)?
+        function_id_at(&reader, entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
-    engine.ensure_ir(function, IrLevel::PCode)?;
-    engine.flush_ir_references(function)?;
-    let changes = engine.flush_ir_references(function)?;
+    engine.ensure_lifted(function, IlLevel::PCode)?;
+    engine.flush_derived_references(function)?;
+    let changes = engine.flush_derived_references(function)?;
     assert!(
         !changes
             .records()
@@ -1571,31 +1571,7 @@ fn test_engine_flush_ir_references_is_idempotent() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_engine_ensure_ir_reports_unsupported_mlil_levels() -> Result<(), Box<dyn std::error::Error>>
-{
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let project = Project::new_transient(&loader)?;
-    let engine = AnalysisEngine::new(project)?;
-    engine.wait_until_idle()?;
-    let function = FunctionId::default();
-
-    for level in [IrLevel::MappedMlil, IrLevel::Mlil] {
-        assert!(matches!(
-            engine.ensure_ir(function, level),
-            Err(EngineError::Project(ProjectError::Il(
-                IlError::MlilBuildSchedulingUnsupported
-            )))
-        ));
-
-        let reader = engine.query_reader()?;
-        assert!(reader.ir_artefact(function, level)?.is_none());
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_engine_partial_write_rolls_back_without_publishing()
+fn test_engine_partial_write_rolls_back_without_materialising()
 -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1618,7 +1594,7 @@ fn test_engine_partial_write_rolls_back_without_publishing()
 }
 
 #[test]
-fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1673,7 +1649,7 @@ fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_engine_symbol_replacement_publishes_removed_and_added()
+fn test_engine_symbol_replacement_materialises_removed_and_added()
 -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1851,7 +1827,7 @@ fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let view = project
@@ -2268,9 +2244,9 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_manual_save_reopen_reads_ir_artefacts() -> Result<(), Box<dyn std::error::Error>> {
+fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let project_path = directory.path().join("engine-ir-artefacts.fdbz");
+    let project_path = directory.path().join("engine-il-artefacts.fdbz");
     let mut attributes = AttributeMap::new();
     attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
 
@@ -2294,23 +2270,19 @@ fn test_manual_save_reopen_reads_ir_artefacts() -> Result<(), Box<dyn std::error
     engine.add_function(function)?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let function = reader
-        .function_id(entry)?
+    let function = function_id_at(&reader, entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
-    engine.ensure_ir(function, IrLevel::LlilSsa)?;
-    let pcode_digest = reader
-        .ir_artefact(function, IrLevel::PCode)?
-        .ok_or_else(|| io::Error::other("PCode artefact missing after ensure_ir"))?
-        .content_digest();
-    let llil_digest = reader
-        .ir_artefact(function, IrLevel::Llil)?
-        .ok_or_else(|| io::Error::other("LLIL artefact missing after ensure_ir"))?
-        .content_digest();
-    let ssa_digest = reader
-        .ir_artefact(function, IrLevel::LlilSsa)?
-        .ok_or_else(|| io::Error::other("LLIL SSA artefact missing after ensure_ir"))?
-        .content_digest();
+    engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    let pcode = reader
+        .pcode(function)?
+        .ok_or_else(|| io::Error::other("PCode IR missing after ensure_lifted"))?;
+    let ecode = reader
+        .ecode(function)?
+        .ok_or_else(|| io::Error::other("LIR missing after ensure_lifted"))?;
+    let ssa = reader
+        .ecode_ssa(function)?
+        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
     let revision = reader.revision()?;
 
     engine.save()?;
@@ -2325,31 +2297,13 @@ fn test_manual_save_reopen_reads_ir_artefacts() -> Result<(), Box<dyn std::error
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
     let reader = engine.query_reader()?;
-    let function = reader
-        .function_id(entry)?
+    let function = function_id_at(&reader, entry)?
         .ok_or_else(|| io::Error::other("reopened function ID missing"))?;
 
-    assert_eq!(
-        reader
-            .ir_artefact(function, IrLevel::PCode)?
-            .ok_or_else(|| io::Error::other("reopened PCode artefact missing"))?
-            .content_digest(),
-        pcode_digest
-    );
-    assert_eq!(
-        reader
-            .ir_artefact(function, IrLevel::Llil)?
-            .ok_or_else(|| io::Error::other("reopened LLIL artefact missing"))?
-            .content_digest(),
-        llil_digest
-    );
-    assert_eq!(
-        reader
-            .ir_artefact(function, IrLevel::LlilSsa)?
-            .ok_or_else(|| io::Error::other("reopened LLIL SSA artefact missing"))?
-            .content_digest(),
-        ssa_digest
-    );
+    let snapshot = reader.project()?;
+    assert_eq!(snapshot.pcode(function)?.as_ref(), Some(&*pcode));
+    assert_eq!(snapshot.ecode(function)?.as_ref(), Some(&*ecode));
+    assert_eq!(snapshot.ecode_ssa(function)?.as_ref(), Some(&*ssa));
 
     Ok(())
 }
@@ -2706,7 +2660,7 @@ fn test_engine_storm_regions_coalesce_to_single_analyser_task()
 }
 
 #[test]
-fn test_analyser_error_rolls_back_without_publishing_records()
+fn test_analyser_error_rolls_back_without_materialising_records()
 -> Result<(), Box<dyn std::error::Error>> {
     let project = project_with_test_analyser("mutating-error")?;
     let address = project
@@ -3091,7 +3045,7 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
         .collect::<Result<Vec<_>, _>>()?;
     let call_reference = incoming
         .iter()
-        .find(|reference| reference.kind().is_call())
+        .find(|reference| reference.is_call())
         .ok_or_else(|| io::Error::other("no incoming call reference at callee"))?;
     assert!(call_reference.origin().is_derived());
     assert_eq!(call_reference.target().address(), Some(callee));
@@ -3099,9 +3053,11 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
     let outgoing = reader
         .outgoing_references(call_reference.from())
         .collect::<Result<Vec<_>, _>>()?;
-    assert!(outgoing.iter().any(
-        |reference| reference.target().address() == Some(callee) && reference.kind().is_call()
-    ));
+    assert!(
+        outgoing
+            .iter()
+            .any(|reference| reference.target().address() == Some(callee) && reference.is_call())
+    );
 
     Ok(())
 }
@@ -3117,7 +3073,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     engine.wait_until_idle()?;
 
     let to = entry + 0x40u64;
-    let changes = engine.add_reference(Reference::new(entry, to, ReferenceKind::read()))?;
+    let changes = engine.add_reference(Reference::data(entry, to, ReferenceProperties::READ))?;
     assert!(changes.contains(ChangeKinds::REFERENCE_ADDED));
 
     let outgoing = engine
@@ -3128,10 +3084,10 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
         .iter()
         .find(|reference| reference.target().address() == Some(to))
         .ok_or_else(|| io::Error::other("asserted reference missing"))?;
-    assert!(asserted.kind().is_read());
+    assert!(asserted.is_read());
     assert!(asserted.origin().is_asserted());
 
-    engine.add_reference(Reference::new(entry, to, ReferenceKind::write()))?;
+    engine.add_reference(Reference::data(entry, to, ReferenceProperties::WRITE))?;
     let merged = engine
         .query_reader()?
         .references_to(to, None, 64)?
@@ -3140,8 +3096,8 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
         .copied()
         .find(|reference| reference.from() == entry)
         .ok_or_else(|| io::Error::other("merged reference missing"))?;
-    assert!(merged.kind().is_read());
-    assert!(merged.kind().is_write());
+    assert!(merged.is_read());
+    assert!(merged.is_write());
 
     engine.remove_reference(entry, ReferenceTarget::from(to))?;
     let after = engine

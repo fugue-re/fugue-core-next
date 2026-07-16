@@ -5,9 +5,9 @@ use fugue_lifter::runtime::language::Language;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::il::pcode::PCodeOp;
 use crate::ir::cfg::FlowKind;
-use crate::ir::{Address, Id, Location, Reference, ReferenceKind, ReferenceOrigin, ToRawAddress};
+use crate::ir::{Address, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
+use crate::lifter::PCodeOp;
 
 pub type InsnId = Id<Insn>;
 
@@ -377,7 +377,7 @@ impl Insn {
             }
             let flow = FlowKind::from_insn_target(self, target)?;
             Some(
-                Reference::new(self.address(), to, ReferenceKind::from_flow(flow))
+                Reference::from_flow(self.address(), to, flow)
                     .with_origin(ReferenceOrigin::Derived),
             )
         })

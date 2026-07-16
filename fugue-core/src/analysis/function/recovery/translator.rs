@@ -1,7 +1,6 @@
 use super::FunctionRecoveryError;
-use crate::il::pcode::PCodeOp;
 use crate::ir::{Address, Insn};
-use crate::lifter::{Disassembler, Lifter, LiftingContext};
+use crate::lifter::{Disassembler, Lifter, LiftingContext, PCodeOp};
 use crate::project::Project;
 
 pub struct Translator {

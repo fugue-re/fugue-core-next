@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use crate::il::common::IrLevel;
+use crate::il::common::IlLevel;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, ReferenceKind, ReferenceTarget, Symbol,
 };
@@ -219,8 +219,8 @@ bitflags::bitflags! {
         const SYMBOL_REMOVED          = 0x0800;
         const REFERENCE_ADDED         = 0x1000;
         const REFERENCE_REMOVED       = 0x2000;
-        const IR_ARTEFACT_PUBLISHED   = 0x4000;
-        const IR_ARTEFACT_REMOVED     = 0x8000;
+        const LIFTED_MATERIALISED   = 0x4000;
+        const LIFTED_REMOVED     = 0x8000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
@@ -231,8 +231,8 @@ bitflags::bitflags! {
             | Self::SEGMENT_MAPPING_CREATED.bits()
             | Self::SEGMENT_MAPPING_CHANGED.bits();
         const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
-        const IR_ARTEFACTS = Self::IR_ARTEFACT_PUBLISHED.bits()
-            | Self::IR_ARTEFACT_REMOVED.bits();
+        const LIFTED = Self::LIFTED_MATERIALISED.bits()
+            | Self::LIFTED_REMOVED.bits();
     }
 }
 
@@ -295,13 +295,13 @@ pub enum ChangeRecord {
     ReferencesChanged {
         coverage: AddressRangeSet,
     },
-    IrArtefactPublished {
+    LiftedMaterialised {
         function: FunctionId,
-        level: IrLevel,
+        level: IlLevel,
     },
-    IrArtefactRemoved {
+    LiftedRemoved {
         function: FunctionId,
-        level: IrLevel,
+        level: IlLevel,
     },
 }
 
@@ -323,16 +323,16 @@ impl ChangeRecord {
             Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
             Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
             Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
-            Self::IrArtefactPublished { .. } => ChangeKinds::IR_ARTEFACT_PUBLISHED,
-            Self::IrArtefactRemoved { .. } => ChangeKinds::IR_ARTEFACT_REMOVED,
+            Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
+            Self::LiftedRemoved { .. } => ChangeKinds::LIFTED_REMOVED,
         }
     }
 
-    pub fn affects_ir_inputs(&self) -> bool {
+    pub fn affects_lifted_inputs(&self) -> bool {
         !matches!(
             self,
-            Self::IrArtefactPublished { .. }
-                | Self::IrArtefactRemoved { .. }
+            Self::LiftedMaterialised { .. }
+                | Self::LiftedRemoved { .. }
                 | Self::ReferencesChanged { .. }
                 | Self::ReferenceAdded { .. }
                 | Self::ReferenceRemoved { .. }
@@ -363,8 +363,8 @@ impl ChangeRecord {
             }
             Self::ReferencesChanged { coverage } => coverage.ranges().collect(),
             Self::Restored { .. }
-            | Self::IrArtefactPublished { .. }
-            | Self::IrArtefactRemoved { .. }
+            | Self::LiftedMaterialised { .. }
+            | Self::LiftedRemoved { .. }
             | Self::SegmentMappingChanged { .. }
             | Self::SegmentMappingCreated { .. }
             | Self::SpaceCreated { .. } => SmallVec::new(),

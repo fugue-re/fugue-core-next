@@ -1,5 +1,3 @@
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
 use ustr::Ustr;
 
 use crate::ir::{Address, CodeBlockId, Id};
@@ -79,24 +77,26 @@ where
     }
 }
 
-impl Archive for FunctionProperties {
+impl rkyv::Archive for FunctionProperties {
     type Archived = ArchivedFunctionProperties;
     type Resolver = ();
 
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         out.write(ArchivedFunctionProperties(
             rkyv::primitive::ArchivedU32::from_native(self.bits()),
         ));
     }
 }
 
-impl<S: Fallible + ?Sized> Serialize<S> for FunctionProperties {
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for FunctionProperties {
     fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: Fallible + ?Sized> rkyv::Deserialize<FunctionProperties, D> for ArchivedFunctionProperties {
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<FunctionProperties, D>
+    for ArchivedFunctionProperties
+{
     fn deserialize(&self, _: &mut D) -> Result<FunctionProperties, D::Error> {
         Ok(FunctionProperties::from_bits_truncate(self.0.to_native()))
     }

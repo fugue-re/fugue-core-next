@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Display, Formatter};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
@@ -17,7 +17,7 @@ use self::change::{
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
-use crate::il::common::{IlError, IrLevel, RawIrArtefact};
+use crate::il::common::{IlError, IlLevel};
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
     SymbolEntry, SymbolIndex,
@@ -101,7 +101,7 @@ impl Default for Priority {
 }
 
 impl Display for Priority {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.0, f)
     }
 }
@@ -626,30 +626,6 @@ impl MappingCreationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IrEnsured {
-    changes: ChangeSet,
-    artefact: Arc<RawIrArtefact>,
-}
-
-impl IrEnsured {
-    pub fn new(changes: ChangeSet, artefact: Arc<RawIrArtefact>) -> Self {
-        Self { changes, artefact }
-    }
-
-    pub fn changes(&self) -> &ChangeSet {
-        &self.changes
-    }
-
-    pub fn artefact(&self) -> &Arc<RawIrArtefact> {
-        &self.artefact
-    }
-
-    pub fn into_artefact(self) -> Arc<RawIrArtefact> {
-        self.artefact
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceCreationResult {
     changes: ChangeSet,
     space: AddressSpaceId,
@@ -840,12 +816,12 @@ pub(crate) enum Intake {
         regions: AddressRangeSet,
         trigger: Trigger,
     },
-    EnsureIr {
+    EnsureLifted {
         function: FunctionId,
-        level: IrLevel,
-        reply: Sender<Result<IrEnsured, EngineError>>,
+        level: IlLevel,
+        reply: Sender<Result<ChangeSet, EngineError>>,
     },
-    FlushIrReferences {
+    FlushDerivedReferences {
         function: FunctionId,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
@@ -908,7 +884,7 @@ impl Subscriber {
         Self { rx, tx, filter }
     }
 
-    fn publish(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
+    fn materialise(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
         let scoped = match changes.scoped_to(&self.filter) {
             Some(scoped) => Arc::new(scoped),
             None => return true,
@@ -1304,16 +1280,16 @@ impl AnalysisEngine {
         self.apply_update(ProjectUpdate::update_mapping_metadata(update))
     }
 
-    pub fn ensure_ir(
+    pub fn ensure_lifted(
         &self,
         function: FunctionId,
-        level: IrLevel,
-    ) -> Result<IrEnsured, EngineError> {
+        level: IlLevel,
+    ) -> Result<ChangeSet, EngineError> {
         self.poison_check()?;
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
-            .send(Intake::EnsureIr {
+            .send(Intake::EnsureLifted {
                 function,
                 level,
                 reply: reply_tx,
@@ -1323,12 +1299,12 @@ impl AnalysisEngine {
         reply_rx.recv().map_err(|_| EngineError::Stopped)?
     }
 
-    pub fn flush_ir_references(&self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+    pub fn flush_derived_references(&self, function: FunctionId) -> Result<ChangeSet, EngineError> {
         self.poison_check()?;
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
-            .send(Intake::FlushIrReferences {
+            .send(Intake::FlushDerivedReferences {
                 function,
                 reply: reply_tx,
             })
@@ -1598,10 +1574,10 @@ impl Worker {
                 Ok(Intake::Update { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
-                Ok(Intake::EnsureIr { reply, .. }) => {
+                Ok(Intake::EnsureLifted { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
-                Ok(Intake::FlushIrReferences { reply, .. }) => {
+                Ok(Intake::FlushDerivedReferences { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
                 Ok(Intake::Flush(reply)) | Ok(Intake::Save(reply)) => {
@@ -1673,20 +1649,20 @@ impl Worker {
                         }
                     }
                 }
-                Intake::EnsureIr {
+                Intake::EnsureLifted {
                     function,
                     level,
                     reply,
                 } => {
                     let result = self
                         .drain_or_handle_cancelled()
-                        .and_then(|()| self.ensure_ir(function, level));
+                        .and_then(|()| self.ensure_lifted(function, level));
                     let _ = reply.send(result);
                 }
-                Intake::FlushIrReferences { function, reply } => {
+                Intake::FlushDerivedReferences { function, reply } => {
                     let result = self
                         .drain_or_handle_cancelled()
-                        .and_then(|()| self.flush_ir_references(function));
+                        .and_then(|()| self.flush_derived_references(function));
                     let _ = reply.send(result);
                 }
                 Intake::Update { update, reply } => {
@@ -1882,8 +1858,8 @@ impl Worker {
             ChangeRecord::ReferenceAdded { .. }
             | ChangeRecord::ReferenceRemoved { .. }
             | ChangeRecord::ReferencesChanged { .. }
-            | ChangeRecord::IrArtefactPublished { .. }
-            | ChangeRecord::IrArtefactRemoved { .. } => {}
+            | ChangeRecord::LiftedMaterialised { .. }
+            | ChangeRecord::LiftedRemoved { .. } => {}
         }
     }
 
@@ -2091,25 +2067,33 @@ impl Worker {
         }
     }
 
-    fn ensure_ir(
+    fn ensure_lifted(
         &mut self,
         function: FunctionId,
-        level: IrLevel,
-    ) -> Result<IrEnsured, EngineError> {
+        level: IlLevel,
+    ) -> Result<ChangeSet, EngineError> {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
         let mut transaction = project.transaction(ChangeSource::agent("ensure IR"));
         let cancellation = self.cancellation.child();
-        let result = transaction.ensure_ir(function, level, &cancellation);
+        let result = transaction.ensure_lifted(function, level, &cancellation);
 
         match result {
             Ok(_) => {
                 let changes = transaction.commit()?;
-                let artefact = project
-                    .ir_artefact(function, level)?
-                    .ok_or_else(|| IlError::missing_artefact(function, level))
-                    .map_err(ProjectError::from)?;
+                let present = match level {
+                    IlLevel::PCode => project.pcode(function)?.is_some(),
+                    IlLevel::ECode => project.ecode(function)?.is_some(),
+                    IlLevel::ECodeSsa => project.ecode_ssa(function)?.is_some(),
+                };
+
+                if !present {
+                    return Err(
+                        ProjectError::from(IlError::missing_artefact(function, level)).into(),
+                    );
+                }
+
                 if !changes.is_empty() {
                     self.begin_publish(&changes);
                 }
@@ -2120,7 +2104,7 @@ impl Worker {
                     self.finish_publish(changes.clone())?;
                 }
 
-                Ok(IrEnsured::new(changes, Arc::new(artefact)))
+                Ok(changes)
             }
             Err(error) => {
                 if let Err(rollback_error) = transaction.rollback() {
@@ -2131,13 +2115,13 @@ impl Worker {
         }
     }
 
-    fn flush_ir_references(&mut self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+    fn flush_derived_references(&mut self, function: FunctionId) -> Result<ChangeSet, EngineError> {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
         let mut transaction = project.transaction(ChangeSource::agent("flush IR references"));
 
-        match transaction.flush_ir_references(function) {
+        match transaction.flush_derived_references(function) {
             Ok(_) => {
                 let changes = transaction.commit()?;
                 if !changes.is_empty() {
@@ -2244,7 +2228,7 @@ impl Worker {
         );
         let changes = Arc::new(changes);
         self.subscribers
-            .retain(|subscriber| subscriber.publish(&changes, &resync));
+            .retain(|subscriber| subscriber.materialise(&changes, &resync));
         self.route_changes(&changes);
         if self.persistence_policy == PersistencePolicy::OnCommit {
             self.persist_dirty()?;
@@ -2303,7 +2287,7 @@ impl Worker {
                 ChangeSet::with_records(revision, [ChangeRecord::Restored { to: revision }])
                     .attributed_to(ChangeSource::engine("restore")),
             );
-            if !subscriber.publish(&restored, &restored) {
+            if !subscriber.materialise(&restored, &restored) {
                 return;
             }
         }
@@ -2421,8 +2405,8 @@ mod test {
             }],
         ));
 
-        assert!(subscriber.publish(&first, &resync));
-        assert!(subscriber.publish(&second, &resync));
+        assert!(subscriber.materialise(&first, &resync));
+        assert!(subscriber.materialise(&second, &resync));
 
         let delivered = rx.try_recv()?;
         assert_eq!(&*delivered, &*resync);

@@ -6,13 +6,12 @@ use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};
-use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
-    LiftingContext,
+    LiftingContext, Varnode,
 };
 
 #[derive(Clone)]

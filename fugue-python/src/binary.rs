@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use fugue_core::arch::Arch as CoreArch;
-use fugue_core::il::pcode::Varnode as CoreVarnode;
-use fugue_core::lifter::Language as CoreLanguage;
+use fugue_core::lifter::{Language as CoreLanguage, Varnode as CoreVarnode};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

@@ -1,9 +1,8 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-use crate::il::pcode::Varnode;
 use crate::ir::{Address, RawAddress};
-use crate::lifter::Language;
+use crate::lifter::{Language, Varnode};
 
 #[derive(
     Debug,

@@ -1,9 +1,6 @@
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
-
 use crate::ir::{Address, AddressRange, AddressRangeSet, Id, IdSet, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
@@ -88,24 +85,24 @@ where
     }
 }
 
-impl Archive for CodeBlockProperties {
+impl rkyv::Archive for CodeBlockProperties {
     type Archived = ArchivedCodeBlockProperties;
     type Resolver = ();
 
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         out.write(ArchivedCodeBlockProperties(
             rkyv::primitive::ArchivedU32::from_native(self.bits()),
         ));
     }
 }
 
-impl<S: Fallible + ?Sized> Serialize<S> for CodeBlockProperties {
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for CodeBlockProperties {
     fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
     for ArchivedCodeBlockProperties
 {
     fn deserialize(&self, _: &mut D) -> Result<CodeBlockProperties, D::Error> {

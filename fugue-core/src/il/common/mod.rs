@@ -1,19 +1,18 @@
 pub mod artefact;
-pub mod builder;
-pub mod dialect;
-pub mod entity;
+pub mod dominance;
 pub mod error;
-pub mod mapping;
+pub mod graph;
+pub mod id;
 pub mod pool;
-pub mod transform;
-pub mod verify;
+pub mod span;
+#[cfg(test)]
+pub(crate) mod verify;
 
-pub use artefact::{ArtefactDigest, ArtefactHeader, CommonBody, IrArtefact, RawIrArtefact};
-pub use builder::{BuildCancellation, BuildStatus, Finish};
-pub use dialect::{DialectId, IrLevel, SchemaVersion};
-pub use entity::{BlockId, ExpressionId, IrArtefactKey, OperationId, SourceSpanId, ValueId};
+pub use artefact::{IlArtefact, IlHeader, IlLevel, IlSchemaVersion, ParseIlLevelError};
+pub use dominance::{IlDominance, IlDominanceFrontier};
 pub use error::IlError;
-pub use mapping::{CrossLevelMap, MappingRun, SourceMap, SourceRun};
-pub use pool::{Block, PackedRange, Pool, PredecessorIndex};
-pub use transform::{Scratch, Transform, TransformContext};
-pub use verify::{StructuralVerifier, Verify};
+pub use graph::{IlBlock, IlBlockPredecessors, IlBlockProperties, IlGraph};
+pub use id::{IlBlockId, IlExprId, IlOpId, IlValueId};
+pub use pool::IlIndexRange;
+pub(crate) use pool::IlPool;
+pub use span::{IlParentSpan, IlSourceSpan};

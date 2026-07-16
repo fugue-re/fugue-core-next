@@ -8,11 +8,10 @@ use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use fugue_lifter::{Lifter as FugueLifter, LifterBuilderError};
 use thiserror::Error;
 
-use crate::il::pcode::PCodeOp;
 use crate::ir::{Address, Insn, InsnError, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
-use crate::lifter::resolve_language;
 use crate::lifter::traits::Disassembler;
+use crate::lifter::{PCodeOp, resolve_language};
 
 #[derive(Debug, Error)]
 pub enum LifterError {

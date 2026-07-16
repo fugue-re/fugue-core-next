@@ -1,21 +1,10 @@
-use crate::il::common::{ExpressionId, PackedRange};
+use crate::il::common::{IlExprId, IlIndexRange};
 use crate::storage::segments::space::AddressSpaceId;
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 #[repr(u16)]
-pub enum ExpressionOpcode {
+pub enum ECodeExprOpcode {
     Constant = 0,
     Address = 1,
     ReadRegister = 2,
@@ -49,39 +38,39 @@ pub enum ExpressionOpcode {
     Copy = 30,
 }
 
-impl ExpressionOpcode {
+impl ECodeExprOpcode {
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Constant => "const",
-            Self::Address => "address",
-            Self::ReadRegister => "read_register",
+            Self::Address => "addr",
+            Self::ReadRegister => "read_reg",
             Self::ReadFlag => "read_flag",
             Self::Load => "load",
             Self::Add => "add",
             Self::Sub => "sub",
             Self::Mul => "mul",
-            Self::UnsignedDiv => "unsigned_div",
-            Self::SignedDiv => "signed_div",
-            Self::UnsignedRem => "unsigned_rem",
-            Self::SignedRem => "signed_rem",
-            Self::LeftShift => "left_shift",
-            Self::LogicalRightShift => "logical_right_shift",
-            Self::ArithmeticRightShift => "arithmetic_right_shift",
-            Self::Compare => "compare",
+            Self::UnsignedDiv => "udiv",
+            Self::SignedDiv => "sdiv",
+            Self::UnsignedRem => "urem",
+            Self::SignedRem => "srem",
+            Self::LeftShift => "shl",
+            Self::LogicalRightShift => "lshr",
+            Self::ArithmeticRightShift => "ashr",
+            Self::Compare => "cmp",
             Self::Carry => "carry",
             Self::Borrow => "borrow",
             Self::Bool => "bool",
             Self::Not => "not",
-            Self::Negate => "negate",
-            Self::CountOnes => "count_ones",
-            Self::CountLeadingZeros => "count_leading_zeros",
-            Self::ZeroExtend => "zero_extend",
-            Self::SignExtend => "sign_extend",
-            Self::Truncate => "truncate",
+            Self::Negate => "neg",
+            Self::CountOnes => "popcount",
+            Self::CountLeadingZeros => "clz",
+            Self::ZeroExtend => "zext",
+            Self::SignExtend => "sext",
+            Self::Truncate => "trunc",
             Self::Extract => "extract",
             Self::Insert => "insert",
             Self::IntrinsicResult => "intrinsic_result",
-            Self::Undefined => "undefined",
+            Self::Undefined => "undef",
             Self::Copy => "copy",
         }
     }
@@ -127,31 +116,20 @@ impl ExpressionOpcode {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub struct Expression {
-    opcode: ExpressionOpcode,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ECodeExpr {
+    opcode: ECodeExprOpcode,
     width: u32,
-    operands: PackedRange,
+    operands: IlIndexRange,
     immediate: u64,
     address_space: Option<AddressSpaceId>,
 }
 
-impl Expression {
-    pub const fn new(
-        opcode: ExpressionOpcode,
+impl ECodeExpr {
+    pub(crate) const fn new(
+        opcode: ECodeExprOpcode,
         width: u32,
-        operands: PackedRange,
+        operands: IlIndexRange,
         immediate: u64,
         address_space: Option<AddressSpaceId>,
     ) -> Self {
@@ -164,7 +142,7 @@ impl Expression {
         }
     }
 
-    pub const fn opcode(&self) -> ExpressionOpcode {
+    pub const fn opcode(&self) -> ECodeExprOpcode {
         self.opcode
     }
 
@@ -172,7 +150,7 @@ impl Expression {
         self.width
     }
 
-    pub const fn operands(&self) -> PackedRange {
+    pub const fn operands(&self) -> IlIndexRange {
         self.operands
     }
 
@@ -185,10 +163,10 @@ impl Expression {
     }
 }
 
-pub type ExpressionOperand = ExpressionId;
+pub type ExpressionOperand = IlExprId;
 
 #[cfg(test)]
-mod tests {
+mod test {
     use std::mem::size_of;
 
     use super::*;
@@ -197,6 +175,6 @@ mod tests {
     fn expression_records_stay_compact() {
         assert_eq!(size_of::<ExpressionOperand>(), 4);
         assert_eq!(size_of::<Option<ExpressionOperand>>(), 4);
-        assert!(size_of::<Expression>() <= 32);
+        assert!(size_of::<ECodeExpr>() <= 32);
     }
 }

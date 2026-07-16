@@ -1,5 +1,5 @@
 pub mod common;
-pub mod llil;
+pub mod ecode;
 pub mod pcode;
 
-pub use fugue_lifter::{Op, PCodeOp, Varnode};
+pub(crate) mod storage;

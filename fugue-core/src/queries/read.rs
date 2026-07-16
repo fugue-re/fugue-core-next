@@ -2,12 +2,11 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
-use crate::il::common::{IrLevel, RawIrArtefact};
 use crate::ir::block::table::CodeBlockRef;
 use crate::ir::cfg::{FlowGraph, FlowTarget};
 use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, CallGraphEdgeKey, FunctionId, RawAddress, Reference, ReferenceTarget};
-use crate::project::{Project, ProjectError};
+use crate::ir::{Address, CallGraphEdgeKey, RawAddress, Reference, ReferenceTarget};
+use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
 pub(crate) struct ProjectRead<'p> {
@@ -21,14 +20,6 @@ impl<'p> ProjectRead<'p> {
 
     pub(crate) fn project(&self) -> &Project {
         self.project
-    }
-
-    pub(crate) fn ir_artefact(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-    ) -> Result<Option<RawIrArtefact>, ProjectError> {
-        self.project.ir_artefact(function, level)
     }
 
     pub(crate) fn call_edges(&self, after: Option<CallEdge>, limit: usize) -> QueryPage<CallEdge> {
@@ -49,10 +40,6 @@ impl<'p> ProjectRead<'p> {
 
     pub(crate) fn function(&self, entry: Address) -> Option<FunctionRef<'_>> {
         self.project.functions().get_by_address(entry)
-    }
-
-    pub(crate) fn function_id(&self, entry: Address) -> Option<FunctionId> {
-        self.function(entry).map(|function| function.id())
     }
 
     pub(crate) fn callers_of(

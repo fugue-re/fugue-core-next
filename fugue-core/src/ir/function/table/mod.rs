@@ -4,7 +4,6 @@ use std::fmt::{Debug as FmtDebug, Display};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use anyhow::Error as AnyhowError;
 use thiserror::Error;
 
 use crate::ir::block::table::CodeBlockTableAllocation;
@@ -80,7 +79,7 @@ pub enum FunctionTableError {
     #[error("function to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Other(AnyhowError),
+    Other(anyhow::Error),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
@@ -90,14 +89,14 @@ impl FunctionTableError {
     where
         E: StdError + Send + Sync + 'static,
     {
-        Self::Other(AnyhowError::new(error))
+        Self::Other(anyhow::Error::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
         M: FmtDebug + Display + Send + Sync + 'static,
     {
-        Self::Other(AnyhowError::msg(msg))
+        Self::Other(anyhow::Error::msg(msg))
     }
 }
 
@@ -413,11 +412,11 @@ impl FunctionTable {
         self.addresses_in_range(space, (start, Bound::Unbounded))
     }
 
-    pub fn ids_intersecting_range(
-        &self,
-        blocks: &CodeBlockTable,
-        range: &AddressRange,
-    ) -> Vec<Id<Function>> {
+    pub fn overlaps<'a>(
+        &'a self,
+        blocks: &'a CodeBlockTable,
+        range: &'a AddressRange,
+    ) -> impl Iterator<Item = Id<Function>> + 'a {
         self.iter()
             .filter(|function| {
                 function.blocks().any(|(_, block)| {
@@ -427,7 +426,6 @@ impl FunctionTable {
                 })
             })
             .map(|function| function.id())
-            .collect()
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {

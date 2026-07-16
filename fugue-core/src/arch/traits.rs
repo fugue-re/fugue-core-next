@@ -3,9 +3,10 @@ use std::borrow::Borrow;
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
-use crate::il::pcode::Varnode;
 use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
-use crate::lifter::{ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext};
+use crate::lifter::{
+    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
+};
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

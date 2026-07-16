@@ -109,10 +109,12 @@ pub struct CallGraphIndex {
 
 #[derive(Debug, Error)]
 pub enum CallGraphVerificationError {
-    #[error("call graph storage error: {0}")]
-    Storage(#[from] EntityStorageError),
     #[error(
-        "call graph mismatch: missing={missing:?}, extra={extra:?}, inverse_missing={inverse_missing:?}, inverse_extra={inverse_extra:?}"
+        "call graph does not match the function table: {} missing, {} extra, {} inverse missing, {} inverse extra",
+        missing.len(),
+        extra.len(),
+        inverse_missing.len(),
+        inverse_extra.len()
     )]
     Mismatch {
         missing: Vec<CallGraphEdgeKey>,
@@ -120,22 +122,8 @@ pub enum CallGraphVerificationError {
         inverse_missing: Vec<CallGraphEdgeKey>,
         inverse_extra: Vec<CallGraphEdgeKey>,
     },
-}
-
-impl CallGraphVerificationError {
-    pub fn mismatch(
-        missing: Vec<CallGraphEdgeKey>,
-        extra: Vec<CallGraphEdgeKey>,
-        inverse_missing: Vec<CallGraphEdgeKey>,
-        inverse_extra: Vec<CallGraphEdgeKey>,
-    ) -> Self {
-        Self::Mismatch {
-            missing,
-            extra,
-            inverse_missing,
-            inverse_extra,
-        }
-    }
+    #[error("call graph storage error: {0}")]
+    Storage(#[from] EntityStorageError),
 }
 
 impl CallGraphIndex {
@@ -245,12 +233,12 @@ impl CallGraphIndex {
             return Ok(());
         }
 
-        Err(CallGraphVerificationError::mismatch(
+        Err(CallGraphVerificationError::Mismatch {
             missing,
             extra,
             inverse_missing,
             inverse_extra,
-        ))
+        })
     }
 
     pub(crate) fn callees(

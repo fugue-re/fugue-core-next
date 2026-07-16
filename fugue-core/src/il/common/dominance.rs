@@ -1,59 +1,29 @@
-use crate::il::common::{Block, BlockId, IlError, PredecessorIndex};
+use crate::il::common::{IlBlock, IlBlockId, IlBlockPredecessors};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Dominance {
-    entry: Option<BlockId>,
-    immediate_dominators: Vec<Option<BlockId>>,
+pub struct IlDominance {
+    entry: Option<IlBlockId>,
+    immediate_dominators: Vec<Option<IlBlockId>>,
     children_offsets: Vec<u32>,
-    children: Vec<BlockId>,
+    children: Vec<IlBlockId>,
     preorder: Vec<u32>,
     postorder: Vec<u32>,
     reachable: Vec<bool>,
 }
 
-impl Dominance {
-    pub fn new(
-        immediate_dominators: Vec<Option<BlockId>>,
-        children_offsets: Vec<u32>,
-        children: Vec<BlockId>,
-        preorder: Vec<u32>,
-        postorder: Vec<u32>,
-    ) -> Self {
-        let reachable = preorder
-            .iter()
-            .zip(&postorder)
-            .map(|(preorder, postorder)| *preorder != u32::MAX && *postorder != u32::MAX)
-            .collect();
-
-        Self {
-            entry: None,
-            immediate_dominators,
-            children_offsets,
-            children,
-            preorder,
-            postorder,
-            reachable,
-        }
+impl IlDominance {
+    pub fn from_blocks(blocks: &[IlBlock], successors: &[IlBlockId], entry: IlBlockId) -> Self {
+        DominanceBuilder::new(blocks, successors, entry).build()
     }
 
-    pub fn from_blocks(
-        blocks: &[Block],
-        successors: &[BlockId],
-        entry: BlockId,
-    ) -> Result<Self, IlError> {
-        let builder = DominanceBuilder::new(blocks, successors, entry)?;
-
-        builder.build()
-    }
-
-    pub fn immediate_dominator(&self, block: BlockId) -> Option<BlockId> {
+    pub fn immediate_dominator(&self, block: IlBlockId) -> Option<IlBlockId> {
         self.immediate_dominators
             .get(block.index())
             .copied()
             .flatten()
     }
 
-    pub fn children(&self, block: BlockId) -> &[BlockId] {
+    pub fn children(&self, block: IlBlockId) -> &[IlBlockId] {
         let Some(start) = self.children_offsets.get(block.index()).copied() else {
             return &[];
         };
@@ -66,46 +36,22 @@ impl Dominance {
         &self.children[start as usize..end as usize]
     }
 
-    pub fn is_reachable(&self, block: BlockId) -> bool {
+    pub fn is_reachable(&self, block: IlBlockId) -> bool {
         self.reachable.get(block.index()).copied().unwrap_or(false)
     }
 
-    pub fn frontiers(
-        &self,
-        blocks: &[Block],
-        successors: &[BlockId],
-    ) -> Result<DominanceFrontier, IlError> {
-        if blocks.len() != self.reachable.len() {
-            return Err(IlError::range_out_of_bounds(
-                u32::try_from(blocks.len()).unwrap_or(u32::MAX),
-                self.reachable.len(),
-            ));
-        }
-
-        for block in blocks {
-            block.successors().verify_bounds(successors.len())?;
-
-            for successor in block.successors().checked_slice(successors)? {
-                if successor.index() >= blocks.len() {
-                    return Err(IlError::range_out_of_bounds(
-                        successor.value(),
-                        blocks.len(),
-                    ));
-                }
-            }
-        }
-
+    pub fn frontiers(&self, blocks: &[IlBlock], successors: &[IlBlockId]) -> IlDominanceFrontier {
         let mut frontiers = vec![Vec::new(); blocks.len()];
 
         for block in self.tree_postorder() {
-            self.add_successor_frontiers(blocks, successors, block, &mut frontiers)?;
+            self.add_successor_frontiers(blocks, successors, block, &mut frontiers);
             self.add_child_frontiers(block, &mut frontiers);
         }
 
-        DominanceFrontier::from_frontiers(frontiers)
+        IlDominanceFrontier::from_frontiers(frontiers)
     }
 
-    pub fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+    pub fn dominates(&self, dominator: IlBlockId, block: IlBlockId) -> bool {
         if !self.is_reachable(dominator) || !self.is_reachable(block) {
             return false;
         }
@@ -128,25 +74,20 @@ impl Dominance {
 
     fn add_successor_frontiers(
         &self,
-        blocks: &[Block],
-        successors: &[BlockId],
-        block: BlockId,
-        frontiers: &mut [Vec<BlockId>],
-    ) -> Result<(), IlError> {
-        for successor in blocks[block.index()]
-            .successors()
-            .checked_slice(successors)?
-        {
+        blocks: &[IlBlock],
+        successors: &[IlBlockId],
+        block: IlBlockId,
+        frontiers: &mut [Vec<IlBlockId>],
+    ) {
+        for successor in blocks[block.index()].successors().slice(successors) {
             if self.is_reachable(*successor) && self.immediate_dominator(*successor) != Some(block)
             {
                 Self::push_frontier(frontiers, block, *successor);
             }
         }
-
-        Ok(())
     }
 
-    fn add_child_frontiers(&self, block: BlockId, frontiers: &mut [Vec<BlockId>]) {
+    fn add_child_frontiers(&self, block: IlBlockId, frontiers: &mut [Vec<IlBlockId>]) {
         for child in self.children(block) {
             let child_frontiers = frontiers[child.index()].clone();
 
@@ -158,7 +99,7 @@ impl Dominance {
         }
     }
 
-    fn push_frontier(frontiers: &mut [Vec<BlockId>], block: BlockId, frontier: BlockId) {
+    fn push_frontier(frontiers: &mut [Vec<IlBlockId>], block: IlBlockId, frontier: IlBlockId) {
         let block_frontiers = &mut frontiers[block.index()];
 
         if !block_frontiers.contains(&frontier) {
@@ -166,7 +107,7 @@ impl Dominance {
         }
     }
 
-    fn tree_postorder(&self) -> Vec<BlockId> {
+    fn tree_postorder(&self) -> Vec<IlBlockId> {
         let mut order = Vec::new();
 
         let Some(entry) = self.entry else {
@@ -196,17 +137,13 @@ impl Dominance {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DominanceFrontier {
+pub struct IlDominanceFrontier {
     offsets: Vec<u32>,
-    frontiers: Vec<BlockId>,
+    frontiers: Vec<IlBlockId>,
 }
 
-impl DominanceFrontier {
-    pub fn new(offsets: Vec<u32>, frontiers: Vec<BlockId>) -> Self {
-        Self { offsets, frontiers }
-    }
-
-    pub fn frontier(&self, block: BlockId) -> &[BlockId] {
+impl IlDominanceFrontier {
+    pub fn frontier(&self, block: IlBlockId) -> &[IlBlockId] {
         let Some(start) = self.offsets.get(block.index()).copied() else {
             return &[];
         };
@@ -219,31 +156,17 @@ impl DominanceFrontier {
         &self.frontiers[start as usize..end as usize]
     }
 
-    pub fn place_phis(
+    pub(crate) fn place_phis(
         &self,
         block_count: usize,
-        definitions: impl IntoIterator<Item = BlockId>,
-    ) -> Result<PhiPlacement, IlError> {
-        if self.offsets.len() != block_count + 1 {
-            return Err(IlError::range_out_of_bounds(
-                u32::try_from(self.offsets.len()).unwrap_or(u32::MAX),
-                block_count + 1,
-            ));
-        }
-
+        definitions: impl IntoIterator<Item = IlBlockId>,
+    ) -> IlPhiPlacement {
         let mut placed = vec![false; block_count];
         let mut queued = vec![false; block_count];
         let mut queue = Vec::new();
         let mut phis = Vec::new();
 
         for definition in definitions {
-            if definition.index() >= block_count {
-                return Err(IlError::range_out_of_bounds(
-                    definition.value(),
-                    block_count,
-                ));
-            }
-
             if !queued[definition.index()] {
                 queued[definition.index()] = true;
                 queue.push(definition);
@@ -252,10 +175,6 @@ impl DominanceFrontier {
 
         while let Some(block) = queue.pop() {
             for frontier in self.frontier(block) {
-                if frontier.index() >= block_count {
-                    return Err(IlError::range_out_of_bounds(frontier.value(), block_count));
-                }
-
                 if placed[frontier.index()] {
                     continue;
                 }
@@ -272,10 +191,10 @@ impl DominanceFrontier {
 
         phis.sort();
 
-        Ok(PhiPlacement::new(phis))
+        IlPhiPlacement::new(phis)
     }
 
-    fn from_frontiers(frontiers: Vec<Vec<BlockId>>) -> Result<Self, IlError> {
+    fn from_frontiers(frontiers: Vec<Vec<IlBlockId>>) -> Self {
         let mut offsets = Vec::with_capacity(frontiers.len() + 1);
         let mut values = Vec::new();
         let mut offset = 0u32;
@@ -287,98 +206,71 @@ impl DominanceFrontier {
 
             for block in frontier {
                 values.push(block);
-                offset = offset
-                    .checked_add(1)
-                    .ok_or(IlError::integer_overflow("dominance frontier offset"))?;
+                offset += 1;
             }
 
             offsets.push(offset);
         }
 
-        Ok(Self {
+        Self {
             offsets,
             frontiers: values,
-        })
+        }
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PhiPlacement {
-    blocks: Vec<BlockId>,
+pub(crate) struct IlPhiPlacement {
+    blocks: Vec<IlBlockId>,
 }
 
-impl PhiPlacement {
-    pub fn new(blocks: Vec<BlockId>) -> Self {
+impl IlPhiPlacement {
+    pub(crate) fn new(blocks: Vec<IlBlockId>) -> Self {
         Self { blocks }
     }
 
-    pub fn blocks(&self) -> &[BlockId] {
+    pub(crate) fn blocks(&self) -> &[IlBlockId] {
         &self.blocks
-    }
-
-    pub fn contains(&self, block: BlockId) -> bool {
-        self.blocks.contains(&block)
     }
 }
 
 struct DominanceBuilder<'a> {
-    blocks: &'a [Block],
-    successors: &'a [BlockId],
-    entry: BlockId,
-    predecessors: PredecessorIndex,
+    blocks: &'a [IlBlock],
+    successors: &'a [IlBlockId],
+    entry: IlBlockId,
+    predecessors: IlBlockPredecessors,
     reachable: Vec<bool>,
-    reverse_postorder: Vec<BlockId>,
+    reverse_postorder: Vec<IlBlockId>,
     positions: Vec<u32>,
-    immediate_dominators: Vec<Option<BlockId>>,
+    immediate_dominators: Vec<Option<IlBlockId>>,
 }
 
 impl<'a> DominanceBuilder<'a> {
-    fn new(
-        blocks: &'a [Block],
-        successors: &'a [BlockId],
-        entry: BlockId,
-    ) -> Result<Self, IlError> {
-        if entry.index() >= blocks.len() {
-            return Err(IlError::range_out_of_bounds(entry.value(), blocks.len()));
-        }
-
-        for block in blocks {
-            block.successors().verify_bounds(successors.len())?;
-
-            for successor in block.successors().checked_slice(successors)? {
-                if successor.index() >= blocks.len() {
-                    return Err(IlError::range_out_of_bounds(
-                        successor.value(),
-                        blocks.len(),
-                    ));
-                }
-            }
-        }
-
+    fn new(blocks: &'a [IlBlock], successors: &'a [IlBlockId], entry: IlBlockId) -> Self {
         let mut builder = Self {
             blocks,
             successors,
             entry,
-            predecessors: PredecessorIndex::build(blocks, successors)?,
+            predecessors: IlBlockPredecessors::build(blocks, successors),
             reachable: vec![false; blocks.len()],
             reverse_postorder: Vec::new(),
             positions: vec![u32::MAX; blocks.len()],
             immediate_dominators: vec![None; blocks.len()],
         };
 
-        builder.build_reverse_postorder()?;
+        builder.build_reverse_postorder();
 
-        Ok(builder)
+        builder
     }
 
-    fn build(mut self) -> Result<Dominance, IlError> {
+    fn build(mut self) -> IlDominance {
         self.solve_immediate_dominators();
         self.immediate_dominators[self.entry.index()] = None;
 
-        let (children_offsets, children) = self.build_children()?;
-        let (preorder, postorder) = self.build_intervals(&children_offsets, &children)?;
+        let (children_offsets, children) = self.build_children();
+        let (preorder, postorder) = self.build_intervals(&children_offsets, &children);
 
-        Ok(Dominance {
+        IlDominance {
             entry: Some(self.entry),
             immediate_dominators: self.immediate_dominators,
             children_offsets,
@@ -386,10 +278,10 @@ impl<'a> DominanceBuilder<'a> {
             preorder,
             postorder,
             reachable: self.reachable,
-        })
+        }
     }
 
-    fn build_reverse_postorder(&mut self) -> Result<(), IlError> {
+    fn build_reverse_postorder(&mut self) {
         let mut visited = vec![false; self.blocks.len()];
         let mut stack = vec![(self.entry, false)];
         let mut postorder = Vec::new();
@@ -410,7 +302,7 @@ impl<'a> DominanceBuilder<'a> {
 
             let successors = self.blocks[block.index()]
                 .successors()
-                .checked_slice(self.successors)?;
+                .slice(self.successors);
 
             for successor in successors.iter().rev() {
                 if !visited[successor.index()] {
@@ -423,11 +315,8 @@ impl<'a> DominanceBuilder<'a> {
         self.reverse_postorder = postorder;
 
         for (position, block) in self.reverse_postorder.iter().enumerate() {
-            self.positions[block.index()] = u32::try_from(position)
-                .map_err(|_| IlError::integer_overflow("dominance position"))?;
+            self.positions[block.index()] = position as u32;
         }
-
-        Ok(())
     }
 
     fn solve_immediate_dominators(&mut self) {
@@ -456,7 +345,7 @@ impl<'a> DominanceBuilder<'a> {
         }
     }
 
-    fn processed_predecessors(&self, block: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+    fn processed_predecessors(&self, block: IlBlockId) -> impl Iterator<Item = IlBlockId> + '_ {
         self.predecessors
             .predecessors(block)
             .iter()
@@ -467,7 +356,7 @@ impl<'a> DominanceBuilder<'a> {
             })
     }
 
-    fn intersect(&self, first: BlockId, second: BlockId) -> BlockId {
+    fn intersect(&self, first: IlBlockId, second: IlBlockId) -> IlBlockId {
         let mut first = first;
         let mut second = second;
 
@@ -484,31 +373,27 @@ impl<'a> DominanceBuilder<'a> {
         first
     }
 
-    fn build_children(&self) -> Result<(Vec<u32>, Vec<BlockId>), IlError> {
+    fn build_children(&self) -> (Vec<u32>, Vec<IlBlockId>) {
         let mut offsets = vec![0u32; self.blocks.len() + 1];
 
         for dominator in self.immediate_dominators.iter().flatten() {
-            let index = dominator.index() + 1;
-            offsets[index] = offsets[index]
-                .checked_add(1)
-                .ok_or(IlError::integer_overflow("dominator tree child count"))?;
+            offsets[dominator.index() + 1] += 1;
         }
 
         for index in 1..offsets.len() {
-            offsets[index] = offsets[index]
-                .checked_add(offsets[index - 1])
-                .ok_or(IlError::integer_overflow("dominator tree child offset"))?;
+            offsets[index] += offsets[index - 1];
         }
 
         let mut cursor = offsets.clone();
-        let mut children =
-            vec![BlockId::try_from_index(0)?; *offsets.last().unwrap_or(&0) as usize];
+        let fill = IlBlockId::try_from_index(0).expect("block id zero is representable");
+        let mut children = vec![fill; *offsets.last().unwrap_or(&0) as usize];
 
         for (block_index, dominator) in self.immediate_dominators.iter().enumerate() {
             let Some(dominator) = dominator else {
                 continue;
             };
-            let block = BlockId::try_from_index(block_index)?;
+            let block = IlBlockId::try_from_index(block_index)
+                .expect("block count fits the block id space");
             let cursor_index = dominator.index();
             let index = cursor[cursor_index] as usize;
 
@@ -516,14 +401,14 @@ impl<'a> DominanceBuilder<'a> {
             cursor[cursor_index] += 1;
         }
 
-        Ok((offsets, children))
+        (offsets, children)
     }
 
     fn build_intervals(
         &self,
         children_offsets: &[u32],
-        children: &[BlockId],
-    ) -> Result<(Vec<u32>, Vec<u32>), IlError> {
+        children: &[IlBlockId],
+    ) -> (Vec<u32>, Vec<u32>) {
         let mut preorder = vec![u32::MAX; self.blocks.len()];
         let mut postorder = vec![u32::MAX; self.blocks.len()];
         let mut next = 0u32;
@@ -536,16 +421,12 @@ impl<'a> DominanceBuilder<'a> {
 
             if expanded {
                 postorder[block.index()] = next;
-                next = next
-                    .checked_add(1)
-                    .ok_or(IlError::integer_overflow("dominance postorder"))?;
+                next += 1;
                 continue;
             }
 
             preorder[block.index()] = next;
-            next = next
-                .checked_add(1)
-                .ok_or(IlError::integer_overflow("dominance preorder"))?;
+            next += 1;
             stack.push((block, true));
 
             let start = children_offsets[block.index()] as usize;
@@ -556,19 +437,19 @@ impl<'a> DominanceBuilder<'a> {
             }
         }
 
-        Ok((preorder, postorder))
+        (preorder, postorder)
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use crate::il::common::PackedRange;
+    use crate::il::common::{IlBlockProperties, IlError, IlIndexRange};
 
     #[test]
     fn dominance_builds_linear_tree() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1], &[2], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
 
         assert_eq!(
             dominance.immediate_dominator(block_id(1)?),
@@ -589,7 +470,7 @@ mod tests {
     #[test]
     fn dominance_builds_diamond_tree() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1, 2], &[3], &[3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
 
         assert_eq!(
             dominance.immediate_dominator(block_id(1)?),
@@ -613,8 +494,8 @@ mod tests {
     #[test]
     fn dominance_frontier_marks_diamond_join() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1, 2], &[3], &[3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
+        let frontiers = dominance.frontiers(&blocks, &successors);
 
         assert_eq!(frontiers.frontier(block_id(0)?), &[]);
         assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(3)?]);
@@ -627,12 +508,12 @@ mod tests {
     #[test]
     fn phi_placement_places_diamond_join() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1, 2], &[3], &[3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
-        let placement = frontiers.place_phis(blocks.len(), [block_id(1)?, block_id(2)?])?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
+        let frontiers = dominance.frontiers(&blocks, &successors);
+        let placement = frontiers.place_phis(blocks.len(), [block_id(1)?, block_id(2)?]);
 
         assert_eq!(placement.blocks(), &[block_id(3)?]);
-        assert!(placement.contains(block_id(3)?));
+        assert!(placement.blocks().contains(&block_id(3)?));
 
         Ok(())
     }
@@ -640,7 +521,7 @@ mod tests {
     #[test]
     fn dominance_handles_loop_back_edge() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1], &[2], &[1, 3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
 
         assert_eq!(
             dominance.immediate_dominator(block_id(1)?),
@@ -663,10 +544,10 @@ mod tests {
     #[test]
     fn phi_placement_iterates_from_new_phi_blocks() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1, 2], &[3], &[3], &[4, 5], &[6], &[6], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
+        let frontiers = dominance.frontiers(&blocks, &successors);
         let placement =
-            frontiers.place_phis(blocks.len(), [block_id(1)?, block_id(2)?, block_id(4)?])?;
+            frontiers.place_phis(blocks.len(), [block_id(1)?, block_id(2)?, block_id(4)?]);
 
         assert_eq!(placement.blocks(), &[block_id(3)?, block_id(6)?]);
 
@@ -676,8 +557,8 @@ mod tests {
     #[test]
     fn dominance_frontier_marks_loop_header() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1], &[2], &[1, 3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
+        let frontiers = dominance.frontiers(&blocks, &successors);
 
         assert_eq!(frontiers.frontier(block_id(0)?), &[]);
         assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(1)?]);
@@ -688,23 +569,9 @@ mod tests {
     }
 
     #[test]
-    fn phi_placement_rejects_out_of_range_definition() -> Result<(), IlError> {
-        let (blocks, successors) = graph(&[&[1], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
-
-        assert!(matches!(
-            frontiers.place_phis(blocks.len(), [block_id(2)?]),
-            Err(IlError::RangeOutOfBounds { .. })
-        ));
-
-        Ok(())
-    }
-
-    #[test]
     fn dominance_ignores_unreachable_blocks() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[1], &[], &[3], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
 
         assert!(dominance.is_reachable(block_id(1)?));
         assert!(!dominance.is_reachable(block_id(2)?));
@@ -718,26 +585,13 @@ mod tests {
     #[test]
     fn dominance_frontier_uses_non_zero_entry() -> Result<(), IlError> {
         let (blocks, successors) = graph(&[&[], &[2], &[]])?;
-        let dominance = Dominance::from_blocks(&blocks, &successors, block_id(1)?)?;
-        let frontiers = dominance.frontiers(&blocks, &successors)?;
+        let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(1)?);
+        let frontiers = dominance.frontiers(&blocks, &successors);
 
         assert!(!dominance.is_reachable(block_id(0)?));
         assert!(dominance.is_reachable(block_id(2)?));
         assert_eq!(frontiers.frontier(block_id(1)?), &[]);
         assert_eq!(frontiers.frontier(block_id(2)?), &[]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn dominance_rejects_out_of_range_successor() -> Result<(), IlError> {
-        let blocks = vec![Block::new(PackedRange::EMPTY, PackedRange::new(0, 1)?, 0)];
-        let successors = vec![block_id(1)?];
-
-        assert!(matches!(
-            Dominance::from_blocks(&blocks, &successors, block_id(0)?),
-            Err(IlError::RangeOutOfBounds { .. })
-        ));
 
         Ok(())
     }
@@ -750,7 +604,7 @@ mod tests {
             for _ in 0..64 {
                 let edges = generator.edges(node_count);
                 let (blocks, successors) = graph_from_edges(&edges)?;
-                let dominance = Dominance::from_blocks(&blocks, &successors, block_id(0)?)?;
+                let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
                 let oracle = SlowDominance::new(&blocks, &successors, block_id(0)?)?;
 
                 for dominator in 0..node_count {
@@ -767,13 +621,13 @@ mod tests {
         Ok(())
     }
 
-    fn graph(edges: &[&[usize]]) -> Result<(Vec<Block>, Vec<BlockId>), IlError> {
+    fn graph(edges: &[&[usize]]) -> Result<(Vec<IlBlock>, Vec<IlBlockId>), IlError> {
         let edges = edges.iter().map(|edge| edge.to_vec()).collect::<Vec<_>>();
 
         graph_from_edges(&edges)
     }
 
-    fn graph_from_edges(edges: &[Vec<usize>]) -> Result<(Vec<Block>, Vec<BlockId>), IlError> {
+    fn graph_from_edges(edges: &[Vec<usize>]) -> Result<(Vec<IlBlock>, Vec<IlBlockId>), IlError> {
         let mut blocks = Vec::new();
         let mut successors = Vec::new();
 
@@ -784,18 +638,18 @@ mod tests {
                 successors.push(block_id(*successor)?);
             }
 
-            blocks.push(Block::new(
-                PackedRange::EMPTY,
-                PackedRange::new(start, successors.len())?,
-                0,
+            blocks.push(IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::new(start, successors.len())?,
+                IlBlockProperties::empty(),
             ));
         }
 
         Ok((blocks, successors))
     }
 
-    fn block_id(index: usize) -> Result<BlockId, IlError> {
-        BlockId::try_from_index(index)
+    fn block_id(index: usize) -> Result<IlBlockId, IlError> {
+        IlBlockId::try_from_index(index)
     }
 
     struct GraphGenerator {
@@ -848,7 +702,11 @@ mod tests {
     }
 
     impl SlowDominance {
-        fn new(blocks: &[Block], successors: &[BlockId], entry: BlockId) -> Result<Self, IlError> {
+        fn new(
+            blocks: &[IlBlock],
+            successors: &[IlBlockId],
+            entry: IlBlockId,
+        ) -> Result<Self, IlError> {
             let reachable = Self::reachable(blocks, successors, entry)?;
             let predecessors = Self::predecessors(blocks, successors)?;
             let mut sets = vec![vec![false; blocks.len()]; blocks.len()];
@@ -917,9 +775,9 @@ mod tests {
         }
 
         fn reachable(
-            blocks: &[Block],
-            successors: &[BlockId],
-            entry: BlockId,
+            blocks: &[IlBlock],
+            successors: &[IlBlockId],
+            entry: IlBlockId,
         ) -> Result<Vec<bool>, IlError> {
             let mut reachable = vec![false; blocks.len()];
             let mut stack = vec![entry];
@@ -931,10 +789,7 @@ mod tests {
 
                 reachable[block.index()] = true;
 
-                for successor in blocks[block.index()]
-                    .successors()
-                    .checked_slice(successors)?
-                {
+                for successor in blocks[block.index()].successors().slice(successors) {
                     if !reachable[successor.index()] {
                         stack.push(*successor);
                     }
@@ -945,13 +800,13 @@ mod tests {
         }
 
         fn predecessors(
-            blocks: &[Block],
-            successors: &[BlockId],
+            blocks: &[IlBlock],
+            successors: &[IlBlockId],
         ) -> Result<Vec<Vec<usize>>, IlError> {
             let mut predecessors = vec![Vec::new(); blocks.len()];
 
             for (block_index, block) in blocks.iter().enumerate() {
-                for successor in block.successors().checked_slice(successors)? {
+                for successor in block.successors().slice(successors) {
                     predecessors[successor.index()].push(block_index);
                 }
             }

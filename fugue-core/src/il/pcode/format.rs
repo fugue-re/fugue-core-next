@@ -1,12 +1,12 @@
 use std::fmt;
 
-use crate::il::pcode::{Location, LocationId, Opcode, Operation, PCodeBody};
+use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode};
 use crate::ir::Address;
 
 #[derive(Debug, Copy, Clone)]
-pub struct OpcodeDisplay(pub Opcode);
+pub struct PCodeOpcodeDisplay(pub PCodeOpcode);
 
-impl fmt::Display for OpcodeDisplay {
+impl fmt::Display for PCodeOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mnemonic = self.0.mnemonic();
         write!(f, "pcode.{mnemonic}")
@@ -14,20 +14,20 @@ impl fmt::Display for OpcodeDisplay {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct PCodeBodyDisplay<'a> {
-    body: &'a PCodeBody,
+pub struct PCodeIrDisplay<'a> {
+    body: &'a PCodeIr,
 }
 
-impl<'a> PCodeBodyDisplay<'a> {
-    pub const fn new(body: &'a PCodeBody) -> Self {
+impl<'a> PCodeIrDisplay<'a> {
+    pub(crate) const fn new(body: &'a PCodeIr) -> Self {
         Self { body }
     }
 }
 
-impl fmt::Display for PCodeBodyDisplay<'_> {
+impl fmt::Display for PCodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, operation) in self.body.operations().iter().enumerate() {
-            let display = OperationDisplay::new(self.body, index, operation);
+            let display = PCodeOpDisplay::new(self.body, index, operation);
             write!(f, "{display}")?;
 
             if index + 1 < self.body.operations().len() {
@@ -41,16 +41,13 @@ impl fmt::Display for PCodeBodyDisplay<'_> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct PCodeSourceDisplay<'a> {
-    body: &'a PCodeBody,
-    machine_address: Address,
+    body: &'a PCodeIr,
+    address: Address,
 }
 
 impl<'a> PCodeSourceDisplay<'a> {
-    pub const fn new(body: &'a PCodeBody, machine_address: Address) -> Self {
-        Self {
-            body,
-            machine_address,
-        }
+    pub(crate) const fn new(body: &'a PCodeIr, address: Address) -> Self {
+        Self { body, address }
     }
 }
 
@@ -58,13 +55,13 @@ impl fmt::Display for PCodeSourceDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
 
-        for (index, operation) in self.body.operations_for_source(self.machine_address) {
+        for (index, operation) in self.body.operations_for_source(self.address) {
             if !first {
                 writeln!(f)?;
             }
 
             first = false;
-            let display = OperationDisplay::new(self.body, index, operation);
+            let display = PCodeOpDisplay::new(self.body, index, operation);
             write!(f, "{display}")?;
         }
 
@@ -73,18 +70,18 @@ impl fmt::Display for PCodeSourceDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct LocationDisplay<'a> {
-    id: LocationId,
-    location: &'a Location,
+pub struct PCodeLocationDisplay<'a> {
+    id: PCodeLocationId,
+    location: &'a PCodeLocation,
 }
 
-impl<'a> LocationDisplay<'a> {
-    pub const fn new(id: LocationId, location: &'a Location) -> Self {
+impl<'a> PCodeLocationDisplay<'a> {
+    pub(crate) const fn new(id: PCodeLocationId, location: &'a PCodeLocation) -> Self {
         Self { id, location }
     }
 }
 
-impl fmt::Display for LocationDisplay<'_> {
+impl fmt::Display for PCodeLocationDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.id.index();
         let width = self.location.width();
@@ -108,14 +105,14 @@ impl fmt::Display for LocationDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct OperationDisplay<'a> {
-    body: &'a PCodeBody,
+pub struct PCodeOpDisplay<'a> {
+    body: &'a PCodeIr,
     index: usize,
-    operation: &'a Operation,
+    operation: &'a PCodeOp,
 }
 
-impl<'a> OperationDisplay<'a> {
-    pub const fn new(body: &'a PCodeBody, index: usize, operation: &'a Operation) -> Self {
+impl<'a> PCodeOpDisplay<'a> {
+    pub(crate) const fn new(body: &'a PCodeIr, index: usize, operation: &'a PCodeOp) -> Self {
         Self {
             body,
             index,
@@ -123,17 +120,14 @@ impl<'a> OperationDisplay<'a> {
         }
     }
 
-    fn write_location(&self, f: &mut fmt::Formatter<'_>, id: LocationId) -> fmt::Result {
+    fn write_location(&self, f: &mut fmt::Formatter<'_>, id: PCodeLocationId) -> fmt::Result {
         let location = self.body.location(id).ok_or(fmt::Error)?;
-        let display = LocationDisplay::new(id, location);
+        let display = PCodeLocationDisplay::new(id, location);
         write!(f, "{display}")
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self
-            .body
-            .operation_operands(self.operation)
-            .map_err(|_| fmt::Error)?;
+        let operands = self.body.operation_operands(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -154,12 +148,15 @@ impl<'a> OperationDisplay<'a> {
             write!(f, " @fugue_space<{space}>")?;
         }
 
-        if matches!(self.operation.opcode(), Opcode::Load | Opcode::Store) {
+        if matches!(
+            self.operation.opcode(),
+            PCodeOpcode::Load | PCodeOpcode::Store
+        ) {
             let lifter_space = self.operation.immediate();
             write!(f, " @lifter_space<{lifter_space}>")?;
         }
 
-        if matches!(self.operation.opcode(), Opcode::UserOp) {
+        if matches!(self.operation.opcode(), PCodeOpcode::UserOp) {
             let user_op = self.operation.immediate();
             write!(f, " @user_op<{user_op}>")?;
         }
@@ -170,7 +167,7 @@ impl<'a> OperationDisplay<'a> {
     fn write_target(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if matches!(
             self.operation.opcode(),
-            Opcode::Branch | Opcode::CBranch | Opcode::Call
+            PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
         ) {
             let target = self
                 .body
@@ -184,7 +181,7 @@ impl<'a> OperationDisplay<'a> {
     }
 }
 
-impl fmt::Display for OperationDisplay<'_> {
+impl fmt::Display for PCodeOpDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.index;
 
@@ -195,7 +192,7 @@ impl fmt::Display for OperationDisplay<'_> {
             write!(f, " = ")?;
         }
 
-        let opcode = OpcodeDisplay(self.operation.opcode());
+        let opcode = PCodeOpcodeDisplay(self.operation.opcode());
         write!(f, "{opcode}")?;
         self.write_effects(f)?;
         self.write_operands(f)?;
@@ -204,44 +201,45 @@ impl fmt::Display for OperationDisplay<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use crate::il::common::{
-        ArtefactHeader, BuildStatus, CommonBody, Finish, IrLevel, PackedRange, SourceRun,
+    use crate::analysis::control::CancellationToken;
+    use crate::il::common::{IlGraph, IlHeader, IlIndexRange, IlSourceSpan};
+    use crate::il::pcode::{
+        LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocationProperties,
     };
-    use crate::il::pcode::{LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder};
-    use crate::ir::{Address, FunctionId};
+    use crate::ir::FunctionId;
+    use crate::lifter::{Language, resolve_language};
     use crate::storage::segments::space::AddressSpaceId;
 
+    fn language() -> &'static Language {
+        resolve_language("x86:LE:64").expect("test language should resolve")
+    }
+
     #[test]
-    fn pcode_body_display_is_deterministic() {
-        let header = ArtefactHeader::new(
-            FunctionId::default(),
-            IrLevel::PCode,
-            PCODE_SCHEMA_VERSION,
-            0,
-        );
-        let mut builder = PCodeBuilder::new(header, CommonBody::default());
+    fn pcode_ir_display_is_deterministic() {
+        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language(), header, IlGraph::default());
         let input = builder
-            .push_location(Location::new(
+            .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
                 0x11,
                 8,
-                Location::CONSTANT,
+                PCodeLocationProperties::CONSTANT,
             ))
             .unwrap();
         let output = builder
-            .push_location(Location::new(
+            .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(1),
                 0x20,
                 8,
-                Location::REGISTER,
+                PCodeLocationProperties::REGISTER,
             ))
             .unwrap();
         let operands = builder.push_operands([input]).unwrap();
 
-        builder.push_operation(Operation::new(
-            Opcode::Copy,
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
             Some(output),
             operands,
             0,
@@ -251,18 +249,19 @@ mod tests {
         let target = Address::new(AddressSpaceId::new(2), 0x2000u64);
         let branch_target = builder.push_target(target).unwrap();
         let branch_operands = builder.push_operands([input]).unwrap();
-        builder.push_operation(Operation::new(
-            Opcode::Branch,
+
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Branch,
             None,
             branch_operands,
             branch_target,
             None,
         ));
 
-        let body = builder.finish(&BuildStatus::new()).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
-            body.display().to_string(),
+            ir.display().to_string(),
             "@0 %l1:bytes<8>@lifter_space<1>[0x20]{register} = pcode.copy %l0:bytes<8>@lifter_space<0>[0x11]{constant}\n\
              @1 pcode.branch %l0:bytes<8>@lifter_space<0>[0x11]{constant} -> 0x2:0x2000"
         );
@@ -272,68 +271,60 @@ mod tests {
     fn pcode_source_display_selects_source_instruction_operations() {
         let first = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let second = Address::new(AddressSpaceId::new(1), 0x1004u64);
-        let header = ArtefactHeader::new(
-            FunctionId::default(),
-            IrLevel::PCode,
-            PCODE_SCHEMA_VERSION,
-            0,
-        );
-        let common = CommonBody::new(
-            Vec::new(),
-            Vec::new(),
-            vec![
-                SourceRun::new(PackedRange::new(0, 1).unwrap(), first, 0, 1),
-                SourceRun::new(PackedRange::new(1, 2).unwrap(), second, 0, 1),
-            ],
-            Vec::new(),
-        );
-        let mut builder = PCodeBuilder::new(header, common);
+        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language(), header, IlGraph::default());
+
+        builder.replace_source_spans(vec![
+            IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), first, 0, 1),
+            IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), second, 0, 1),
+        ]);
+
         let input = builder
-            .push_location(Location::new(
+            .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
                 0x11,
                 8,
-                Location::CONSTANT,
+                PCodeLocationProperties::CONSTANT,
             ))
             .unwrap();
         let output = builder
-            .push_location(Location::new(
+            .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(1),
                 0x20,
                 8,
-                Location::REGISTER,
+                PCodeLocationProperties::REGISTER,
             ))
             .unwrap();
         let first_operands = builder.push_operands([input]).unwrap();
         let second_operands = builder.push_operands([output]).unwrap();
 
-        builder.push_operation(Operation::new(
-            Opcode::Copy,
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
             Some(output),
             first_operands,
             0,
             None,
         ));
-        builder.push_operation(Operation::new(
-            Opcode::IntNeg,
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::IntNeg,
             Some(output),
             second_operands,
             0,
             None,
         ));
 
-        let body = builder.finish(&BuildStatus::new()).unwrap();
-        let operations = body.operations_for_source(second).collect::<Vec<_>>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let operations = ir.operations_for_source(second).collect::<Vec<_>>();
 
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].0, 1);
-        assert_eq!(operations[0].1.opcode(), Opcode::IntNeg);
+        assert_eq!(operations[0].1.opcode(), PCodeOpcode::IntNeg);
         assert_eq!(
-            body.display_source(second).to_string(),
+            ir.display_source(second).to_string(),
             "@1 %l1:bytes<8>@lifter_space<1>[0x20]{register} = pcode.int_neg %l1:bytes<8>@lifter_space<1>[0x20]{register}"
         );
         assert_eq!(
-            body.display_source(Address::new(AddressSpaceId::new(1), 0x2000u64))
+            ir.display_source(Address::new(AddressSpaceId::new(1), 0x2000u64))
                 .to_string(),
             ""
         );

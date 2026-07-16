@@ -6,7 +6,8 @@ use std::slice::Iter;
 use smallvec::SmallVec;
 
 use super::super::{SymbolEntry, SymbolIndex, SymbolMap, SymbolProperties, SymbolTableSelector};
-use crate::ir::{Address, Id, symbol::Symbol};
+use crate::ir::symbol::Symbol;
+use crate::ir::{Address, Id};
 
 pub(super) struct Allocation {
     symbols_len: usize,

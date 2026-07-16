@@ -1,4 +1,4 @@
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Display, Formatter};
 
 use crate::arch::Arch;
 use crate::ir::Endian;
@@ -56,7 +56,7 @@ impl CallingConvention {
 }
 
 impl Display for CallingConvention {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }

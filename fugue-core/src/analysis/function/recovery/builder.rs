@@ -136,6 +136,7 @@ impl FunctionBuilder {
     pub fn global_targets(&self) -> &BTreeSet<AddressWithContext> {
         &self.context.global_targets
     }
+
     pub fn add_initialisation_pass(
         &mut self,
         name: impl Into<String>,

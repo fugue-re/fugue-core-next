@@ -1,4 +1,4 @@
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::Arc;
@@ -6,7 +6,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
-use rkyv::rancor::Error as RkyvError;
 
 use super::{
     Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
@@ -66,7 +65,7 @@ impl<E> Display for CachedRef<'_, E>
 where
     E: Entity + Display,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -295,7 +294,7 @@ where
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
                     WriteBackAction::Insert(bytes) => {
-                        let entity = rkyv::from_bytes::<E, RkyvError>(&bytes)
+                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
                             .map_err(EntityStorageError::decode)?;
                         Ok(Some(self.admit(
                             key.clone(),
@@ -412,8 +411,8 @@ where
 
     fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
         self.storage.get_as::<K, E, _, _>(key, |bytes| {
-            let entity =
-                rkyv::from_bytes::<E, RkyvError>(bytes).map_err(EntityStorageError::decode)?;
+            let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes)
+                .map_err(EntityStorageError::decode)?;
             Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
     }
@@ -456,7 +455,7 @@ where
                 let value = match action {
                     WriteBackAction::Insert(bytes) => {
                         let weight = ByteWeighter::entry_weight(bytes.len());
-                        let entity = rkyv::from_bytes::<E, RkyvError>(&bytes)
+                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
                             .map_err(EntityStorageError::decode)?;
                         Some(self.admit(key.clone(), Arc::new(entity), weight))
                     }
@@ -541,7 +540,8 @@ where
     }
 
     fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
-        let encoded = rkyv::to_bytes::<RkyvError>(entity).map_err(EntityStorageError::encode)?;
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
         let weight = ByteWeighter::entry_weight(encoded.len());
 
         match &self.sink {

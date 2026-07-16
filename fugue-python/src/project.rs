@@ -1,31 +1,32 @@
 use std::path::PathBuf;
 
 use fugue_core::analysis::AnalysisPass;
+use fugue_core::analysis::control::CancellationToken;
 use fugue_core::analysis::function::recovery::FunctionRecovery;
 use fugue_core::il::common::{
-    ArtefactDigest as CoreArtefactDigest, Block as CoreBlock, BlockId as CoreBlockId, BuildStatus,
-    IlError as CoreIlError, IrArtefact as CoreIrArtefact, IrLevel as CoreIrLevel,
-    MappingRun as CoreMappingRun, RawIrArtefact, SourceRun as CoreSourceRun,
-    ValueId as CoreValueId,
+    IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId, IlBlockProperties as CoreIlBlockProperties,
+    IlDominance as CoreDominance, IlDominanceFrontier as CoreDominanceFrontier,
+    IlError as CoreIlError, IlGraph as CoreIlGraph, IlHeader as CoreIlHeader,
+    IlLevel as CoreIlLevel, IlParentSpan as CoreIlParentSpan, IlSourceSpan as CoreIlSourceSpan,
+    IlValueId as CoreIlValueId,
 };
-use fugue_core::il::llil::ssa::{
-    BlockArgument as CoreSsaBlockArgument, Dominance as CoreDominance,
-    DominanceFrontier as CoreDominanceFrontier, Liveness as CoreLiveness,
-    MemoryDomain as CoreSsaMemoryDomain, SsaBody as CoreSsaBody, SsaOperation as CoreSsaOperation,
-    Use as CoreSsaUse, UseIndex as CoreUseIndex, Value as CoreSsaValue,
-    ValueDefinitionKind as CoreValueDefinitionKind,
+use fugue_core::il::ecode::ssa::{
+    ECodeSsaBlockArg as CoreECodeSsaBlockArg, ECodeSsaIr as CoreECodeSsaIr,
+    ECodeSsaLiveness as CoreECodeSsaLiveness, ECodeSsaMemoryDomain as CoreECodeSsaMemoryDomain,
+    ECodeSsaOp as CoreECodeSsaOp, ECodeSsaUse as CoreECodeSsaUse, ECodeSsaUses as CoreECodeSsaUses,
+    ECodeSsaValue as CoreECodeSsaValue, ECodeSsaValueKind as CoreECodeSsaValueKind,
 };
-use fugue_core::il::llil::{
-    Expression as CoreLlilExpression, LlilBody as CoreLlilBody, Statement as CoreLlilStatement,
+use fugue_core::il::ecode::{
+    ECodeExpr as CoreECodeExpr, ECodeIr as CoreECodeIr, ECodeStmt as CoreECodeStmt,
 };
 use fugue_core::il::pcode::{
-    Location as CorePCodeLocation, Opcode as CorePCodeOpcode, Operation as CorePCodeOperation,
-    PCodeBody as CorePCodeBody,
+    PCodeIr as CorePCodeIr, PCodeLocation as CorePCodeLocation, PCodeOp as CorePCodeOp,
+    PCodeOpcode as CorePCodeOpcode,
 };
 use fugue_core::ir::{Address as CoreAddress, FunctionId as CoreFunctionId};
 use fugue_core::project::Project as CoreProject;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::types::PyModule;
 
 use crate::address::Address;
 use crate::binary::Binary;
@@ -37,8 +38,10 @@ pub(crate) struct Project {
 }
 
 impl Project {
-    fn ir_level(level: &str) -> PyResult<CoreIrLevel> {
-        CoreIrLevel::from_name(level).ok_or_else(|| BindingError::invalid_ir_level(level).into())
+    fn parse_level(level: &str) -> PyResult<CoreIlLevel> {
+        level
+            .parse()
+            .map_err(|_| BindingError::invalid_level(level).into())
     }
 }
 
@@ -78,43 +81,46 @@ impl Project {
         Ok(self.inner.functions().len().saturating_sub(before))
     }
 
-    fn ir_artefact(&self, function: &Function, level: &str) -> PyResult<Option<IrArtefact>> {
-        let level = Self::ir_level(level)?;
+    fn pcode(&self, function: &Function) -> PyResult<Option<PCodeIr>> {
         self.inner
-            .ir_artefact(function.id, level)
-            .map(|artefact| artefact.map(IrArtefact::from_core))
+            .pcode(function.id)
+            .map(|ir| ir.map(PCodeIr::from_core))
             .map_err(project_error)
     }
 
-    fn ir_artefacts(&self, function: &Function) -> PyResult<Vec<IrArtefact>> {
-        let mut artefacts = Vec::new();
+    fn ecode(&self, function: &Function) -> PyResult<Option<ECodeIr>> {
+        self.inner
+            .ecode(function.id)
+            .map(|ir| ir.map(ECodeIr::from_core))
+            .map_err(project_error)
+    }
 
-        for level in CoreIrLevel::ALL {
-            if let Some(artefact) = self
-                .inner
-                .ir_artefact(function.id, level)
-                .map_err(project_error)?
-            {
-                artefacts.push(IrArtefact::from_core(artefact));
-            }
+    fn ecode_ssa(&self, function: &Function) -> PyResult<Option<ECodeSsaIr>> {
+        self.inner
+            .ecode_ssa(function.id)
+            .map(|ir| ir.map(ECodeSsaIr::from_core))
+            .map_err(project_error)
+    }
+
+    fn has_lifted(&self, function: &Function, level: &str) -> PyResult<bool> {
+        let level = Self::parse_level(level)?;
+        match level {
+            CoreIlLevel::PCode => self.inner.pcode(function.id).map(|ir| ir.is_some()),
+            CoreIlLevel::ECode => self.inner.ecode(function.id).map(|ir| ir.is_some()),
+            CoreIlLevel::ECodeSsa => self.inner.ecode_ssa(function.id).map(|ir| ir.is_some()),
         }
-
-        Ok(artefacts)
+        .map_err(project_error)
     }
 
-    fn has_ir(&self, function: &Function, level: &str) -> PyResult<bool> {
-        Ok(self.ir_artefact(function, level)?.is_some())
-    }
-
-    fn ensure_ir(&mut self, function: &Function, level: &str) -> PyResult<bool> {
-        let level = Self::ir_level(level)?;
-        let status = BuildStatus::new();
+    fn ensure_lifted(&mut self, function: &Function, level: &str) -> PyResult<bool> {
+        let level = Self::parse_level(level)?;
+        let status = CancellationToken::default();
         let mut transaction = self.inner.transaction("python");
 
-        match transaction.ensure_ir(function.id, level, &status) {
-            Ok(published) => {
+        match transaction.ensure_lifted(function.id, level, &status) {
+            Ok(materialised) => {
                 transaction.commit().map_err(project_error)?;
-                Ok(published)
+                Ok(materialised)
             }
             Err(error) => {
                 if let Err(rollback) = transaction.rollback() {
@@ -125,116 +131,89 @@ impl Project {
         }
     }
 
-    fn ir_text(&self, function: &Function, level: &str) -> PyResult<Option<String>> {
-        let level = Self::ir_level(level)?;
+    fn lifted_display(&self, function: &Function, level: &str) -> PyResult<Option<String>> {
+        let level = Self::parse_level(level)?;
         match level {
-            CoreIrLevel::PCode => self
+            CoreIlLevel::PCode => self
                 .inner
-                .pcode_body(function.id)
-                .map(|body| body.map(|body| body.display().to_string()))
+                .pcode(function.id)
+                .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
-            CoreIrLevel::Llil => self
+            CoreIlLevel::ECode => self
                 .inner
-                .llil_body(function.id)
-                .map(|body| body.map(|body| body.display().to_string()))
+                .ecode(function.id)
+                .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
-            CoreIrLevel::LlilSsa => self
+            CoreIlLevel::ECodeSsa => self
                 .inner
-                .llil_ssa_body(function.id)
-                .map(|body| body.map(|body| body.display().to_string()))
+                .ecode_ssa(function.id)
+                .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
-            CoreIrLevel::MappedMlil | CoreIrLevel::Mlil => Err(project_error(
-                CoreIlError::mlil_build_scheduling_unsupported(),
-            )),
         }
     }
 
-    fn llil_ssa_value_uses(&self, function: &Function) -> PyResult<Option<Vec<LlilSsaValueUses>>> {
-        let Some(body) = self
-            .inner
-            .llil_ssa_body(function.id)
-            .map_err(project_error)?
-        else {
+    fn ecode_ssa_value_uses(
+        &self,
+        function: &Function,
+    ) -> PyResult<Option<Vec<ECodeSsaValueUses>>> {
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let Some(use_index) = self
-            .inner
-            .llil_ssa_use_index(function.id)
-            .map_err(project_error)?
-        else {
-            return Ok(None);
-        };
-
-        let uses = body
+        let uses = ir.uses();
+        let uses = ir
             .values()
             .iter()
             .enumerate()
-            .map(|(value, _)| LlilSsaValueUses::from_core(&use_index, value))
+            .map(|(value, _)| ECodeSsaValueUses::from_core(&uses, value))
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)?;
 
         Ok(Some(uses))
     }
 
-    fn llil_ssa_uses_for_value(
+    fn ecode_ssa_uses_for_value(
         &self,
         function: &Function,
         value: usize,
-    ) -> PyResult<Option<Vec<LlilSsaUse>>> {
-        let value = CoreValueId::try_from_index(value).map_err(project_error)?;
-        let Some(use_index) = self
-            .inner
-            .llil_ssa_use_index(function.id)
-            .map_err(project_error)?
-        else {
+    ) -> PyResult<Option<Vec<ECodeSsaUse>>> {
+        let value = CoreIlValueId::try_from_index(value).map_err(project_error)?;
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let uses = use_index
+        let uses = ir.uses();
+        let uses = uses
             .uses_for(value)
             .iter()
             .copied()
-            .map(LlilSsaUse::from_core)
+            .map(ECodeSsaUse::from_core)
             .collect();
 
         Ok(Some(uses))
     }
 
-    fn llil_ssa_liveness(&self, function: &Function) -> PyResult<Option<Vec<LlilSsaLiveness>>> {
-        let Some(body) = self
-            .inner
-            .llil_ssa_body(function.id)
-            .map_err(project_error)?
-        else {
+    fn ecode_ssa_liveness(&self, function: &Function) -> PyResult<Option<Vec<ECodeSsaLiveness>>> {
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let Some(liveness) = self
-            .inner
-            .llil_ssa_liveness(function.id)
-            .map_err(project_error)?
-        else {
-            return Ok(None);
-        };
-        let live = body
-            .common()
+        let liveness = ir.liveness();
+        let live = ir
+            .graph()
             .blocks()
             .iter()
             .enumerate()
-            .map(|(block, _)| LlilSsaLiveness::from_core(&liveness, block))
+            .map(|(block, _)| ECodeSsaLiveness::from_core(&liveness, block))
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)?;
 
         Ok(Some(live))
     }
 
-    fn llil_ssa_live_in(&self, function: &Function, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let Some(liveness) = self
-            .inner
-            .llil_ssa_liveness(function.id)
-            .map_err(project_error)?
-        else {
+    fn ecode_ssa_live_in(&self, function: &Function, block: usize) -> PyResult<Option<Vec<usize>>> {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
+        let liveness = ir.liveness();
         let values = liveness
             .live_in(block)
             .iter()
@@ -244,15 +223,16 @@ impl Project {
         Ok(Some(values))
     }
 
-    fn llil_ssa_live_out(&self, function: &Function, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let Some(liveness) = self
-            .inner
-            .llil_ssa_liveness(function.id)
-            .map_err(project_error)?
-        else {
+    fn ecode_ssa_live_out(
+        &self,
+        function: &Function,
+        block: usize,
+    ) -> PyResult<Option<Vec<usize>>> {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
+        let liveness = ir.liveness();
         let values = liveness
             .live_out(block)
             .iter()
@@ -262,49 +242,34 @@ impl Project {
         Ok(Some(values))
     }
 
-    fn llil_ssa_dominance(&self, function: &Function) -> PyResult<Option<Vec<LlilSsaDominance>>> {
-        let Some(body) = self
-            .inner
-            .llil_ssa_body(function.id)
-            .map_err(project_error)?
-        else {
+    fn ecode_ssa_dominance(&self, function: &Function) -> PyResult<Option<Vec<IlDominance>>> {
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let Some(dominance) = self
-            .inner
-            .llil_ssa_dominance(function.id)
-            .map_err(project_error)?
-        else {
-            return Ok(None);
-        };
-        let frontiers = dominance
-            .frontiers(body.common().blocks(), body.common().successors())
-            .map_err(project_error)?;
-        let rows = body
-            .common()
+        let dominance = ir.dominance();
+        let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
+        let rows = ir
+            .graph()
             .blocks()
             .iter()
             .enumerate()
-            .map(|(block, _)| LlilSsaDominance::from_core(&dominance, &frontiers, block))
+            .map(|(block, _)| IlDominance::from_core(&dominance, &frontiers, block))
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)?;
 
         Ok(Some(rows))
     }
 
-    fn llil_ssa_dominance_frontier(
+    fn ecode_ssa_dominance_frontier(
         &self,
         function: &Function,
         block: usize,
     ) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let Some(frontiers) = self
-            .inner
-            .llil_ssa_dominance_frontiers(function.id)
-            .map_err(project_error)?
-        else {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
+        let frontiers = ir.dominance_frontiers();
         let values = frontiers
             .frontier(block)
             .iter()
@@ -314,23 +279,19 @@ impl Project {
         Ok(Some(values))
     }
 
-    fn llil_ssa_dominates(
+    fn ecode_ssa_dominates(
         &self,
         function: &Function,
         dominator: usize,
         block: usize,
     ) -> PyResult<Option<bool>> {
-        let dominator = CoreBlockId::try_from_index(dominator).map_err(project_error)?;
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let Some(dominance) = self
-            .inner
-            .llil_ssa_dominance(function.id)
-            .map_err(project_error)?
-        else {
+        let dominator = CoreIlBlockId::try_from_index(dominator).map_err(project_error)?;
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
 
-        Ok(Some(dominance.dominates(dominator, block)))
+        Ok(Some(ir.dominance().dominates(dominator, block)))
     }
 }
 
@@ -372,136 +333,83 @@ impl Function {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct ArtefactDigest {
-    bytes: [u8; 32],
+pub(crate) struct IlHeader {
+    inner: CoreIlHeader,
 }
 
-impl ArtefactDigest {
-    fn from_core(digest: CoreArtefactDigest) -> Self {
-        Self {
-            bytes: *digest.bytes(),
-        }
-    }
-
-    fn hex_text(&self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-
-        let mut text = String::with_capacity(64);
-        for byte in self.bytes {
-            text.push(HEX[(byte >> 4) as usize] as char);
-            text.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-
-        text
+impl IlHeader {
+    fn from_core(header: CoreIlHeader) -> Self {
+        Self { inner: header }
     }
 }
 
 #[pymethods]
-impl ArtefactDigest {
-    #[getter]
-    fn bytes<'py>(&self, py: Python<'py>) -> Py<PyBytes> {
-        PyBytes::new(py, &self.bytes).unbind()
-    }
-
-    #[getter]
-    fn hex(&self) -> String {
-        self.hex_text()
-    }
-
-    fn __repr__(&self) -> String {
-        let hex = self.hex_text();
-        format!("ArtefactDigest({hex:?})")
-    }
-}
-
-#[pyclass(frozen, skip_from_py_object)]
-pub(crate) struct IrArtefact {
-    inner: RawIrArtefact,
-}
-
-impl IrArtefact {
-    fn from_core(artefact: RawIrArtefact) -> Self {
-        Self { inner: artefact }
-    }
-}
-
-#[pymethods]
-impl IrArtefact {
-    #[getter]
-    fn level(&self) -> &str {
-        self.inner.header().level().name()
-    }
-
+impl IlHeader {
     #[getter]
     fn function(&self) -> String {
-        let function = self.inner.header().function();
+        let function = self.inner.function();
         format!("{function:x}")
     }
 
     #[getter]
     fn schema(&self) -> u16 {
-        self.inner.header().schema().value()
-    }
-
-    #[getter]
-    fn dialect(&self) -> u16 {
-        self.inner.header().dialect().value()
+        self.inner.schema().value()
     }
 
     #[getter]
     fn input_revision(&self) -> u64 {
-        self.inner.header().input_revision()
+        self.inner.input_revision()
     }
 
-    #[getter]
-    fn parent_digest(&self) -> ArtefactDigest {
-        ArtefactDigest::from_core(self.inner.header().parent_digest())
+    fn __repr__(&self) -> String {
+        let function = self.function();
+        let schema = self.schema();
+        format!("IlHeader(function={function:?}, schema={schema})")
     }
+}
 
-    #[getter]
-    fn address_topology_digest(&self) -> ArtefactDigest {
-        ArtefactDigest::from_core(self.inner.header().address_topology_digest())
+#[pyclass(frozen, skip_from_py_object)]
+pub(crate) struct IlGraph {
+    inner: CoreIlGraph,
+}
+
+impl IlGraph {
+    fn from_core(common: CoreIlGraph) -> Self {
+        Self { inner: common }
     }
+}
 
-    #[getter]
-    fn transform_digest(&self) -> ArtefactDigest {
-        ArtefactDigest::from_core(self.inner.header().transform_digest())
-    }
-
-    #[getter]
-    fn content_digest(&self) -> ArtefactDigest {
-        ArtefactDigest::from_core(self.inner.header().content_digest())
-    }
-
-    #[getter]
-    fn payload<'py>(&self, py: Python<'py>) -> Py<PyBytes> {
-        PyBytes::new(py, self.inner.payload()).unbind()
-    }
-
-    fn blocks(&self) -> PyResult<Vec<IrBlock>> {
-        let successors = self.inner.body().successors();
+#[pymethods]
+impl IlGraph {
+    fn blocks(&self) -> Vec<IlBlock> {
+        let successors = self.inner.successors();
         self.inner
-            .body()
             .blocks()
             .iter()
             .copied()
             .enumerate()
-            .map(|(index, block)| IrBlock::from_core(index, block, successors))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)
+            .map(|(index, block)| IlBlock::from_core(index, block, successors))
+            .collect()
     }
 
-    fn block_predecessors(&self) -> PyResult<Vec<IrBlockPredecessors>> {
-        let predecessors = self.inner.body().predecessors().map_err(project_error)?;
+    fn successors(&self) -> Vec<usize> {
+        self.inner
+            .successors()
+            .iter()
+            .map(|successor| successor.index())
+            .collect()
+    }
+
+    fn predecessors(&self) -> PyResult<Vec<IlBlockPredecessors>> {
+        let predecessors = self.inner.predecessors();
 
         self.inner
-            .body()
             .blocks()
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                let block = CoreBlockId::try_from_index(index)?;
-                Ok(IrBlockPredecessors::from_core(
+                let block = CoreIlBlockId::try_from_index(index)?;
+                Ok(IlBlockPredecessors::from_core(
                     index,
                     predecessors.predecessors(block),
                 ))
@@ -509,491 +417,437 @@ impl IrArtefact {
             .collect::<Result<Vec<_>, CoreIlError>>()
             .map_err(project_error)
     }
-
-    fn source_runs(&self) -> Vec<IrSourceRun> {
-        self.inner
-            .body()
-            .source_runs()
-            .iter()
-            .copied()
-            .map(IrSourceRun::from_core)
-            .collect()
-    }
-
-    fn mapping_runs(&self) -> Vec<IrMappingRun> {
-        self.inner
-            .body()
-            .mapping_runs()
-            .iter()
-            .copied()
-            .map(IrMappingRun::from_core)
-            .collect()
-    }
-
-    fn source_for_destination(&self, node: u32) -> Option<IrSourceRun> {
-        self.inner
-            .body()
-            .source_for_destination(node)
-            .map(IrSourceRun::from_core)
-    }
-
-    fn destinations_for_source(
-        &self,
-        machine_address: &Address,
-        pcode_index: u32,
-    ) -> Vec<IrSourceRun> {
-        self.inner
-            .body()
-            .destinations_for_source(machine_address.inner(), pcode_index)
-            .map(IrSourceRun::from_core)
-            .collect()
-    }
-
-    fn mapping_for_destination(&self, node: u32) -> Option<IrMappingRun> {
-        self.inner
-            .body()
-            .mapping_for_destination(node)
-            .map(IrMappingRun::from_core)
-    }
-
-    fn mappings_for_source(&self, node: u32) -> Vec<IrMappingRun> {
-        self.inner
-            .body()
-            .mappings_for_source(node)
-            .map(IrMappingRun::from_core)
-            .collect()
-    }
-
-    fn pcode_locations(&self) -> PyResult<Option<Vec<PCodeLocation>>> {
-        let Some(body) = self.pcode_body()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(
-            body.locations()
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, location)| PCodeLocation::from_core(index, location))
-                .collect(),
-        ))
-    }
-
-    fn pcode_operations(&self) -> PyResult<Option<Vec<PCodeOperation>>> {
-        let Some(body) = self.pcode_body()? else {
-            return Ok(None);
-        };
-
-        let operations = body
-            .operations()
-            .iter()
-            .enumerate()
-            .map(|(index, operation)| PCodeOperation::from_core(&body, index, operation))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(operations))
-    }
-
-    fn pcode_operations_for_source(
-        &self,
-        machine_address: &Address,
-    ) -> PyResult<Option<Vec<PCodeOperation>>> {
-        let Some(body) = self.pcode_body()? else {
-            return Ok(None);
-        };
-
-        let operations = body
-            .operations_for_source(machine_address.inner())
-            .map(|(index, operation)| PCodeOperation::from_core(&body, index, operation))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(operations))
-    }
-
-    fn pcode_text_for_source(&self, machine_address: &Address) -> PyResult<Option<String>> {
-        let Some(body) = self.pcode_body()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(
-            body.display_source(machine_address.inner()).to_string(),
-        ))
-    }
-
-    fn llil_expressions(&self) -> PyResult<Option<Vec<LlilExpression>>> {
-        let Some(body) = self.llil_body()? else {
-            return Ok(None);
-        };
-
-        let expressions = body
-            .expressions()
-            .iter()
-            .enumerate()
-            .map(|(index, expression)| LlilExpression::from_core(&body, index, expression))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(expressions))
-    }
-
-    fn llil_statements(&self) -> PyResult<Option<Vec<LlilStatement>>> {
-        let Some(body) = self.llil_body()? else {
-            return Ok(None);
-        };
-
-        let statements = body
-            .statements()
-            .iter()
-            .enumerate()
-            .map(|(index, statement)| LlilStatement::from_core(&body, index, statement))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(statements))
-    }
-
-    fn llil_statements_for_source(
-        &self,
-        machine_address: &Address,
-    ) -> PyResult<Option<Vec<LlilStatement>>> {
-        let Some(body) = self.llil_body()? else {
-            return Ok(None);
-        };
-
-        let statements = body
-            .statements_for_source(machine_address.inner())
-            .map(|(index, statement)| LlilStatement::from_core(&body, index, statement))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(statements))
-    }
-
-    fn llil_ssa_values(&self) -> PyResult<Option<Vec<LlilSsaValue>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(
-            body.values()
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, value)| LlilSsaValue::from_core(index, value))
-                .collect(),
-        ))
-    }
-
-    fn llil_ssa_value_uses(&self) -> PyResult<Option<Vec<LlilSsaValueUses>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let use_index = body.use_index().map_err(project_error)?;
-        let uses = body
-            .values()
-            .iter()
-            .enumerate()
-            .map(|(value, _)| LlilSsaValueUses::from_core(&use_index, value))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(uses))
-    }
-
-    fn llil_ssa_uses_for_value(&self, value: usize) -> PyResult<Option<Vec<LlilSsaUse>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let value = CoreValueId::try_from_index(value).map_err(project_error)?;
-        let use_index = body.use_index().map_err(project_error)?;
-        let uses = use_index
-            .uses_for(value)
-            .iter()
-            .copied()
-            .map(LlilSsaUse::from_core)
-            .collect();
-
-        Ok(Some(uses))
-    }
-
-    fn llil_ssa_liveness(&self) -> PyResult<Option<Vec<LlilSsaLiveness>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let liveness = body.liveness().map_err(project_error)?;
-        let live = body
-            .common()
-            .blocks()
-            .iter()
-            .enumerate()
-            .map(|(block, _)| LlilSsaLiveness::from_core(&liveness, block))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(live))
-    }
-
-    fn llil_ssa_live_in(&self, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let liveness = body.liveness().map_err(project_error)?;
-        let values = liveness
-            .live_in(block)
-            .iter()
-            .map(|value| value.index())
-            .collect();
-
-        Ok(Some(values))
-    }
-
-    fn llil_ssa_live_out(&self, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let liveness = body.liveness().map_err(project_error)?;
-        let values = liveness
-            .live_out(block)
-            .iter()
-            .map(|value| value.index())
-            .collect();
-
-        Ok(Some(values))
-    }
-
-    fn llil_ssa_dominance(&self) -> PyResult<Option<Vec<LlilSsaDominance>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let dominance = body.dominance().map_err(project_error)?;
-        let frontiers = dominance
-            .frontiers(body.common().blocks(), body.common().successors())
-            .map_err(project_error)?;
-        let rows = body
-            .common()
-            .blocks()
-            .iter()
-            .enumerate()
-            .map(|(block, _)| LlilSsaDominance::from_core(&dominance, &frontiers, block))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(rows))
-    }
-
-    fn llil_ssa_dominance_frontier(&self, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let frontiers = body.dominance_frontiers().map_err(project_error)?;
-        let values = frontiers
-            .frontier(block)
-            .iter()
-            .map(|frontier| frontier.index())
-            .collect();
-
-        Ok(Some(values))
-    }
-
-    fn llil_ssa_dominates(&self, dominator: usize, block: usize) -> PyResult<Option<bool>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let dominator = CoreBlockId::try_from_index(dominator).map_err(project_error)?;
-        let block = CoreBlockId::try_from_index(block).map_err(project_error)?;
-        let dominance = body.dominance().map_err(project_error)?;
-
-        Ok(Some(dominance.dominates(dominator, block)))
-    }
-
-    fn llil_ssa_block_arguments(&self) -> PyResult<Option<Vec<LlilSsaBlockArgument>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(
-            body.block_arguments()
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, argument)| LlilSsaBlockArgument::from_core(index, argument))
-                .collect(),
-        ))
-    }
-
-    fn llil_ssa_edge_arguments(&self) -> PyResult<Option<Vec<LlilSsaEdgeArguments>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let arguments = body
-            .edge_arguments()
-            .iter()
-            .enumerate()
-            .map(|(edge, _)| LlilSsaEdgeArguments::from_core(&body, edge))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(arguments))
-    }
-
-    fn llil_ssa_arguments_for_edge(&self, edge: usize) -> PyResult<Option<Vec<usize>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let arguments = body
-            .arguments_for_edge(edge)
-            .map(|arguments| {
-                arguments
-                    .iter()
-                    .map(|argument| argument.index())
-                    .collect::<Vec<_>>()
-            })
-            .map_err(project_error)?;
-
-        Ok(Some(arguments))
-    }
-
-    fn llil_ssa_memory_domains(&self) -> PyResult<Option<Vec<LlilSsaMemoryDomain>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(
-            body.memory_domains()
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, domain)| LlilSsaMemoryDomain::from_core(index, domain))
-                .collect(),
-        ))
-    }
-
-    fn llil_ssa_operations(&self) -> PyResult<Option<Vec<LlilSsaOperation>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let operations = body
-            .operations()
-            .iter()
-            .enumerate()
-            .map(|(index, operation)| LlilSsaOperation::from_core(&body, index, operation))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(operations))
-    }
-
-    fn llil_ssa_operations_for_source(
-        &self,
-        machine_address: &Address,
-    ) -> PyResult<Option<Vec<LlilSsaOperation>>> {
-        let Some(body) = self.llil_ssa_body()? else {
-            return Ok(None);
-        };
-
-        let operations = body
-            .operations_for_source(machine_address.inner())
-            .map(|(index, operation)| LlilSsaOperation::from_core(&body, index, operation))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(operations))
-    }
-
-    fn __repr__(&self) -> String {
-        let level = self.level();
-        let function = self.function();
-        format!("IrArtefact(level={level:?}, function={function:?})")
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+pub(crate) struct PCodeIr {
+    inner: CorePCodeIr,
+}
+
+impl PCodeIr {
+    fn from_core(ir: CorePCodeIr) -> Self {
+        Self { inner: ir }
     }
 }
 
-impl IrArtefact {
-    fn pcode_body(&self) -> PyResult<Option<CorePCodeBody>> {
-        if self.inner.header().level() != CoreIrLevel::PCode {
-            return Ok(None);
-        }
+#[pymethods]
+impl PCodeIr {
+    #[getter]
+    fn level(&self) -> &'static str {
+        CoreIlLevel::PCode.name()
+    }
 
-        CorePCodeBody::from_raw_artefact(self.inner.clone())
-            .map(Some)
+    fn header(&self) -> IlHeader {
+        IlHeader::from_core(*self.inner.header())
+    }
+
+    fn graph(&self) -> IlGraph {
+        IlGraph::from_core(self.inner.graph().clone())
+    }
+
+    fn source_spans(&self) -> Vec<IlSourceSpan> {
+        self.inner
+            .source_spans()
+            .iter()
+            .copied()
+            .map(IlSourceSpan::from_core)
+            .collect()
+    }
+
+    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+        self.inner
+            .source_span_for(node)
+            .map(IlSourceSpan::from_core)
+    }
+
+    fn source_spans_for(&self, address: &Address, pcode_index: u32) -> Vec<IlSourceSpan> {
+        self.inner
+            .source_spans_for(address.inner(), pcode_index)
+            .map(IlSourceSpan::from_core)
+            .collect()
+    }
+
+    fn locations(&self) -> Vec<PCodeLocation> {
+        self.inner
+            .locations()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, location)| PCodeLocation::from_core(index, location))
+            .collect()
+    }
+
+    fn operations(&self) -> PyResult<Vec<PCodeOperation>> {
+        self.inner
+            .operations()
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| PCodeOperation::from_core(&self.inner, index, operation))
+            .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
     }
 
-    fn llil_body(&self) -> PyResult<Option<CoreLlilBody>> {
-        if self.inner.header().level() != CoreIrLevel::Llil {
-            return Ok(None);
-        }
-
-        CoreLlilBody::from_raw_artefact(self.inner.clone())
-            .map(Some)
+    fn operations_for_source(&self, address: &Address) -> PyResult<Vec<PCodeOperation>> {
+        self.inner
+            .operations_for_source(address.inner())
+            .map(|(index, operation)| PCodeOperation::from_core(&self.inner, index, operation))
+            .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
     }
 
-    fn llil_ssa_body(&self) -> PyResult<Option<CoreSsaBody>> {
-        if self.inner.header().level() != CoreIrLevel::LlilSsa {
-            return Ok(None);
-        }
+    fn display_source(&self, address: &Address) -> String {
+        self.inner.display_source(address.inner()).to_string()
+    }
 
-        CoreSsaBody::from_raw_artefact(self.inner.clone())
-            .map(Some)
+    fn __repr__(&self) -> String {
+        let function = self.header().function();
+        format!("PCodeIr(function={function:?})")
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+pub(crate) struct ECodeIr {
+    inner: CoreECodeIr,
+}
+
+impl ECodeIr {
+    fn from_core(ir: CoreECodeIr) -> Self {
+        Self { inner: ir }
+    }
+}
+
+#[pymethods]
+impl ECodeIr {
+    #[getter]
+    fn level(&self) -> &'static str {
+        CoreIlLevel::ECode.name()
+    }
+
+    fn header(&self) -> IlHeader {
+        IlHeader::from_core(*self.inner.header())
+    }
+
+    fn graph(&self) -> IlGraph {
+        IlGraph::from_core(self.inner.graph().clone())
+    }
+
+    fn source_spans(&self) -> Vec<IlSourceSpan> {
+        self.inner
+            .source_spans()
+            .iter()
+            .copied()
+            .map(IlSourceSpan::from_core)
+            .collect()
+    }
+
+    fn parent_spans(&self) -> Vec<IlParentSpan> {
+        self.inner
+            .parent_spans()
+            .iter()
+            .copied()
+            .map(IlParentSpan::from_core)
+            .collect()
+    }
+
+    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+        self.inner
+            .source_span_for(node)
+            .map(IlSourceSpan::from_core)
+    }
+
+    fn parent_span_for(&self, node: u32) -> Option<IlParentSpan> {
+        self.inner
+            .parent_span_for(node)
+            .map(IlParentSpan::from_core)
+    }
+
+    fn expressions(&self) -> PyResult<Vec<ECodeExpr>> {
+        self.inner
+            .expressions()
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| ECodeExpr::from_core(&self.inner, index, expression))
+            .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
+    }
+
+    fn statements(&self) -> PyResult<Vec<ECodeStmt>> {
+        self.inner
+            .statements()
+            .iter()
+            .enumerate()
+            .map(|(index, statement)| ECodeStmt::from_core(&self.inner, index, statement))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn statements_for_source(&self, address: &Address) -> PyResult<Vec<ECodeStmt>> {
+        self.inner
+            .statements_for_source(address.inner())
+            .map(|(index, statement)| ECodeStmt::from_core(&self.inner, index, statement))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn __repr__(&self) -> String {
+        let function = self.header().function();
+        format!("ECodeIr(function={function:?})")
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+pub(crate) struct ECodeSsaIr {
+    inner: CoreECodeSsaIr,
+}
+
+impl ECodeSsaIr {
+    fn from_core(ir: CoreECodeSsaIr) -> Self {
+        Self { inner: ir }
+    }
+}
+
+#[pymethods]
+impl ECodeSsaIr {
+    #[getter]
+    fn level(&self) -> &'static str {
+        CoreIlLevel::ECodeSsa.name()
+    }
+
+    fn header(&self) -> IlHeader {
+        IlHeader::from_core(*self.inner.header())
+    }
+
+    fn graph(&self) -> IlGraph {
+        IlGraph::from_core(self.inner.graph().clone())
+    }
+
+    fn source_spans(&self) -> Vec<IlSourceSpan> {
+        self.inner
+            .source_spans()
+            .iter()
+            .copied()
+            .map(IlSourceSpan::from_core)
+            .collect()
+    }
+
+    fn parent_spans(&self) -> Vec<IlParentSpan> {
+        self.inner
+            .parent_spans()
+            .iter()
+            .copied()
+            .map(IlParentSpan::from_core)
+            .collect()
+    }
+
+    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+        self.inner
+            .source_span_for(node)
+            .map(IlSourceSpan::from_core)
+    }
+
+    fn parent_span_for(&self, node: u32) -> Option<IlParentSpan> {
+        self.inner
+            .parent_span_for(node)
+            .map(IlParentSpan::from_core)
+    }
+
+    fn values(&self) -> Vec<ECodeSsaValue> {
+        self.inner
+            .values()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| ECodeSsaValue::from_core(index, value))
+            .collect()
+    }
+
+    fn value_uses(&self) -> PyResult<Vec<ECodeSsaValueUses>> {
+        let uses = self.inner.uses();
+        self.inner
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(value, _)| ECodeSsaValueUses::from_core(&uses, value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn uses_for_value(&self, value: usize) -> PyResult<Vec<ECodeSsaUse>> {
+        let value = CoreIlValueId::try_from_index(value).map_err(project_error)?;
+        let uses = self.inner.uses();
+
+        Ok(uses
+            .uses_for(value)
+            .iter()
+            .copied()
+            .map(ECodeSsaUse::from_core)
+            .collect())
+    }
+
+    fn liveness(&self) -> PyResult<Vec<ECodeSsaLiveness>> {
+        let liveness = self.inner.liveness();
+        self.inner
+            .graph()
+            .blocks()
+            .iter()
+            .enumerate()
+            .map(|(block, _)| ECodeSsaLiveness::from_core(&liveness, block))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn live_in(&self, block: usize) -> PyResult<Vec<usize>> {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let liveness = self.inner.liveness();
+
+        Ok(liveness
+            .live_in(block)
+            .iter()
+            .map(|value| value.index())
+            .collect())
+    }
+
+    fn live_out(&self, block: usize) -> PyResult<Vec<usize>> {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let liveness = self.inner.liveness();
+
+        Ok(liveness
+            .live_out(block)
+            .iter()
+            .map(|value| value.index())
+            .collect())
+    }
+
+    fn dominance(&self) -> PyResult<Vec<IlDominance>> {
+        let dominance = self.inner.dominance();
+        let frontiers =
+            dominance.frontiers(self.inner.graph().blocks(), self.inner.graph().successors());
+        self.inner
+            .graph()
+            .blocks()
+            .iter()
+            .enumerate()
+            .map(|(block, _)| IlDominance::from_core(&dominance, &frontiers, block))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn dominance_frontier(&self, block: usize) -> PyResult<Vec<usize>> {
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let frontiers = self.inner.dominance_frontiers();
+
+        Ok(frontiers
+            .frontier(block)
+            .iter()
+            .map(|frontier| frontier.index())
+            .collect())
+    }
+
+    fn dominates(&self, dominator: usize, block: usize) -> PyResult<bool> {
+        let dominator = CoreIlBlockId::try_from_index(dominator).map_err(project_error)?;
+        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
+        let dominance = self.inner.dominance();
+
+        Ok(dominance.dominates(dominator, block))
+    }
+
+    fn block_arguments(&self) -> Vec<ECodeSsaBlockArg> {
+        self.inner
+            .block_arguments()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, argument)| ECodeSsaBlockArg::from_core(index, argument))
+            .collect()
+    }
+
+    fn edge_arguments(&self) -> PyResult<Vec<ECodeSsaEdgeArguments>> {
+        self.inner
+            .edge_arguments()
+            .iter()
+            .enumerate()
+            .map(|(edge, _)| ECodeSsaEdgeArguments::from_core(&self.inner, edge))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn arguments_for_edge(&self, edge: usize) -> Vec<usize> {
+        self.inner
+            .arguments_for_edge(edge)
+            .iter()
+            .map(|argument| argument.index())
+            .collect()
+    }
+
+    fn memory_domains(&self) -> Vec<ECodeSsaMemoryDomain> {
+        self.inner
+            .memory_domains()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, domain)| ECodeSsaMemoryDomain::from_core(index, domain))
+            .collect()
+    }
+
+    fn operations(&self) -> PyResult<Vec<ECodeSsaOp>> {
+        self.inner
+            .operations()
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| ECodeSsaOp::from_core(&self.inner, index, operation))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn operations_for_source(&self, address: &Address) -> PyResult<Vec<ECodeSsaOp>> {
+        self.inner
+            .operations_for_source(address.inner())
+            .map(|(index, operation)| ECodeSsaOp::from_core(&self.inner, index, operation))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(project_error)
+    }
+
+    fn __repr__(&self) -> String {
+        let function = self.header().function();
+        format!("ECodeSsaIr(function={function:?})")
     }
 }
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct IrBlock {
+pub(crate) struct IlBlock {
     index: usize,
     operation_start: usize,
     operation_end: usize,
     successor_start: usize,
     successor_end: usize,
     successors: Vec<usize>,
-    flags: u16,
+    properties: u16,
 }
 
-impl IrBlock {
-    fn from_core(
-        index: usize,
-        block: CoreBlock,
-        successors: &[CoreBlockId],
-    ) -> Result<Self, CoreIlError> {
+impl IlBlock {
+    fn from_core(index: usize, block: CoreIlBlock, successors: &[CoreIlBlockId]) -> Self {
         let successors = block
             .successors()
-            .checked_slice(successors)?
+            .slice(successors)
             .iter()
             .map(|successor| successor.index())
             .collect();
 
-        Ok(Self {
+        Self {
             index,
             operation_start: block.operations().start(),
             operation_end: block.operations().end(),
             successor_start: block.successors().start(),
             successor_end: block.successors().end(),
             successors,
-            flags: block.flags(),
-        })
+            properties: block.properties().bits(),
+        }
     }
 }
 
 #[pymethods]
-impl IrBlock {
+impl IlBlock {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1025,30 +879,32 @@ impl IrBlock {
     }
 
     #[getter]
-    fn flags(&self) -> u16 {
-        self.flags
+    fn properties(&self) -> u16 {
+        self.properties
     }
 
     #[getter]
     fn entry(&self) -> bool {
-        self.flags & CoreBlock::ENTRY != 0
+        CoreIlBlockProperties::from_bits_retain(self.properties)
+            .contains(CoreIlBlockProperties::ENTRY)
     }
 
     #[getter]
     fn exit(&self) -> bool {
-        self.flags & CoreBlock::EXIT != 0
+        CoreIlBlockProperties::from_bits_retain(self.properties)
+            .contains(CoreIlBlockProperties::EXIT)
     }
 }
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct IrBlockPredecessors {
+pub(crate) struct IlBlockPredecessors {
     block: usize,
     predecessors: Vec<usize>,
 }
 
-impl IrBlockPredecessors {
-    fn from_core(block: usize, predecessors: &[CoreBlockId]) -> Self {
+impl IlBlockPredecessors {
+    fn from_core(block: usize, predecessors: &[CoreIlBlockId]) -> Self {
         Self {
             block,
             predecessors: predecessors
@@ -1060,7 +916,7 @@ impl IrBlockPredecessors {
 }
 
 #[pymethods]
-impl IrBlockPredecessors {
+impl IlBlockPredecessors {
     #[getter]
     fn block(&self) -> usize {
         self.block
@@ -1074,31 +930,31 @@ impl IrBlockPredecessors {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct IrSourceRun {
-    machine_address: Address,
+pub(crate) struct IlSourceSpan {
+    address: Address,
     destination_start: usize,
     destination_end: usize,
-    pcode_start: u32,
+    first_pcode_index: u32,
     pcode_count: u32,
 }
 
-impl IrSourceRun {
-    fn from_core(run: CoreSourceRun) -> Self {
+impl IlSourceSpan {
+    fn from_core(span: CoreIlSourceSpan) -> Self {
         Self {
-            machine_address: Address::from_core(run.machine_address()),
-            destination_start: run.destination().start(),
-            destination_end: run.destination().end(),
-            pcode_start: run.first_pcode_index(),
-            pcode_count: run.pcode_count(),
+            address: Address::from_core(span.address()),
+            destination_start: span.destination().start(),
+            destination_end: span.destination().end(),
+            first_pcode_index: span.first_pcode_index(),
+            pcode_count: span.pcode_count(),
         }
     }
 }
 
 #[pymethods]
-impl IrSourceRun {
+impl IlSourceSpan {
     #[getter]
-    fn machine_address(&self) -> Address {
-        self.machine_address.clone()
+    fn address(&self) -> Address {
+        self.address.clone()
     }
 
     #[getter]
@@ -1112,8 +968,8 @@ impl IrSourceRun {
     }
 
     #[getter]
-    fn pcode_start(&self) -> u32 {
-        self.pcode_start
+    fn first_pcode_index(&self) -> u32 {
+        self.first_pcode_index
     }
 
     #[getter]
@@ -1124,26 +980,26 @@ impl IrSourceRun {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct IrMappingRun {
+pub(crate) struct IlParentSpan {
     destination_start: usize,
     destination_end: usize,
     source_start: usize,
     source_end: usize,
 }
 
-impl IrMappingRun {
-    fn from_core(run: CoreMappingRun) -> Self {
+impl IlParentSpan {
+    fn from_core(span: CoreIlParentSpan) -> Self {
         Self {
-            destination_start: run.destination().start(),
-            destination_end: run.destination().end(),
-            source_start: run.source().start(),
-            source_end: run.source().end(),
+            destination_start: span.destination().start(),
+            destination_end: span.destination().end(),
+            source_start: span.source().start(),
+            source_end: span.source().end(),
         }
     }
 }
 
 #[pymethods]
-impl IrMappingRun {
+impl IlParentSpan {
     #[getter]
     fn destination_start(&self) -> usize {
         self.destination_start
@@ -1243,12 +1099,12 @@ pub(crate) struct PCodeOperation {
 
 impl PCodeOperation {
     fn from_core(
-        body: &CorePCodeBody,
+        ir: &CorePCodeIr,
         index: usize,
-        operation: &CorePCodeOperation,
+        operation: &CorePCodeOp,
     ) -> Result<Self, CoreIlError> {
-        let operands = body
-            .operation_operands(operation)?
+        let operands = ir
+            .operation_operands(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();
@@ -1256,7 +1112,7 @@ impl PCodeOperation {
             operation.opcode(),
             CorePCodeOpcode::Branch | CorePCodeOpcode::CBranch | CorePCodeOpcode::Call
         ) {
-            body.target(operation.immediate()).map(Address::from_core)
+            ir.target(operation.immediate()).map(Address::from_core)
         } else {
             None
         };
@@ -1313,7 +1169,7 @@ impl PCodeOperation {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilExpression {
+pub(crate) struct ECodeExpr {
     index: usize,
     opcode: &'static str,
     operands: Vec<usize>,
@@ -1322,14 +1178,14 @@ pub(crate) struct LlilExpression {
     address_space: Option<usize>,
 }
 
-impl LlilExpression {
+impl ECodeExpr {
     fn from_core(
-        body: &CoreLlilBody,
+        ir: &CoreECodeIr,
         index: usize,
-        expression: &CoreLlilExpression,
+        expression: &CoreECodeExpr,
     ) -> Result<Self, CoreIlError> {
-        let operands = body
-            .expression_operands_for(expression)?
+        let operands = ir
+            .expression_operands_for(expression)
             .iter()
             .map(|operand| operand.index())
             .collect();
@@ -1346,7 +1202,7 @@ impl LlilExpression {
 }
 
 #[pymethods]
-impl LlilExpression {
+impl ECodeExpr {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1380,7 +1236,7 @@ impl LlilExpression {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilStatement {
+pub(crate) struct ECodeStmt {
     index: usize,
     opcode: &'static str,
     operands: Vec<usize>,
@@ -1390,14 +1246,14 @@ pub(crate) struct LlilStatement {
     address_space: Option<usize>,
 }
 
-impl LlilStatement {
+impl ECodeStmt {
     fn from_core(
-        body: &CoreLlilBody,
+        ir: &CoreECodeIr,
         index: usize,
-        statement: &CoreLlilStatement,
+        statement: &CoreECodeStmt,
     ) -> Result<Self, CoreIlError> {
-        let operands = body
-            .statement_operands_for(statement)?
+        let operands = ir
+            .statement_operands_for(statement)
             .iter()
             .map(|operand| operand.index())
             .collect();
@@ -1415,7 +1271,7 @@ impl LlilStatement {
 }
 
 #[pymethods]
-impl LlilStatement {
+impl ECodeStmt {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1454,18 +1310,18 @@ impl LlilStatement {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaValue {
+pub(crate) struct ECodeSsaValue {
     index: usize,
     width: u32,
     definition_kind: &'static str,
     definition_index: u32,
 }
 
-impl LlilSsaValue {
-    fn from_core(index: usize, value: CoreSsaValue) -> Self {
+impl ECodeSsaValue {
+    fn from_core(index: usize, value: CoreECodeSsaValue) -> Self {
         let definition_kind = match value.definition_kind() {
-            CoreValueDefinitionKind::Operation => "operation",
-            CoreValueDefinitionKind::BlockArgument => "block_argument",
+            CoreECodeSsaValueKind::Operation => "operation",
+            CoreECodeSsaValueKind::BlockArgument => "block_argument",
         };
 
         Self {
@@ -1478,7 +1334,7 @@ impl LlilSsaValue {
 }
 
 #[pymethods]
-impl LlilSsaValue {
+impl ECodeSsaValue {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1502,19 +1358,19 @@ impl LlilSsaValue {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaValueUses {
+pub(crate) struct ECodeSsaValueUses {
     value: usize,
-    uses: Vec<LlilSsaUse>,
+    uses: Vec<ECodeSsaUse>,
 }
 
-impl LlilSsaValueUses {
-    fn from_core(use_index: &CoreUseIndex, value: usize) -> Result<Self, CoreIlError> {
-        let value_id = CoreValueId::try_from_index(value)?;
-        let uses = use_index
+impl ECodeSsaValueUses {
+    fn from_core(uses: &CoreECodeSsaUses, value: usize) -> Result<Self, CoreIlError> {
+        let value_id = CoreIlValueId::try_from_index(value)?;
+        let uses = uses
             .uses_for(value_id)
             .iter()
             .copied()
-            .map(LlilSsaUse::from_core)
+            .map(ECodeSsaUse::from_core)
             .collect();
 
         Ok(Self { value, uses })
@@ -1522,27 +1378,27 @@ impl LlilSsaValueUses {
 }
 
 #[pymethods]
-impl LlilSsaValueUses {
+impl ECodeSsaValueUses {
     #[getter]
     fn value(&self) -> usize {
         self.value
     }
 
     #[getter]
-    fn uses(&self) -> Vec<LlilSsaUse> {
+    fn uses(&self) -> Vec<ECodeSsaUse> {
         self.uses.clone()
     }
 }
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaUse {
+pub(crate) struct ECodeSsaUse {
     user: usize,
     operand_index: u32,
 }
 
-impl LlilSsaUse {
-    fn from_core(use_record: CoreSsaUse) -> Self {
+impl ECodeSsaUse {
+    fn from_core(use_record: CoreECodeSsaUse) -> Self {
         Self {
             user: use_record.user().index(),
             operand_index: use_record.operand_index(),
@@ -1551,7 +1407,7 @@ impl LlilSsaUse {
 }
 
 #[pymethods]
-impl LlilSsaUse {
+impl ECodeSsaUse {
     #[getter]
     fn user(&self) -> usize {
         self.user
@@ -1565,15 +1421,15 @@ impl LlilSsaUse {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaLiveness {
+pub(crate) struct ECodeSsaLiveness {
     block: usize,
     live_in: Vec<usize>,
     live_out: Vec<usize>,
 }
 
-impl LlilSsaLiveness {
-    fn from_core(liveness: &CoreLiveness, block: usize) -> Result<Self, CoreIlError> {
-        let block_id = CoreBlockId::try_from_index(block)?;
+impl ECodeSsaLiveness {
+    fn from_core(liveness: &CoreECodeSsaLiveness, block: usize) -> Result<Self, CoreIlError> {
+        let block_id = CoreIlBlockId::try_from_index(block)?;
         let live_in = liveness
             .live_in(block_id)
             .iter()
@@ -1594,7 +1450,7 @@ impl LlilSsaLiveness {
 }
 
 #[pymethods]
-impl LlilSsaLiveness {
+impl ECodeSsaLiveness {
     #[getter]
     fn block(&self) -> usize {
         self.block
@@ -1613,7 +1469,7 @@ impl LlilSsaLiveness {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaDominance {
+pub(crate) struct IlDominance {
     block: usize,
     immediate_dominator: Option<usize>,
     children: Vec<usize>,
@@ -1621,13 +1477,13 @@ pub(crate) struct LlilSsaDominance {
     reachable: bool,
 }
 
-impl LlilSsaDominance {
+impl IlDominance {
     fn from_core(
         dominance: &CoreDominance,
         frontiers: &CoreDominanceFrontier,
         block: usize,
     ) -> Result<Self, CoreIlError> {
-        let block_id = CoreBlockId::try_from_index(block)?;
+        let block_id = CoreIlBlockId::try_from_index(block)?;
         let immediate_dominator = dominance
             .immediate_dominator(block_id)
             .map(|dominator| dominator.index());
@@ -1653,7 +1509,7 @@ impl LlilSsaDominance {
 }
 
 #[pymethods]
-impl LlilSsaDominance {
+impl IlDominance {
     #[getter]
     fn block(&self) -> usize {
         self.block
@@ -1682,15 +1538,15 @@ impl LlilSsaDominance {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaBlockArgument {
+pub(crate) struct ECodeSsaBlockArg {
     index: usize,
     block: usize,
     value: usize,
     width: u32,
 }
 
-impl LlilSsaBlockArgument {
-    fn from_core(index: usize, argument: CoreSsaBlockArgument) -> Self {
+impl ECodeSsaBlockArg {
+    fn from_core(index: usize, argument: CoreECodeSsaBlockArg) -> Self {
         Self {
             index,
             block: argument.block().index(),
@@ -1701,7 +1557,7 @@ impl LlilSsaBlockArgument {
 }
 
 #[pymethods]
-impl LlilSsaBlockArgument {
+impl ECodeSsaBlockArg {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1725,15 +1581,15 @@ impl LlilSsaBlockArgument {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaEdgeArguments {
+pub(crate) struct ECodeSsaEdgeArguments {
     edge: usize,
     arguments: Vec<usize>,
 }
 
-impl LlilSsaEdgeArguments {
-    fn from_core(body: &CoreSsaBody, edge: usize) -> Result<Self, CoreIlError> {
-        let arguments = body
-            .arguments_for_edge(edge)?
+impl ECodeSsaEdgeArguments {
+    fn from_core(ir: &CoreECodeSsaIr, edge: usize) -> Result<Self, CoreIlError> {
+        let arguments = ir
+            .arguments_for_edge(edge)
             .iter()
             .map(|argument| argument.index())
             .collect();
@@ -1743,7 +1599,7 @@ impl LlilSsaEdgeArguments {
 }
 
 #[pymethods]
-impl LlilSsaEdgeArguments {
+impl ECodeSsaEdgeArguments {
     #[getter]
     fn edge(&self) -> usize {
         self.edge
@@ -1757,13 +1613,13 @@ impl LlilSsaEdgeArguments {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaMemoryDomain {
+pub(crate) struct ECodeSsaMemoryDomain {
     index: usize,
     address_space: usize,
 }
 
-impl LlilSsaMemoryDomain {
-    fn from_core(index: usize, domain: CoreSsaMemoryDomain) -> Self {
+impl ECodeSsaMemoryDomain {
+    fn from_core(index: usize, domain: CoreECodeSsaMemoryDomain) -> Self {
         Self {
             index,
             address_space: domain.space().index(),
@@ -1772,7 +1628,7 @@ impl LlilSsaMemoryDomain {
 }
 
 #[pymethods]
-impl LlilSsaMemoryDomain {
+impl ECodeSsaMemoryDomain {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1786,7 +1642,7 @@ impl LlilSsaMemoryDomain {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct LlilSsaOperation {
+pub(crate) struct ECodeSsaOp {
     index: usize,
     opcode: &'static str,
     results: Vec<usize>,
@@ -1797,16 +1653,16 @@ pub(crate) struct LlilSsaOperation {
     address_space: Option<usize>,
 }
 
-impl LlilSsaOperation {
+impl ECodeSsaOp {
     fn from_core(
-        body: &CoreSsaBody,
+        ir: &CoreECodeSsaIr,
         index: usize,
-        operation: &CoreSsaOperation,
+        operation: &CoreECodeSsaOp,
     ) -> Result<Self, CoreIlError> {
         let results = operation.results().start()..operation.results().end();
         let results = results.collect();
-        let operands = body
-            .operation_operands(operation)?
+        let operands = ir
+            .operation_operands(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();
@@ -1825,7 +1681,7 @@ impl LlilSsaOperation {
 }
 
 #[pymethods]
-impl LlilSsaOperation {
+impl ECodeSsaOp {
     #[getter]
     fn index(&self) -> usize {
         self.index
@@ -1870,25 +1726,28 @@ impl LlilSsaOperation {
 pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Project>()?;
     module.add_class::<Function>()?;
-    module.add_class::<ArtefactDigest>()?;
-    module.add_class::<IrArtefact>()?;
-    module.add_class::<IrBlock>()?;
-    module.add_class::<IrBlockPredecessors>()?;
-    module.add_class::<IrSourceRun>()?;
-    module.add_class::<IrMappingRun>()?;
+    module.add_class::<IlHeader>()?;
+    module.add_class::<IlGraph>()?;
+    module.add_class::<PCodeIr>()?;
+    module.add_class::<ECodeIr>()?;
+    module.add_class::<ECodeSsaIr>()?;
+    module.add_class::<IlBlock>()?;
+    module.add_class::<IlBlockPredecessors>()?;
+    module.add_class::<IlSourceSpan>()?;
+    module.add_class::<IlParentSpan>()?;
     module.add_class::<PCodeLocation>()?;
     module.add_class::<PCodeOperation>()?;
-    module.add_class::<LlilExpression>()?;
-    module.add_class::<LlilStatement>()?;
-    module.add_class::<LlilSsaValue>()?;
-    module.add_class::<LlilSsaValueUses>()?;
-    module.add_class::<LlilSsaUse>()?;
-    module.add_class::<LlilSsaLiveness>()?;
-    module.add_class::<LlilSsaDominance>()?;
-    module.add_class::<LlilSsaBlockArgument>()?;
-    module.add_class::<LlilSsaEdgeArguments>()?;
-    module.add_class::<LlilSsaMemoryDomain>()?;
-    module.add_class::<LlilSsaOperation>()?;
+    module.add_class::<ECodeExpr>()?;
+    module.add_class::<ECodeStmt>()?;
+    module.add_class::<ECodeSsaValue>()?;
+    module.add_class::<ECodeSsaValueUses>()?;
+    module.add_class::<ECodeSsaUse>()?;
+    module.add_class::<ECodeSsaLiveness>()?;
+    module.add_class::<IlDominance>()?;
+    module.add_class::<ECodeSsaBlockArg>()?;
+    module.add_class::<ECodeSsaEdgeArguments>()?;
+    module.add_class::<ECodeSsaMemoryDomain>()?;
+    module.add_class::<ECodeSsaOp>()?;
 
     Ok(())
 }

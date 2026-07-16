@@ -7,8 +7,7 @@ use std::str::FromStr;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
 
-use crate::il::pcode::Varnode;
-use crate::lifter::{ContextSet, Language};
+use crate::lifter::{ContextSet, Language, Varnode};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Confidence;
 

@@ -1,51 +1,52 @@
 use std::fmt;
 
-use crate::il::common::ValueId;
-use crate::il::llil::ssa::{
-    BlockArgument, MemoryDomain, SsaBody, SsaOpcode, SsaOperation, Value, ValueDefinitionKind,
+use crate::il::common::IlValueId;
+use crate::il::ecode::ssa::{
+    ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
+    ECodeSsaValueKind,
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct SsaOpcodeDisplay(pub SsaOpcode);
+pub struct ECodeSsaOpcodeDisplay(pub ECodeSsaOpcode);
 
-impl fmt::Display for SsaOpcodeDisplay {
+impl fmt::Display for ECodeSsaOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mnemonic = self.0.mnemonic();
-        write!(f, "llil.ssa.{mnemonic}")
+        write!(f, "ecode.ssa.{mnemonic}")
     }
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct SsaBodyDisplay<'a> {
-    body: &'a SsaBody,
+pub struct ECodeSsaIrDisplay<'a> {
+    body: &'a ECodeSsaIr,
 }
 
-impl<'a> SsaBodyDisplay<'a> {
-    pub const fn new(body: &'a SsaBody) -> Self {
+impl<'a> ECodeSsaIrDisplay<'a> {
+    pub(crate) const fn new(body: &'a ECodeSsaIr) -> Self {
         Self { body }
     }
 }
 
-impl fmt::Display for SsaBodyDisplay<'_> {
+impl fmt::Display for ECodeSsaIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, value) in self.body.values().iter().enumerate() {
-            let id = ValueId::try_from_index(index).map_err(|_| fmt::Error)?;
-            let display = ValueDisplay::new(id, value);
+            let id = IlValueId::try_from_index(index).map_err(|_| fmt::Error)?;
+            let display = ECodeSsaValueDisplay::new(id, value);
             writeln!(f, "{display}")?;
         }
 
         for (index, argument) in self.body.block_arguments().iter().enumerate() {
-            let display = BlockArgumentDisplay::new(index, argument);
+            let display = ECodeSsaBlockArgDisplay::new(index, argument);
             writeln!(f, "{display}")?;
         }
 
         for (index, domain) in self.body.memory_domains().iter().enumerate() {
-            let display = MemoryDomainDisplay::new(index, domain);
+            let display = ECodeSsaMemoryDomainDisplay::new(index, domain);
             writeln!(f, "{display}")?;
         }
 
         for (index, operation) in self.body.operations().iter().enumerate() {
-            let display = SsaOperationDisplay::new(self.body, index, operation);
+            let display = ECodeSsaOpDisplay::new(self.body, index, operation);
             write!(f, "{display}")?;
 
             if index + 1 < self.body.operations().len() {
@@ -58,24 +59,24 @@ impl fmt::Display for SsaBodyDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ValueDisplay<'a> {
-    id: ValueId,
-    value: &'a Value,
+pub struct ECodeSsaValueDisplay<'a> {
+    id: IlValueId,
+    value: &'a ECodeSsaValue,
 }
 
-impl<'a> ValueDisplay<'a> {
-    pub const fn new(id: ValueId, value: &'a Value) -> Self {
+impl<'a> ECodeSsaValueDisplay<'a> {
+    pub(crate) const fn new(id: IlValueId, value: &'a ECodeSsaValue) -> Self {
         Self { id, value }
     }
 }
 
-impl fmt::Display for ValueDisplay<'_> {
+impl fmt::Display for ECodeSsaValueDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.id.index();
         let width = self.value.width();
         let definition = match self.value.definition_kind() {
-            ValueDefinitionKind::Operation => "operation",
-            ValueDefinitionKind::BlockArgument => "block_argument",
+            ECodeSsaValueKind::Operation => "operation",
+            ECodeSsaValueKind::BlockArgument => "block_argument",
         };
         let definition_index = self.value.definition_index();
 
@@ -87,18 +88,18 @@ impl fmt::Display for ValueDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct BlockArgumentDisplay<'a> {
+pub struct ECodeSsaBlockArgDisplay<'a> {
     index: usize,
-    argument: &'a BlockArgument,
+    argument: &'a ECodeSsaBlockArg,
 }
 
-impl<'a> BlockArgumentDisplay<'a> {
-    pub const fn new(index: usize, argument: &'a BlockArgument) -> Self {
+impl<'a> ECodeSsaBlockArgDisplay<'a> {
+    pub(crate) const fn new(index: usize, argument: &'a ECodeSsaBlockArg) -> Self {
         Self { index, argument }
     }
 }
 
-impl fmt::Display for BlockArgumentDisplay<'_> {
+impl fmt::Display for ECodeSsaBlockArgDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.index;
         let block = self.argument.block().index();
@@ -110,18 +111,18 @@ impl fmt::Display for BlockArgumentDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct MemoryDomainDisplay<'a> {
+pub struct ECodeSsaMemoryDomainDisplay<'a> {
     index: usize,
-    domain: &'a MemoryDomain,
+    domain: &'a ECodeSsaMemoryDomain,
 }
 
-impl<'a> MemoryDomainDisplay<'a> {
-    pub const fn new(index: usize, domain: &'a MemoryDomain) -> Self {
+impl<'a> ECodeSsaMemoryDomainDisplay<'a> {
+    pub(crate) const fn new(index: usize, domain: &'a ECodeSsaMemoryDomain) -> Self {
         Self { index, domain }
     }
 }
 
-impl fmt::Display for MemoryDomainDisplay<'_> {
+impl fmt::Display for ECodeSsaMemoryDomainDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.index;
         let space = self.domain.space().index();
@@ -131,14 +132,14 @@ impl fmt::Display for MemoryDomainDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct SsaOperationDisplay<'a> {
-    body: &'a SsaBody,
+pub struct ECodeSsaOpDisplay<'a> {
+    body: &'a ECodeSsaIr,
     index: usize,
-    operation: &'a SsaOperation,
+    operation: &'a ECodeSsaOp,
 }
 
-impl<'a> SsaOperationDisplay<'a> {
-    pub const fn new(body: &'a SsaBody, index: usize, operation: &'a SsaOperation) -> Self {
+impl<'a> ECodeSsaOpDisplay<'a> {
+    pub(crate) const fn new(body: &'a ECodeSsaIr, index: usize, operation: &'a ECodeSsaOp) -> Self {
         Self {
             body,
             index,
@@ -146,7 +147,7 @@ impl<'a> SsaOperationDisplay<'a> {
         }
     }
 
-    fn write_result(&self, f: &mut fmt::Formatter<'_>, id: ValueId) -> fmt::Result {
+    fn write_result(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
         let value = self.body.values().get(id.index()).ok_or(fmt::Error)?;
         let index = id.index();
         let width = value.width();
@@ -154,7 +155,7 @@ impl<'a> SsaOperationDisplay<'a> {
         write!(f, "%v{index}:bits<{width}>")
     }
 
-    fn write_value(&self, f: &mut fmt::Formatter<'_>, id: ValueId) -> fmt::Result {
+    fn write_value(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
         self.body.values().get(id.index()).ok_or(fmt::Error)?;
         let index = id.index();
 
@@ -162,13 +163,8 @@ impl<'a> SsaOperationDisplay<'a> {
     }
 
     fn write_results(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.operation
-            .results()
-            .verify_bounds(self.body.values().len())
-            .map_err(|_| fmt::Error)?;
-
         for index in self.operation.results().start()..self.operation.results().end() {
-            let id = ValueId::try_from_index(index).map_err(|_| fmt::Error)?;
+            let id = IlValueId::try_from_index(index).map_err(|_| fmt::Error)?;
 
             if index == self.operation.results().start() {
                 self.write_result(f, id)?;
@@ -186,10 +182,7 @@ impl<'a> SsaOperationDisplay<'a> {
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self
-            .body
-            .operation_operands(self.operation)
-            .map_err(|_| fmt::Error)?;
+        let operands = self.body.operation_operands(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -206,15 +199,15 @@ impl<'a> SsaOperationDisplay<'a> {
 
     fn write_metadata(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.operation.opcode() {
-            SsaOpcode::Constant | SsaOpcode::Address => {
+            ECodeSsaOpcode::Constant | ECodeSsaOpcode::Address => {
                 let immediate = self.operation.immediate();
                 write!(f, " 0x{immediate:x}")?;
             }
-            SsaOpcode::Undefined => {
+            ECodeSsaOpcode::Undefined => {
                 let origin = self.operation.immediate();
                 write!(f, " origin<{origin}>")?;
             }
-            SsaOpcode::Intrinsic | SsaOpcode::IntrinsicResult
+            ECodeSsaOpcode::Intrinsic | ECodeSsaOpcode::IntrinsicResult
                 if self.operation.immediate() != 0 =>
             {
                 let intrinsic = self.operation.immediate();
@@ -240,10 +233,10 @@ impl<'a> SsaOperationDisplay<'a> {
     }
 }
 
-impl fmt::Display for SsaOperationDisplay<'_> {
+impl fmt::Display for ECodeSsaOpDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.index;
-        let opcode = SsaOpcodeDisplay(self.operation.opcode());
+        let opcode = ECodeSsaOpcodeDisplay(self.operation.opcode());
 
         write!(f, "@o{index} ")?;
         self.write_results(f)?;
@@ -254,49 +247,43 @@ impl fmt::Display for SsaOperationDisplay<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use crate::il::common::{
-        ArtefactHeader, BuildStatus, CommonBody, Finish, IrLevel, PackedRange,
-    };
-    use crate::il::llil::ssa::{LLIL_SSA_SCHEMA_VERSION, SsaBuilder};
+    use crate::analysis::control::CancellationToken;
+    use crate::il::common::{IlGraph, IlHeader, IlIndexRange};
+    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
     use crate::ir::FunctionId;
 
     #[test]
     fn ssa_body_display_is_deterministic() {
-        let header = ArtefactHeader::new(
-            FunctionId::default(),
-            IrLevel::LlilSsa,
-            LLIL_SSA_SCHEMA_VERSION,
-            0,
-        );
-        let mut builder = SsaBuilder::new(header, CommonBody::default());
+        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
         let (value, results) = builder.push_result_value(64).unwrap();
 
         builder
             .push_operation(
-                SsaOperation::new(SsaOpcode::Constant, results, PackedRange::EMPTY, 64)
+                ECodeSsaOp::new(ECodeSsaOpcode::Constant, results, IlIndexRange::EMPTY, 64)
                     .with_immediate(0x2a),
             )
             .unwrap();
 
         let operands = builder.push_value_operands([value]).unwrap();
         builder
-            .push_operation(SsaOperation::new(
-                SsaOpcode::Return,
-                PackedRange::EMPTY,
+            .push_operation(ECodeSsaOp::new(
+                ECodeSsaOpcode::Return,
+                IlIndexRange::EMPTY,
                 operands,
                 0,
             ))
             .unwrap();
 
-        let body = builder.finish(&BuildStatus::new()).unwrap();
+        let body = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
             body.display().to_string(),
             "%v0:bits<64> = operation<0>\n\
-             @o0 %v0:bits<64> = llil.ssa.constant 0x2a\n\
-             @o1 llil.ssa.return %v0"
+             @o0 %v0:bits<64> = ecode.ssa.const 0x2a\n\
+             @o1 ecode.ssa.ret %v0"
         );
     }
 }

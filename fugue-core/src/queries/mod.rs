@@ -1,17 +1,18 @@
 use std::collections::VecDeque;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use flume::Sender;
-use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RwLock};
+use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::engine::{EngineError, Intake};
-use crate::il::common::{IlError, IrArtefact, IrArtefactKey, IrLevel, RawIrArtefact};
-use crate::il::llil::LlilBody;
-use crate::il::llil::ssa::{Dominance, DominanceFrontier, Liveness, SsaBody, UseIndex};
-use crate::il::pcode::PCodeBody;
+use crate::il::common::{IlError, IlLevel};
+use crate::il::ecode::ECodeIr;
+use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowGraph;
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
@@ -59,12 +60,12 @@ impl<T> QueryPage<T> {
 
 #[derive(Debug, Error)]
 pub enum QueryError {
-    #[error("analysis engine stopped")]
-    Stopped,
-    #[error(transparent)]
-    Project(#[from] ProjectError),
     #[error(transparent)]
     Engine(Box<EngineError>),
+    #[error(transparent)]
+    Project(#[from] ProjectError),
+    #[error("analysis engine stopped")]
+    Stopped,
 }
 
 impl From<EngineError> for QueryError {
@@ -342,63 +343,89 @@ impl QueryReader {
         Ok(graph)
     }
 
-    fn cached_ir_artefact(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-    ) -> Result<Option<Arc<RawIrArtefact>>, QueryError> {
-        let _query_guard = self.enter_query()?;
-        let key = IrArtefactKey::new(function, level);
-
-        if let Some(cached) = self.cache.get_ir(key) {
-            return Ok(cached);
+    pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
+        if let Some(cached) = self.cached_pcode(function)? {
+            return Ok(Some(cached));
         }
 
-        let artefact = {
-            let project = self.project.read();
-            let read = ProjectRead::new(&project);
-            read.ir_artefact(function, level)?
-        }
-        .map(Arc::new);
-
-        self.cache.insert_ir(key, artefact.clone());
-        Ok(artefact)
-    }
-
-    fn cached_body<T>(&self, function: FunctionId) -> Result<Option<T>, QueryError>
-    where
-        T: IrArtefact,
-    {
-        if let Some(raw) = self.cached_ir_artefact(function, T::LEVEL)? {
-            return Self::decode_body(&raw).map(Some);
-        }
-
-        if !self.build_ir(function, T::LEVEL)? {
+        if !self.ensure_lifted(function, IlLevel::PCode)? {
             return Ok(None);
         }
 
-        self.cached_ir_artefact(function, T::LEVEL)?
-            .map(|raw| Self::decode_body(&raw))
-            .transpose()
+        self.cached_pcode(function)
     }
 
-    fn decode_body<T>(raw: &RawIrArtefact) -> Result<T, QueryError>
-    where
-        T: IrArtefact,
-    {
-        T::from_raw_artefact(raw.clone())
-            .map_err(ProjectError::from)
-            .map_err(QueryError::from)
+    fn cached_pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.pcode(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().pcode(function)? }.map(Arc::new);
+        self.cache.insert_pcode(function, ir.clone());
+        Ok(ir)
     }
 
-    fn build_ir(&self, function: FunctionId, level: IrLevel) -> Result<bool, QueryError> {
+    pub fn ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
+        if let Some(cached) = self.cached_ecode(function)? {
+            return Ok(Some(cached));
+        }
+
+        if !self.ensure_lifted(function, IlLevel::ECode)? {
+            return Ok(None);
+        }
+
+        self.cached_ecode(function)
+    }
+
+    fn cached_ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.ecode(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().ecode(function)? }.map(Arc::new);
+        self.cache.insert_ecode(function, ir.clone());
+        Ok(ir)
+    }
+
+    pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
+        if let Some(cached) = self.cached_ecode_ssa(function)? {
+            return Ok(Some(cached));
+        }
+
+        if !self.ensure_lifted(function, IlLevel::ECodeSsa)? {
+            return Ok(None);
+        }
+
+        self.cached_ecode_ssa(function)
+    }
+
+    fn cached_ecode_ssa(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.ecode_ssa(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().ecode_ssa(function)? }.map(Arc::new);
+        self.cache.insert_ecode_ssa(function, ir.clone());
+        Ok(ir)
+    }
+
+    fn ensure_lifted(&self, function: FunctionId, level: IlLevel) -> Result<bool, QueryError> {
         let Some(intake) = &self.intake else {
             return Ok(false);
         };
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         intake
-            .send(Intake::EnsureIr {
+            .send(Intake::EnsureLifted {
                 function,
                 level,
                 reply: reply_tx,
@@ -414,75 +441,13 @@ impl QueryReader {
         }
     }
 
-    pub fn ir_artefact(
-        &self,
-        function: FunctionId,
-        level: IrLevel,
-    ) -> Result<Option<RawIrArtefact>, QueryError> {
-        Ok(self
-            .cached_ir_artefact(function, level)?
-            .map(|raw| (*raw).clone()))
-    }
+    pub fn project(&self) -> Result<ProjectHandle, QueryError> {
+        let gate = self.enter_query()?;
 
-    pub fn ir_body<T>(&self, function: FunctionId) -> Result<Option<T>, QueryError>
-    where
-        T: IrArtefact,
-    {
-        self.cached_body(function)
-    }
-
-    pub fn pcode_body(&self, function: FunctionId) -> Result<Option<PCodeBody>, QueryError> {
-        self.cached_body(function)
-    }
-
-    pub fn llil_body(&self, function: FunctionId) -> Result<Option<LlilBody>, QueryError> {
-        self.cached_body(function)
-    }
-
-    pub fn llil_ssa_body(&self, function: FunctionId) -> Result<Option<SsaBody>, QueryError> {
-        self.cached_body(function)
-    }
-
-    pub fn llil_ssa_use_index(&self, function: FunctionId) -> Result<Option<UseIndex>, QueryError> {
-        self.cached_body::<SsaBody>(function)?
-            .map(|body| body.use_index())
-            .transpose()
-            .map_err(ProjectError::from)
-            .map_err(QueryError::from)
-    }
-
-    pub fn llil_ssa_dominance(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<Dominance>, QueryError> {
-        self.cached_body::<SsaBody>(function)?
-            .map(|body| body.dominance())
-            .transpose()
-            .map_err(ProjectError::from)
-            .map_err(QueryError::from)
-    }
-
-    pub fn llil_ssa_dominance_frontiers(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<DominanceFrontier>, QueryError> {
-        self.cached_body::<SsaBody>(function)?
-            .map(|body| body.dominance_frontiers())
-            .transpose()
-            .map_err(ProjectError::from)
-            .map_err(QueryError::from)
-    }
-
-    pub fn llil_ssa_liveness(&self, function: FunctionId) -> Result<Option<Liveness>, QueryError> {
-        self.cached_body::<SsaBody>(function)?
-            .map(|body| body.liveness())
-            .transpose()
-            .map_err(ProjectError::from)
-            .map_err(QueryError::from)
-    }
-
-    pub fn function_id(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
-        self.with_project(|read| read.function_id(entry))
+        Ok(ProjectHandle {
+            project: self.project.read_arc(),
+            _gate: gate,
+        })
     }
 
     pub fn call_edges(
@@ -628,13 +593,26 @@ impl QueryReader {
         Ok(query(ProjectRead::new(&project)))
     }
 
-    fn enter_query(&self) -> Result<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>, QueryError> {
+    fn enter_query(&self) -> Result<ArcRwLockReadGuard<RawRwLock, ()>, QueryError> {
         let guard = self.gate.read_arc();
         if self.active.load(Ordering::Acquire) {
             Ok(guard)
         } else {
             Err(QueryError::Stopped)
         }
+    }
+}
+
+pub struct ProjectHandle {
+    project: ArcRwLockReadGuard<RawRwLock, Project>,
+    _gate: ArcRwLockReadGuard<RawRwLock, ()>,
+}
+
+impl Deref for ProjectHandle {
+    type Target = Project;
+
+    fn deref(&self) -> &Project {
+        &self.project
     }
 }
 
@@ -682,16 +660,16 @@ impl QueryEngine {
                 | ChangeRecord::FunctionRemoved { entry, .. } => {
                     self.cache.evict(*entry);
                 }
-                ChangeRecord::IrArtefactPublished { function, level }
-                | ChangeRecord::IrArtefactRemoved { function, level } => {
-                    self.cache.evict_ir(*function, *level);
+                ChangeRecord::LiftedMaterialised { function, level }
+                | ChangeRecord::LiftedRemoved { function, level } => {
+                    self.cache.evict_lifted(*function, *level);
                 }
                 ChangeRecord::Restored { .. } => self.cache.clear(),
                 _ => {}
             }
 
-            if record.affects_ir_inputs() {
-                self.cache.clear_ir();
+            if record.affects_lifted_inputs() {
+                self.cache.clear_lifted();
             }
         }
     }
@@ -707,7 +685,7 @@ impl Drop for QueryEngine {
     }
 }
 
-pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<parking_lot::RawRwLock, ()>;
+pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<RawRwLock, ()>;
 
 #[cfg(test)]
 mod test {
@@ -716,28 +694,22 @@ mod test {
 
     use parking_lot::RwLock;
 
-    use super::{Cached, Dependency, QueryEngine, QueryError, QueryPage, QueryReader};
+    use super::*;
+    use crate::analysis::control::CancellationToken;
     use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-    use crate::engine::change::{
-        ChangeKinds, ChangeRecord, ChangeSet, FunctionChangeKind, Revision,
-    };
+    use crate::engine::change::FunctionChangeKind;
     use crate::il::common::{
-        ArtefactHeader, BlockId, BuildStatus, CommonBody, Finish, IlError, IrArtefact,
-        IrArtefactKey, IrLevel, PackedRange, RawIrArtefact, SourceRun, ValueId,
+        IlArtefact, IlBlockId, IlGraph, IlHeader, IlIndexRange, IlSourceSpan, IlValueId,
     };
-    use crate::il::llil::ssa::{LLIL_SSA_SCHEMA_VERSION, SsaBody, SsaBuilder};
-    use crate::il::llil::{LLIL_SCHEMA_VERSION, LlilBody, LlilBuilder};
-    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBody, PCodeBuilder};
-    use crate::ir::{
-        Address, AddressRange, AddressRangeSet, FunctionId, RawAddress, ReferenceKind,
-        ReferenceTarget,
-    };
+    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
+    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
+    use crate::il::storage::IlRevert;
+    use crate::ir::{AddressRange, ReferenceKind};
     use crate::loader::Loader;
-    use crate::project::{Project, ProjectError};
-    use crate::queries::cache::QUERY_MEMO_CAPACITY;
+    use crate::project::ProjectTransaction;
+    use crate::queries::cache::CFG_CACHE_CAPACITY;
     use crate::queries::index::{CENSUS_INTERVAL, ChangeIndex, MAX_CHANGE_RUNS};
-    use crate::storage::segments::mapping::SegmentMappingId;
-    use crate::storage::segments::space::AddressSpaceId;
 
     #[test]
     fn test_query_page_exposes_entries_and_next_cursor() {
@@ -745,6 +717,12 @@ mod test {
 
         assert_eq!(page.entries(), &[1, 2, 3]);
         assert_eq!(page.next_cursor(), Some(&3));
+    }
+
+    struct PublishedIl {
+        pcode: PCodeIr,
+        ecode: ECodeIr,
+        ecode_ssa: ECodeSsaIr,
     }
 
     struct Fixture {
@@ -768,6 +746,26 @@ mod test {
             self.project.read().revision().next()
         }
 
+        fn commit_with<T>(
+            &mut self,
+            mutate: impl FnOnce(&mut ProjectTransaction<'_>) -> Result<T, ProjectError>,
+        ) -> Result<T, Box<dyn std::error::Error>> {
+            let (changes, value) = {
+                let mut project = self.project.write();
+                let mut transaction = project.transaction("query fixture");
+                let value = match mutate(&mut transaction) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        transaction.rollback()?;
+                        return Err(error.into());
+                    }
+                };
+                (transaction.commit()?, value)
+            };
+            self.queries.apply_changes(&changes);
+            Ok(value)
+        }
+
         fn commit_function(
             &mut self,
             function: PartialFunction,
@@ -779,70 +777,20 @@ mod test {
             &mut self,
             function: PartialFunction,
         ) -> Result<FunctionId, Box<dyn std::error::Error>> {
-            let (changes, function) = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                let function = transaction.add_function(function)?;
-                (transaction.commit()?, function)
-            };
-            self.queries.apply_changes(&changes);
-            Ok(function)
+            self.commit_with(|transaction| transaction.add_function(function))
         }
 
         fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn std::error::Error>> {
-            let changes = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                transaction.remove_function(entry)?;
-                transaction.commit()?
-            };
-            self.queries.apply_changes(&changes);
-            Ok(())
+            self.commit_with(|transaction| transaction.remove_function(entry))
+                .map(drop)
         }
 
-        fn publish_ir_artefact(
-            &mut self,
-            artefact: RawIrArtefact,
-        ) -> Result<(), Box<dyn std::error::Error>> {
-            let changes = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                if let Err(error) = transaction.publish_ir_artefact(artefact) {
-                    transaction.rollback()?;
-                    return Err(error.into());
-                }
-                transaction.commit()?
-            };
-            self.queries.apply_changes(&changes);
-            Ok(())
-        }
-
-        fn publish_ir_body<T>(&mut self, artefact: &mut T) -> Result<(), Box<dyn std::error::Error>>
+        fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn std::error::Error>>
         where
-            T: IrArtefact,
+            T: IlArtefact,
+            IlRevert: From<(FunctionId, Option<T>)>,
         {
-            let changes = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                if let Err(error) = transaction.publish_ir_body(artefact) {
-                    transaction.rollback()?;
-                    return Err(error.into());
-                }
-                transaction.commit()?
-            };
-            self.queries.apply_changes(&changes);
-            Ok(())
-        }
-
-        fn insert_ir_artefact_direct(
-            &mut self,
-            artefact: &RawIrArtefact,
-        ) -> Result<(), Box<dyn std::error::Error>> {
-            let project = self.project.write();
-            let key = IrArtefactKey::new(artefact.header().function(), artefact.header().level());
-
-            project.storage.entities.insert(&key, artefact)?;
-            Ok(())
+            self.commit_with(|transaction| transaction.materialise_lifted(ir))
         }
 
         fn apply(&mut self, changes: &ChangeSet) {
@@ -864,221 +812,159 @@ mod test {
             function
         }
 
-        fn ir_artefact(payload: Vec<u8>) -> RawIrArtefact {
-            let tag = payload.first().copied().unwrap_or_default();
-            let header = ArtefactHeader::new(
-                FunctionId::default(),
-                IrLevel::PCode,
-                PCODE_SCHEMA_VERSION,
-                0,
-            );
-            let common = CommonBody::new(
-                Vec::new(),
-                Vec::new(),
-                vec![SourceRun::new(
-                    PackedRange::EMPTY,
-                    Address::new(AddressSpaceId::new(1), u64::from(tag)),
-                    u32::from(tag),
-                    u32::try_from(payload.len()).expect("test payload length should fit"),
-                )],
-                Vec::new(),
+        fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
+            let mut builder = PCodeBuilder::new(
+                self.project.read().language(),
+                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
             );
 
-            PCodeBuilder::new(header, common)
-                .finish(&BuildStatus::new())
-                .expect("test PCode artefact should verify")
-                .to_raw_artefact()
-                .expect("test PCode artefact should encode")
+            builder.replace_source_spans(vec![IlSourceSpan::new(
+                IlIndexRange::EMPTY,
+                Address::new(AddressSpaceId::new(1), u64::from(tag)),
+                u32::from(tag),
+                count,
+            )]);
+
+            builder
+                .build(&CancellationToken::default())
+                .expect("test pcode ir should build")
         }
 
-        fn pcode_body_for(function: FunctionId) -> PCodeBody {
-            let header = ArtefactHeader::new(function, IrLevel::PCode, PCODE_SCHEMA_VERSION, 0);
-
-            PCodeBuilder::new(header, CommonBody::default())
-                .finish(&BuildStatus::new())
-                .expect("empty PCode body should verify")
+        fn pcode_for(&self, function: FunctionId) -> PCodeIr {
+            PCodeBuilder::new(
+                self.project.read().language(),
+                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty pcode ir should build")
         }
 
-        fn pcode_body() -> PCodeBody {
-            Self::pcode_body_for(FunctionId::default())
+        fn ecode_for(function: FunctionId) -> ECodeIr {
+            ECodeBuilder::new(
+                IlHeader::new(function, ECODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty ecode ir should build")
         }
 
-        fn llil_body(function: FunctionId, parent: &PCodeBody) -> LlilBody {
-            let mut header = ArtefactHeader::new(function, IrLevel::Llil, LLIL_SCHEMA_VERSION, 0);
-            header.set_parent_digest(
-                parent
-                    .to_raw_artefact()
-                    .expect("test PCode body should encode")
-                    .header()
-                    .content_digest(),
-            );
-
-            LlilBuilder::new(header, CommonBody::default())
-                .finish(&BuildStatus::new())
-                .expect("empty LLIL body should verify")
+        fn ecode_ssa_for(function: FunctionId) -> ECodeSsaIr {
+            ECodeSsaBuilder::new(
+                IlHeader::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty ecode ssa ir should build")
         }
 
-        fn ssa_body(function: FunctionId, parent: &LlilBody) -> SsaBody {
-            let mut header =
-                ArtefactHeader::new(function, IrLevel::LlilSsa, LLIL_SSA_SCHEMA_VERSION, 0);
-            header.set_parent_digest(
-                parent
-                    .to_raw_artefact()
-                    .expect("test LLIL body should encode")
-                    .header()
-                    .content_digest(),
-            );
-
-            SsaBuilder::new(header, CommonBody::default())
-                .finish(&BuildStatus::new())
-                .expect("empty SSA body should verify")
-        }
-
-        fn publish_ssa_chain(
+        fn materialise_lifted_chain(
             &mut self,
             function: FunctionId,
-        ) -> Result<SsaBody, Box<dyn std::error::Error>> {
-            let mut pcode = Self::pcode_body_for(function);
-            let mut llil = Self::llil_body(function, &pcode);
-            let mut ssa = Self::ssa_body(function, &llil);
+        ) -> Result<PublishedIl, Box<dyn std::error::Error>> {
+            let mut pcode = self.pcode_for(function);
+            let mut ecode = Self::ecode_for(function);
+            let mut ecode_ssa = Self::ecode_ssa_for(function);
 
-            self.publish_ir_body(&mut pcode)?;
-            self.publish_ir_body(&mut llil)?;
-            self.publish_ir_body(&mut ssa)?;
+            self.materialise_lifted(&mut pcode)?;
+            self.materialise_lifted(&mut ecode)?;
+            self.materialise_lifted(&mut ecode_ssa)?;
 
-            Ok(ssa)
+            Ok(PublishedIl {
+                pcode,
+                ecode,
+                ecode_ssa,
+            })
         }
     }
 
     #[test]
-    fn test_query_reader_reads_ir_artefact() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn std::error::Error>> {
         let mut fixture = Fixture::new()?;
-        let artefact = Fixture::ir_artefact(vec![7, 8, 9]);
+        let mut ir = fixture.pcode_with_span(FunctionId::default(), 7, 3);
 
-        fixture.publish_ir_artefact(artefact.clone())?;
+        fixture.materialise_lifted(&mut ir)?;
 
         let read = fixture
             .reader()
-            .ir_artefact(FunctionId::default(), IrLevel::PCode)?
-            .expect("artefact should be visible to query reader");
+            .pcode(FunctionId::default())?
+            .expect("pcode should be visible to query reader");
 
-        assert_eq!(read.payload(), artefact.payload());
+        assert_eq!(read.source_spans(), ir.source_spans());
         Ok(())
     }
 
     #[test]
-    fn test_query_reader_memoises_ir_reads() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_memoises_lifted_reads() -> Result<(), Box<dyn std::error::Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
         let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
-        let mut body = Fixture::pcode_body_for(function);
-        fixture.publish_ir_body(&mut body)?;
-        fixture.queries.cache.clear_ir();
+        let mut ir = fixture.pcode_for(function);
+        fixture.materialise_lifted(&mut ir)?;
+        fixture.queries.cache.clear_lifted();
 
         let reader = fixture.reader();
-        assert_eq!(fixture.queries.cache.ir_len(), 0);
+        assert_eq!(fixture.queries.cache.lifted_len(), 0);
+
+        reader.pcode(function)?.expect("pcode should be visible");
+        assert_eq!(fixture.queries.cache.lifted_len(), 1);
 
         reader
-            .pcode_body(function)?
-            .expect("PCode body should be visible");
-        assert_eq!(fixture.queries.cache.ir_len(), 1);
-
-        reader
-            .ir_artefact(function, IrLevel::PCode)?
-            .expect("cached artefact should be visible");
-        assert_eq!(fixture.queries.cache.ir_len(), 1);
+            .pcode(function)?
+            .expect("cached pcode should be visible");
+        assert_eq!(fixture.queries.cache.lifted_len(), 1);
 
         fixture.commit_function(Fixture::function_with_len(entry, 2))?;
-        assert_eq!(fixture.queries.cache.ir_len(), 0);
+        assert_eq!(fixture.queries.cache.lifted_len(), 0);
 
         Ok(())
     }
 
     #[test]
-    fn test_query_reader_ir_artefact_snapshot_survives_invalidation()
+    fn test_query_reader_lifted_snapshot_survives_invalidation()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
         let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
-        let mut body = Fixture::pcode_body_for(function);
-        let artefact = body.to_raw_artefact()?;
+        let mut ir = fixture.pcode_for(function);
 
-        fixture.publish_ir_body(&mut body)?;
+        fixture.materialise_lifted(&mut ir)?;
 
         let reader = fixture.reader();
         let snapshot = reader
-            .ir_artefact(function, IrLevel::PCode)?
-            .expect("PCode artefact should be visible to query reader");
+            .pcode(function)?
+            .expect("pcode should be visible to query reader");
 
         fixture.commit_function(Fixture::function_with_len(entry, 2))?;
 
-        assert!(reader.ir_artefact(function, IrLevel::PCode)?.is_none());
-        assert_eq!(snapshot.content_digest(), artefact.content_digest());
-        assert_eq!(snapshot.payload(), artefact.payload());
+        assert!(reader.pcode(function)?.is_none());
+        assert_eq!(snapshot.as_ref(), &ir);
 
         Ok(())
     }
 
     #[test]
-    fn test_query_reader_reads_typed_ir_body() -> Result<(), Box<dyn std::error::Error>> {
-        let mut fixture = Fixture::new()?;
-        let mut body = Fixture::pcode_body();
-
-        fixture.publish_ir_body(&mut body)?;
-
-        let read = fixture
-            .reader()
-            .ir_body::<PCodeBody>(FunctionId::default())?
-            .expect("PCode body should be visible to query reader");
-        let named = fixture
-            .reader()
-            .pcode_body(FunctionId::default())?
-            .expect("PCode body should be visible to named query reader");
-
-        assert_eq!(read.to_raw_artefact()?, body.to_raw_artefact()?);
-        assert_eq!(named.to_raw_artefact()?, body.to_raw_artefact()?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_query_reader_recovers_after_corrupt_ir_artefact()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn std::error::Error>> {
         let mut fixture = Fixture::new()?;
         let function = FunctionId::default();
-        let pcode = Fixture::pcode_body_for(function);
-        let llil = Fixture::llil_body(function, &pcode);
-        let ssa = Fixture::ssa_body(function, &llil);
-        let valid = [
-            pcode.to_raw_artefact()?,
-            llil.to_raw_artefact()?,
-            ssa.to_raw_artefact()?,
-        ];
+
+        let materialised = fixture.materialise_lifted_chain(function)?;
 
         let reader = fixture.reader();
-        for artefact in valid {
-            let level = artefact.header().level();
-            let mut header = ArtefactHeader::new(function, level, artefact.header().schema(), 0);
-            header.set_parent_digest(artefact.header().parent_digest());
-            let corrupt = RawIrArtefact::new(header, CommonBody::default(), vec![1, 2, 3]);
+        let pcode = reader
+            .pcode(function)?
+            .expect("pcode should be visible to query reader");
+        let ecode = reader
+            .ecode(function)?
+            .expect("ecode should be visible to query reader");
+        let ecode_ssa = reader
+            .ecode_ssa(function)?
+            .expect("ecode ssa should be visible to query reader");
 
-            fixture.insert_ir_artefact_direct(&corrupt)?;
-
-            assert!(matches!(
-                reader.ir_artefact(function, level),
-                Err(QueryError::Project(ProjectError::Il(
-                    IlError::ArtefactDecode { level: found }
-                ))) if found == level
-            ));
-
-            fixture.insert_ir_artefact_direct(&artefact)?;
-
-            let read = reader
-                .ir_artefact(function, level)?
-                .expect("valid artefact should be readable after corrupt artefact");
-
-            assert_eq!(read.content_digest(), artefact.content_digest());
-        }
-
+        assert_eq!(pcode.as_ref(), &materialised.pcode);
+        assert_eq!(ecode.as_ref(), &materialised.ecode);
+        assert_eq!(ecode_ssa.as_ref(), &materialised.ecode_ssa);
         Ok(())
     }
 
@@ -1087,26 +973,21 @@ mod test {
         let mut fixture = Fixture::new()?;
         let function = FunctionId::default();
 
-        fixture.publish_ssa_chain(function)?;
+        fixture.materialise_lifted_chain(function)?;
 
         let reader = fixture.reader();
-        let use_index = reader
-            .llil_ssa_use_index(function)?
-            .expect("SSA use index should be available");
-        let dominance = reader
-            .llil_ssa_dominance(function)?
-            .expect("SSA dominance should be available");
-        let frontiers = reader
-            .llil_ssa_dominance_frontiers(function)?
-            .expect("SSA dominance frontiers should be available");
-        let liveness = reader
-            .llil_ssa_liveness(function)?
-            .expect("SSA liveness should be available");
+        let ir = reader
+            .ecode_ssa(function)?
+            .expect("ssa ir should be available");
+        let uses = ir.uses();
+        let dominance = ir.dominance();
+        let frontiers = ir.dominance_frontiers();
+        let liveness = ir.liveness();
 
-        let value = ValueId::try_from_index(0)?;
-        let block = BlockId::try_from_index(0)?;
+        let value = IlValueId::try_from_index(0)?;
+        let block = IlBlockId::try_from_index(0)?;
 
-        assert!(use_index.uses_for(value).is_empty());
+        assert!(uses.uses_for(value).is_empty());
         assert!(!dominance.is_reachable(block));
         assert!(frontiers.frontier(block).is_empty());
         assert!(liveness.live_in(block).is_empty());
@@ -1249,11 +1130,11 @@ mod test {
         let fixture = Fixture::new()?;
         let reader = fixture.reader();
 
-        for index in 0..(QUERY_MEMO_CAPACITY as u64 * 2) {
+        for index in 0..(CFG_CACHE_CAPACITY as u64 * 2) {
             let _ = reader.flow_graph(Address::from(0x1_0000_0000u64 + index * 0x10))?;
         }
 
-        assert!(fixture.queries.cache.len() <= QUERY_MEMO_CAPACITY);
+        assert!(fixture.queries.cache.len() <= CFG_CACHE_CAPACITY);
         Ok(())
     }
 
@@ -1339,7 +1220,7 @@ mod test {
             [ChangeRecord::ReferenceAdded {
                 from,
                 target: ReferenceTarget::from(to),
-                kind: ReferenceKind::call(),
+                kind: ReferenceKind::Flow,
             }],
         ));
 

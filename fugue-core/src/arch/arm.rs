@@ -7,7 +7,6 @@ use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand,
 use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
 use crate::ir::{
     Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, RawAddress, Symbol,
 };
@@ -16,7 +15,7 @@ use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
-    LanguageLoader, Lifter, LiftingContext,
+    LanguageLoader, Lifter, LiftingContext, Varnode,
 };
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
