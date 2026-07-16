@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
 use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
-use crate::operand::{OperandFilter, Operands};
+use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::resolve::DecisionNode;
@@ -558,9 +558,10 @@ impl Language {
         address: u64,
         bytes: impl AsRef<[u8]>,
         context: &mut LiftingContext,
+        operand_context: &mut OperandsContext,
         operands: &mut Operands,
     ) -> Option<usize> {
-        entry::operands(address, bytes.as_ref(), context, operands)
+        entry::operands(address, bytes.as_ref(), context, operand_context, operands)
     }
 
     pub fn disassemble(

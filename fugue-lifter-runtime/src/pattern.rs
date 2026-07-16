@@ -2,8 +2,8 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
-use crate::language::LanguageData;
-use crate::operand::Operands;
+use crate::language::{Language, LanguageData};
+use crate::operand::{OperandPiece, Operands};
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
 
@@ -97,7 +97,7 @@ impl PatternExpression {
         }
     }
 
-    fn has_signed_terms(&self, data: &'static LanguageData) -> bool {
+    pub(crate) fn has_signed_terms(&self, data: &'static LanguageData) -> bool {
         self.operations(data).iter().any(|op| match op {
             PatternOp::TokenField { sign_bit, .. } | PatternOp::ContextField { sign_bit, .. } => {
                 *sign_bit
@@ -109,20 +109,19 @@ impl PatternExpression {
         })
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operand_pieces(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
-    ) {
+    ) -> Option<()> {
         unsafe {
-            let (value, range) = self
-                .resolve_with_range(data, state)
-                .expect("value previously resolved");
-            operands.push_with(value, range);
+            let data = language.data();
+            let (value, resolved) = self.resolve_with_range(data, state)?;
+            let signed = self.has_signed_terms(data);
+            operands.push_piece(OperandPiece::scalar(value, resolved.as_ref(), signed));
+            operands.merge_bits(resolved);
+            Some(())
         }
     }
 

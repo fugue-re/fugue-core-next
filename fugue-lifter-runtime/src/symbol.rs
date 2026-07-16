@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::input::FixedHandle;
-use crate::language::LanguageData;
-use crate::operand::{OperandValue, Operands};
+use crate::language::{Language, LanguageData};
+use crate::operand::{OperandPiece, Operands};
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
@@ -136,39 +136,44 @@ impl Symbol {
         }
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operand_pieces(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
-    ) {
+    ) -> Option<()> {
         unsafe {
+            let data = language.data();
             match self {
                 Self::Varnode {
                     name,
                     space,
                     offset,
-                    ..
+                    size,
                 } => {
-                    operands.push(OperandValue::from_varnode(data, name, *space, *offset));
+                    operands.push_piece(OperandPiece::from_varnode(
+                        language, name, *space, *offset, *size,
+                    ));
                 }
                 Self::Name {
                     pattern_value,
                     symbol_table,
+                } => {
+                    let (index, resolved) = pattern_value.resolve_with_range(data, state)?;
+                    if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
+                        operands.push_piece(OperandPiece::Text(name));
+                        operands.merge_bits(resolved);
+                    }
                 }
-                | Self::VarnodeList {
+                Self::VarnodeList {
                     pattern_value,
                     symbol_table,
                     ..
                 } => {
-                    let (index, range) = pattern_value
-                        .resolve_with_range(data, state)
-                        .expect("resolved");
+                    let (index, resolved) = pattern_value.resolve_with_range(data, state)?;
                     if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
-                        operands.push_with(name, range);
+                        operands.push_piece(OperandPiece::register(language, name));
+                        operands.merge_bits(resolved);
                     }
                 }
                 Self::VarnodeListFilled {
@@ -176,45 +181,45 @@ impl Symbol {
                     symbol_table,
                     ..
                 } => {
-                    let (index, range) = pattern_value
-                        .resolve_with_range(data, state)
-                        .expect("resolved");
+                    let (index, resolved) = pattern_value.resolve_with_range(data, state)?;
                     if let Some(name) = symbol_table.get(index as usize).copied() {
-                        operands.push_with(name, range);
+                        operands.push_piece(OperandPiece::register(language, name));
+                        operands.merge_bits(resolved);
                     }
                 }
                 Self::ValueMap {
                     pattern_value,
                     value_table,
                 } => {
-                    let (index, range) = pattern_value
-                        .resolve_with_range(data, state)
-                        .expect("resolved");
+                    let (index, resolved) = pattern_value.resolve_with_range(data, state)?;
                     if let Some(value) = value_table.get(index as usize).copied().flatten() {
-                        operands.push_with(value, range);
+                        let signed = pattern_value.has_signed_terms(data);
+                        operands.push_piece(OperandPiece::scalar(value, resolved.as_ref(), signed));
+                        operands.merge_bits(resolved);
                     }
                 }
                 Self::ValueMapFilled {
                     pattern_value,
                     value_table,
                 } => {
-                    let (index, range) = pattern_value
-                        .resolve_with_range(data, state)
-                        .expect("resolved");
-                    let value = *value_table.get(index as usize).expect("resolved");
-                    operands.push_with(value, range);
+                    let (index, resolved) = pattern_value.resolve_with_range(data, state)?;
+                    let value = value_table.get(index as usize).copied()?;
+                    let signed = pattern_value.has_signed_terms(data);
+                    operands.push_piece(OperandPiece::scalar(value, resolved.as_ref(), signed));
+                    operands.merge_bits(resolved);
                 }
                 Self::Start { .. } => {
-                    operands.push(state.address());
+                    operands.push_piece(OperandPiece::Address(state.address()));
                 }
                 Self::End { .. } => {
-                    operands.push(state.next_address());
+                    operands.push_piece(OperandPiece::Address(state.next_address()));
                 }
                 Self::Next2 { .. } => {
-                    operands.push(state.next2_address().expect("resolved"));
+                    operands.push_piece(OperandPiece::Address(state.next2_address()?));
                 }
                 what => unreachable!("this state should not be reachable: {what:?}"),
             }
+            Some(())
         }
     }
 
