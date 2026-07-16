@@ -7,7 +7,6 @@ use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand,
 use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
 use crate::ir::{
     Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, RawAddress, Symbol,
 };
@@ -16,7 +15,7 @@ use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
-    LanguageLoader, Lifter, LiftingContext,
+    LanguageLoader, Lifter, LiftingContext, Varnode,
 };
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
@@ -294,17 +293,17 @@ impl DisassemblerT for ArmDisassembler {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;
                 let properties = if self.should_lift(&insn) {
-                    InsnProperties::NEEDS_LIFTING
+                    InsnProperties::NEEDS_FLOW_RESOLUTION
                 } else {
                     let naddress = address + size;
                     context.set_variable_by_bits(self.t_mode, naddress.offset(), in_thumb);
                     InsnProperties::FALL
                 };
 
-                Insn::from_disassembly(address, size, properties)
+                Insn::from_disassembly(address, size, properties)?
             }
             Err(DecodeError::Incomplete) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));

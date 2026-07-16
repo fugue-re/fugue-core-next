@@ -20,10 +20,11 @@ use fugue_core::engine::{
     DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
     Trigger,
 };
+use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Endian, RawAddress, Reference, ReferenceKind,
-    ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Endian, FunctionId, RawAddress, Reference,
+    ReferenceProperties, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex,
+    SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::resolve_language;
 use fugue_core::loader::{
@@ -31,8 +32,11 @@ use fugue_core::loader::{
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
-use fugue_core::project::{Project, ProjectTransaction};
-use fugue_core::queries::{CallEdge, MappingRecord, QueryError, QueryPage, SymbolRecord};
+use fugue_core::project::{Project, ProjectError, ProjectTransaction};
+use fugue_core::queries::{
+    CallEdge, MappingRecord, QueryError, QueryPage, QueryReader, SymbolRecord,
+};
+use fugue_core::registry;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
 #[cfg(feature = "sqlite")]
@@ -289,7 +293,7 @@ impl Analyser for FailingTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -368,7 +372,7 @@ impl Analyser for PanickingTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -385,7 +389,7 @@ impl Analyser for PanickingTestAnalyser {
                 .checked_add(0x100u64)
                 .expect("torn reference target");
             transaction
-                .add_reference(Reference::new(address, target, ReferenceKind::read()))
+                .add_reference(Reference::data(address, target, ReferenceProperties::READ))
                 .expect("torn reference asserted");
         }
         panic!("test analyser panic");
@@ -412,7 +416,7 @@ impl Analyser for CompletionTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
@@ -470,7 +474,7 @@ impl Analyser for PanickingCompletionTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
@@ -514,7 +518,7 @@ impl Analyser for DerivedSymbolAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -556,7 +560,7 @@ impl Analyser for StormTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -598,7 +602,7 @@ impl Analyser for CancellingTestAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -643,7 +647,7 @@ impl Analyser for CancellationFollowUpAnalyser {
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        regions: &fugue_core::ir::AddressRangeSet,
+        regions: &AddressRangeSet,
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
@@ -718,43 +722,43 @@ fn configure_chunked_recovery(
     Ok(())
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("error-test", build_error_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("mutating-error", build_mutating_error_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("panicking-test", build_panicking_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("completion-test", build_completion_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("completion-panic-test", build_completion_panic_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("derived-symbol", build_derived_symbol_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("storm-test", build_storm_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("cancelling-test", build_cancelling_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     AnalyserProvider::new("cancellation-follow-up", build_cancellation_follow_up_analyser)
 }
 
-fugue_core::registry::submit! {
+registry::submit! {
     FunctionRecoveryExtension::new("test-chunked-recovery", configure_chunked_recovery)
 }
 
@@ -769,11 +773,19 @@ fn trigger_test_analyser(
     engine: &AnalysisEngine,
     address: Address,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    let mut regions = AddressRangeSet::new();
     regions.insert(address);
     engine.schedule_ranges(Trigger::BytesWritten, regions)?;
     engine.wait_until_idle()?;
     Ok(())
+}
+
+fn function_id_at(reader: &QueryReader, entry: Address) -> Result<Option<FunctionId>, QueryError> {
+    Ok(reader
+        .project()?
+        .functions()
+        .get_by_address(entry)
+        .map(|function| function.id()))
 }
 
 fn symbol_exists(
@@ -1065,7 +1077,7 @@ fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::
     unchunked.analyse_transaction(&mut transaction)?;
     transaction.commit()?;
 
-    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    let mut regions = AddressRangeSet::new();
     if let Some(entry) = chunked_project.entry() {
         regions.insert(entry);
     }
@@ -1084,7 +1096,7 @@ fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::
             break;
         }
 
-        regions = fugue_core::ir::AddressRangeSet::new();
+        regions = AddressRangeSet::new();
     }
 
     let unchunked_functions = unchunked_project
@@ -1346,7 +1358,7 @@ fn test_function_recovery_cancel_before_seeding_leaves_project_unchanged()
 }
 
 #[test]
-fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let address = project
@@ -1380,7 +1392,186 @@ fn test_engine_write_bytes_publishes_change() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_engine_partial_write_rolls_back_without_publishing()
+fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dyn std::error::Error>>
+{
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let mut partial = PartialFunction::new(entry);
+    partial.push_block(PartialCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(partial)?;
+    engine.wait_until_idle()?;
+    let function = {
+        let reader = engine.query_reader()?;
+        function_id_at(&reader, entry)?
+            .ok_or_else(|| io::Error::other("function ID missing after add"))?
+    };
+
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+
+    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+        assert!(
+            ensured
+                .records()
+                .contains(&ChangeRecord::LiftedMaterialised { function, level })
+        );
+    }
+
+    let reader = engine.query_reader()?;
+    assert!(reader.ecode(function)?.is_some());
+    let ssa = reader
+        .ecode_ssa(function)?
+        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
+    assert_eq!(ssa.header().function(), function);
+
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    assert!(ensured.records().is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_ensure_lifted_cancelled_rolls_back_without_materialising()
+-> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let mut partial = PartialFunction::new(entry);
+    partial.push_block(PartialCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(partial)?;
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let function = function_id_at(&reader, entry)?
+        .ok_or_else(|| io::Error::other("function ID missing after add"))?;
+    let revision = reader.revision()?;
+
+    let cancellation = engine.cancellation_token();
+    cancellation.cancel();
+
+    assert!(matches!(
+        engine.ensure_lifted(function, IlLevel::ECodeSsa),
+        Err(EngineError::Project(ProjectError::Il(IlError::Cancelled)))
+    ));
+
+    let reader = engine.query_reader()?;
+    assert_eq!(reader.revision()?, revision);
+    let snapshot = reader.project()?;
+    assert!(snapshot.pcode(function)?.is_none());
+    assert!(snapshot.ecode(function)?.is_none());
+    assert!(snapshot.ecode_ssa(function)?.is_none());
+    drop(snapshot);
+
+    cancellation.clear();
+    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    assert!(
+        ensured
+            .records()
+            .contains(&ChangeRecord::LiftedMaterialised {
+                function,
+                level: IlLevel::PCode,
+            })
+    );
+    assert!(engine.query_reader()?.ecode_ssa(function)?.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let mut partial = PartialFunction::new(entry);
+    partial.push_block(PartialCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(partial)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let function = function_id_at(&reader, entry)?
+        .ok_or_else(|| io::Error::other("function ID missing after add"))?;
+
+    assert!(reader.project()?.pcode(function)?.is_none());
+
+    assert!(reader.pcode(function)?.is_some());
+    assert!(reader.project()?.pcode(function)?.is_some());
+
+    assert!(reader.ecode_ssa(function)?.is_some());
+    assert!(reader.project()?.ecode(function)?.is_some());
+    assert!(reader.project()?.ecode_ssa(function)?.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let mut partial = PartialFunction::new(entry);
+    partial.push_block(PartialCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(partial)?;
+    engine.wait_until_idle()?;
+    let function = {
+        let reader = engine.query_reader()?;
+        function_id_at(&reader, entry)?
+            .ok_or_else(|| io::Error::other("function ID missing after add"))?
+    };
+
+    engine.ensure_lifted(function, IlLevel::PCode)?;
+    engine.flush_derived_references(function)?;
+    let changes = engine.flush_derived_references(function)?;
+    assert!(
+        !changes
+            .records()
+            .iter()
+            .any(|record| matches!(record, ChangeRecord::ReferencesChanged { .. }))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_partial_write_rolls_back_without_materialising()
 -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1403,7 +1594,7 @@ fn test_engine_partial_write_rolls_back_without_publishing()
 }
 
 #[test]
-fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1458,7 +1649,7 @@ fn test_engine_symbol_edits_publish_changes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_engine_symbol_replacement_publishes_removed_and_added()
+fn test_engine_symbol_replacement_materialises_removed_and_added()
 -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1636,7 +1827,7 @@ fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_engine_mapping_edits_publish_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let view = project
@@ -2053,6 +2244,72 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine-il-artefacts.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
+
+    engine.wait_until_idle()?;
+    let mut function = PartialFunction::new(entry);
+    function.push_block(PartialCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        Default::default(),
+    ));
+    engine.add_function(function)?;
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let function = function_id_at(&reader, entry)?
+        .ok_or_else(|| io::Error::other("function ID missing after add"))?;
+
+    engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    let pcode = reader
+        .pcode(function)?
+        .ok_or_else(|| io::Error::other("PCode IR missing after ensure_lifted"))?;
+    let ecode = reader
+        .ecode(function)?
+        .ok_or_else(|| io::Error::other("LIR missing after ensure_lifted"))?;
+    let ssa = reader
+        .ecode_ssa(function)?
+        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
+    let revision = reader.revision()?;
+
+    engine.save()?;
+    drop(reader);
+    drop(engine);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.revision(), revision);
+
+    let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
+    let reader = engine.query_reader()?;
+    let function = function_id_at(&reader, entry)?
+        .ok_or_else(|| io::Error::other("reopened function ID missing"))?;
+
+    let snapshot = reader.project()?;
+    assert_eq!(snapshot.pcode(function)?.as_ref(), Some(&*pcode));
+    assert_eq!(snapshot.ecode(function)?.as_ref(), Some(&*ecode));
+    assert_eq!(snapshot.ecode_ssa(function)?.as_ref(), Some(&*ssa));
+
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn std::error::Error>>
 {
     let directory = tempfile::tempdir()?;
@@ -2160,7 +2417,7 @@ fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn std::error::Error>> 
     let engine = AnalysisEngine::new(project)?;
 
     engine.wait_until_idle()?;
-    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    let mut regions = AddressRangeSet::new();
     regions.insert(address);
     engine.schedule_ranges(Trigger::BytesWritten, regions)?;
 
@@ -2207,7 +2464,7 @@ fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn s
     let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnIdle)?;
 
     engine.wait_until_idle()?;
-    let mut regions = fugue_core::ir::AddressRangeSet::new();
+    let mut regions = AddressRangeSet::new();
     regions.insert(entry);
     engine.schedule_ranges(Trigger::BytesWritten, regions)?;
 
@@ -2361,12 +2618,12 @@ fn run_storm_analyser_scenario(
                 .raw_address()
                 .checked_add(RawAddress::from(offset))
                 .ok_or_else(|| io::Error::other("fixture entry cannot form storm range"))?;
-            let mut regions = fugue_core::ir::AddressRangeSet::new();
+            let mut regions = AddressRangeSet::new();
             regions.insert_raw_range(entry.space(), entry.raw_address()..=end);
             engine.schedule_ranges(Trigger::BytesWritten, regions)?;
         }
     } else {
-        let mut regions = fugue_core::ir::AddressRangeSet::new();
+        let mut regions = AddressRangeSet::new();
         regions.insert(entry);
         engine.schedule_ranges(Trigger::BytesWritten, regions)?;
     }
@@ -2403,7 +2660,7 @@ fn test_engine_storm_regions_coalesce_to_single_analyser_task()
 }
 
 #[test]
-fn test_analyser_error_rolls_back_without_publishing_records()
+fn test_analyser_error_rolls_back_without_materialising_records()
 -> Result<(), Box<dyn std::error::Error>> {
     let project = project_with_test_analyser("mutating-error")?;
     let address = project
@@ -2788,7 +3045,7 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
         .collect::<Result<Vec<_>, _>>()?;
     let call_reference = incoming
         .iter()
-        .find(|reference| reference.kind().is_call())
+        .find(|reference| reference.is_call())
         .ok_or_else(|| io::Error::other("no incoming call reference at callee"))?;
     assert!(call_reference.origin().is_derived());
     assert_eq!(call_reference.target().address(), Some(callee));
@@ -2796,9 +3053,11 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
     let outgoing = reader
         .outgoing_references(call_reference.from())
         .collect::<Result<Vec<_>, _>>()?;
-    assert!(outgoing.iter().any(
-        |reference| reference.target().address() == Some(callee) && reference.kind().is_call()
-    ));
+    assert!(
+        outgoing
+            .iter()
+            .any(|reference| reference.target().address() == Some(callee) && reference.is_call())
+    );
 
     Ok(())
 }
@@ -2814,7 +3073,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     engine.wait_until_idle()?;
 
     let to = entry + 0x40u64;
-    let changes = engine.add_reference(Reference::new(entry, to, ReferenceKind::read()))?;
+    let changes = engine.add_reference(Reference::data(entry, to, ReferenceProperties::READ))?;
     assert!(changes.contains(ChangeKinds::REFERENCE_ADDED));
 
     let outgoing = engine
@@ -2825,10 +3084,10 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
         .iter()
         .find(|reference| reference.target().address() == Some(to))
         .ok_or_else(|| io::Error::other("asserted reference missing"))?;
-    assert!(asserted.kind().is_read());
+    assert!(asserted.is_read());
     assert!(asserted.origin().is_asserted());
 
-    engine.add_reference(Reference::new(entry, to, ReferenceKind::write()))?;
+    engine.add_reference(Reference::data(entry, to, ReferenceProperties::WRITE))?;
     let merged = engine
         .query_reader()?
         .references_to(to, None, 64)?
@@ -2837,8 +3096,8 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
         .copied()
         .find(|reference| reference.from() == entry)
         .ok_or_else(|| io::Error::other("merged reference missing"))?;
-    assert!(merged.kind().is_read());
-    assert!(merged.kind().is_write());
+    assert!(merged.is_read());
+    assert!(merged.is_write());
 
     engine.remove_reference(entry, ReferenceTarget::from(to))?;
     let after = engine

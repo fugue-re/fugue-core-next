@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Display, Formatter};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
@@ -17,6 +17,7 @@ use self::change::{
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
+use crate::il::common::{IlError, IlLevel};
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
     SymbolEntry, SymbolIndex,
@@ -100,7 +101,7 @@ impl Default for Priority {
 }
 
 impl Display for Priority {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.0, f)
     }
 }
@@ -144,7 +145,6 @@ pub trait Analyser: Send {
 
     fn can_analyse(&self, project: &Project) -> bool;
 
-    /// Return recoverable failures as `Err`; panics are fatal and terminate the engine.
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
@@ -152,7 +152,6 @@ pub trait Analyser: Send {
         cx: &AnalysisCx,
     ) -> Result<(), AnalysisError>;
 
-    /// Return recoverable failures as `Err`; panics are fatal and terminate the engine.
     fn analysis_ended(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
@@ -806,7 +805,7 @@ impl ProjectUpdate {
     }
 }
 
-enum Intake {
+pub(crate) enum Intake {
     Cancel,
     CreateMapping {
         builder: SegmentMappingBuilder,
@@ -816,6 +815,15 @@ enum Intake {
     Direct {
         regions: AddressRangeSet,
         trigger: Trigger,
+    },
+    EnsureLifted {
+        function: FunctionId,
+        level: IlLevel,
+        reply: Sender<Result<ChangeSet, EngineError>>,
+    },
+    FlushDerivedReferences {
+        function: FunctionId,
+        reply: Sender<Result<ChangeSet, EngineError>>,
     },
     Update {
         update: ProjectUpdate,
@@ -865,7 +873,7 @@ struct AnalyserState {
     triggers: &'static [Trigger],
 }
 
-struct Subscriber {
+pub(crate) struct Subscriber {
     rx: Receiver<Arc<ChangeSet>>,
     tx: Sender<Arc<ChangeSet>>,
     filter: ChangeFilter,
@@ -876,7 +884,7 @@ impl Subscriber {
         Self { rx, tx, filter }
     }
 
-    fn publish(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
+    fn materialise(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
         let scoped = match changes.scoped_to(&self.filter) {
             Some(scoped) => Arc::new(scoped),
             None => return true,
@@ -1053,7 +1061,7 @@ impl AnalysisEngine {
         let progress = Progress::default();
         let project = Arc::new(RwLock::new(project));
         let queries = QueryEngine::new(project.clone());
-        let query_reader = queries.reader();
+        let query_reader = queries.reader().with_intake(tx.clone());
         let worker_cancellation = cancellation.clone();
         let worker_messages = messages.clone();
         let worker_poison = poison.clone();
@@ -1270,6 +1278,39 @@ impl AnalysisEngine {
         update: MappingMetadataUpdate,
     ) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::update_mapping_metadata(update))
+    }
+
+    pub fn ensure_lifted(
+        &self,
+        function: FunctionId,
+        level: IlLevel,
+    ) -> Result<ChangeSet, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::EnsureLifted {
+                function,
+                level,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        reply_rx.recv().map_err(|_| EngineError::Stopped)?
+    }
+
+    pub fn flush_derived_references(&self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::FlushDerivedReferences {
+                function,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        reply_rx.recv().map_err(|_| EngineError::Stopped)?
     }
 
     pub fn wait_until_idle(&self) -> Result<(), EngineError> {
@@ -1533,6 +1574,12 @@ impl Worker {
                 Ok(Intake::Update { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
+                Ok(Intake::EnsureLifted { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
+                Ok(Intake::FlushDerivedReferences { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
                 Ok(Intake::Flush(reply)) | Ok(Intake::Save(reply)) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
@@ -1601,6 +1648,22 @@ impl Worker {
                             }
                         }
                     }
+                }
+                Intake::EnsureLifted {
+                    function,
+                    level,
+                    reply,
+                } => {
+                    let result = self
+                        .drain_or_handle_cancelled()
+                        .and_then(|()| self.ensure_lifted(function, level));
+                    let _ = reply.send(result);
+                }
+                Intake::FlushDerivedReferences { function, reply } => {
+                    let result = self
+                        .drain_or_handle_cancelled()
+                        .and_then(|()| self.flush_derived_references(function));
+                    let _ = reply.send(result);
                 }
                 Intake::Update { update, reply } => {
                     let result = self
@@ -1794,7 +1857,9 @@ impl Worker {
             }
             ChangeRecord::ReferenceAdded { .. }
             | ChangeRecord::ReferenceRemoved { .. }
-            | ChangeRecord::ReferencesChanged { .. } => {}
+            | ChangeRecord::ReferencesChanged { .. }
+            | ChangeRecord::LiftedMaterialised { .. }
+            | ChangeRecord::LiftedRemoved { .. } => {}
         }
     }
 
@@ -2002,6 +2067,84 @@ impl Worker {
         }
     }
 
+    fn ensure_lifted(
+        &mut self,
+        function: FunctionId,
+        level: IlLevel,
+    ) -> Result<ChangeSet, EngineError> {
+        let query_write = self.queries.write_guard();
+        let project_lock = self.project.clone();
+        let mut project = project_lock.write();
+        let mut transaction = project.transaction(ChangeSource::agent("ensure IR"));
+        let cancellation = self.cancellation.child();
+        let result = transaction.ensure_lifted(function, level, &cancellation);
+
+        match result {
+            Ok(_) => {
+                let changes = transaction.commit()?;
+                let present = match level {
+                    IlLevel::PCode => project.pcode(function)?.is_some(),
+                    IlLevel::ECode => project.ecode(function)?.is_some(),
+                    IlLevel::ECodeSsa => project.ecode_ssa(function)?.is_some(),
+                };
+
+                if !present {
+                    return Err(
+                        ProjectError::from(IlError::missing_artefact(function, level)).into(),
+                    );
+                }
+
+                if !changes.is_empty() {
+                    self.begin_publish(&changes);
+                }
+                drop(project);
+                drop(query_write);
+
+                if !changes.is_empty() {
+                    self.finish_publish(changes.clone())?;
+                }
+
+                Ok(changes)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(self.poison_and_stop(rollback_error.to_string()));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    fn flush_derived_references(&mut self, function: FunctionId) -> Result<ChangeSet, EngineError> {
+        let query_write = self.queries.write_guard();
+        let project_lock = self.project.clone();
+        let mut project = project_lock.write();
+        let mut transaction = project.transaction(ChangeSource::agent("flush IR references"));
+
+        match transaction.flush_derived_references(function) {
+            Ok(_) => {
+                let changes = transaction.commit()?;
+                if !changes.is_empty() {
+                    self.begin_publish(&changes);
+                }
+                drop(project);
+                drop(query_write);
+
+                if !changes.is_empty() {
+                    self.finish_publish(changes.clone())?;
+                }
+
+                Ok(changes)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    return Err(self.poison_and_stop(rollback_error.to_string()));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
     fn create_mapping_from_builder(
         &mut self,
         builder: SegmentMappingBuilder,
@@ -2085,7 +2228,7 @@ impl Worker {
         );
         let changes = Arc::new(changes);
         self.subscribers
-            .retain(|subscriber| subscriber.publish(&changes, &resync));
+            .retain(|subscriber| subscriber.materialise(&changes, &resync));
         self.route_changes(&changes);
         if self.persistence_policy == PersistencePolicy::OnCommit {
             self.persist_dirty()?;
@@ -2144,7 +2287,7 @@ impl Worker {
                 ChangeSet::with_records(revision, [ChangeRecord::Restored { to: revision }])
                     .attributed_to(ChangeSource::engine("restore")),
             );
-            if !subscriber.publish(&restored, &restored) {
+            if !subscriber.materialise(&restored, &restored) {
                 return;
             }
         }
@@ -2262,8 +2405,8 @@ mod test {
             }],
         ));
 
-        assert!(subscriber.publish(&first, &resync));
-        assert!(subscriber.publish(&second, &resync));
+        assert!(subscriber.materialise(&first, &resync));
+        assert!(subscriber.materialise(&second, &resync));
 
         let delivered = rx.try_recv()?;
         assert_eq!(&*delivered, &*resync);

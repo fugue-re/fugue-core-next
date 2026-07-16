@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::num::TryFromIntError;
 use std::ops::{Range, RangeInclusive};
 use std::path::Path;
@@ -50,7 +50,7 @@ impl SegmentStorageProviderId {
 }
 
 impl Display for SegmentStorageProviderId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -71,7 +71,7 @@ pub struct SegmentStorageDescriptor {
 }
 
 impl Debug for SegmentStorageDescriptor {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("SegmentStorageDescriptor")
             .field("id", &self.id)
             .field("permissions", &self.permissions)

@@ -6,13 +6,12 @@ use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, Flag};
-use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
-    LiftingContext,
+    LiftingContext, Varnode,
 };
 
 #[derive(Clone)]
@@ -247,14 +246,14 @@ impl DisassemblerT for X86_64Disassembler {
                     address,
                     size,
                     if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
+                        InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
                         InsnProperties::FALL
                     },
-                )
+                )?
             }
             Err(DecodeError::IncompleteDecoder) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));

@@ -1,17 +1,24 @@
 use std::collections::VecDeque;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RwLock};
+use flume::Sender;
+use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
+use crate::engine::{EngineError, Intake};
+use crate::il::common::{IlError, IlLevel};
+use crate::il::ecode::ECodeIr;
+use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowGraph;
 use crate::ir::{
-    Address, AddressRangeSet, RawAddress, Reference, ReferenceTarget, SegmentProperties, Symbol,
-    SymbolEntry, SymbolProperties,
+    Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
+    SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
 };
-use crate::project::Project;
+use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -51,11 +58,33 @@ impl<T> QueryPage<T> {
     }
 }
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum QueryError {
+    #[error(transparent)]
+    Engine(Box<EngineError>),
+    #[error(transparent)]
+    Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
 }
+
+impl From<EngineError> for QueryError {
+    fn from(error: EngineError) -> Self {
+        match error {
+            EngineError::Stopped => Self::Stopped,
+            EngineError::Project(error) => Self::Project(error),
+            error => Self::Engine(Box::new(error)),
+        }
+    }
+}
+
+impl PartialEq for QueryError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Stopped, Self::Stopped))
+    }
+}
+
+impl Eq for QueryError {}
 
 const WALK_PAGE_LEN: usize = 256;
 
@@ -247,6 +276,7 @@ pub struct QueryReader {
     project: Arc<RwLock<Project>>,
     cache: Arc<QueryCache>,
     changes: Arc<RwLock<ChangeIndex>>,
+    intake: Option<Sender<Intake>>,
 }
 
 impl QueryReader {
@@ -263,7 +293,13 @@ impl QueryReader {
             project,
             cache,
             changes,
+            intake: None,
         }
+    }
+
+    pub(crate) fn with_intake(mut self, intake: Sender<Intake>) -> Self {
+        self.intake = Some(intake);
+        self
     }
 
     pub fn revision(&self) -> Result<Revision, QueryError> {
@@ -305,6 +341,113 @@ impl QueryReader {
 
         self.cache.insert(entry, graph.clone());
         Ok(graph)
+    }
+
+    pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
+        if let Some(cached) = self.cached_pcode(function)? {
+            return Ok(Some(cached));
+        }
+
+        if !self.ensure_lifted(function, IlLevel::PCode)? {
+            return Ok(None);
+        }
+
+        self.cached_pcode(function)
+    }
+
+    fn cached_pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.pcode(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().pcode(function)? }.map(Arc::new);
+        self.cache.insert_pcode(function, ir.clone());
+        Ok(ir)
+    }
+
+    pub fn ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
+        if let Some(cached) = self.cached_ecode(function)? {
+            return Ok(Some(cached));
+        }
+
+        if !self.ensure_lifted(function, IlLevel::ECode)? {
+            return Ok(None);
+        }
+
+        self.cached_ecode(function)
+    }
+
+    fn cached_ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.ecode(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().ecode(function)? }.map(Arc::new);
+        self.cache.insert_ecode(function, ir.clone());
+        Ok(ir)
+    }
+
+    pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
+        if let Some(cached) = self.cached_ecode_ssa(function)? {
+            return Ok(Some(cached));
+        }
+
+        if !self.ensure_lifted(function, IlLevel::ECodeSsa)? {
+            return Ok(None);
+        }
+
+        self.cached_ecode_ssa(function)
+    }
+
+    fn cached_ecode_ssa(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+
+        if let Some(cached) = self.cache.ecode_ssa(function) {
+            return Ok(cached);
+        }
+
+        let ir = { self.project.read().ecode_ssa(function)? }.map(Arc::new);
+        self.cache.insert_ecode_ssa(function, ir.clone());
+        Ok(ir)
+    }
+
+    fn ensure_lifted(&self, function: FunctionId, level: IlLevel) -> Result<bool, QueryError> {
+        let Some(intake) = &self.intake else {
+            return Ok(false);
+        };
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        intake
+            .send(Intake::EnsureLifted {
+                function,
+                level,
+                reply: reply_tx,
+            })
+            .map_err(|_| QueryError::Stopped)?;
+
+        match reply_rx.recv().map_err(|_| QueryError::Stopped)? {
+            Ok(_) => Ok(true),
+            Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
+                Ok(false)
+            }
+            Err(error) => Err(QueryError::from(error)),
+        }
+    }
+
+    pub fn project(&self) -> Result<ProjectHandle, QueryError> {
+        let gate = self.enter_query()?;
+
+        Ok(ProjectHandle {
+            project: self.project.read_arc(),
+            _gate: gate,
+        })
     }
 
     pub fn call_edges(
@@ -450,13 +593,26 @@ impl QueryReader {
         Ok(query(ProjectRead::new(&project)))
     }
 
-    fn enter_query(&self) -> Result<ArcRwLockReadGuard<parking_lot::RawRwLock, ()>, QueryError> {
+    fn enter_query(&self) -> Result<ArcRwLockReadGuard<RawRwLock, ()>, QueryError> {
         let guard = self.gate.read_arc();
         if self.active.load(Ordering::Acquire) {
             Ok(guard)
         } else {
             Err(QueryError::Stopped)
         }
+    }
+}
+
+pub struct ProjectHandle {
+    project: ArcRwLockReadGuard<RawRwLock, Project>,
+    _gate: ArcRwLockReadGuard<RawRwLock, ()>,
+}
+
+impl Deref for ProjectHandle {
+    type Target = Project;
+
+    fn deref(&self) -> &Project {
+        &self.project
     }
 }
 
@@ -501,9 +657,19 @@ impl QueryEngine {
             match record {
                 ChangeRecord::FunctionAdded { entry, .. }
                 | ChangeRecord::FunctionChanged { entry, .. }
-                | ChangeRecord::FunctionRemoved { entry, .. } => self.cache.evict(*entry),
+                | ChangeRecord::FunctionRemoved { entry, .. } => {
+                    self.cache.evict(*entry);
+                }
+                ChangeRecord::LiftedMaterialised { function, level }
+                | ChangeRecord::LiftedRemoved { function, level } => {
+                    self.cache.evict_lifted(*function, *level);
+                }
                 ChangeRecord::Restored { .. } => self.cache.clear(),
                 _ => {}
+            }
+
+            if record.affects_lifted_inputs() {
+                self.cache.clear_lifted();
             }
         }
     }
@@ -519,7 +685,7 @@ impl Drop for QueryEngine {
     }
 }
 
-pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<parking_lot::RawRwLock, ()>;
+pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<RawRwLock, ()>;
 
 #[cfg(test)]
 mod test {
@@ -528,18 +694,22 @@ mod test {
 
     use parking_lot::RwLock;
 
-    use super::{Cached, Dependency, QueryEngine, QueryPage, QueryReader};
+    use super::*;
+    use crate::analysis::control::CancellationToken;
     use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
-    use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
-    use crate::ir::{
-        Address, AddressRange, AddressRangeSet, RawAddress, ReferenceKind, ReferenceTarget,
+    use crate::engine::change::FunctionChangeKind;
+    use crate::il::common::{
+        IlArtefact, IlBlockId, IlGraph, IlHeader, IlIndexRange, IlSourceSpan, IlValueId,
     };
+    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
+    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
+    use crate::il::storage::IlRevert;
+    use crate::ir::{AddressRange, ReferenceKind};
     use crate::loader::Loader;
-    use crate::project::Project;
-    use crate::queries::cache::QUERY_MEMO_CAPACITY;
+    use crate::project::ProjectTransaction;
+    use crate::queries::cache::CFG_CACHE_CAPACITY;
     use crate::queries::index::{CENSUS_INTERVAL, ChangeIndex, MAX_CHANGE_RUNS};
-    use crate::storage::segments::mapping::SegmentMappingId;
-    use crate::storage::segments::space::AddressSpaceId;
 
     #[test]
     fn test_query_page_exposes_entries_and_next_cursor() {
@@ -547,6 +717,12 @@ mod test {
 
         assert_eq!(page.entries(), &[1, 2, 3]);
         assert_eq!(page.next_cursor(), Some(&3));
+    }
+
+    struct PublishedIl {
+        pcode: PCodeIr,
+        ecode: ECodeIr,
+        ecode_ssa: ECodeSsaIr,
     }
 
     struct Fixture {
@@ -570,29 +746,51 @@ mod test {
             self.project.read().revision().next()
         }
 
+        fn commit_with<T>(
+            &mut self,
+            mutate: impl FnOnce(&mut ProjectTransaction<'_>) -> Result<T, ProjectError>,
+        ) -> Result<T, Box<dyn std::error::Error>> {
+            let (changes, value) = {
+                let mut project = self.project.write();
+                let mut transaction = project.transaction("query fixture");
+                let value = match mutate(&mut transaction) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        transaction.rollback()?;
+                        return Err(error.into());
+                    }
+                };
+                (transaction.commit()?, value)
+            };
+            self.queries.apply_changes(&changes);
+            Ok(value)
+        }
+
         fn commit_function(
             &mut self,
             function: PartialFunction,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let changes = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                transaction.add_function(function)?;
-                transaction.commit()?
-            };
-            self.queries.apply_changes(&changes);
-            Ok(())
+            self.commit_function_with_id(function).map(drop)
+        }
+
+        fn commit_function_with_id(
+            &mut self,
+            function: PartialFunction,
+        ) -> Result<FunctionId, Box<dyn std::error::Error>> {
+            self.commit_with(|transaction| transaction.add_function(function))
         }
 
         fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn std::error::Error>> {
-            let changes = {
-                let mut project = self.project.write();
-                let mut transaction = project.transaction("query fixture");
-                transaction.remove_function(entry)?;
-                transaction.commit()?
-            };
-            self.queries.apply_changes(&changes);
-            Ok(())
+            self.commit_with(|transaction| transaction.remove_function(entry))
+                .map(drop)
+        }
+
+        fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn std::error::Error>>
+        where
+            T: IlArtefact,
+            IlRevert: From<(FunctionId, Option<T>)>,
+        {
+            self.commit_with(|transaction| transaction.materialise_lifted(ir))
         }
 
         fn apply(&mut self, changes: &ChangeSet) {
@@ -613,6 +811,188 @@ mod test {
             ));
             function
         }
+
+        fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
+            let mut builder = PCodeBuilder::new(
+                self.project.read().language(),
+                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            );
+
+            builder.replace_source_spans(vec![IlSourceSpan::new(
+                IlIndexRange::EMPTY,
+                Address::new(AddressSpaceId::new(1), u64::from(tag)),
+                u32::from(tag),
+                count,
+            )]);
+
+            builder
+                .build(&CancellationToken::default())
+                .expect("test pcode ir should build")
+        }
+
+        fn pcode_for(&self, function: FunctionId) -> PCodeIr {
+            PCodeBuilder::new(
+                self.project.read().language(),
+                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty pcode ir should build")
+        }
+
+        fn ecode_for(function: FunctionId) -> ECodeIr {
+            ECodeBuilder::new(
+                IlHeader::new(function, ECODE_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty ecode ir should build")
+        }
+
+        fn ecode_ssa_for(function: FunctionId) -> ECodeSsaIr {
+            ECodeSsaBuilder::new(
+                IlHeader::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
+                IlGraph::default(),
+            )
+            .build(&CancellationToken::default())
+            .expect("empty ecode ssa ir should build")
+        }
+
+        fn materialise_lifted_chain(
+            &mut self,
+            function: FunctionId,
+        ) -> Result<PublishedIl, Box<dyn std::error::Error>> {
+            let mut pcode = self.pcode_for(function);
+            let mut ecode = Self::ecode_for(function);
+            let mut ecode_ssa = Self::ecode_ssa_for(function);
+
+            self.materialise_lifted(&mut pcode)?;
+            self.materialise_lifted(&mut ecode)?;
+            self.materialise_lifted(&mut ecode_ssa)?;
+
+            Ok(PublishedIl {
+                pcode,
+                ecode,
+                ecode_ssa,
+            })
+        }
+    }
+
+    #[test]
+    fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let mut ir = fixture.pcode_with_span(FunctionId::default(), 7, 3);
+
+        fixture.materialise_lifted(&mut ir)?;
+
+        let read = fixture
+            .reader()
+            .pcode(FunctionId::default())?
+            .expect("pcode should be visible to query reader");
+
+        assert_eq!(read.source_spans(), ir.source_spans());
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_memoises_lifted_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let entry = Address::from(0x1_0000_0000u64);
+        let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
+        let mut ir = fixture.pcode_for(function);
+        fixture.materialise_lifted(&mut ir)?;
+        fixture.queries.cache.clear_lifted();
+
+        let reader = fixture.reader();
+        assert_eq!(fixture.queries.cache.lifted_len(), 0);
+
+        reader.pcode(function)?.expect("pcode should be visible");
+        assert_eq!(fixture.queries.cache.lifted_len(), 1);
+
+        reader
+            .pcode(function)?
+            .expect("cached pcode should be visible");
+        assert_eq!(fixture.queries.cache.lifted_len(), 1);
+
+        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+        assert_eq!(fixture.queries.cache.lifted_len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_lifted_snapshot_survives_invalidation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let entry = Address::from(0x1_0000_0000u64);
+        let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
+        let mut ir = fixture.pcode_for(function);
+
+        fixture.materialise_lifted(&mut ir)?;
+
+        let reader = fixture.reader();
+        let snapshot = reader
+            .pcode(function)?
+            .expect("pcode should be visible to query reader");
+
+        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+
+        assert!(reader.pcode(function)?.is_none());
+        assert_eq!(snapshot.as_ref(), &ir);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let function = FunctionId::default();
+
+        let materialised = fixture.materialise_lifted_chain(function)?;
+
+        let reader = fixture.reader();
+        let pcode = reader
+            .pcode(function)?
+            .expect("pcode should be visible to query reader");
+        let ecode = reader
+            .ecode(function)?
+            .expect("ecode should be visible to query reader");
+        let ecode_ssa = reader
+            .ecode_ssa(function)?
+            .expect("ecode ssa should be visible to query reader");
+
+        assert_eq!(pcode.as_ref(), &materialised.pcode);
+        assert_eq!(ecode.as_ref(), &materialised.ecode);
+        assert_eq!(ecode_ssa.as_ref(), &materialised.ecode_ssa);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = Fixture::new()?;
+        let function = FunctionId::default();
+
+        fixture.materialise_lifted_chain(function)?;
+
+        let reader = fixture.reader();
+        let ir = reader
+            .ecode_ssa(function)?
+            .expect("ssa ir should be available");
+        let uses = ir.uses();
+        let dominance = ir.dominance();
+        let frontiers = ir.dominance_frontiers();
+        let liveness = ir.liveness();
+
+        let value = IlValueId::try_from_index(0)?;
+        let block = IlBlockId::try_from_index(0)?;
+
+        assert!(uses.uses_for(value).is_empty());
+        assert!(!dominance.is_reachable(block));
+        assert!(frontiers.frontier(block).is_empty());
+        assert!(liveness.live_in(block).is_empty());
+        assert!(liveness.live_out(block).is_empty());
+        Ok(())
     }
 
     #[test]
@@ -750,12 +1130,11 @@ mod test {
         let fixture = Fixture::new()?;
         let reader = fixture.reader();
 
-        for index in 0..(QUERY_MEMO_CAPACITY as u64 * 2) {
+        for index in 0..(CFG_CACHE_CAPACITY as u64 * 2) {
             let _ = reader.flow_graph(Address::from(0x1_0000_0000u64 + index * 0x10))?;
         }
 
-        assert!(fixture.queries.cache.len() <= QUERY_MEMO_CAPACITY);
-
+        assert!(fixture.queries.cache.len() <= CFG_CACHE_CAPACITY);
         Ok(())
     }
 
@@ -841,7 +1220,7 @@ mod test {
             [ChangeRecord::ReferenceAdded {
                 from,
                 target: ReferenceTarget::from(to),
-                kind: ReferenceKind::call(),
+                kind: ReferenceKind::Flow,
             }],
         ));
 
@@ -1145,7 +1524,7 @@ mod test {
             Revision::new(base.value() + 1),
             [ChangeRecord::FunctionChanged {
                 entry: functions.start_address(),
-                kind: crate::engine::change::FunctionChangeKind::Body,
+                kind: FunctionChangeKind::Body,
                 coverage: function_coverage,
             }],
         ));

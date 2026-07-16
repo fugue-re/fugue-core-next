@@ -6,14 +6,13 @@ use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
 use crate::lazy_symbol;
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
-    LanguageLoader, Lifter, LiftingContext,
+    LanguageLoader, Lifter, LiftingContext, Varnode,
 };
 
 static MAPPING_SYMBOL_CODE: LazySymbol = lazy_symbol!("$x");
@@ -240,14 +239,14 @@ impl DisassemblerT for AArch64Disassembler {
                     address,
                     size,
                     if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
+                        InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
                         InsnProperties::FALL
                     },
-                )
+                )?
             }
             Err(DecodeError::IncompleteDecoder) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));

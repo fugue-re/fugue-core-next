@@ -1,10 +1,6 @@
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::LazyLock;
 
-use rkyv::bytecheck::CheckBytes;
-use rkyv::rancor::Fallible;
-use rkyv::traits::NoUndef;
-use rkyv::{Archive, Deserialize, Place, Portable, Serialize};
 use smallvec::SmallVec;
 pub use ustr::{
     Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
@@ -36,7 +32,7 @@ impl SymbolTableSelector {
 }
 
 impl Display for SymbolTableSelector {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:02x}", self.0)
     }
 }
@@ -84,7 +80,7 @@ impl<A> Display for SymbolEntry<A>
 where
     A: Display + Copy,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let address = self.address;
         let properties = self.properties;
         if !self.symbol.is_empty() {
@@ -249,41 +245,44 @@ impl Default for SymbolProperties {
 #[repr(transparent)]
 pub struct ArchivedSymbolProperties(u8);
 
-unsafe impl Portable for ArchivedSymbolProperties {}
-unsafe impl NoUndef for ArchivedSymbolProperties {}
+unsafe impl rkyv::Portable for ArchivedSymbolProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedSymbolProperties {}
 
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedSymbolProperties
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedSymbolProperties
 where
-    u8: CheckBytes<C>,
+    u8: rkyv::bytecheck::CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
         unsafe { u8::check_bytes(value.cast(), context) }
     }
 }
 
-impl Archive for SymbolProperties {
+impl rkyv::Archive for SymbolProperties {
     type Archived = ArchivedSymbolProperties;
     type Resolver = ();
 
-    fn resolve(&self, _resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         out.write(ArchivedSymbolProperties(self.bits()));
     }
 }
 
-impl<S: Fallible + ?Sized> Serialize<S> for SymbolProperties {
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for SymbolProperties {
     fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: Fallible + ?Sized> Deserialize<SymbolProperties, D> for ArchivedSymbolProperties {
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SymbolProperties, D>
+    for ArchivedSymbolProperties
+{
     fn deserialize(&self, _deserializer: &mut D) -> Result<SymbolProperties, D::Error> {
         Ok(SymbolProperties::from_bits_truncate(self.0))
     }
 }
 
 impl Display for SymbolProperties {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut names = self.iter_names();
 
         let Some((name, _)) = names.next() else {
@@ -347,7 +346,7 @@ impl SymbolProperties {
 pub struct SymbolIndex(u64);
 
 impl Debug for SymbolIndex {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("SymbolIndex")
             .field("selector", &self.selector())
             .field("index", &self.index())

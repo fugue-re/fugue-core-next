@@ -48,10 +48,18 @@ impl From<Confidence> for f32 {
 }
 
 #[cfg(feature = "rkyv")]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ArchivedConfidence(rkyv::Archived<f32>);
 
+#[cfg(feature = "rkyv")]
+impl PartialOrd for ArchivedConfidence {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(feature = "rkyv")]
 impl Ord for ArchivedConfidence {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         OrderedFloat(self.0.to_native()).cmp(&OrderedFloat(other.0.to_native()))

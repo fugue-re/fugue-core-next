@@ -1,6 +1,5 @@
 use std::error::Error as StdError;
 
-use anyhow::Error as AnyError;
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
@@ -32,13 +31,13 @@ pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
     #[error("failed to create block: {0}")]
-    BlockCreation(AnyError),
+    BlockCreation(anyhow::Error),
     #[error("commit hook failed: {0}")]
     CommitHook(AnalysisError),
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
     #[error("failed to create function: {0}")]
-    FunctionCreation(AnyError),
+    FunctionCreation(anyhow::Error),
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
     #[error("invalid block index: {0}")]
@@ -76,12 +75,20 @@ impl FunctionRecoveryError {
         FunctionRecoveryError::FunctionCreation(err.into())
     }
 
+    pub fn invalid_block_id(id: usize) -> Self {
+        FunctionRecoveryError::InvalidBlockId(id)
+    }
+
     pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
         FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
     }
 
     pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
         FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
+    }
+
+    pub fn invalid_instruction_id(id: usize) -> Self {
+        FunctionRecoveryError::InvalidInstructionId(id)
     }
 }
 

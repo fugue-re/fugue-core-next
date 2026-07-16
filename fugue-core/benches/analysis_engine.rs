@@ -7,28 +7,27 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
+#[cfg(feature = "sqlite")]
+use fugue_core::attributes;
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeKinds;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Reference, ReferenceKind, SymbolEntry, SymbolIndex,
-    SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, Reference, ReferenceProperties, SymbolEntry,
+    SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::queries::{Cached, Dependency, QueryReader};
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
-use rustc_hash::FxHasher;
-
-#[cfg(feature = "sqlite")]
-use fugue_core::attributes;
+use fugue_core::queries::{Cached, Dependency, QueryError, QueryReader};
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::entities::DefaultPersistentEntityStorage;
+use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use rustc_hash::FxHasher;
 
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
@@ -153,9 +152,7 @@ fn current_rss_kib() -> Option<u64> {
         .ok()
 }
 
-fn run_query<T>(
-    query: impl FnOnce() -> Result<T, fugue_core::queries::QueryError>,
-) -> Result<T, Box<dyn Error>> {
+fn run_query<T>(query: impl FnOnce() -> Result<T, QueryError>) -> Result<T, Box<dyn Error>> {
     Ok(query()?)
 }
 
@@ -675,7 +672,7 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
             let from = entry
                 .checked_add(0x20_0000 + index as u64 * 0x10)
                 .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
-            engine.add_reference(Reference::new(from, hot_target, ReferenceKind::read()))?;
+            engine.add_reference(Reference::data(from, hot_target, ReferenceProperties::READ))?;
         }
         engine.wait_until_idle()?;
         Ok(((), HOT_TARGET_REFERENCES))
@@ -749,7 +746,7 @@ fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), B
                     .checked_add(0x2000_0000 + index as u64 * 0x10)
                     .ok_or_else(|| std::io::Error::other("reference target address overflow"))?
             };
-            engine.add_reference(Reference::new(from, target, ReferenceKind::read()))?;
+            engine.add_reference(Reference::data(from, target, ReferenceProperties::READ))?;
         }
         engine.wait_until_idle()?;
         Ok(((), SCALE_REFERENCES))

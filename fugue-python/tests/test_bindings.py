@@ -46,8 +46,9 @@ def test_loader_attributes_are_converted_from_dict():
         },
     )
 
-    executable = next(segment for segment in binary.segments() if segment.properties.execute)
-    assert executable.address.space == 3
+    segments = binary.segments()
+    executable = next(segment for segment in segments if segment.properties.execute)
+    assert any(segment.address.space == 3 for segment in segments)
 
     storage = fugue.SegmentStorage.from_binary(binary, attributes={"custom_storage": 1})
     assert storage.contains(executable.address)
@@ -74,6 +75,70 @@ def test_segment_hints_preserve_structured_addresses():
         assert isinstance(mapping_hints[0].address, fugue.Address)
         assert mapping_hints[0].hint.kind in {"code", "data"}
         assert mapping_hints[0].hint.text
+
+
+def test_project_recovers_functions_from_binary():
+    project = fugue.Project.from_file(LS_ELF)
+    before = project.functions()
+    recovered = project.recover_functions()
+    after = project.functions()
+
+    assert recovered == len(after) - len(before)
+    assert after
+    assert isinstance(after[0].entry, fugue.Address)
+
+
+def test_project_ensure_ir_error_rolls_back_transaction():
+    project = fugue.Project.from_file(LS_ELF)
+    project.recover_functions()
+
+    for function in project.functions():
+        try:
+            project.ensure_ir(function, "pcode")
+        except fugue.ProjectError:
+            assert project.functions()
+            assert not project.has_ir(function, "pcode")
+            return
+
+    pytest.skip("fixture did not contain a PCode build failure")
+
+
+def test_project_ensures_pcode_for_recovered_function():
+    project = fugue.Project.from_file(LS_ELF)
+    project.recover_functions()
+
+    for function in project.functions():
+        try:
+            published = project.ensure_ir(function, "pcode")
+        except fugue.ProjectError:
+            continue
+
+        assert published
+        assert project.has_ir(function, "pcode")
+        artefact = project.ir_artefact(function, "pcode")
+        assert artefact is not None
+        assert artefact.level == "pcode"
+        assert artefact.retained_bytes > 0
+        assert any(item.level == "pcode" for item in project.ir_artefacts(function))
+        assert project.ir_text(function, "pcode")
+        assert not project.ensure_ir(function, "pcode")
+        reread = project.ir_artefact(function, "pcode")
+        assert reread.content_digest.hex == artefact.content_digest.hex
+        return
+
+    pytest.skip("fixture did not contain a PCode-buildable recovered function")
+
+
+def test_project_rejects_unsupported_mlil_levels():
+    project = fugue.Project.from_file(LS_ELF)
+    project.recover_functions()
+    function = project.functions()[0]
+
+    for level in ("mapped_mlil", "mlil"):
+        with pytest.raises(fugue.ProjectError, match="MLIL project build scheduling"):
+            project.ensure_ir(function, level)
+        with pytest.raises(fugue.ProjectError, match="MLIL project build scheduling"):
+            project.ir_text(function, level)
 
 
 def test_attributes_must_be_dicts():

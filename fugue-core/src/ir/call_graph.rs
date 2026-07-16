@@ -109,10 +109,12 @@ pub struct CallGraphIndex {
 
 #[derive(Debug, Error)]
 pub enum CallGraphVerificationError {
-    #[error("call graph storage error: {0}")]
-    Storage(#[from] EntityStorageError),
     #[error(
-        "call graph mismatch: missing={missing:?}, extra={extra:?}, inverse_missing={inverse_missing:?}, inverse_extra={inverse_extra:?}"
+        "call graph does not match the function table: {} missing, {} extra, {} inverse missing, {} inverse extra",
+        missing.len(),
+        extra.len(),
+        inverse_missing.len(),
+        inverse_extra.len()
     )]
     Mismatch {
         missing: Vec<CallGraphEdgeKey>,
@@ -120,6 +122,8 @@ pub enum CallGraphVerificationError {
         inverse_missing: Vec<CallGraphEdgeKey>,
         inverse_extra: Vec<CallGraphEdgeKey>,
     },
+    #[error("call graph storage error: {0}")]
+    Storage(#[from] EntityStorageError),
 }
 
 impl CallGraphIndex {
@@ -454,6 +458,7 @@ mod test {
     use fugue_lifter::{Op, PCodeOp, Varnode};
 
     use super::*;
+    use crate::ir::block::table::CodeBlockTableError;
     use crate::ir::{CodeBlock, FunctionId, FunctionTable, Insn};
     use crate::lifter::{Language, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
@@ -462,17 +467,18 @@ mod test {
         CallGraphIndex::new(EntityStorage::new(InMemoryEntityStorage::new()))
     }
 
-    fn call_insn(language: &'static Language, address: Address, target: Address) -> Insn {
-        Insn::from_lifted(
-            language,
-            address,
-            1,
-            vec![PCodeOp {
-                op: Op::Call,
-                inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
-                output: Varnode::INVALID,
-            }],
-        )
+    fn call_insn(
+        language: &'static Language,
+        address: Address,
+        target: Address,
+    ) -> Result<Insn, Box<dyn std::error::Error>> {
+        let operations = [PCodeOp {
+            op: Op::Call,
+            inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
+            output: Varnode::INVALID,
+        }];
+
+        Ok(Insn::from_resolved_flow(language, address, 1, &operations)?)
     }
 
     fn insert_function(
@@ -486,10 +492,11 @@ mod test {
             .iter()
             .enumerate()
             .map(|(index, target)| call_insn(language, entry + index, *target))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let block_id = blocks.insert(entry, |id, address| {
-            Ok(CodeBlock::try_new(id, address, instructions.len().max(1), instructions).unwrap())
+            CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
         let function_id = functions.insert(entry, |id, address| {
@@ -517,10 +524,11 @@ mod test {
             .iter()
             .enumerate()
             .map(|(index, target)| call_insn(language, entry + index, *target))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let block_id = blocks.insert(entry, |id, address| {
-            Ok(CodeBlock::try_new(id, address, instructions.len().max(1), instructions).unwrap())
+            CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
         functions.try_modify_by_id(function_id, |function| {

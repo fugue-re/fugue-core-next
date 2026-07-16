@@ -5,10 +5,10 @@ use arrayvec::ArrayVec;
 use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::runtime::operand;
-pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LiftingContext};
+pub use fugue_lifter::{
+    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp, Varnode,
+};
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
 use thiserror::Error;
 
 use crate::ir::Address;
@@ -137,23 +137,25 @@ where
     }
 }
 
-impl Archive for ContextSet {
+impl rkyv::Archive for ContextSet {
     type Archived = ArchivedContextSet;
-    type Resolver = <ContextSetInner as Archive>::Resolver;
+    type Resolver = <ContextSetInner as rkyv::Archive>::Resolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<ContextSetInner>>() };
         self.0.resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer> Serialize<S> for ContextSet {
+impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
+    rkyv::Serialize<S> for ContextSet
+{
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         self.0.serialize(serializer)
     }
 }
 
-impl<D: Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
     fn deserialize(&self, deserializer: &mut D) -> Result<ContextSet, D::Error> {
         let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserializer)?;
         Ok(ContextSet(inner))

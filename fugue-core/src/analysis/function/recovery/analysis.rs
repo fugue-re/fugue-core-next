@@ -19,7 +19,7 @@ use crate::ir::{
     RawAddressRangeSet,
 };
 use crate::project::{Project, ProjectTransaction};
-use crate::registry::{self, Registration};
+use crate::registry::{self, Registration, submit};
 use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Confidence;
@@ -1057,6 +1057,6 @@ impl Analyser for FunctionRecovery {
     }
 }
 
-crate::registry::submit! {
+submit! {
     AnalyserProvider::new("function-recovery", FunctionRecovery::build_analyser)
 }

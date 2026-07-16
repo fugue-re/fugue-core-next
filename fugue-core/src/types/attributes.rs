@@ -2,17 +2,6 @@ use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::ptr;
 
-use rkyv::bytecheck::CheckBytes;
-use rkyv::collections::util::{Entry as ArchivedEntry, EntryResolver};
-use rkyv::munge::munge;
-use rkyv::primitive::{ArchivedF64, ArchivedI64, ArchivedU64};
-use rkyv::rancor::{Fallible, Source, fail};
-use rkyv::ser::{Allocator, Writer};
-use rkyv::string::{ArchivedString, StringResolver};
-use rkyv::traits::NoUndef;
-use rkyv::validation::ArchiveContext;
-use rkyv::vec::{ArchivedVec, VecResolver};
-use rkyv::{Archive, Deserialize, Place, Portable, Serialize};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
@@ -46,55 +35,64 @@ enum ArchivedJsonValueTag {
     Object = 7,
 }
 
-unsafe impl NoUndef for ArchivedJsonValueTag {}
-unsafe impl Portable for ArchivedJsonValueTag {}
+unsafe impl rkyv::traits::NoUndef for ArchivedJsonValueTag {}
+unsafe impl rkyv::Portable for ArchivedJsonValueTag {}
 
 #[repr(u8)]
 pub enum ArchivedJsonValue {
     Null,
     Bool(bool),
-    I64(ArchivedI64),
-    U64(ArchivedU64),
-    F64(ArchivedF64),
-    String(ArchivedString),
-    Array(ArchivedVec<ArchivedJsonValue>),
-    Object(ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>>),
+    I64(rkyv::primitive::ArchivedI64),
+    U64(rkyv::primitive::ArchivedU64),
+    F64(rkyv::primitive::ArchivedF64),
+    String(rkyv::string::ArchivedString),
+    Array(rkyv::vec::ArchivedVec<ArchivedJsonValue>),
+    Object(
+        rkyv::vec::ArchivedVec<
+            rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+        >,
+    ),
 }
 
-unsafe impl Portable for ArchivedJsonValue {}
+unsafe impl rkyv::Portable for ArchivedJsonValue {}
 
 #[repr(C)]
 struct VarBool(ArchivedJsonValueTag, bool);
 
 #[repr(C)]
-struct VarI64(ArchivedJsonValueTag, ArchivedI64);
+struct VarI64(ArchivedJsonValueTag, rkyv::primitive::ArchivedI64);
 
 #[repr(C)]
-struct VarU64(ArchivedJsonValueTag, ArchivedU64);
+struct VarU64(ArchivedJsonValueTag, rkyv::primitive::ArchivedU64);
 
 #[repr(C)]
-struct VarF64(ArchivedJsonValueTag, ArchivedF64);
+struct VarF64(ArchivedJsonValueTag, rkyv::primitive::ArchivedF64);
 
 #[repr(C)]
-struct VarString(ArchivedJsonValueTag, ArchivedString);
+struct VarString(ArchivedJsonValueTag, rkyv::string::ArchivedString);
 
 #[repr(C)]
-struct VarArray(ArchivedJsonValueTag, ArchivedVec<ArchivedJsonValue>);
+struct VarArray(
+    ArchivedJsonValueTag,
+    rkyv::vec::ArchivedVec<ArchivedJsonValue>,
+);
 
 #[repr(C)]
 struct VarObject(
     ArchivedJsonValueTag,
-    ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>>,
+    rkyv::vec::ArchivedVec<
+        rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+    >,
 );
 
 #[derive(Debug, Error)]
 #[error("invalid discriminant: {0}")]
 struct InvalidJsonTag(u8);
 
-unsafe impl<C> CheckBytes<C> for ArchivedJsonValue
+unsafe impl<C> rkyv::bytecheck::CheckBytes<C> for ArchivedJsonValue
 where
-    C: Fallible + ArchiveContext + ?Sized,
-    C::Error: Source,
+    C: rkyv::rancor::Fallible + rkyv::validation::ArchiveContext + ?Sized,
+    C::Error: rkyv::rancor::Source,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
         // SAFETY: `ArchivedJsonValue` is `#[repr(u8)]`, so the first byte is
@@ -104,59 +102,78 @@ where
             0 => Ok(()),
             1 => unsafe {
                 let p = value.cast::<VarBool>();
-                <bool as CheckBytes<C>>::check_bytes(ptr::addr_of!((*p).1), context)
+                <bool as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1),
+                    context,
+                )
             },
             2 => unsafe {
                 let p = value.cast::<VarI64>();
-                <ArchivedI64 as CheckBytes<C>>::check_bytes(ptr::addr_of!((*p).1), context)
+                <rkyv::primitive::ArchivedI64 as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1),
+                    context,
+                )
             },
             3 => unsafe {
                 let p = value.cast::<VarU64>();
-                <ArchivedU64 as CheckBytes<C>>::check_bytes(ptr::addr_of!((*p).1), context)
+                <rkyv::primitive::ArchivedU64 as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1),
+                    context,
+                )
             },
             4 => unsafe {
                 let p = value.cast::<VarF64>();
-                <ArchivedF64 as CheckBytes<C>>::check_bytes(ptr::addr_of!((*p).1), context)
+                <rkyv::primitive::ArchivedF64 as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1),
+                    context,
+                )
             },
             5 => unsafe {
                 let p = value.cast::<VarString>();
-                <ArchivedString as CheckBytes<C>>::check_bytes(ptr::addr_of!((*p).1), context)
+                <rkyv::string::ArchivedString as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1),
+                    context,
+                )
             },
             6 => unsafe {
                 let p = value.cast::<VarArray>();
-                <ArchivedVec<ArchivedJsonValue> as CheckBytes<C>>::check_bytes(
+                <rkyv::vec::ArchivedVec<ArchivedJsonValue> as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
                     ptr::addr_of!((*p).1),
                     context,
                 )
             },
             7 => unsafe {
                 let p = value.cast::<VarObject>();
-                <ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>> as CheckBytes<C>>::check_bytes(
-                    ptr::addr_of!((*p).1),
-                    context,
+                <rkyv::vec::ArchivedVec<
+                    rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+                > as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*p).1), context
                 )
             },
-            other => fail!(InvalidJsonTag(other)),
+            other => rkyv::rancor::fail!(InvalidJsonTag(other)),
         }
     }
 }
 
 #[repr(transparent)]
-pub struct ArchivedAttributeMap(ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>>);
+pub struct ArchivedAttributeMap(
+    rkyv::vec::ArchivedVec<
+        rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+    >,
+);
 
-unsafe impl Portable for ArchivedAttributeMap {}
+unsafe impl rkyv::Portable for ArchivedAttributeMap {}
 
-unsafe impl<C> CheckBytes<C> for ArchivedAttributeMap
+unsafe impl<C> rkyv::bytecheck::CheckBytes<C> for ArchivedAttributeMap
 where
-    C: Fallible + ArchiveContext + ?Sized,
-    C::Error: Source,
+    C: rkyv::rancor::Fallible + rkyv::validation::ArchiveContext + ?Sized,
+    C::Error: rkyv::rancor::Source,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
         unsafe {
-            <ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>> as CheckBytes<C>>::check_bytes(
-                value.cast(),
-                context,
-            )
+            <rkyv::vec::ArchivedVec<
+                rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+            > as rkyv::bytecheck::CheckBytes<C>>::check_bytes(value.cast(), context)
         }
     }
 }
@@ -170,16 +187,16 @@ enum JsonValueResolver {
     I64,
     U64,
     F64,
-    String(StringResolver),
-    Array(VecResolver),
-    Object(VecResolver),
+    String(rkyv::string::StringResolver),
+    Array(rkyv::vec::VecResolver),
+    Object(rkyv::vec::VecResolver),
 }
 
-impl<'a> Archive for JsonValueRef<'a> {
+impl<'a> rkyv::Archive for JsonValueRef<'a> {
     type Archived = ArchivedJsonValue;
     type Resolver = JsonValueResolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         match (self.0, resolver) {
             (serde_json::Value::Null, JsonValueResolver::Null) => {
                 let out = unsafe { out.cast_unchecked::<ArchivedJsonValueTag>() };
@@ -187,55 +204,61 @@ impl<'a> Archive for JsonValueRef<'a> {
             }
             (serde_json::Value::Bool(b), JsonValueResolver::Bool) => {
                 let out = unsafe { out.cast_unchecked::<VarBool>() };
-                munge!(let VarBool(tag, payload) = out);
+                rkyv::munge::munge!(let VarBool(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::Bool);
                 payload.write(*b);
             }
             (serde_json::Value::Number(n), JsonValueResolver::I64) => {
                 let out = unsafe { out.cast_unchecked::<VarI64>() };
-                munge!(let VarI64(tag, payload) = out);
+                rkyv::munge::munge!(let VarI64(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::I64);
-                payload.write(ArchivedI64::from_native(n.as_i64().unwrap_or(0)));
+                payload.write(rkyv::primitive::ArchivedI64::from_native(
+                    n.as_i64().unwrap_or(0),
+                ));
             }
             (serde_json::Value::Number(n), JsonValueResolver::U64) => {
                 let out = unsafe { out.cast_unchecked::<VarU64>() };
-                munge!(let VarU64(tag, payload) = out);
+                rkyv::munge::munge!(let VarU64(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::U64);
-                payload.write(ArchivedU64::from_native(n.as_u64().unwrap_or(0)));
+                payload.write(rkyv::primitive::ArchivedU64::from_native(
+                    n.as_u64().unwrap_or(0),
+                ));
             }
             (serde_json::Value::Number(n), JsonValueResolver::F64) => {
                 let out = unsafe { out.cast_unchecked::<VarF64>() };
-                munge!(let VarF64(tag, payload) = out);
+                rkyv::munge::munge!(let VarF64(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::F64);
-                payload.write(ArchivedF64::from_native(n.as_f64().unwrap_or(0.0)));
+                payload.write(rkyv::primitive::ArchivedF64::from_native(
+                    n.as_f64().unwrap_or(0.0),
+                ));
             }
             (serde_json::Value::String(s), JsonValueResolver::String(r)) => {
                 let out = unsafe { out.cast_unchecked::<VarString>() };
-                munge!(let VarString(tag, payload) = out);
+                rkyv::munge::munge!(let VarString(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::String);
-                ArchivedString::resolve_from_str(s.as_str(), r, payload);
+                rkyv::string::ArchivedString::resolve_from_str(s.as_str(), r, payload);
             }
             (serde_json::Value::Array(arr), JsonValueResolver::Array(r)) => {
                 let out = unsafe { out.cast_unchecked::<VarArray>() };
-                munge!(let VarArray(tag, payload) = out);
+                rkyv::munge::munge!(let VarArray(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::Array);
-                ArchivedVec::resolve_from_len(arr.len(), r, payload);
+                rkyv::vec::ArchivedVec::resolve_from_len(arr.len(), r, payload);
             }
             (serde_json::Value::Object(obj), JsonValueResolver::Object(r)) => {
                 let out = unsafe { out.cast_unchecked::<VarObject>() };
-                munge!(let VarObject(tag, payload) = out);
+                rkyv::munge::munge!(let VarObject(tag, payload) = out);
                 tag.write(ArchivedJsonValueTag::Object);
-                ArchivedVec::resolve_from_len(obj.len(), r, payload);
+                rkyv::vec::ArchivedVec::resolve_from_len(obj.len(), r, payload);
             }
             _ => unreachable!(),
         }
     }
 }
 
-impl<'a, S> Serialize<S> for JsonValueRef<'a>
+impl<'a, S> rkyv::Serialize<S> for JsonValueRef<'a>
 where
-    S: Fallible + Writer + Allocator + ?Sized,
-    S::Error: Source,
+    S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+    S::Error: rkyv::rancor::Source,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(match self.0 {
@@ -251,20 +274,20 @@ where
                 }
             }
             serde_json::Value::String(s) => JsonValueResolver::String(
-                ArchivedString::serialize_from_str(s.as_str(), serializer)?,
+                rkyv::string::ArchivedString::serialize_from_str(s.as_str(), serializer)?,
             ),
             serde_json::Value::Array(arr) => {
-                JsonValueResolver::Array(ArchivedVec::<ArchivedJsonValue>::serialize_from_iter::<
-                    JsonValueRef<'_>,
-                    _,
-                    _,
-                >(
-                    arr.iter().map(JsonValueRef), serializer
-                )?)
+                JsonValueResolver::Array(
+                    rkyv::vec::ArchivedVec::<ArchivedJsonValue>::serialize_from_iter::<
+                        JsonValueRef<'_>,
+                        _,
+                        _,
+                    >(arr.iter().map(JsonValueRef), serializer)?,
+                )
             }
             serde_json::Value::Object(obj) => {
-                JsonValueResolver::Object(ArchivedVec::<
-                    ArchivedEntry<ArchivedString, ArchivedJsonValue>,
+                JsonValueResolver::Object(rkyv::vec::ArchivedVec::<
+                    rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
                 >::serialize_from_iter::<AttributeEntryRef<'_>, _, _>(
                     obj.iter().map(|(k, v)| AttributeEntryRef {
                         key: k.as_str(),
@@ -283,53 +306,54 @@ struct AttributeEntryRef<'a> {
     value: JsonValueRef<'a>,
 }
 
-impl<'a> Archive for AttributeEntryRef<'a> {
-    type Archived = ArchivedEntry<ArchivedString, ArchivedJsonValue>;
-    type Resolver = EntryResolver<StringResolver, JsonValueResolver>;
+impl<'a> rkyv::Archive for AttributeEntryRef<'a> {
+    type Archived = rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>;
+    type Resolver =
+        rkyv::collections::util::EntryResolver<rkyv::string::StringResolver, JsonValueResolver>;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        munge!(let ArchivedEntry { key, value } = out);
-        ArchivedString::resolve_from_str(self.key, resolver.key, key);
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(let rkyv::collections::util::Entry { key, value } = out);
+        rkyv::string::ArchivedString::resolve_from_str(self.key, resolver.key, key);
         self.value.resolve(resolver.value, value);
     }
 }
 
-impl<'a, S> Serialize<S> for AttributeEntryRef<'a>
+impl<'a, S> rkyv::Serialize<S> for AttributeEntryRef<'a>
 where
-    S: Fallible + Writer + Allocator + ?Sized,
-    S::Error: Source,
+    S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+    S::Error: rkyv::rancor::Source,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(EntryResolver {
-            key: ArchivedString::serialize_from_str(self.key, serializer)?,
+        Ok(rkyv::collections::util::EntryResolver {
+            key: rkyv::string::ArchivedString::serialize_from_str(self.key, serializer)?,
             value: self.value.serialize(serializer)?,
         })
     }
 }
 
-impl Archive for AttributeMap {
+impl rkyv::Archive for AttributeMap {
     type Archived = ArchivedAttributeMap;
-    type Resolver = VecResolver;
+    type Resolver = rkyv::vec::VecResolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let out = unsafe {
-            out.cast_unchecked::<ArchivedVec<ArchivedEntry<ArchivedString, ArchivedJsonValue>>>()
+            out.cast_unchecked::<rkyv::vec::ArchivedVec<
+                rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+            >>()
         };
-        ArchivedVec::resolve_from_len(self.0.len(), resolver, out);
+        rkyv::vec::ArchivedVec::resolve_from_len(self.0.len(), resolver, out);
     }
 }
 
-impl<S> Serialize<S> for AttributeMap
+impl<S> rkyv::Serialize<S> for AttributeMap
 where
-    S: Fallible + Writer + Allocator + ?Sized,
-    S::Error: Source,
+    S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+    S::Error: rkyv::rancor::Source,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        ArchivedVec::<ArchivedEntry<ArchivedString, ArchivedJsonValue>>::serialize_from_iter::<
-            AttributeEntryRef<'_>,
-            _,
-            _,
-        >(
+        rkyv::vec::ArchivedVec::<
+            rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
+        >::serialize_from_iter::<AttributeEntryRef<'_>, _, _>(
             self.0.iter().map(|(k, v)| AttributeEntryRef {
                 key: k.as_str(),
                 value: JsonValueRef(v),
@@ -339,10 +363,10 @@ where
     }
 }
 
-impl<D> Deserialize<serde_json::Value, D> for ArchivedJsonValue
+impl<D> rkyv::Deserialize<serde_json::Value, D> for ArchivedJsonValue
 where
-    D: Fallible + ?Sized,
-    D::Error: Source,
+    D: rkyv::rancor::Fallible + ?Sized,
+    D::Error: rkyv::rancor::Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<serde_json::Value, D::Error> {
         let _ = &deserializer;
@@ -377,10 +401,10 @@ where
     }
 }
 
-impl<D> Deserialize<AttributeMap, D> for ArchivedAttributeMap
+impl<D> rkyv::Deserialize<AttributeMap, D> for ArchivedAttributeMap
 where
-    D: Fallible + ?Sized,
-    D::Error: Source,
+    D: rkyv::rancor::Fallible + ?Sized,
+    D::Error: rkyv::rancor::Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<AttributeMap, D::Error> {
         let archived = self.0.as_slice();

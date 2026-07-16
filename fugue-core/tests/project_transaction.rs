@@ -1,14 +1,16 @@
 use std::io;
 use std::path::PathBuf;
 
+use fugue_core::analysis::control::CancellationToken;
 use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 use fugue_core::engine::change::{ChangeRecord, FunctionChangeKind};
+use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, SymbolEntry, SymbolIndex, SymbolProperties,
+    Address, AddressRange, AddressRangeSet, FunctionId, SymbolEntry, SymbolIndex, SymbolProperties,
     SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::project::Project;
+use fugue_core::project::{Project, ProjectError};
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::types::AttributeMap;
 use fugue_core::types::attributes::ATTRIBUTE_LOADER_FORMAT;
@@ -30,6 +32,24 @@ fn writable_address(project: &Project) -> Result<Address, Box<dyn std::error::Er
         .find(|view| view.properties().is_writable())
         .map(|view| view.start())
         .ok_or_else(|| io::Error::other("fixture writable segment missing").into())
+}
+
+fn cancelled_token() -> CancellationToken {
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+    cancellation
+}
+
+fn partial_function(entry: Address, len: usize) -> PartialFunction {
+    let mut function = PartialFunction::new(entry);
+    function.push_block(PartialCodeBlock::new(
+        entry,
+        len,
+        Vec::new(),
+        ContextSet::default(),
+    ));
+
+    function
 }
 
 #[test]
@@ -54,6 +74,91 @@ fn test_loadable_fallback_preserves_caller_attributes() -> Result<(), Box<dyn st
             .as_deref(),
         Some("caller-format")
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_ensure_lifted_rebuilds_deterministic_content() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let entry = writable_address(&project)?;
+    let function = {
+        let mut transaction = project.transaction("test");
+        let function = transaction.add_function(partial_function(entry, 1))?;
+        transaction.commit()?;
+        function
+    };
+
+    {
+        let mut transaction = project.transaction("test");
+        assert!(transaction.ensure_ecode_ssa(function, &CancellationToken::default())?);
+        transaction.commit()?;
+    }
+
+    let first_pcode = project
+        .pcode(function)?
+        .expect("PCode IR should be present");
+    let first_ecode = project.ecode(function)?.expect("LIR should be present");
+    let first_ssa = project
+        .ecode_ssa(function)?
+        .expect("LIR SSA should be present");
+
+    {
+        let mut transaction = project.transaction("test");
+        assert_eq!(transaction.remove_lifted_from(function, IlLevel::PCode)?, 3);
+        transaction.commit()?;
+    }
+
+    {
+        let mut transaction = project.transaction("test");
+        assert!(transaction.ensure_ecode_ssa(function, &CancellationToken::default())?);
+        transaction.commit()?;
+    }
+
+    assert_eq!(project.pcode(function)?, Some(first_pcode));
+    assert_eq!(project.ecode(function)?, Some(first_ecode));
+    assert_eq!(project.ecode_ssa(function)?, Some(first_ssa));
+
+    Ok(())
+}
+
+#[test]
+fn test_ensure_lifted_reports_missing_parent_artefact() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let function = FunctionId::default();
+
+    let mut transaction = project.transaction("test");
+    assert!(matches!(
+        transaction.ensure_ecode(function, &CancellationToken::default()),
+        Err(ProjectError::Il(IlError::MissingArtefact {
+            level: IlLevel::PCode,
+            ..
+        }))
+    ));
+    transaction.rollback()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_ensure_lifted_cancelled_materialises_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let function = FunctionId::default();
+    let revision = project.semantic_revision();
+
+    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+        let mut transaction = project.transaction("test");
+        assert!(matches!(
+            transaction.ensure_lifted(function, level, &cancelled_token()),
+            Err(ProjectError::Il(IlError::Cancelled))
+        ));
+        transaction.rollback()?;
+    }
+
+    assert_eq!(project.semantic_revision(), revision);
+    assert!(project.pcode(function)?.is_none());
+    assert!(project.ecode(function)?.is_none());
+    assert!(project.ecode_ssa(function)?.is_none());
 
     Ok(())
 }

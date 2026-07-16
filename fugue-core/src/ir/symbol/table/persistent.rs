@@ -5,7 +5,8 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use super::super::{SymbolEntry, SymbolIndex, SymbolMap, SymbolProperties, SymbolTableSelector};
-use crate::ir::{Address, Id, symbol::Symbol};
+use crate::ir::symbol::Symbol;
+use crate::ir::{Address, Id};
 use crate::storage::entities::{CachedRef, EntityCache, WriteBackWorker};
 use crate::storage::{EntityStorage, EntityStorageError};
 

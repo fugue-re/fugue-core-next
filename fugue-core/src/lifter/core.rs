@@ -1,23 +1,24 @@
 use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
-use fugue_lifter::LifterBuilderError;
 use fugue_lifter::runtime::context::ContextBitRange;
 use fugue_lifter::runtime::language::Language;
 use fugue_lifter::runtime::operand::Operands;
 use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
+use fugue_lifter::{Lifter as FugueLifter, LifterBuilderError};
 use thiserror::Error;
 
-use crate::il::pcode::PCodeOp;
-use crate::ir::{Address, Insn, InsnProperties};
+use crate::ir::{Address, Insn, InsnError, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
-use crate::lifter::resolve_language;
 use crate::lifter::traits::Disassembler;
+use crate::lifter::{PCodeOp, resolve_language};
 
 #[derive(Debug, Error)]
 pub enum LifterError {
     #[error(transparent)]
     Builder(#[from] LifterBuilderError),
+    #[error(transparent)]
+    Instruction(#[from] InsnError),
     #[error("invalid instruction at {0}")]
     InvalidInstruction(Address),
     #[error(transparent)]
@@ -45,15 +46,15 @@ impl LifterError {
 }
 
 #[derive(Clone)]
-pub struct Lifter(fugue_lifter::Lifter);
+pub struct Lifter(FugueLifter);
 
 impl Lifter {
     pub fn new(language: &'static Language) -> Self {
-        Self(fugue_lifter::Lifter::new(language))
+        Self(FugueLifter::new(language))
     }
 
     pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
-        Self(fugue_lifter::Lifter::with_context(language, context))
+        Self(FugueLifter::with_context(language, context))
     }
 
     pub fn language(&self) -> &'static Language {
@@ -205,14 +206,7 @@ impl Lifter {
         let address = address.into();
         let mut operations = Vec::new();
 
-        let length = self.lift_into(address, bytes, &mut operations)?;
-
-        Ok(Insn::from_lifted(
-            self.language(),
-            address,
-            length,
-            operations,
-        ))
+        self.resolve_insn_flow_into(address, bytes, &mut operations)
     }
 
     pub fn lift_into(
@@ -223,10 +217,28 @@ impl Lifter {
     ) -> Result<usize, LifterError> {
         let address = addr.into();
         let Some(length) = self.0.lift(address.offset(), bytes, output) else {
-            return Err(LifterError::InvalidInstruction(address));
+            return Err(LifterError::invalid_instruction(address));
         };
 
         Ok(length)
+    }
+
+    pub fn resolve_insn_flow_into(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        output: &mut Vec<PCodeOp>,
+    ) -> Result<Insn, LifterError> {
+        output.clear();
+        let address = address.into();
+        let length = self.lift_into(address, bytes, output)?;
+
+        Ok(Insn::from_resolved_flow(
+            self.language(),
+            address,
+            length,
+            output,
+        )?)
     }
 }
 
@@ -248,14 +260,14 @@ impl Disassembler for Lifter {
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
         let Some(size) = self.resolve(address, bytes, true) else {
-            return Err(DisassemblerError::InvalidInstruction(address));
+            return Err(DisassemblerError::invalid_instruction(address));
         };
 
         Ok(Insn::from_disassembly(
             address,
             size,
-            InsnProperties::NEEDS_LIFTING,
-        ))
+            InsnProperties::NEEDS_FLOW_RESOLUTION,
+        )?)
     }
 }
 
@@ -318,6 +330,30 @@ mod test {
 
         let op1_2 = op1.group().unwrap().get(2).unwrap();
         assert_eq!(op1_2.value(), Some(0x10));
+    }
+
+    #[test]
+    fn test_resolve_insn_flow_into_reuses_operation_buffer() {
+        let mut lifter = x86_64_lifter();
+        let bytes = [0x48, 0x89, 0xd8];
+        let mut operations = Vec::new();
+
+        let insn = lifter
+            .resolve_insn_flow_into(0x1000, &bytes, &mut operations)
+            .unwrap();
+        let capacity = operations.capacity();
+
+        assert_eq!(insn.address().offset(), 0x1000);
+        assert_eq!(insn.len(), bytes.len());
+        assert!(insn.has_resolved_flow());
+        assert!(!operations.is_empty());
+
+        let insn = lifter
+            .resolve_insn_flow_into(0x1003, &bytes, &mut operations)
+            .unwrap();
+
+        assert_eq!(insn.address().offset(), 0x1003);
+        assert_eq!(operations.capacity(), capacity);
     }
 
     #[test]

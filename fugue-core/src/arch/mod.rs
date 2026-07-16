@@ -1,17 +1,11 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-use rkyv::bytecheck::CheckBytes;
-use rkyv::rancor::{Fallible, Source};
-use rkyv::ser::{Allocator, Writer};
-use rkyv::traits::NoUndef;
-use rkyv::{Archive, Archived, Deserialize, Place, Portable, Serialize};
-
-use crate::il::pcode::Varnode;
 use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, resolve_language,
+    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
+    resolve_language,
 };
 use crate::platform::Platform;
 use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
@@ -35,7 +29,7 @@ pub use traits::{Flag, FlagKind};
 pub struct Arch(Box<dyn ArchT>);
 
 impl Debug for Arch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Arch")
             .field("language", self.0.language())
             .finish_non_exhaustive()
@@ -43,7 +37,7 @@ impl Debug for Arch {
 }
 
 impl Display for Arch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.language().id())
     }
 }
@@ -87,45 +81,46 @@ impl From<&'static Language> for Arch {
 }
 
 #[repr(transparent)]
-pub struct ArchivedArch(Archived<String>);
+pub struct ArchivedArch(rkyv::Archived<String>);
 
-unsafe impl Portable for ArchivedArch {}
-unsafe impl NoUndef for ArchivedArch {}
+unsafe impl rkyv::Portable for ArchivedArch {}
+unsafe impl rkyv::traits::NoUndef for ArchivedArch {}
 
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedArch
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedArch
 where
-    Archived<String>: CheckBytes<C>,
+    rkyv::Archived<String>: rkyv::bytecheck::CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { <Archived<String>>::check_bytes(value.cast(), context) }
+        unsafe { <rkyv::Archived<String>>::check_bytes(value.cast(), context) }
     }
 }
 
-impl Archive for Arch {
+impl rkyv::Archive for Arch {
     type Archived = ArchivedArch;
-    type Resolver = <String as Archive>::Resolver;
+    type Resolver = <String as rkyv::Archive>::Resolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        let out_inner = unsafe { out.cast_unchecked::<Archived<String>>() };
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<String>>() };
         self.0.language().to_string().resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + ?Sized + Allocator + Writer> Serialize<S> for Arch
+impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
+    rkyv::Serialize<S> for Arch
 where
-    S::Error: Source,
+    S::Error: rkyv::rancor::Source,
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         self.0.language().to_string().serialize(serializer)
     }
 }
 
-impl<D: Fallible + ?Sized> Deserialize<Arch, D> for ArchivedArch
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Arch, D> for ArchivedArch
 where
-    D::Error: Source,
+    D::Error: rkyv::rancor::Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
-        let variant_str = Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
+        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
         Ok(Arch::new(
             resolve_language(&variant_str).expect("invalid language variant"),
         ))

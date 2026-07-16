@@ -1,11 +1,11 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, BytesMut};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::cfg::FlowKind;
 use crate::ir::function::table::FunctionRef;
@@ -37,9 +37,19 @@ const ADDRESS_KEY_SIZE: usize = size_of::<AddressSpaceId>() + size_of::<RawAddre
     rkyv::Deserialize,
 )]
 #[repr(u8)]
-pub enum ReferenceClass {
+pub enum ReferenceKind {
     Flow = 0,
     Data = 1,
+}
+
+impl ReferenceKind {
+    pub fn is_flow(self) -> bool {
+        matches!(self, Self::Flow)
+    }
+
+    pub fn is_data(self) -> bool {
+        matches!(self, Self::Data)
+    }
 }
 
 #[derive(
@@ -73,7 +83,7 @@ impl ReferenceOrigin {
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct ReferenceFlags: u16 {
+    pub struct ReferenceProperties: u16 {
         const CALL          = 0x0001;
         const JUMP          = 0x0002;
         const CONDITIONAL   = 0x0004;
@@ -87,138 +97,61 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ReferenceKind {
-    class: ReferenceClass,
-    flags: ReferenceFlags,
+#[derive(Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ArchivedReferenceProperties(u16);
+
+unsafe impl rkyv::Portable for ArchivedReferenceProperties {}
+unsafe impl rkyv::traits::NoUndef for ArchivedReferenceProperties {}
+
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedReferenceProperties
+where
+    u16: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { u16::check_bytes(value.cast(), context) }
+    }
 }
 
-impl ReferenceKind {
-    pub fn flow(flags: ReferenceFlags) -> Self {
-        Self {
-            class: ReferenceClass::Flow,
-            flags,
-        }
-    }
+impl rkyv::Archive for ReferenceProperties {
+    type Archived = ArchivedReferenceProperties;
+    type Resolver = ();
 
-    pub fn data(flags: ReferenceFlags) -> Self {
-        Self {
-            class: ReferenceClass::Data,
-            flags,
-        }
+    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedReferenceProperties(self.bits()));
     }
+}
 
-    pub fn call() -> Self {
-        Self::flow(ReferenceFlags::CALL)
+impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ReferenceProperties {
+    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(())
     }
+}
 
-    pub fn jump() -> Self {
-        Self::flow(ReferenceFlags::JUMP)
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ReferenceProperties, D>
+    for ArchivedReferenceProperties
+{
+    fn deserialize(&self, _deserializer: &mut D) -> Result<ReferenceProperties, D::Error> {
+        Ok(ReferenceProperties::from_bits_retain(self.0))
     }
+}
 
-    pub fn read() -> Self {
-        Self::data(ReferenceFlags::READ)
-    }
-
-    pub fn write() -> Self {
-        Self::data(ReferenceFlags::WRITE)
-    }
-
-    pub fn conditional(mut self) -> Self {
-        self.flags |= ReferenceFlags::CONDITIONAL;
-        self
-    }
-
-    pub fn computed(mut self) -> Self {
-        self.flags |= ReferenceFlags::COMPUTED;
-        self
-    }
-
-    pub fn indirect(mut self) -> Self {
-        self.flags |= ReferenceFlags::INDIRECT;
-        self
-    }
-
+impl ReferenceProperties {
     pub fn from_flow(kind: FlowKind) -> Self {
-        let flags = match kind {
-            FlowKind::Branch => ReferenceFlags::JUMP,
-            FlowKind::CBranch => ReferenceFlags::JUMP | ReferenceFlags::CONDITIONAL,
-            FlowKind::IBranch => ReferenceFlags::JUMP | ReferenceFlags::COMPUTED,
-            FlowKind::Fall => ReferenceFlags::FALLS_THROUGH,
-            FlowKind::Call => ReferenceFlags::CALL,
-            FlowKind::ICall => ReferenceFlags::CALL | ReferenceFlags::COMPUTED,
-            FlowKind::ServiceCall => ReferenceFlags::CALL,
-            FlowKind::Return => ReferenceFlags::TERMINAL,
-            FlowKind::SwitchBranch => ReferenceFlags::JUMP | ReferenceFlags::COMPUTED,
-            FlowKind::SwitchCall => ReferenceFlags::CALL | ReferenceFlags::COMPUTED,
-            FlowKind::TailCallBranch => {
-                ReferenceFlags::CALL | ReferenceFlags::JUMP | ReferenceFlags::TERMINAL
-            }
-        };
-        Self::flow(flags)
-    }
-
-    pub fn class(&self) -> ReferenceClass {
-        self.class
-    }
-
-    pub fn flags(&self) -> ReferenceFlags {
-        self.flags
-    }
-
-    pub fn merged(self, other: ReferenceKind) -> Self {
-        Self {
-            class: self.class,
-            flags: self.flags | other.flags,
+        match kind {
+            FlowKind::Branch => Self::JUMP,
+            FlowKind::CBranch => Self::JUMP | Self::CONDITIONAL,
+            FlowKind::IBranch => Self::JUMP | Self::COMPUTED,
+            FlowKind::Fall => Self::FALLS_THROUGH,
+            FlowKind::Call => Self::CALL,
+            FlowKind::ICall => Self::CALL | Self::COMPUTED,
+            FlowKind::ServiceCall => Self::CALL,
+            FlowKind::Return => Self::TERMINAL,
+            FlowKind::SwitchBranch => Self::JUMP | Self::COMPUTED,
+            FlowKind::SwitchCall => Self::CALL | Self::COMPUTED,
+            FlowKind::TailCallBranch => Self::CALL | Self::JUMP | Self::TERMINAL,
         }
-    }
-
-    pub fn is_flow(&self) -> bool {
-        self.class == ReferenceClass::Flow
-    }
-
-    pub fn is_data(&self) -> bool {
-        self.class == ReferenceClass::Data
-    }
-
-    pub fn is_call(&self) -> bool {
-        self.flags.contains(ReferenceFlags::CALL)
-    }
-
-    pub fn is_jump(&self) -> bool {
-        self.flags.contains(ReferenceFlags::JUMP)
-    }
-
-    pub fn is_conditional(&self) -> bool {
-        self.flags.contains(ReferenceFlags::CONDITIONAL)
-    }
-
-    pub fn is_computed(&self) -> bool {
-        self.flags.contains(ReferenceFlags::COMPUTED)
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        self.flags.contains(ReferenceFlags::TERMINAL)
-    }
-
-    pub fn has_fall_through(&self) -> bool {
-        self.flags.contains(ReferenceFlags::FALLS_THROUGH)
-    }
-
-    pub fn is_read(&self) -> bool {
-        self.flags.contains(ReferenceFlags::READ)
-    }
-
-    pub fn is_write(&self) -> bool {
-        self.flags.contains(ReferenceFlags::WRITE)
-    }
-
-    pub fn is_indirect(&self) -> bool {
-        self.flags.contains(ReferenceFlags::INDIRECT)
-    }
-
-    pub(crate) fn from_parts(class: ReferenceClass, flags: ReferenceFlags) -> Self {
-        Self { class, flags }
     }
 }
 
@@ -284,21 +217,53 @@ pub struct Reference {
     from: Address,
     target: ReferenceTarget,
     kind: ReferenceKind,
+    properties: ReferenceProperties,
     origin: ReferenceOrigin,
 }
 
 impl Reference {
-    pub fn new(from: Address, target: impl Into<ReferenceTarget>, kind: ReferenceKind) -> Self {
+    pub fn new(
+        from: Address,
+        target: impl Into<ReferenceTarget>,
+        kind: ReferenceKind,
+        properties: ReferenceProperties,
+    ) -> Self {
         Self {
             from,
             target: target.into(),
             kind,
+            properties,
             origin: ReferenceOrigin::Asserted,
         }
     }
 
+    pub fn flow(
+        from: Address,
+        target: impl Into<ReferenceTarget>,
+        properties: ReferenceProperties,
+    ) -> Self {
+        Self::new(from, target, ReferenceKind::Flow, properties)
+    }
+
+    pub fn data(
+        from: Address,
+        target: impl Into<ReferenceTarget>,
+        properties: ReferenceProperties,
+    ) -> Self {
+        Self::new(from, target, ReferenceKind::Data, properties)
+    }
+
+    pub fn from_flow(from: Address, target: impl Into<ReferenceTarget>, kind: FlowKind) -> Self {
+        Self::flow(from, target, ReferenceProperties::from_flow(kind))
+    }
+
     pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
         self.origin = origin;
+        self
+    }
+
+    pub fn with_merged_properties(mut self, properties: ReferenceProperties) -> Self {
+        self.properties |= properties;
         self
     }
 
@@ -314,8 +279,56 @@ impl Reference {
         self.kind
     }
 
+    pub fn properties(&self) -> ReferenceProperties {
+        self.properties
+    }
+
     pub fn origin(&self) -> ReferenceOrigin {
         self.origin
+    }
+
+    pub fn is_flow(&self) -> bool {
+        self.kind.is_flow()
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.kind.is_data()
+    }
+
+    pub fn is_call(&self) -> bool {
+        self.properties.contains(ReferenceProperties::CALL)
+    }
+
+    pub fn is_jump(&self) -> bool {
+        self.properties.contains(ReferenceProperties::JUMP)
+    }
+
+    pub fn is_conditional(&self) -> bool {
+        self.properties.contains(ReferenceProperties::CONDITIONAL)
+    }
+
+    pub fn is_computed(&self) -> bool {
+        self.properties.contains(ReferenceProperties::COMPUTED)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.properties.contains(ReferenceProperties::TERMINAL)
+    }
+
+    pub fn has_fall_through(&self) -> bool {
+        self.properties.contains(ReferenceProperties::FALLS_THROUGH)
+    }
+
+    pub fn is_read(&self) -> bool {
+        self.properties.contains(ReferenceProperties::READ)
+    }
+
+    pub fn is_write(&self) -> bool {
+        self.properties.contains(ReferenceProperties::WRITE)
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        self.properties.contains(ReferenceProperties::INDIRECT)
     }
 }
 
@@ -431,22 +444,26 @@ impl EntityKey for InverseReferenceKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ReferenceRecord {
-    class: ReferenceClass,
-    flags: u16,
+    kind: ReferenceKind,
+    properties: ReferenceProperties,
     origin: ReferenceOrigin,
 }
 
 impl ReferenceRecord {
     fn of(reference: &Reference) -> Self {
         Self {
-            class: reference.kind().class(),
-            flags: reference.kind().flags().bits(),
+            kind: reference.kind(),
+            properties: reference.properties(),
             origin: reference.origin(),
         }
     }
 
     fn kind(&self) -> ReferenceKind {
-        ReferenceKind::from_parts(self.class, ReferenceFlags::from_bits_retain(self.flags))
+        self.kind
+    }
+
+    fn properties(&self) -> ReferenceProperties {
+        self.properties
     }
 
     fn origin(&self) -> ReferenceOrigin {
@@ -647,7 +664,7 @@ impl ReferenceIndex {
         let asserted = self.clear_derived()?;
 
         for function in functions {
-            for reference in blocks.references(function.blocks().map(|(_, id)| id)) {
+            for reference in blocks.flow_references(function.blocks().map(|(_, id)| id)) {
                 let key = ReferenceKey::new(reference.from(), reference.target());
                 if !asserted.contains(&key) {
                     self.insert(&reference)?;
@@ -658,8 +675,8 @@ impl ReferenceIndex {
         Ok(())
     }
 
-    fn clear_derived(&self) -> Result<HashSet<ReferenceKey>, EntityStorageError> {
-        let mut asserted = HashSet::new();
+    fn clear_derived(&self) -> Result<FxHashSet<ReferenceKey>, EntityStorageError> {
+        let mut asserted = FxHashSet::default();
         let mut cursor = None;
 
         loop {
@@ -706,26 +723,56 @@ impl ReferenceIndex {
         Ok(())
     }
 
-    pub(crate) fn replace_derived(
+    pub(crate) fn replace_derived_of_kind(
         &self,
         current: &[Reference],
         derived: impl IntoIterator<Item = Reference>,
+        kind: ReferenceKind,
     ) -> Result<(), EntityStorageError> {
-        let mut asserted = HashSet::new();
+        let mut occupied = FxHashSet::default();
         for reference in current {
-            if reference.origin().is_derived() {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if reference.origin().is_derived() && reference.kind() == kind {
                 self.remove(reference.from(), reference.target())?;
             } else {
-                asserted.insert(ReferenceKey::new(reference.from(), reference.target()));
+                occupied.insert(key);
             }
         }
         for reference in derived {
+            debug_assert_eq!(reference.kind(), kind);
             let key = ReferenceKey::new(reference.from(), reference.target());
-            if !asserted.contains(&key) {
+            if !occupied.contains(&key) {
                 self.insert(&reference)?;
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn derived_kind_matches(
+        current: &[Reference],
+        derived: &[Reference],
+        kind: ReferenceKind,
+    ) -> bool {
+        let mut occupied = FxHashSet::default();
+        let mut existing = FxHashMap::default();
+        for reference in current {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if reference.origin().is_derived() && reference.kind() == kind {
+                existing.insert(key, reference.properties());
+            } else {
+                occupied.insert(key);
+            }
+        }
+
+        let mut desired = FxHashMap::default();
+        for reference in derived {
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            if !occupied.contains(&key) {
+                desired.insert(key, reference.properties());
+            }
+        }
+
+        existing == desired
     }
 
     fn collect_range(
@@ -754,7 +801,8 @@ impl ReferenceIndex {
         target: ReferenceTarget,
         record: &ReferenceRecord,
     ) -> Reference {
-        Reference::new(from, target, record.kind()).with_origin(record.origin())
+        Reference::new(from, target, record.kind(), record.properties())
+            .with_origin(record.origin())
     }
 }
 
@@ -826,14 +874,20 @@ impl ReferenceRevert {
         }
     }
 }
-
 #[cfg(test)]
 mod test {
     use fugue_lifter::runtime::pcode::Inputs;
     use fugue_lifter::{Op, PCodeOp, Varnode};
 
     use super::*;
-    use crate::ir::{CodeBlock, Function, FunctionTable, Insn};
+    use crate::analysis::control::CancellationToken;
+    use crate::il::common::{IlGraph, IlHeader, IlIndexRange, IlOpId, IlSourceSpan};
+    use crate::il::pcode::{
+        AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
+        PCodeBuilder,
+    };
+    use crate::ir::block::table::CodeBlockTableError;
+    use crate::ir::{CodeBlock, Function, FunctionId, FunctionTable, Insn};
     use crate::lifter::{Language, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
 
@@ -846,7 +900,48 @@ mod test {
     }
 
     fn flow_reference(from: Address, to: Address) -> Reference {
-        Reference::new(from, to, ReferenceKind::call()).with_origin(ReferenceOrigin::Derived)
+        Reference::flow(from, to, ReferenceProperties::CALL).with_origin(ReferenceOrigin::Derived)
+    }
+
+    fn derived_read(from: Address, to: Address) -> Reference {
+        Reference::data(from, to, ReferenceProperties::READ).with_origin(ReferenceOrigin::Derived)
+    }
+
+    #[test]
+    fn test_derived_kind_matches_ignores_kind_and_shadowing() {
+        let from = address(0, 0x1000);
+        let data_target = address(0, 0x2000);
+        let flow_target = address(0, 0x3000);
+
+        let current = [
+            derived_read(from, data_target),
+            flow_reference(from, flow_target),
+        ];
+        let derived = [derived_read(from, data_target)];
+        assert!(ReferenceIndex::derived_kind_matches(
+            &current,
+            &derived,
+            ReferenceKind::Data,
+        ));
+
+        let upgraded = [Reference::data(
+            from,
+            data_target,
+            ReferenceProperties::READ | ReferenceProperties::WRITE,
+        )
+        .with_origin(ReferenceOrigin::Derived)];
+        assert!(!ReferenceIndex::derived_kind_matches(
+            &current,
+            &upgraded,
+            ReferenceKind::Data,
+        ));
+
+        let asserted = [derived_read(from, data_target).with_origin(ReferenceOrigin::Asserted)];
+        assert!(ReferenceIndex::derived_kind_matches(
+            &asserted,
+            &derived,
+            ReferenceKind::Data,
+        ));
     }
 
     fn single_point(address: Address) -> AddressRangeSet {
@@ -856,19 +951,30 @@ mod test {
     }
 
     #[test]
-    fn test_reference_flags_compose_and_predicate() {
-        let kind = ReferenceKind::call().conditional().computed();
-        assert!(kind.is_flow());
-        assert!(kind.is_call());
-        assert!(kind.is_conditional());
-        assert!(kind.is_computed());
-        assert!(!kind.is_jump());
-        assert!(!kind.is_read());
+    fn test_reference_properties_compose_and_predicate() {
+        let reference = Reference::flow(
+            address(0, 0x1000),
+            address(0, 0x2000),
+            ReferenceProperties::CALL
+                | ReferenceProperties::CONDITIONAL
+                | ReferenceProperties::COMPUTED,
+        );
+        assert!(reference.is_flow());
+        assert!(reference.is_call());
+        assert!(reference.is_conditional());
+        assert!(reference.is_computed());
+        assert!(!reference.is_jump());
+        assert!(!reference.is_read());
     }
 
     #[test]
-    fn test_reference_kind_merges_data_access() {
-        let merged = ReferenceKind::read().merged(ReferenceKind::write());
+    fn test_reference_merges_data_access() {
+        let merged = Reference::data(
+            address(0, 0x1000),
+            address(0, 0x2000),
+            ReferenceProperties::READ,
+        )
+        .with_merged_properties(ReferenceProperties::WRITE);
         assert!(merged.is_read());
         assert!(merged.is_write());
         assert!(merged.is_data());
@@ -876,27 +982,40 @@ mod test {
 
     #[test]
     fn test_flow_kind_conversion_preserves_semantics() {
-        assert!(ReferenceKind::from_flow(FlowKind::Call).is_call());
-        assert!(ReferenceKind::from_flow(FlowKind::ICall).is_computed());
-        assert!(ReferenceKind::from_flow(FlowKind::CBranch).is_conditional());
-        assert!(ReferenceKind::from_flow(FlowKind::CBranch).is_jump());
-        assert!(ReferenceKind::from_flow(FlowKind::Return).is_terminal());
-        assert!(ReferenceKind::from_flow(FlowKind::Fall).has_fall_through());
+        let from = address(0, 0x1000);
+        let to = address(0, 0x2000);
+        assert!(Reference::from_flow(from, to, FlowKind::Call).is_call());
+        assert!(Reference::from_flow(from, to, FlowKind::ICall).is_computed());
+        assert!(Reference::from_flow(from, to, FlowKind::CBranch).is_conditional());
+        assert!(Reference::from_flow(from, to, FlowKind::CBranch).is_jump());
+        assert!(Reference::from_flow(from, to, FlowKind::Return).is_terminal());
+        assert!(Reference::from_flow(from, to, FlowKind::Fall).has_fall_through());
     }
 
     #[test]
     fn test_reference_record_round_trips_kind_and_origin() {
-        for kind in [
-            ReferenceKind::call().conditional(),
-            ReferenceKind::jump().computed(),
-            ReferenceKind::read().indirect(),
-            ReferenceKind::write(),
+        for (kind, properties) in [
+            (
+                ReferenceKind::Flow,
+                ReferenceProperties::CALL | ReferenceProperties::CONDITIONAL,
+            ),
+            (
+                ReferenceKind::Flow,
+                ReferenceProperties::JUMP | ReferenceProperties::COMPUTED,
+            ),
+            (
+                ReferenceKind::Data,
+                ReferenceProperties::READ | ReferenceProperties::INDIRECT,
+            ),
+            (ReferenceKind::Data, ReferenceProperties::WRITE),
         ] {
             for origin in [ReferenceOrigin::Derived, ReferenceOrigin::Asserted] {
-                let reference = Reference::new(address(0, 0x1000), address(0, 0x2000), kind)
-                    .with_origin(origin);
+                let reference =
+                    Reference::new(address(0, 0x1000), address(0, 0x2000), kind, properties)
+                        .with_origin(origin);
                 let record = ReferenceRecord::of(&reference);
                 assert_eq!(record.kind(), kind);
+                assert_eq!(record.properties(), properties);
                 assert_eq!(record.origin(), origin);
             }
         }
@@ -924,25 +1043,25 @@ mod test {
     }
 
     #[test]
-    fn test_reference_identity_ignores_payload() {
-        let base = Reference::new(
+    fn test_reference_identity_ignores_properties() {
+        let base = Reference::flow(
             address(0, 0x1000),
             address(0, 0x2000),
-            ReferenceKind::call(),
+            ReferenceProperties::CALL,
         )
         .with_origin(ReferenceOrigin::Derived);
-        let repainted = Reference::new(
+        let repainted = Reference::flow(
             address(0, 0x1000),
             address(0, 0x2000),
-            ReferenceKind::jump(),
+            ReferenceProperties::JUMP,
         );
         assert_eq!(base, repainted);
         assert_eq!(base.cmp(&repainted), Ordering::Equal);
 
-        let elsewhere = Reference::new(
+        let elsewhere = Reference::flow(
             address(0, 0x1000),
             address(0, 0x3000),
-            ReferenceKind::call(),
+            ReferenceProperties::CALL,
         )
         .with_origin(ReferenceOrigin::Derived);
         assert!(base < elsewhere);
@@ -956,7 +1075,7 @@ mod test {
         let c = address(0, 0x3000);
 
         index.insert(&flow_reference(a, b))?;
-        index.insert(&Reference::new(a, c, ReferenceKind::read()))?;
+        index.insert(&Reference::data(a, c, ReferenceProperties::READ))?;
         index.insert(&flow_reference(c, b))?;
 
         let from_a = index
@@ -964,9 +1083,9 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_a.len(), 2);
         assert_eq!(from_a[0].target().address(), Some(b));
-        assert!(from_a[0].kind().is_call());
+        assert!(from_a[0].is_call());
         assert_eq!(from_a[1].target().address(), Some(c));
-        assert!(from_a[1].kind().is_read());
+        assert!(from_a[1].is_read());
 
         let to_b = index
             .references_to(b.into(), None)?
@@ -1001,20 +1120,24 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_get_reads_payload() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_reference_index_get_reads_record() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
         assert!(index.get(a, b.into())?.is_none());
 
-        index.insert(&Reference::new(a, b, ReferenceKind::read().indirect()))?;
+        index.insert(&Reference::data(
+            a,
+            b,
+            ReferenceProperties::READ | ReferenceProperties::INDIRECT,
+        ))?;
 
         let stored = index
             .get(a, b.into())?
             .ok_or("reference absent after insert")?;
-        assert!(stored.kind().is_read());
-        assert!(stored.kind().is_indirect());
+        assert!(stored.is_read());
+        assert!(stored.is_indirect());
         assert!(stored.origin().is_asserted());
         Ok(())
     }
@@ -1111,7 +1234,7 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(derived.len(), 1);
         assert_eq!(derived[0].target().address(), Some(callee));
-        assert!(derived[0].kind().is_call());
+        assert!(derived[0].is_call());
         assert!(derived[0].origin().is_derived());
         Ok(())
     }
@@ -1124,15 +1247,19 @@ mod test {
         let asserted_target = address(0, 0x3000);
         let new_target = address(0, 0x4000);
 
-        index.insert(&Reference::new(
+        index.insert(&Reference::data(
             from,
             asserted_target,
-            ReferenceKind::read(),
+            ReferenceProperties::READ,
         ))?;
         index.insert(&flow_reference(from, old_target))?;
 
         let current = index.references_in(&single_point(from))?;
-        index.replace_derived(&current, [flow_reference(from, new_target)])?;
+        index.replace_derived_of_kind(
+            &current,
+            [flow_reference(from, new_target)],
+            ReferenceKind::Flow,
+        )?;
 
         let from_refs = index
             .references_from(from, None)?
@@ -1164,10 +1291,10 @@ mod test {
         assert!(revert.had_derived());
 
         index.clear_in(&single_point(from))?;
-        index.insert(&Reference::new(
+        index.insert(&Reference::data(
             from,
             address(0, 0x9000),
-            ReferenceKind::write(),
+            ReferenceProperties::WRITE,
         ))?;
 
         revert.restore(&index)?;
@@ -1177,7 +1304,7 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_refs.len(), 1);
         assert_eq!(from_refs[0].target().address(), Some(original));
-        assert!(from_refs[0].kind().is_call());
+        assert!(from_refs[0].is_call());
         Ok(())
     }
 
@@ -1186,89 +1313,116 @@ mod test {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
         let insn_address = address(0, 0x1000);
+        let data_space = insn_address.space();
         let data_address = 0x4000u64;
-
-        let load = Insn::from_lifted(
-            language,
+        let register_value = Varnode::new(language.register_space(), 0, 8);
+        let load_operation = PCodeOp {
+            op: Op::Load(default_space),
+            inputs: Inputs::one(Varnode::constant(data_address, 8)),
+            output: register_value,
+        };
+        let store_operation = PCodeOp {
+            op: Op::Store(default_space),
+            inputs: Inputs([Varnode::constant(data_address, 8), register_value]),
+            output: Varnode::INVALID,
+        };
+        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let annotations = [
+            AddressAnnotation::new(
+                IlOpId::try_from_index(0).unwrap(),
+                AddressAnnotationValue::ComputedSpace(data_space),
+            ),
+            AddressAnnotation::new(
+                IlOpId::try_from_index(1).unwrap(),
+                AddressAnnotationValue::ComputedSpace(data_space),
+            ),
+        ];
+        let mut context = PCodeAddressContext::new(insn_address, &annotations);
+        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+        builder.push_lifted_operations(&[load_operation, store_operation], &mut context)?;
+        builder.replace_source_spans(vec![IlSourceSpan::new(
+            IlIndexRange::new(0, 2).unwrap(),
             insn_address,
-            1,
-            vec![PCodeOp {
-                op: Op::Load(default_space),
-                inputs: Inputs::one(Varnode::constant(data_address, 8)),
-                output: Varnode::new(language.register_space(), 0, 8),
-            }],
-        );
-        let derived = load.data_references().collect::<Vec<_>>();
-        assert_eq!(derived.len(), 1);
+            0,
+            2,
+        )]);
+        let ir = builder.build(&CancellationToken::default())?;
+        let artefact_refs = ir.data_references().collect::<Vec<_>>();
+
+        assert_eq!(artefact_refs.len(), 2);
+        assert_eq!(artefact_refs[0].from(), insn_address);
         assert_eq!(
-            derived[0].target().address(),
-            Some(address(0, data_address))
+            artefact_refs[0].target().address(),
+            Some(Address::new(data_space, data_address))
         );
-        assert!(derived[0].kind().is_read());
-        assert!(derived[0].origin().is_derived());
+        assert!(artefact_refs[0].is_read());
+        assert!(artefact_refs[0].origin().is_derived());
+        assert_eq!(artefact_refs[1].from(), insn_address);
+        assert!(artefact_refs[1].is_write());
+        assert_eq!(
+            artefact_refs[1].target().address(),
+            Some(Address::new(data_space, data_address))
+        );
 
-        let register_relative = Insn::from_lifted(
-            language,
+        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let annotations = [AddressAnnotation::new(
+            IlOpId::try_from_index(0).unwrap(),
+            AddressAnnotationValue::ComputedSpace(data_space),
+        )];
+        let mut context = PCodeAddressContext::new(insn_address, &annotations);
+        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+        let register_relative = PCodeOp {
+            op: Op::Load(default_space),
+            inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
+            output: Varnode::new(language.register_space(), 0, 8),
+        };
+        builder.push_lifted_operations(&[register_relative], &mut context)?;
+        builder.replace_source_spans(vec![IlSourceSpan::new(
+            IlIndexRange::new(0, 1).unwrap(),
             insn_address,
+            0,
             1,
-            vec![PCodeOp {
-                op: Op::Load(default_space),
-                inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
-                output: Varnode::new(language.register_space(), 0, 8),
-            }],
-        );
-        assert!(register_relative.data_references().next().is_none());
+        )]);
+        let ir = builder.build(&CancellationToken::default())?;
+        assert!(ir.data_references().next().is_none());
 
         Ok(())
     }
 
     #[test]
-    fn test_derivation_merges_read_and_write_at_one_address()
+    fn test_block_reference_derivation_excludes_instruction_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
         let insn_address = address(0, 0x1000);
         let data = 0x4000u64;
 
-        let read_modify_write = Insn::from_lifted(
-            language,
-            insn_address,
-            1,
-            vec![
-                PCodeOp {
-                    op: Op::Load(default_space),
-                    inputs: Inputs::one(Varnode::constant(data, 8)),
-                    output: Varnode::new(language.register_space(), 0, 8),
-                },
-                PCodeOp {
-                    op: Op::Store(default_space),
-                    inputs: Inputs([
-                        Varnode::constant(data, 8),
-                        Varnode::new(language.register_space(), 0, 8),
-                    ]),
-                    output: Varnode::INVALID,
-                },
-            ],
-        );
+        let operations = [
+            PCodeOp {
+                op: Op::Load(default_space),
+                inputs: Inputs::one(Varnode::constant(data, 8)),
+                output: Varnode::new(language.register_space(), 0, 8),
+            },
+            PCodeOp {
+                op: Op::Store(default_space),
+                inputs: Inputs([
+                    Varnode::constant(data, 8),
+                    Varnode::new(language.register_space(), 0, 8),
+                ]),
+                output: Varnode::INVALID,
+            },
+        ];
+        let read_modify_write = Insn::from_resolved_flow(language, insn_address, 1, &operations)?;
 
         let mut blocks = CodeBlockTable::new_transient();
         let block_id = blocks.insert(insn_address, |id, address| {
-            Ok(CodeBlock::try_new(id, address, 1, vec![read_modify_write])
-                .expect("block construction failed"))
+            CodeBlock::try_new(id, address, 1, vec![read_modify_write])
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
-        let derived = blocks.references([block_id]);
-        let data_references = derived
-            .iter()
-            .filter(|reference| reference.kind().is_data())
-            .collect::<Vec<_>>();
-        assert_eq!(data_references.len(), 1);
-        assert!(data_references[0].kind().is_read());
-        assert!(data_references[0].kind().is_write());
-        assert_eq!(
-            data_references[0].target().address(),
-            Some(address(0, data))
-        );
+        let derived = blocks.flow_references([block_id]);
+
+        assert!(derived.iter().all(|reference| !reference.is_data()));
 
         Ok(())
     }
@@ -1286,7 +1440,7 @@ mod test {
         let asserted_from = address(0, 0x5000);
         let asserted_to = address(0, 0x6000);
         index.insert(
-            &Reference::new(asserted_from, asserted_to, ReferenceKind::read())
+            &Reference::data(asserted_from, asserted_to, ReferenceProperties::READ)
                 .with_origin(ReferenceOrigin::Asserted),
         )?;
 
@@ -1316,28 +1470,19 @@ mod test {
             .iter()
             .enumerate()
             .map(|(offset, target)| {
-                Insn::from_lifted(
-                    language,
-                    entry + offset,
-                    1,
-                    vec![PCodeOp {
-                        op: Op::Call,
-                        inputs: Inputs::one(Varnode::new(
-                            language.default_space(),
-                            target.offset(),
-                            8,
-                        )),
-                        output: Varnode::INVALID,
-                    }],
-                )
+                let operations = [PCodeOp {
+                    op: Op::Call,
+                    inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
+                    output: Varnode::INVALID,
+                }];
+
+                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let block_id = blocks.insert(entry, |id, address| {
-            Ok(
-                CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
-                    .expect("block construction failed"),
-            )
+            CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
+                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
         functions.insert(entry, |id, address| {

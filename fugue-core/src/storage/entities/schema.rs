@@ -22,6 +22,7 @@ impl EntityKeyId {
         self.0 as usize
     }
 
+    #[cfg(feature = "sqlite")]
     pub(crate) const fn prefix(self, entity: EntityId) -> EntityKeyPrefix {
         [self.0, entity.0]
     }
@@ -90,6 +91,9 @@ pub const ENTITY_CALL_GRAPH_INDEX_HEADER_ID: EntityId = EntityId::new(11);
 pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
 pub const ENTITY_REFERENCE_RECORD_ID: EntityId = EntityId::new(13);
 pub const ENTITY_REFERENCE_INDEX_HEADER_ID: EntityId = EntityId::new(14);
+pub const ENTITY_IL_PCODE_ID: EntityId = EntityId::new(15);
+pub const ENTITY_IL_ECODE_ID: EntityId = EntityId::new(16);
+pub const ENTITY_IL_ECODE_SSA_ID: EntityId = EntityId::new(17);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 

@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use fugue_core_derive::SegmentStorageProvider;
 use memmap2::MmapMut;
 use range_set_blaze::RangeSetBlaze;
-use rkyv::ser::writer::IoWriter;
 use thiserror::Error;
 
 use super::{
@@ -328,7 +327,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
         let writer = rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
             &metadata,
-            IoWriter::new(meta_file),
+            rkyv::ser::writer::IoWriter::new(meta_file),
         )
         .map_err(|e| MemoryMappedSegmentStorageError::EncodeMetadata(anyhow::Error::new(e)))?;
         writer

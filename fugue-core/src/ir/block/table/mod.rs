@@ -3,13 +3,12 @@ use std::error::Error as StdError;
 use std::fmt::{Debug as FmtDebug, Display};
 use std::sync::Arc;
 
-use anyhow::Error as AnyhowError;
 use iset::IntervalMap;
 use thiserror::Error;
 
 use crate::ir::{
     Address, AddressRangeSet, CodeBlock, Id, IdSet, RawAddress, Reference, ReferenceKey,
-    ReferenceKind, ReferenceOrigin,
+    ReferenceOrigin, ReferenceProperties,
 };
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
@@ -71,7 +70,7 @@ pub enum CodeBlockTableError {
     #[error("code block to insert has a different address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
-    Other(AnyhowError),
+    Other(anyhow::Error),
     #[error(transparent)]
     Storage(#[from] EntityStorageError),
 }
@@ -81,14 +80,14 @@ impl CodeBlockTableError {
     where
         E: StdError + Send + Sync + 'static,
     {
-        Self::Other(AnyhowError::new(error))
+        Self::Other(anyhow::Error::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
         M: FmtDebug + Display + Send + Sync + 'static,
     {
-        Self::Other(AnyhowError::msg(msg))
+        Self::Other(anyhow::Error::msg(msg))
     }
 }
 
@@ -250,17 +249,20 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn references(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> Vec<Reference> {
-        let mut coalesced = BTreeMap::<ReferenceKey, ReferenceKind>::new();
+    pub fn flow_references(
+        &self,
+        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
+    ) -> Vec<Reference> {
+        let mut coalesced = BTreeMap::<ReferenceKey, ReferenceProperties>::new();
         for id in blocks {
             if let Some(block) = self.get_by_id(id) {
                 for insn in block.instructions().iter() {
-                    for reference in insn.flow_references().chain(insn.data_references()) {
+                    for reference in insn.flow_references() {
                         let key = ReferenceKey::new(reference.from(), reference.target());
                         coalesced
                             .entry(key)
-                            .and_modify(|kind| *kind = kind.merged(reference.kind()))
-                            .or_insert_with(|| reference.kind());
+                            .and_modify(|properties| *properties |= reference.properties())
+                            .or_insert_with(|| reference.properties());
                     }
                 }
             }
@@ -268,8 +270,9 @@ impl CodeBlockTable {
 
         coalesced
             .into_iter()
-            .map(|(key, kind)| {
-                Reference::new(key.from(), key.target(), kind).with_origin(ReferenceOrigin::Derived)
+            .map(|(key, flags)| {
+                Reference::flow(key.from(), key.target(), flags)
+                    .with_origin(ReferenceOrigin::Derived)
             })
             .collect()
     }

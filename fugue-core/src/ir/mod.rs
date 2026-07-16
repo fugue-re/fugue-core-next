@@ -1,15 +1,9 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Formatter, LowerHex, Result as FmtResult, UpperHex};
+use std::fmt::{self, Debug, Formatter, LowerHex, UpperHex};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use bytes::{BufMut, BytesMut};
-use rkyv::bytecheck::CheckBytes;
-use rkyv::primitive::ArchivedU64;
-use rkyv::rancor::{Fallible, Source};
-use rkyv::ser::{Allocator, Writer};
-use rkyv::traits::NoUndef;
-use rkyv::{Archive, Archived, Deserialize, Place, Portable, Serialize};
 use tinyset::SetU64;
 
 pub mod address;
@@ -32,7 +26,7 @@ pub mod function;
 pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
 
 pub mod insn;
-pub use insn::{Insn, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
+pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
 pub mod module;
 pub use module::{Module, ModuleId};
@@ -42,8 +36,8 @@ pub use location::Location;
 
 pub mod reference;
 pub use reference::{
-    Reference, ReferenceClass, ReferenceFlags, ReferenceIndex, ReferenceKey, ReferenceKind,
-    ReferenceOrigin, ReferenceTarget,
+    Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
+    ReferenceTarget,
 };
 
 pub mod segment;
@@ -68,7 +62,7 @@ impl<T> Default for Id<T> {
 }
 
 impl<T> Debug for Id<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Id")
             .field(&self.id)
             .field(&self.generation)
@@ -77,13 +71,13 @@ impl<T> Debug for Id<T> {
 }
 
 impl<T> LowerHex for Id<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         <u64 as LowerHex>::fmt(&self.key(), f)
     }
 }
 
 impl<T> UpperHex for Id<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         <u64 as UpperHex>::fmt(&self.key(), f)
     }
 }
@@ -199,7 +193,7 @@ pub struct IdSet<T> {
 }
 
 impl<T> Debug for IdSet<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
@@ -261,78 +255,82 @@ impl<T> IdSet<T> {
 }
 
 #[repr(transparent)]
-pub struct ArchivedId(ArchivedU64);
+pub struct ArchivedId(rkyv::primitive::ArchivedU64);
 
-unsafe impl Portable for ArchivedId {}
-unsafe impl NoUndef for ArchivedId {}
+unsafe impl rkyv::Portable for ArchivedId {}
+unsafe impl rkyv::traits::NoUndef for ArchivedId {}
 
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedId
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedId
 where
-    ArchivedU64: CheckBytes<C>,
+    rkyv::primitive::ArchivedU64: rkyv::bytecheck::CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { ArchivedU64::check_bytes(value.cast(), context) }
+        unsafe { rkyv::primitive::ArchivedU64::check_bytes(value.cast(), context) }
     }
 }
 
-impl<T> Archive for Id<T> {
+impl<T> rkyv::Archive for Id<T> {
     type Archived = ArchivedId;
     type Resolver = ();
 
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedId(ArchivedU64::from_native(self.key())));
+    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        out.write(ArchivedId(rkyv::primitive::ArchivedU64::from_native(
+            self.key(),
+        )));
     }
 }
 
-impl<S: Fallible + ?Sized, T> Serialize<S> for Id<T> {
+impl<S: rkyv::rancor::Fallible + ?Sized, T> rkyv::Serialize<S> for Id<T> {
     fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(())
     }
 }
 
-impl<D: Fallible + ?Sized, T> Deserialize<Id<T>, D> for ArchivedId {
+impl<D: rkyv::rancor::Fallible + ?Sized, T> rkyv::Deserialize<Id<T>, D> for ArchivedId {
     fn deserialize(&self, _: &mut D) -> Result<Id<T>, D::Error> {
         Ok(Id::from_key(self.0.to_native()))
     }
 }
 
 #[repr(transparent)]
-pub struct ArchivedIdSet(Archived<SetU64>);
+pub struct ArchivedIdSet(rkyv::Archived<SetU64>);
 
-unsafe impl Portable for ArchivedIdSet {}
-unsafe impl NoUndef for ArchivedIdSet {}
+unsafe impl rkyv::Portable for ArchivedIdSet {}
+unsafe impl rkyv::traits::NoUndef for ArchivedIdSet {}
 
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedIdSet
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C> for ArchivedIdSet
 where
-    Archived<SetU64>: CheckBytes<C>,
+    rkyv::Archived<SetU64>: rkyv::bytecheck::CheckBytes<C>,
 {
     unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { <Archived<SetU64>>::check_bytes(value.cast(), context) }
+        unsafe { <rkyv::Archived<SetU64>>::check_bytes(value.cast(), context) }
     }
 }
 
-impl<T> Archive for IdSet<T> {
+impl<T> rkyv::Archive for IdSet<T> {
     type Archived = ArchivedIdSet;
-    type Resolver = <SetU64 as Archive>::Resolver;
+    type Resolver = <SetU64 as rkyv::Archive>::Resolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        let out_inner = unsafe { out.cast_unchecked::<Archived<SetU64>>() };
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<SetU64>>() };
         self.set.resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + Writer + Allocator + ?Sized, T> Serialize<S> for IdSet<T> {
+impl<S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized, T>
+    rkyv::Serialize<S> for IdSet<T>
+{
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         self.set.serialize(serializer)
     }
 }
 
-impl<D: Fallible + ?Sized, T> Deserialize<IdSet<T>, D> for ArchivedIdSet
+impl<D: rkyv::rancor::Fallible + ?Sized, T> rkyv::Deserialize<IdSet<T>, D> for ArchivedIdSet
 where
-    D::Error: Source,
+    D::Error: rkyv::rancor::Source,
 {
     fn deserialize(&self, deserializer: &mut D) -> Result<IdSet<T>, D::Error> {
-        let set = Deserialize::<SetU64, D>::deserialize(&self.0, deserializer)?;
+        let set = rkyv::Deserialize::<SetU64, D>::deserialize(&self.0, deserializer)?;
         Ok(IdSet {
             set,
             _marker: PhantomData,

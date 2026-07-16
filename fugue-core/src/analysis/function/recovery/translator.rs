@@ -1,11 +1,12 @@
 use super::FunctionRecoveryError;
 use crate::ir::{Address, Insn};
-use crate::lifter::{Disassembler, Lifter, LiftingContext};
+use crate::lifter::{Disassembler, Lifter, LiftingContext, PCodeOp};
 use crate::project::Project;
 
 pub struct Translator {
     disassembler: Disassembler,
     lifter: Lifter,
+    operations: Vec<PCodeOp>,
 }
 
 impl Translator {
@@ -16,6 +17,7 @@ impl Translator {
         Self {
             disassembler,
             lifter,
+            operations: Vec::new(),
         }
     }
 
@@ -29,7 +31,7 @@ impl Translator {
             .disassembler
             .disassemble(address, bytes, self.lifter.context_mut())?;
 
-        if !insn.needs_lifting() && !insn.is_empty() {
+        if !insn.needs_flow_resolution() && !insn.is_empty() {
             return Ok(insn);
         }
 
@@ -42,7 +44,7 @@ impl Translator {
         bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, FunctionRecoveryError> {
         self.lifter
-            .lift(address, bytes.as_ref())
+            .resolve_insn_flow_into(address, bytes.as_ref(), &mut self.operations)
             .map_err(FunctionRecoveryError::from)
     }
 

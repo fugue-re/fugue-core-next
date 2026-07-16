@@ -235,7 +235,7 @@ impl PartialFunction {
         let block = self
             .blocks
             .get(id)
-            .ok_or_else(|| FunctionRecoveryError::InvalidBlockId(id))?;
+            .ok_or_else(|| FunctionRecoveryError::invalid_block_id(id))?;
 
         let start = block.address();
         let segment = segments.view_at(start)?;
@@ -249,19 +249,19 @@ impl PartialFunction {
         for insn_id in block.insns().iter().copied() {
             let insn = &mut self.insns[insn_id];
 
-            if insn.is_lifted() {
+            if insn.has_resolved_flow() {
                 continue;
             }
 
             let offset = insn
                 .address()
                 .checked_offset_from(start)
-                .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?
+                .ok_or_else(|| LifterError::invalid_instruction(insn.address()))?
                 as usize;
 
             let view = bytes
                 .get(offset..)
-                .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
+                .ok_or_else(|| LifterError::invalid_instruction(insn.address()))?;
 
             *insn = translator.lift(insn.address(), view)?;
         }
@@ -291,19 +291,19 @@ impl PartialFunction {
             for insn_id in block.insns().iter().copied() {
                 let insn = &mut self.insns[insn_id];
 
-                if insn.is_lifted() {
+                if insn.has_resolved_flow() {
                     continue;
                 }
 
                 let offset = insn
                     .address()
                     .checked_offset_from(block.address())
-                    .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?
+                    .ok_or_else(|| LifterError::invalid_instruction(insn.address()))?
                     as usize;
 
                 let view = bytes
                     .get(offset..)
-                    .ok_or_else(|| LifterError::InvalidInstruction(insn.address()))?;
+                    .ok_or_else(|| LifterError::invalid_instruction(insn.address()))?;
 
                 *insn = translator.lift(insn.address(), view)?;
             }
@@ -321,9 +321,9 @@ impl PartialFunction {
         let insn = self
             .insns
             .get_mut(id)
-            .ok_or_else(|| FunctionRecoveryError::InvalidInstructionId(id))?;
+            .ok_or_else(|| FunctionRecoveryError::invalid_instruction_id(id))?;
 
-        if insn.is_lifted() {
+        if insn.has_resolved_flow() {
             return Ok(Some(insn));
         }
 
@@ -333,8 +333,6 @@ impl PartialFunction {
         segments
             .read_bytes(address, &mut bytes)
             .expect("storage should be consistent");
-
-        // TODO: should we use Rc<RefCell<...>>/Arc for Insn?
 
         *insn = translator.lift(address, bytes)?;
 
