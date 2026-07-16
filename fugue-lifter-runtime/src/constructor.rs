@@ -2,8 +2,8 @@ use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::language::LanguageData;
-use crate::operand::{Operand, OperandHandleResolver, OperandResolver, Operands};
+use crate::language::{Language, LanguageData};
+use crate::operand::{Operand, OperandHandleResolver, OperandPiece, OperandResolver, Operands};
 use crate::pcode::LiftingContextState;
 use crate::symbol::Symbol;
 use crate::template::handle_tpl;
@@ -387,89 +387,113 @@ impl Constructor {
 
     pub(crate) unsafe fn operands(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) -> Option<()> {
         unsafe {
-            if let Some(index) = self.flow_through_index {
-                if matches!(
+            let data = language.data();
+
+            if let Some(index) = self.flow_through_index
+                && matches!(
                     &self.operands[index].handle_resolver,
                     OperandHandleResolver::None
-                ) {
-                    state.input().push_operand(index);
-                    state
-                        .input()
-                        .constructor()
-                        .operands(data, state, operands)?;
-                    state.input().pop_operand();
-                    return Some(());
-                }
+                )
+            {
+                state.input().push_operand(index);
+                let result = state
+                    .input()
+                    .constructor()
+                    .operands(language, state, operands);
+                state.input().pop_operand();
+                return result;
             }
 
-            let Some(pieces) = self
+            self.format_mnemonic(data, state, operands.mnemonic_mut())
+                .ok()?;
+
+            if let Some(body) = self
                 .first_whitespace
                 .and_then(|start| self.print_pieces.get(start + 1..))
-            else {
-                return Some(());
-            };
+            {
+                if !body.is_empty() {
+                    operands.push_separator(" ");
+                }
 
-            for p in pieces {
-                if let PrintPiece::Operand(index) = p {
-                    state.input().push_operand(*index as usize);
-                    match &self.operands[*index as usize].handle_resolver {
-                        OperandHandleResolver::None => {
-                            let mut inner = Operands::new();
-                            state
-                                .input()
-                                .constructor()
-                                .operands_inner(data, state, &mut inner)?;
-                            operands.append(inner);
+                for p in body {
+                    match p {
+                        PrintPiece::Operand(index) => {
+                            operands.begin_operand();
+
+                            state.input().push_operand(*index as usize);
+                            match &self.operands[*index as usize].handle_resolver {
+                                OperandHandleResolver::None => {
+                                    state
+                                        .input()
+                                        .constructor()
+                                        .operand_pieces(language, state, operands)?;
+                                }
+                                OperandHandleResolver::Symbol(symbol) => {
+                                    data.symbols[*symbol as usize]
+                                        .operand_pieces(language, state, operands)?;
+                                }
+                                OperandHandleResolver::Expression(expr) => {
+                                    expr.operand_pieces(language, state, operands)?;
+                                }
+                            }
+                            state.input().pop_operand();
+
+                            operands.finish_operand();
                         }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            data.symbols[*symbol as usize].operands(data, state, operands);
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.operands(data, state, operands);
+                        PrintPiece::Token(token) => {
+                            operands.push_separator(token);
                         }
                     }
-                    state.input().pop_operand();
                 }
             }
+
+            operands.finish();
 
             Some(())
         }
     }
 
-    pub(crate) unsafe fn operands_inner(
+    pub(crate) unsafe fn operand_pieces(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
         operands: &mut Operands,
     ) -> Option<()> {
         unsafe {
+            let data = language.data();
+
             for p in self.print_pieces {
-                if let PrintPiece::Operand(index) = p {
-                    state.input().push_operand(*index as usize);
-                    match &self.operands[*index as usize].handle_resolver {
-                        OperandHandleResolver::None => {
-                            let mut inner = Operands::new();
-                            state
-                                .input()
-                                .constructor()
-                                .operands_inner(data, state, &mut inner)?;
-                            operands.append(inner);
+                match p {
+                    PrintPiece::Operand(index) => {
+                        state.input().push_operand(*index as usize);
+                        match &self.operands[*index as usize].handle_resolver {
+                            OperandHandleResolver::None => {
+                                state
+                                    .input()
+                                    .constructor()
+                                    .operand_pieces(language, state, operands)?;
+                            }
+                            OperandHandleResolver::Symbol(symbol) => {
+                                data.symbols[*symbol as usize]
+                                    .operand_pieces(language, state, operands)?;
+                            }
+                            OperandHandleResolver::Expression(expr) => {
+                                expr.operand_pieces(language, state, operands)?;
+                            }
                         }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            data.symbols[*symbol as usize].operands(data, state, operands);
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.operands(data, state, operands);
-                        }
+                        state.input().pop_operand();
                     }
-                    state.input().pop_operand();
+                    PrintPiece::Token(token) => {
+                        operands.push_piece(OperandPiece::Text(token));
+                    }
                 }
             }
+
             Some(())
         }
     }

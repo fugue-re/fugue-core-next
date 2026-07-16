@@ -311,23 +311,17 @@ impl<'a> LiftingContextState<'a> {
         })
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    #[doc(hidden)]
     #[inline]
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operands(
         &mut self,
-        data: &'static LanguageData,
+        language: &'static Language,
         operands: &mut Operands,
     ) -> Option<()> {
         unsafe {
             self.inputs.base_state();
 
             let ctor = &self.inputs.input.constructor();
-            ctor.operands(data, self, operands)?;
-
-            Some(())
+            ctor.operands(language, self, operands)
         }
     }
 
@@ -740,6 +734,13 @@ impl Varnode {
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
         if self.is_invalid() { None } else { Some(self) }
+    }
+
+    #[inline]
+    pub const fn overlaps(&self, other: &Varnode) -> bool {
+        self.space == other.space
+            && self.offset < other.offset + other.size as u64
+            && other.offset < self.offset + self.size as u64
     }
 }
 

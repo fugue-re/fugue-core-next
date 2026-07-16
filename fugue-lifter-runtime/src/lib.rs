@@ -19,7 +19,10 @@ pub use context::ContextDatabase;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId};
 pub use lifter::Lifter;
-pub use operand::{Operand, OperandData, OperandHandleResolver, OperandResolver, Operands};
+pub use operand::{
+    Operand, OperandAccess, OperandHandleResolver, OperandKind, OperandPiece, OperandRef,
+    OperandResolver, Operands, OperandsContext, Register, Scalar,
+};
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,
 };
