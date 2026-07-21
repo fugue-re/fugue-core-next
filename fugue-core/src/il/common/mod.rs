@@ -5,7 +5,6 @@ pub mod graph;
 pub mod id;
 pub mod pool;
 pub mod span;
-#[cfg(test)]
 pub(crate) mod verify;
 
 pub use artefact::{IlArtefact, IlHeader, IlLevel, IlSchemaVersion, ParseIlLevelError};

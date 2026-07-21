@@ -204,23 +204,25 @@ pub enum FunctionChangeKind {
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct ChangeKinds: u16 {
-        const BYTES_WRITTEN           = 0x0001;
-        const FUNCTION_ADDED          = 0x0002;
-        const FUNCTION_CHANGED        = 0x0004;
-        const FUNCTION_REMOVED        = 0x0008;
-        const RESTORED                = 0x0010;
-        const SEGMENT_MAPPED          = 0x0020;
-        const SEGMENT_MAPPING_CHANGED = 0x0040;
-        const SEGMENT_MAPPING_CREATED = 0x0080;
-        const SEGMENT_UNMAPPED        = 0x0100;
-        const SPACE_CREATED           = 0x0200;
-        const SYMBOL_ADDED            = 0x0400;
-        const SYMBOL_REMOVED          = 0x0800;
-        const REFERENCE_ADDED         = 0x1000;
-        const REFERENCE_REMOVED       = 0x2000;
-        const LIFTED_MATERIALISED   = 0x4000;
-        const LIFTED_REMOVED     = 0x8000;
+    pub struct ChangeKinds: u32 {
+        const BYTES_WRITTEN           = 0x0000_0001;
+        const FUNCTION_ADDED          = 0x0000_0002;
+        const FUNCTION_CHANGED        = 0x0000_0004;
+        const FUNCTION_REMOVED        = 0x0000_0008;
+        const RESTORED                = 0x0000_0010;
+        const SEGMENT_MAPPED          = 0x0000_0020;
+        const SEGMENT_MAPPING_CHANGED = 0x0000_0040;
+        const SEGMENT_MAPPING_CREATED = 0x0000_0080;
+        const SEGMENT_UNMAPPED        = 0x0000_0100;
+        const SPACE_CREATED           = 0x0000_0200;
+        const SYMBOL_ADDED            = 0x0000_0400;
+        const SYMBOL_REMOVED          = 0x0000_0800;
+        const REFERENCE_ADDED         = 0x0000_1000;
+        const REFERENCE_REMOVED       = 0x0000_2000;
+        const LIFTED_MATERIALISED     = 0x0000_4000;
+        const LIFTED_REMOVED          = 0x0000_8000;
+        const SWITCH_ADDED            = 0x0001_0000;
+        const SWITCH_REMOVED          = 0x0002_0000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
@@ -233,6 +235,7 @@ bitflags::bitflags! {
         const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
         const LIFTED = Self::LIFTED_MATERIALISED.bits()
             | Self::LIFTED_REMOVED.bits();
+        const SWITCHES = Self::SWITCH_ADDED.bits() | Self::SWITCH_REMOVED.bits();
     }
 }
 
@@ -295,6 +298,12 @@ pub enum ChangeRecord {
     ReferencesChanged {
         coverage: AddressRangeSet,
     },
+    SwitchAdded {
+        branch: Address,
+    },
+    SwitchRemoved {
+        branch: Address,
+    },
     LiftedMaterialised {
         function: FunctionId,
         level: IlLevel,
@@ -323,6 +332,8 @@ impl ChangeRecord {
             Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
             Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
             Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
+            Self::SwitchAdded { .. } => ChangeKinds::SWITCH_ADDED,
+            Self::SwitchRemoved { .. } => ChangeKinds::SWITCH_REMOVED,
             Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
             Self::LiftedRemoved { .. } => ChangeKinds::LIFTED_REMOVED,
         }
@@ -338,6 +349,8 @@ impl ChangeRecord {
                 | Self::ReferenceRemoved { .. }
                 | Self::SymbolAdded { .. }
                 | Self::SymbolRemoved { .. }
+                | Self::SwitchAdded { .. }
+                | Self::SwitchRemoved { .. }
         )
     }
 
@@ -351,6 +364,9 @@ impl ChangeRecord {
             | Self::FunctionRemoved { coverage, .. } => coverage.ranges().collect(),
             Self::SymbolAdded { address, .. } | Self::SymbolRemoved { address, .. } => {
                 [AddressRange::point(*address)].into_iter().collect()
+            }
+            Self::SwitchAdded { branch } | Self::SwitchRemoved { branch } => {
+                [AddressRange::point(*branch)].into_iter().collect()
             }
             Self::ReferenceAdded { from, target, .. }
             | Self::ReferenceRemoved { from, target, .. } => {

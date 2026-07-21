@@ -270,8 +270,34 @@ impl ArmDisassembler {
             | Opcode::RFE(_, _)
             | Opcode::SVC
             | Opcode::SMC
+            | Opcode::TBB
+            | Opcode::TBH
             | Opcode::UDF => true,
-            Opcode::MVN | Opcode::MOV => insn.operands[0] == Operand::Reg(pc),
+            Opcode::AND
+            | Opcode::EOR
+            | Opcode::SUB
+            | Opcode::RSB
+            | Opcode::ADD
+            | Opcode::ADC
+            | Opcode::SBC
+            | Opcode::RSC
+            | Opcode::ORR
+            | Opcode::MOV
+            | Opcode::BIC
+            | Opcode::MVN
+            | Opcode::LSL
+            | Opcode::LSR
+            | Opcode::ASR
+            | Opcode::RRX
+            | Opcode::ROR
+            | Opcode::ORN
+            | Opcode::LDR => insn.operands[0] == Operand::Reg(pc),
+            Opcode::POP => {
+                matches!(insn.operands[0], Operand::RegList(list) if list & (1 << 15) != 0)
+            }
+            Opcode::LDM(_, _, _, _) => {
+                matches!(insn.operands[1], Operand::RegList(list) if list & (1 << 15) != 0)
+            }
             _ => false,
         }
     }

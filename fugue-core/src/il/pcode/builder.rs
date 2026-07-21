@@ -3,6 +3,9 @@ use fugue_lifter::{Op, PCodeOp as RawPCodeOp};
 use rustc_hash::FxHashMap;
 
 use crate::analysis::control::CancellationToken;
+use crate::il::common::verify::{
+    VerifyError, verify_bounds, verify_graph, verify_graph_bounds, verify_source_spans,
+};
 use crate::il::common::{
     IlArtefact, IlError, IlGraph, IlHeader, IlIndexRange, IlLevel, IlOpId, IlPool, IlSchemaVersion,
     IlSourceSpan,
@@ -13,14 +16,14 @@ use crate::il::pcode::{
     PCodeLocationId, PCodeOp, PCodeOpcode,
 };
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, Reference, ReferenceOrigin,
+    Address, AddressRange, AddressRangeSet, FunctionId, Location, Reference, ReferenceOrigin,
     ReferenceProperties,
 };
 use crate::storage::entities::schema::ENTITY_IL_PCODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 
-pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
+pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PCodeIr {
@@ -30,7 +33,7 @@ pub struct PCodeIr {
     locations: Vec<PCodeLocation>,
     operations: Vec<PCodeOp>,
     operands: Vec<PCodeLocationId>,
-    targets: Vec<Address>,
+    targets: Vec<Location>,
 }
 
 impl PCodeIr {
@@ -41,7 +44,7 @@ impl PCodeIr {
         locations: Vec<PCodeLocation>,
         operations: Vec<PCodeOp>,
         operands: Vec<PCodeLocationId>,
-        targets: Vec<Address>,
+        targets: Vec<Location>,
     ) -> Self {
         Self {
             header,
@@ -90,11 +93,11 @@ impl PCodeIr {
         &self.operands
     }
 
-    pub fn targets(&self) -> &[Address] {
+    pub fn targets(&self) -> &[Location] {
         &self.targets
     }
 
-    pub fn target(&self, index: u32) -> Option<Address> {
+    pub fn target(&self, index: u32) -> Option<Location> {
         index
             .checked_sub(1)
             .and_then(|index| self.targets.get(index as usize))
@@ -213,7 +216,7 @@ pub(crate) struct PCodeBuilder {
     location_ids: FxHashMap<PCodeLocation, PCodeLocationId>,
     operations: Vec<PCodeOp>,
     operands: IlPool<PCodeLocationId>,
-    targets: Vec<Address>,
+    targets: Vec<Location>,
 }
 
 impl PCodeBuilder {
@@ -268,7 +271,7 @@ impl PCodeBuilder {
         self.source_spans = source_spans;
     }
 
-    pub(crate) fn push_target(&mut self, target: Address) -> Result<u32, IlError> {
+    pub(crate) fn push_target(&mut self, target: Location) -> Result<u32, IlError> {
         let index = self.targets.len();
         self.targets.push(target);
         u32::try_from(index + 1).map_err(|_| IlError::id_exhausted("PCode target"))
@@ -417,15 +420,129 @@ impl PCodeBuilder {
     }
 }
 
+pub(crate) fn verify(ir: &PCodeIr) -> Result<(), VerifyError> {
+    if ir.header().schema() != PCodeIr::SCHEMA {
+        return Err(IlError::schema_mismatch(
+            PCodeIr::LEVEL,
+            PCodeIr::SCHEMA.value(),
+            ir.header().schema().value(),
+        )
+        .into());
+    }
+
+    verify_graph(ir.graph())?;
+    verify_graph_bounds(ir.graph(), ir.operations().len())?;
+    verify_source_spans(ir.source_spans(), ir.operations().len())?;
+
+    for operation in ir.operations() {
+        verify_operation(ir, operation)?;
+    }
+
+    Ok(())
+}
+
+fn verify_operation(ir: &PCodeIr, operation: &PCodeOp) -> Result<(), VerifyError> {
+    verify_bounds(operation.operands(), ir.operands().len())?;
+
+    if let Some(count) = operation.opcode().fixed_operand_count() {
+        let found = operation.operands().len();
+
+        if found != count {
+            return Err(VerifyError::InvalidOperandCount {
+                level: PCodeIr::LEVEL,
+                expected: count,
+                found,
+            });
+        }
+    }
+
+    let output = operation.output();
+
+    if operation.opcode().requires_output() && output.is_none() {
+        return Err(IlError::missing_component(PCodeIr::LEVEL, "output").into());
+    }
+
+    if operation.opcode().forbids_output() && output.is_some() {
+        return Err(VerifyError::ForbiddenOutput {
+            level: PCodeIr::LEVEL,
+        });
+    }
+
+    if let Some(output) = output {
+        ir.location(output).ok_or(IlError::range_out_of_bounds(
+            output.value(),
+            ir.locations().len(),
+        ))?;
+    }
+
+    for operand in ir.operation_operands(operation) {
+        ir.location(*operand).ok_or(IlError::range_out_of_bounds(
+            operand.value(),
+            ir.locations().len(),
+        ))?;
+    }
+
+    if matches!(
+        operation.opcode(),
+        PCodeOpcode::Load
+            | PCodeOpcode::Store
+            | PCodeOpcode::IBranch
+            | PCodeOpcode::ICall
+            | PCodeOpcode::Return
+    ) && operation.effect_space().is_none()
+    {
+        return Err(IlError::missing_component(PCodeIr::LEVEL, "address space").into());
+    }
+
+    if matches!(
+        operation.opcode(),
+        PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
+    ) && operation.immediate() == 0
+    {
+        return Err(IlError::missing_component(PCodeIr::LEVEL, "address").into());
+    }
+
+    if matches!(
+        operation.opcode(),
+        PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
+    ) && operation.immediate() as usize > ir.targets().len()
+    {
+        return Err(IlError::range_out_of_bounds(operation.immediate(), ir.targets().len()).into());
+    }
+
+    verify_operation_widths(ir, operation)
+}
+
+fn verify_operation_widths(ir: &PCodeIr, operation: &PCodeOp) -> Result<(), VerifyError> {
+    let operands = ir.operation_operands(operation);
+    let output = operation.output().and_then(|output| ir.location(output));
+
+    if let Some(output) = output
+        && operation.opcode().preserves_first_operand_width()
+        && let Some(first) = operands.first().and_then(|operand| ir.location(*operand))
+        && output.width() != first.width()
+    {
+        return Err(IlError::width_mismatch(PCodeIr::LEVEL).into());
+    }
+
+    if operation.opcode().compares_operands()
+        && let [left, right] = operands
+        && ir.location(*left).map(PCodeLocation::width)
+            != ir.location(*right).map(PCodeLocation::width)
+    {
+        return Err(IlError::width_mismatch(PCodeIr::LEVEL).into());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use fugue_lifter::runtime::pcode::Inputs;
     use fugue_lifter::{Op, Varnode};
 
     use super::*;
-    use crate::il::common::verify::{
-        VerifyError, verify_bounds, verify_graph, verify_graph_bounds, verify_source_spans,
-    };
+    use crate::il::common::verify::VerifyError;
     use crate::il::common::{IlBlock, IlBlockProperties, IlSourceSpan};
     use crate::il::pcode::{
         AddressAnnotation, AddressAnnotationValue, LifterSpaceHandle, PCodeAddressContext,
@@ -443,124 +560,6 @@ mod test {
 
     fn header() -> IlHeader {
         IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0)
-    }
-
-    pub(crate) fn verify(ir: &PCodeIr) -> Result<(), VerifyError> {
-        if ir.header().schema() != PCodeIr::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                PCodeIr::LEVEL,
-                PCodeIr::SCHEMA.value(),
-                ir.header().schema().value(),
-            )
-            .into());
-        }
-
-        verify_graph(ir.graph())?;
-        verify_graph_bounds(ir.graph(), ir.operations().len())?;
-        verify_source_spans(ir.source_spans(), ir.operations().len())?;
-
-        for operation in ir.operations() {
-            verify_operation(ir, operation)?;
-        }
-
-        Ok(())
-    }
-
-    fn verify_operation(ir: &PCodeIr, operation: &PCodeOp) -> Result<(), VerifyError> {
-        verify_bounds(operation.operands(), ir.operands().len())?;
-
-        if let Some(count) = operation.opcode().fixed_operand_count() {
-            let found = operation.operands().len();
-
-            if found != count {
-                return Err(VerifyError::InvalidOperandCount {
-                    level: PCodeIr::LEVEL,
-                    expected: count,
-                    found,
-                });
-            }
-        }
-
-        let output = operation.output();
-
-        if operation.opcode().requires_output() && output.is_none() {
-            return Err(IlError::missing_component(PCodeIr::LEVEL, "output").into());
-        }
-
-        if operation.opcode().forbids_output() && output.is_some() {
-            return Err(VerifyError::ForbiddenOutput {
-                level: PCodeIr::LEVEL,
-            });
-        }
-
-        if let Some(output) = output {
-            ir.location(output).ok_or(IlError::range_out_of_bounds(
-                output.value(),
-                ir.locations().len(),
-            ))?;
-        }
-
-        for operand in ir.operation_operands(operation) {
-            ir.location(*operand).ok_or(IlError::range_out_of_bounds(
-                operand.value(),
-                ir.locations().len(),
-            ))?;
-        }
-
-        if matches!(
-            operation.opcode(),
-            PCodeOpcode::Load
-                | PCodeOpcode::Store
-                | PCodeOpcode::IBranch
-                | PCodeOpcode::ICall
-                | PCodeOpcode::Return
-        ) && operation.effect_space().is_none()
-        {
-            return Err(IlError::missing_component(PCodeIr::LEVEL, "address space").into());
-        }
-
-        if matches!(
-            operation.opcode(),
-            PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
-        ) && operation.immediate() == 0
-        {
-            return Err(IlError::missing_component(PCodeIr::LEVEL, "address").into());
-        }
-
-        if matches!(
-            operation.opcode(),
-            PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
-        ) && operation.immediate() as usize > ir.targets().len()
-        {
-            return Err(
-                IlError::range_out_of_bounds(operation.immediate(), ir.targets().len()).into(),
-            );
-        }
-
-        verify_operation_widths(ir, operation)
-    }
-
-    fn verify_operation_widths(ir: &PCodeIr, operation: &PCodeOp) -> Result<(), VerifyError> {
-        let operands = ir.operation_operands(operation);
-        let output = operation.output().and_then(|output| ir.location(output));
-
-        if let Some(output) = output
-            && operation.opcode().preserves_first_operand_width()
-            && let Some(first) = operands.first().and_then(|operand| ir.location(*operand))
-            && output.width() != first.width()
-        {
-            return Err(IlError::width_mismatch(PCodeIr::LEVEL).into());
-        }
-
-        if operation.opcode().compares_operands()
-            && let [left, right] = operands
-            && ir.location(*left).map(PCodeLocation::width)
-                != ir.location(*right).map(PCodeLocation::width)
-        {
-            return Err(IlError::width_mismatch(PCodeIr::LEVEL).into());
-        }
-
-        Ok(())
     }
 
     #[test]
@@ -901,7 +900,7 @@ mod test {
         let target = Address::new(AddressSpaceId::new(2), 0x2000u64);
         let annotation = [AddressAnnotation::new(
             IlOpId::try_from_index(0).unwrap(),
-            AddressAnnotationValue::DirectTarget(target),
+            AddressAnnotationValue::DirectTarget(target.into()),
         )];
         let mut context = PCodeAddressContext::new(source, &annotation);
 
@@ -910,7 +909,7 @@ mod test {
             .unwrap();
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
-        assert_eq!(ir.targets(), &[target]);
+        assert_eq!(ir.targets(), &[target.into()]);
         assert_eq!(ir.operations()[0].immediate(), 1);
     }
 

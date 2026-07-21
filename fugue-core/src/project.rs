@@ -10,17 +10,19 @@ use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
 use crate::il::common::{IlArtefact, IlError, IlLevel};
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa};
-use crate::il::ecode::{ECodeIr, PCodeToECode};
-use crate::il::pcode::{PCodeCanonicaliser, PCodeError, PCodeIr};
+use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa, verify as verify_ecode_ssa};
+use crate::il::ecode::{ECodeIr, PCodeToECode, verify as verify_ecode};
+use crate::il::pcode::{PCodeCanonicaliser, PCodeError, PCodeIr, verify as verify_pcode};
 use crate::il::storage::{IlPersist, IlRevert, IlStorageError};
 use crate::ir::function::table::FunctionTableRevert;
 use crate::ir::reference::ReferenceRevert;
+use crate::ir::switch::SwitchTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphIndex, CodeBlockTable, FunctionId,
     FunctionTable, RawAddress, Reference, ReferenceIndex, ReferenceKind, ReferenceOrigin,
-    ReferenceTarget, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
+    ReferenceTarget, Switch, SwitchId, SwitchTable, SwitchTableError, Symbol, SymbolEntry,
+    SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter, LifterError};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -35,10 +37,11 @@ use crate::storage::segments::mapping::{
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageRevert, SegmentWriteRevert};
 use crate::storage::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_SYMBOL_CACHE_SIZE,
-    DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES, DEFAULT_SYMBOL_CACHE_BYTES,
-    DefaultProjectStorageProvider, SegmentStorageError, StorageContainer, StorageProvider,
-    StorageProviderError, TransientStorageProvider,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_SWITCH_CACHE_SIZE,
+    ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES,
+    DEFAULT_SWITCH_CACHE_BYTES, DEFAULT_SYMBOL_CACHE_BYTES, DefaultProjectStorageProvider,
+    SegmentStorageError, StorageContainer, StorageProvider, StorageProviderError,
+    TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
@@ -53,6 +56,7 @@ pub struct Project {
     pub(crate) blocks: CodeBlockTable,
     pub(crate) call_graph: CallGraphIndex,
     pub(crate) references: ReferenceIndex,
+    pub(crate) switches: SwitchTable,
     pub(crate) platform: Platform,
     restored_revision: Option<Revision>,
     pub(crate) attributes: AttributeMap,
@@ -146,6 +150,8 @@ pub enum ProjectError {
     SegmentStorage(#[from] SegmentStorageError),
     #[error(transparent)]
     StorageProvider(#[from] StorageProviderError),
+    #[error(transparent)]
+    Switch(#[from] SwitchTableError),
 }
 
 impl From<Cancelled> for ProjectError {
@@ -184,6 +190,7 @@ pub struct ProjectTransaction<'p> {
     segment_reverts: Vec<SegmentStorageRevert>,
     segment_write_reverts: Vec<SegmentWriteRevert>,
     reference_reverts: Vec<ReferenceRevert>,
+    switch_reverts: Vec<SwitchTableRevert>,
     source: ChangeSource,
     committed: bool,
     span: Span,
@@ -449,6 +456,10 @@ impl ProjectTransaction<'_> {
             cancellation,
         )?;
 
+        if cfg!(debug_assertions) {
+            verify_pcode(&ir).expect("canonicalised pcode fails verification");
+        }
+
         self.materialise_lifted(&mut ir)?;
         Ok((true, ir))
     }
@@ -476,6 +487,10 @@ impl ProjectTransaction<'_> {
         let (_, source) = self.ensure_pcode_ir(function, cancellation)?;
         let mut ir = PCodeToECode.transform(&source, cancellation)?;
 
+        if cfg!(debug_assertions) {
+            verify_ecode(&ir).expect("transformed ecode fails verification");
+        }
+
         self.materialise_lifted(&mut ir)?;
 
         Ok((true, ir))
@@ -492,6 +507,14 @@ impl ProjectTransaction<'_> {
 
         let (_, source) = self.ensure_ecode_ir(function, cancellation)?;
         let mut ir = ECodeToSsa.transform(&source, cancellation)?;
+
+        ir.fold_constants();
+        ir.eliminate_dead_code();
+        ir.compact();
+
+        if cfg!(debug_assertions) {
+            verify_ecode_ssa(&ir).expect("optimised ECode SSA fails verification");
+        }
 
         self.materialise_lifted(&mut ir)?;
 
@@ -660,6 +683,8 @@ impl ProjectTransaction<'_> {
         )?;
         self.reference_reverts.push(reference_revert);
 
+        self.remove_switches_of_function(id)?;
+
         let reference_coverage = references_touched.then(|| covered.clone());
 
         for block in blocks {
@@ -714,6 +739,84 @@ impl ProjectTransaction<'_> {
             kind: resolved.kind(),
         });
         Ok(true)
+    }
+
+    pub fn add_switch<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, ProjectError>
+    where
+        F: FnOnce(SwitchId, Address) -> Switch,
+    {
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch);
+        let id = self.project.switches.insert(branch, f)?;
+        self.switch_reverts.push(revert);
+        self.records.push(ChangeRecord::SwitchAdded { branch });
+        Ok(id)
+    }
+
+    pub fn modify_switch<R>(
+        &mut self,
+        branch: Address,
+        f: impl FnOnce(&mut Switch) -> R,
+    ) -> Option<R> {
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch);
+        let result = self.project.switches.modify_by_branch(branch, f)?;
+        self.switch_reverts.push(revert);
+        self.records.push(ChangeRecord::SwitchAdded { branch });
+        Some(result)
+    }
+
+    pub fn remove_switch(&mut self, branch: Address) -> Result<bool, ProjectError> {
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch);
+        let removed = self.project.switches.remove_by_branch(branch);
+        if removed {
+            self.switch_reverts.push(revert);
+            self.replace_switch_references(branch, [])?;
+            self.records.push(ChangeRecord::SwitchRemoved { branch });
+        }
+        Ok(removed)
+    }
+
+    fn remove_switches_of_function(&mut self, function: FunctionId) -> Result<(), ProjectError> {
+        let branches = self
+            .project
+            .switches
+            .branches_of_function(function)
+            .collect::<Vec<_>>();
+
+        for branch in branches {
+            self.remove_switch(branch)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn replace_switch_references(
+        &mut self,
+        branch: Address,
+        references: impl IntoIterator<Item = Reference>,
+    ) -> Result<(), ProjectError> {
+        let mut coverage = AddressRangeSet::new();
+        coverage.insert_range(AddressRange::point(branch));
+
+        let revert = ReferenceRevert::capture(&self.project.references, &coverage)?;
+        let (flow, data) = references
+            .into_iter()
+            .partition::<Vec<_>, _>(Reference::is_flow);
+
+        self.project.references.replace_derived_of_kind(
+            revert.previous(),
+            flow,
+            ReferenceKind::Flow,
+        )?;
+        self.project.references.replace_derived_of_kind(
+            revert.previous(),
+            data,
+            ReferenceKind::Data,
+        )?;
+
+        self.reference_reverts.push(revert);
+        self.records
+            .push(ChangeRecord::ReferencesChanged { coverage });
+        Ok(())
     }
 
     pub fn remove_reference(
@@ -1227,6 +1330,9 @@ impl ProjectTransaction<'_> {
         while let Some(revert) = self.reference_reverts.pop() {
             revert.restore(&self.project.references)?;
         }
+        while let Some(revert) = self.switch_reverts.pop() {
+            revert.restore(&mut self.project.switches)?;
+        }
         while let Some(revert) = self.function_reverts.pop() {
             revert.restore(
                 &mut self.project.functions,
@@ -1409,6 +1515,24 @@ impl Project {
             .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?
         };
 
+        let switch_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_SWITCH_CACHE_SIZE)
+            .unwrap_or(DEFAULT_SWITCH_CACHE_BYTES);
+
+        let switches = if storage.entities.is_transient() {
+            SwitchTable::new_transient()
+        } else {
+            match storage.write_back() {
+                Some(worker) => SwitchTable::new_with(
+                    storage.entities.clone(),
+                    worker.clone(),
+                    switch_cache_bytes,
+                ),
+                None => SwitchTable::new(storage.entities.clone(), switch_cache_bytes),
+            }
+            .inspect_err(|e| tracing::error!("failed to load switch table: {e}"))?
+        };
+
         let revision_record = storage
             .entities
             .get::<ProjectEntity, ProjectRevision>(&ProjectEntity::Revision)?;
@@ -1442,6 +1566,7 @@ impl Project {
             blocks,
             call_graph,
             references,
+            switches,
             platform,
             restored_revision,
             attributes,
@@ -1697,6 +1822,7 @@ impl Project {
             segment_reverts: Vec::new(),
             segment_write_reverts: Vec::new(),
             reference_reverts: Vec::new(),
+            switch_reverts: Vec::new(),
             source,
             committed: false,
             span,
@@ -1729,6 +1855,14 @@ impl Project {
 
     pub fn references(&self) -> &ReferenceIndex {
         &self.references
+    }
+
+    pub fn switches(&self) -> &SwitchTable {
+        &self.switches
+    }
+
+    pub fn switches_mut(&mut self) -> &mut SwitchTable {
+        &mut self.switches
     }
 
     pub fn functions_mut(&mut self) -> &mut FunctionTable {
@@ -1821,6 +1955,9 @@ impl Project {
         tracing::debug!("persisting code block table");
         self.blocks.persist(&self.storage.entities)?;
 
+        tracing::debug!("persisting switch table");
+        self.switches.persist(&self.storage.entities)?;
+
         if let Some(worker) = self.storage.write_back() {
             tracing::debug!("draining write-back worker");
             worker.flush()?;
@@ -1860,11 +1997,12 @@ mod test {
     use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeStmtOpcode};
     use crate::il::pcode::{
-        AddressAnnotationRole, LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder,
-        PCodeLocation, PCodeLocationProperties, PCodeOp, PCodeOpcode,
+        LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
+        PCodeLocationProperties, PCodeOp, PCodeOpcode,
     };
     use crate::ir::{
-        Insn, InsnProperties, ReferenceProperties, SymbolProperties, SymbolTableSelector,
+        AddressWithContext, Insn, InsnProperties, ReferenceProperties, SwitchCase, SwitchModel,
+        SymbolProperties, SymbolTableSelector,
     };
     use crate::lifter::{ContextSet, resolve_language};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
@@ -2392,6 +2530,83 @@ mod test {
     }
 
     #[test]
+    fn project_switch_insert_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let branch = Address::new(AddressSpaceId::new(1), 0x1000u64);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.add_switch(branch, |id, branch| {
+                Switch::new(id, branch, SwitchModel::Explicit)
+            })?;
+            assert!(
+                transaction
+                    .project()
+                    .switches()
+                    .get_by_branch(branch)
+                    .is_some()
+            );
+            transaction.rollback()?;
+        }
+
+        assert!(project.switches().get_by_branch(branch).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn project_removing_function_removes_its_switches() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::new(AddressSpaceId::new(1), 0x2000u64);
+        let target = Address::new(AddressSpaceId::new(1), 0x3000u64);
+
+        let function_id = {
+            let mut transaction = project.transaction("test");
+            let function_id =
+                transaction.add_function(flow_resolved_load_function(entry, 0x4000)?)?;
+            transaction.add_switch(entry, |id, branch| {
+                let mut switch =
+                    Switch::new(id, branch, SwitchModel::Explicit).with_function(function_id);
+                switch.add_case(SwitchCase::new(AddressWithContext::new(
+                    target,
+                    ContextSet::default(),
+                )));
+                switch
+            })?;
+            let references = transaction
+                .project()
+                .switches()
+                .get_by_branch(entry)
+                .expect("switch present")
+                .derived_references()
+                .collect::<Vec<_>>();
+            transaction.replace_switch_references(entry, references)?;
+            transaction.commit()?;
+            function_id
+        };
+
+        assert!(project.switches().get_by_branch(entry).is_some());
+        let reference = project
+            .references
+            .get(entry, ReferenceTarget::from(target))?;
+        assert!(reference.is_some_and(|reference| reference.origin().is_derived()));
+
+        {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.remove_function_by_id(function_id)?);
+            transaction.commit()?;
+        }
+
+        assert!(project.switches().get_by_branch(entry).is_none());
+        assert!(
+            project
+                .references
+                .get(entry, ReferenceTarget::from(target))?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn project_flush_derived_references_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
@@ -2579,8 +2794,8 @@ mod test {
     }
 
     #[test]
-    fn project_ensure_pcode_rejects_missing_computed_space()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn project_ensure_pcode_resolves_default_space_load() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
         let bytes = [0x48, 0x8b, 0x03];
@@ -2594,17 +2809,16 @@ mod test {
         };
 
         let mut transaction = project.transaction("test");
-        let result = transaction.ensure_pcode(function, &CancellationToken::default());
+        assert!(transaction.ensure_pcode(function, &CancellationToken::default())?);
+        transaction.commit()?;
 
-        match result {
-            Err(ProjectError::PCode(PCodeError::MissingAnnotation {
-                role: AddressAnnotationRole::ComputedSpace,
-                ..
-            })) => {}
-            other => panic!("unexpected ensure_pcode result: {other:?}"),
-        }
-
-        transaction.rollback()?;
+        let pcode = project.pcode(function)?.expect("pcode is materialised");
+        let load = pcode
+            .operations()
+            .iter()
+            .find(|operation| operation.opcode() == PCodeOpcode::Load)
+            .expect("load survives canonicalisation");
+        assert_eq!(load.effect_space(), Some(entry.space()));
 
         Ok(())
     }

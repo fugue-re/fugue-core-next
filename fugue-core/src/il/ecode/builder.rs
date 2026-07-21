@@ -1,4 +1,8 @@
 use crate::analysis::control::CancellationToken;
+use crate::il::common::verify::{
+    VerifyError, verify_bounds, verify_graph, verify_graph_bounds, verify_parent_spans,
+    verify_source_spans,
+};
 use crate::il::common::{
     IlArtefact, IlError, IlExprId, IlGraph, IlHeader, IlIndexRange, IlLevel, IlOpId, IlParentSpan,
     IlPool, IlSchemaVersion, IlSourceSpan,
@@ -23,26 +27,27 @@ pub struct ECodeIr {
     statement_operands: Vec<IlExprId>,
 }
 
+#[derive(Default)]
+struct ECodeIrParts {
+    source_spans: Vec<IlSourceSpan>,
+    parent_spans: Vec<IlParentSpan>,
+    expressions: Vec<ECodeExpr>,
+    expression_operands: Vec<IlExprId>,
+    statements: Vec<ECodeStmt>,
+    statement_operands: Vec<IlExprId>,
+}
+
 impl ECodeIr {
-    pub(crate) fn new(
-        header: IlHeader,
-        graph: IlGraph,
-        source_spans: Vec<IlSourceSpan>,
-        parent_spans: Vec<IlParentSpan>,
-        expressions: Vec<ECodeExpr>,
-        expression_operands: Vec<IlExprId>,
-        statements: Vec<ECodeStmt>,
-        statement_operands: Vec<IlExprId>,
-    ) -> Self {
+    fn new(header: IlHeader, graph: IlGraph, parts: ECodeIrParts) -> Self {
         Self {
             header,
             graph,
-            source_spans,
-            parent_spans,
-            expressions,
-            expression_operands,
-            statements,
-            statement_operands,
+            source_spans: parts.source_spans,
+            parent_spans: parts.parent_spans,
+            expressions: parts.expressions,
+            expression_operands: parts.expression_operands,
+            statements: parts.statements,
+            statement_operands: parts.statement_operands,
         }
     }
 
@@ -200,6 +205,14 @@ impl ECodeBuilder {
         Ok(id)
     }
 
+    pub(crate) fn statement_count(&self) -> usize {
+        self.statements.len()
+    }
+
+    pub(crate) fn replace_graph(&mut self, graph: IlGraph) {
+        self.graph = graph;
+    }
+
     pub(crate) fn push_statement_operands(
         &mut self,
         operands: impl IntoIterator<Item = IlExprId>,
@@ -217,12 +230,14 @@ impl ECodeBuilder {
         let mut body = ECodeIr::new(
             self.header,
             self.graph,
-            self.source_spans,
-            self.parent_spans,
-            self.expressions,
-            self.expression_operands.into_values(),
-            self.statements,
-            self.statement_operands.into_values(),
+            ECodeIrParts {
+                source_spans: self.source_spans,
+                parent_spans: self.parent_spans,
+                expressions: self.expressions,
+                expression_operands: self.expression_operands.into_values(),
+                statements: self.statements,
+                statement_operands: self.statement_operands.into_values(),
+            },
         );
 
         body.shrink_to_fit();
@@ -231,118 +246,115 @@ impl ECodeBuilder {
     }
 }
 
+pub(crate) fn verify(ir: &ECodeIr) -> Result<(), VerifyError> {
+    if ir.header().schema() != ECodeIr::SCHEMA {
+        return Err(IlError::schema_mismatch(
+            ECodeIr::LEVEL,
+            ECodeIr::SCHEMA.value(),
+            ir.header().schema().value(),
+        )
+        .into());
+    }
+
+    verify_graph(ir.graph())?;
+    verify_graph_bounds(ir.graph(), ir.statements().len())?;
+    verify_source_spans(ir.source_spans(), ir.statements().len())?;
+    verify_parent_spans(ir.parent_spans(), ir.statements().len())?;
+
+    for expression in ir.expressions() {
+        verify_expr(ir, expression)?;
+    }
+
+    for statement in ir.statements() {
+        verify_stmt(ir, statement)?;
+    }
+
+    Ok(())
+}
+
+fn verify_expr(ir: &ECodeIr, expression: &ECodeExpr) -> Result<(), VerifyError> {
+    verify_bounds(expression.operands(), ir.expression_operands().len())?;
+
+    if let Some(count) = expression.opcode().fixed_operand_count()
+        && expression.operands().len() != count
+    {
+        return Err(VerifyError::InvalidOperandCount {
+            level: IlLevel::ECode,
+            expected: count,
+            found: expression.operands().len(),
+        });
+    }
+
+    if expression.opcode().requires_address_space() && expression.address_space().is_none() {
+        return Err(IlError::missing_component(IlLevel::ECode, "address space").into());
+    }
+
+    for operand in ir.expression_operands_for(expression) {
+        ir.expressions()
+            .get(operand.index())
+            .ok_or(IlError::range_out_of_bounds(
+                operand.value(),
+                ir.expressions().len(),
+            ))?;
+    }
+
+    Ok(())
+}
+
+fn verify_stmt(ir: &ECodeIr, statement: &ECodeStmt) -> Result<(), VerifyError> {
+    verify_bounds(statement.operands(), ir.statement_operands().len())?;
+
+    if let Some(count) = statement.opcode().fixed_operand_count()
+        && statement.operands().len() != count
+    {
+        return Err(VerifyError::InvalidOperandCount {
+            level: IlLevel::ECode,
+            expected: count,
+            found: statement.operands().len(),
+        });
+    }
+
+    if statement.opcode().requires_address() && statement.address().is_none() {
+        return Err(IlError::missing_component(IlLevel::ECode, "address").into());
+    }
+
+    if statement.opcode().requires_address_space() && statement.address_space().is_none() {
+        return Err(IlError::missing_component(IlLevel::ECode, "address space").into());
+    }
+
+    if statement.opcode().requires_immediate() && statement.immediate() == 0 {
+        return Err(IlError::missing_component(IlLevel::ECode, "immediate").into());
+    }
+
+    if let Some(value) = statement.value() {
+        ir.expressions()
+            .get(value.index())
+            .ok_or(IlError::range_out_of_bounds(
+                value.value(),
+                ir.expressions().len(),
+            ))?;
+    }
+
+    for operand in ir.statement_operands_for(statement) {
+        ir.expressions()
+            .get(operand.index())
+            .ok_or(IlError::range_out_of_bounds(
+                operand.value(),
+                ir.expressions().len(),
+            ))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::verify::{
-        VerifyError, verify_bounds, verify_graph, verify_graph_bounds, verify_parent_spans,
-        verify_source_spans,
-    };
-    use crate::il::common::{IlLevel, IlSourceSpan};
+    use crate::il::common::IlSourceSpan;
+    use crate::il::common::verify::VerifyError;
     use crate::il::ecode::{ECodeExprOpcode, ECodeStmtOpcode};
     use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
-
-    pub(crate) fn verify(ir: &ECodeIr) -> Result<(), VerifyError> {
-        if ir.header().schema() != ECodeIr::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                ECodeIr::LEVEL,
-                ECodeIr::SCHEMA.value(),
-                ir.header().schema().value(),
-            )
-            .into());
-        }
-
-        verify_graph(ir.graph())?;
-        verify_graph_bounds(ir.graph(), ir.statements().len())?;
-        verify_source_spans(ir.source_spans(), ir.statements().len())?;
-        verify_parent_spans(ir.parent_spans(), ir.statements().len())?;
-
-        for expression in ir.expressions() {
-            verify_expr(ir, expression)?;
-        }
-
-        for statement in ir.statements() {
-            verify_stmt(ir, statement)?;
-        }
-
-        Ok(())
-    }
-
-    fn verify_expr(ir: &ECodeIr, expression: &ECodeExpr) -> Result<(), VerifyError> {
-        verify_bounds(expression.operands(), ir.expression_operands().len())?;
-
-        if let Some(count) = expression.opcode().fixed_operand_count()
-            && expression.operands().len() != count
-        {
-            return Err(VerifyError::InvalidOperandCount {
-                level: IlLevel::ECode,
-                expected: count,
-                found: expression.operands().len(),
-            });
-        }
-
-        if expression.opcode().requires_address_space() && expression.address_space().is_none() {
-            return Err(IlError::missing_component(IlLevel::ECode, "address space").into());
-        }
-
-        for operand in ir.expression_operands_for(expression) {
-            ir.expressions()
-                .get(operand.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    operand.value(),
-                    ir.expressions().len(),
-                ))?;
-        }
-
-        Ok(())
-    }
-
-    fn verify_stmt(ir: &ECodeIr, statement: &ECodeStmt) -> Result<(), VerifyError> {
-        verify_bounds(statement.operands(), ir.statement_operands().len())?;
-
-        if let Some(count) = statement.opcode().fixed_operand_count()
-            && statement.operands().len() != count
-        {
-            return Err(VerifyError::InvalidOperandCount {
-                level: IlLevel::ECode,
-                expected: count,
-                found: statement.operands().len(),
-            });
-        }
-
-        if statement.opcode().requires_address() && statement.address().is_none() {
-            return Err(IlError::missing_component(IlLevel::ECode, "address").into());
-        }
-
-        if statement.opcode().requires_address_space() && statement.address_space().is_none() {
-            return Err(IlError::missing_component(IlLevel::ECode, "address space").into());
-        }
-
-        if statement.opcode().requires_immediate() && statement.immediate() == 0 {
-            return Err(IlError::missing_component(IlLevel::ECode, "immediate").into());
-        }
-
-        if let Some(value) = statement.value() {
-            ir.expressions()
-                .get(value.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    value.value(),
-                    ir.expressions().len(),
-                ))?;
-        }
-
-        for operand in ir.statement_operands_for(statement) {
-            ir.expressions()
-                .get(operand.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    operand.value(),
-                    ir.expressions().len(),
-                ))?;
-        }
-
-        Ok(())
-    }
 
     #[test]
     fn ecode_builder_finishes_verified_body() {
@@ -390,18 +402,29 @@ mod test {
         let body = ECodeIr::new(
             header,
             IlGraph::default(),
-            vec![
-                IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
-                IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
-                ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
-            ],
-            Vec::new(),
+            ECodeIrParts {
+                source_spans: vec![
+                    IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
+                    IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
+                ],
+                statements: vec![
+                    ECodeStmt::new(
+                        ECodeStmtOpcode::Trap,
+                        IlIndexRange::EMPTY,
+                        None,
+                        None,
+                        None,
+                    ),
+                    ECodeStmt::new(
+                        ECodeStmtOpcode::Trap,
+                        IlIndexRange::EMPTY,
+                        None,
+                        None,
+                        None,
+                    ),
+                ],
+                ..ECodeIrParts::default()
+            },
         );
 
         let statements = body.statements_for_source(address).collect::<Vec<_>>();

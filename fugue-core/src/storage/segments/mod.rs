@@ -24,6 +24,7 @@ use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 pub mod mapping;
 pub mod overlay;
 pub mod provider;
+pub mod reader;
 pub mod space;
 pub mod view;
 
@@ -38,6 +39,7 @@ pub use provider::{
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
+pub use reader::SegmentReader;
 use space::{AddressSpace, AddressSpaceId, AddressSpaceKind, AddressSpaceRevert};
 use view::SegmentMappingView;
 
@@ -1607,6 +1609,25 @@ impl SegmentStorage {
         }
     }
 
+    pub fn segment_properties(&self, at: impl Into<Address>) -> Option<SegmentProperties> {
+        let at = at.into();
+        self.segment_properties_by_space(at.space(), at)
+    }
+
+    pub fn segment_properties_by_space(
+        &self,
+        space_id: AddressSpaceId,
+        at: Address,
+    ) -> Option<SegmentProperties> {
+        let space = self.spaces.get(&space_id)?;
+        let submap = space.find_containing(at)?;
+        let mapping = self.mappings.get(&submap.mapping_ref().mapping_id())?;
+        submap
+            .mapping_ref()
+            .is_valid(mapping)
+            .then(|| mapping.properties())
+    }
+
     pub fn view_at(
         &self,
         addr: impl Into<Address>,
@@ -1921,6 +1942,42 @@ mod test {
             Box::new(fallible_iterator::convert(contents.into_iter()))
                 as ImageSegmentContentsIterator<'a>
         }
+    }
+
+    #[test]
+    fn test_segment_properties_fast_path() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+
+        let text_provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0x90; 4]),
+            SegmentProperties::PERM_ALL,
+        );
+        let data_provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0x00; 4]),
+            SegmentProperties::PERM_ALL,
+        );
+
+        let text = SegmentProperties::PERM_READ | SegmentProperties::PERM_EXECUTE;
+        let data = SegmentProperties::PERM_READ | SegmentProperties::PERM_WRITE;
+        let text_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, text_provider)
+                .with_properties(text)
+                .with_name("text"),
+        )?;
+        let data_id = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x2000u64, 4, 0, data_provider)
+                .with_properties(data)
+                .with_name("data"),
+        )?;
+
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, text_id)?;
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, data_id)?;
+
+        assert_eq!(storage.segment_properties(0x1000u64), Some(text));
+        assert_eq!(storage.segment_properties(0x2003u64), Some(data));
+        assert_eq!(storage.segment_properties(0x3000u64), None);
+
+        Ok(())
     }
 
     #[test]

@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
+use std::mem;
 
 use super::{FunctionRecoveryError, Translator};
 use crate::analysis::function::recovery::builder::CodeBlockStructuringContext;
 use crate::analysis::function::recovery::{FunctionBuilderContext, FunctionRecoveryConfig};
 use crate::ir::{
     Address, CodeBlock, CodeBlockProperties, CodeBlockTable, Function, FunctionId,
-    FunctionProperties, FunctionTable, Insn, InsnList, Symbol,
+    FunctionProperties, FunctionTable, Insn, InsnList, Switch, Symbol,
 };
-use crate::lifter::{ContextSet, LifterError};
+use crate::lifter::{ContextSet, LifterError, PCodeOp};
 use crate::storage::SegmentStorage;
+use crate::storage::segments::SegmentReader;
 
 pub enum InsnEntry<'a> {
     Occupied(OccupiedInsnEntry<'a>),
@@ -151,6 +153,7 @@ pub struct PartialFunction {
     insns: Vec<Insn>,
     insn_map: BTreeMap<Address, usize>,
     properties: FunctionProperties,
+    pending_switches: Vec<Switch>,
 }
 
 impl PartialFunction {
@@ -166,7 +169,24 @@ impl PartialFunction {
             insns: Vec::new(),
             insn_map: BTreeMap::new(),
             properties: FunctionProperties::NONE,
+            pending_switches: Vec::new(),
         }
+    }
+
+    pub fn add_pending_switch(&mut self, switch: Switch) {
+        if let Some(pending) = self
+            .pending_switches
+            .iter_mut()
+            .find(|pending| pending.branch() == switch.branch())
+        {
+            *pending = switch;
+        } else {
+            self.pending_switches.push(switch);
+        }
+    }
+
+    pub fn take_pending_switches(&mut self) -> Vec<Switch> {
+        mem::take(&mut self.pending_switches)
     }
 
     pub fn update_name(&mut self, name: impl Into<Symbol>) {
@@ -238,6 +258,7 @@ impl PartialFunction {
             .ok_or_else(|| FunctionRecoveryError::invalid_block_id(id))?;
 
         let start = block.address();
+        block.context().apply(start, translator.context_mut());
         let segment = segments.view_at(start)?;
         let window = segment
             .bytes_from(start)
@@ -269,6 +290,50 @@ impl PartialFunction {
         Ok(())
     }
 
+    pub(crate) fn append_block_pcode(
+        &self,
+        id: usize,
+        reader: &mut SegmentReader,
+        translator: &mut Translator,
+        operations: &mut Vec<PCodeOp>,
+    ) -> Result<(), FunctionRecoveryError> {
+        let block = self
+            .blocks
+            .get(id)
+            .ok_or_else(|| FunctionRecoveryError::invalid_block_id(id))?;
+
+        let start = block.address();
+        let Some(window) = reader.view(start).and_then(|view| view.bytes_from(start)) else {
+            return Err(LifterError::invalid_instruction(start).into());
+        };
+        let Some(bytes) = window.as_contiguous() else {
+            return Err(LifterError::invalid_instruction(start).into());
+        };
+
+        block.context().apply(start, translator.context_mut());
+
+        let operation_start = operations.len();
+        for insn_id in block.insns().iter().copied() {
+            let insn = &self.insns[insn_id];
+
+            let Some(offset) = insn.address().checked_offset_from(start) else {
+                operations.truncate(operation_start);
+                return Err(LifterError::invalid_instruction(insn.address()).into());
+            };
+            let Some(view) = bytes.get(offset as usize..) else {
+                operations.truncate(operation_start);
+                return Err(LifterError::invalid_instruction(insn.address()).into());
+            };
+
+            if let Err(error) = translator.lift_into(insn.address(), view, operations) {
+                operations.truncate(operation_start);
+                return Err(error);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn lift_all_blocks(
         &mut self,
         segments: &SegmentStorage,
@@ -277,6 +342,9 @@ impl PartialFunction {
         let mut segment = segments.view_at(self.entry)?;
 
         for block in self.blocks.iter_mut() {
+            block
+                .context()
+                .apply(block.address(), translator.context_mut());
             if !segment.contains(block.address()) {
                 segment = segments.view_at(block.address())?;
             }
@@ -318,6 +386,11 @@ impl PartialFunction {
         segments: &SegmentStorage,
         translator: &mut Translator,
     ) -> Result<Option<&mut Insn>, FunctionRecoveryError> {
+        let context = self
+            .blocks
+            .iter()
+            .find(|block| block.insns().contains(&id))
+            .map(|block| block.context().clone());
         let insn = self
             .insns
             .get_mut(id)
@@ -328,6 +401,9 @@ impl PartialFunction {
         }
 
         let address = insn.address();
+        if let Some(context) = context {
+            context.apply(address, translator.context_mut());
+        }
         let mut bytes = [0u8; 32];
 
         segments
@@ -337,6 +413,19 @@ impl PartialFunction {
         *insn = translator.lift(address, bytes)?;
 
         Ok(Some(insn))
+    }
+
+    pub fn indirect_branches(&self) -> impl Iterator<Item = (usize, Address)> + '_ {
+        self.blocks
+            .iter()
+            .enumerate()
+            .flat_map(move |(block_index, block)| {
+                block.insns().iter().filter_map(move |&instruction| {
+                    let insn = self.insns.get(instruction)?;
+                    (insn.is_branch() && insn.is_indirect() && !insn.is_call() && !insn.is_return())
+                        .then_some((block_index, insn.address()))
+                })
+            })
     }
 
     pub fn insn(&self, address: Address) -> Option<&Insn> {
@@ -515,6 +604,22 @@ impl PartialFunction {
             self.blocks[to].add_predecessor(from);
         }
 
+        for index in 0..self.blocks.len() {
+            let Some(&last) = self.blocks[index].insns().last() else {
+                continue;
+            };
+            let insn = &self.insns[last];
+            if !insn.has_fall() {
+                continue;
+            }
+            let Some(&next) = context.block_starts().get(&insn.next_address()) else {
+                continue;
+            };
+
+            self.blocks[index].add_successor(next);
+            self.blocks[next].add_predecessor(index);
+        }
+
         Ok(())
     }
 
@@ -560,8 +665,10 @@ impl PartialFunction {
                             .map(|&insn_id| self.insns[insn_id].clone()),
                     );
 
-                    Ok(CodeBlock::try_new(id, addr, len, insns)
-                        .expect("code block has non-zero length"))
+                    Ok(
+                        CodeBlock::try_new_with(id, addr, len, insns, block.context().clone())
+                            .expect("code block has non-zero length"),
+                    )
                 })
                 .map_err(FunctionRecoveryError::block_creation)?;
             bids.push(bid);

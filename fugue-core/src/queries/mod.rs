@@ -1,9 +1,11 @@
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use flume::Sender;
+use fugue_specs::Confidence;
 use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
 use thiserror::Error;
 
@@ -16,7 +18,7 @@ use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowGraph;
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
-    SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
+    SegmentProperties, Switch, Symbol, SymbolEntry, SymbolProperties,
 };
 use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
@@ -204,6 +206,43 @@ impl SymbolRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchRecord {
+    branch: Address,
+    switch: Switch,
+}
+
+impl SwitchRecord {
+    pub fn branch(&self) -> Address {
+        self.branch
+    }
+
+    pub fn switch(&self) -> &Switch {
+        &self.switch
+    }
+
+    pub fn case_count(&self) -> usize {
+        self.switch.case_count()
+    }
+
+    pub fn has_default(&self) -> bool {
+        self.switch.has_default()
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.switch.provenance().confidence()
+    }
+}
+
+impl From<&Switch> for SwitchRecord {
+    fn from(switch: &Switch) -> Self {
+        Self {
+            branch: switch.branch(),
+            switch: switch.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MappingRecord {
     mapping: SegmentMappingId,
@@ -254,13 +293,13 @@ impl MappingRecord {
 }
 
 impl PartialOrd for MappingRecord {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for MappingRecord {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
         self.start
             .cmp(&other.start)
             .then_with(|| self.mapping.cmp(&other.mapping))
@@ -527,6 +566,23 @@ impl QueryReader {
         limit: usize,
     ) -> Result<QueryPage<SymbolRecord>, QueryError> {
         self.with_project(|read| read.symbols_at(address, after, limit))
+    }
+
+    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchRecord>, QueryError> {
+        self.with_project(|read| read.switch_at(branch))
+    }
+
+    pub fn switch_page(
+        &self,
+        after: Option<SwitchRecord>,
+        limit: usize,
+    ) -> Result<QueryPage<SwitchRecord>, QueryError> {
+        self.with_project(|read| read.switch_page(after, limit))
+    }
+
+    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchRecord, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.switch_page(cursor, WALK_PAGE_LEN))
     }
 
     pub fn functions(

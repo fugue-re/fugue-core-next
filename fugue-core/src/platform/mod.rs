@@ -3,6 +3,8 @@ use std::fmt::{self, Display, Formatter};
 use crate::arch::Arch;
 use crate::ir::Endian;
 
+pub mod non_returning;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OperatingSystem {
     FreeBsd,

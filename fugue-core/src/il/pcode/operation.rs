@@ -5,7 +5,7 @@ use fugue_lifter::{Op, Varnode};
 
 use crate::il::common::{IlError, IlIndexRange, IlOpId};
 use crate::il::pcode::PCodeError;
-use crate::ir::Address;
+use crate::ir::{Address, Location};
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(
@@ -607,7 +607,7 @@ pub enum AddressAnnotationRole {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressAnnotationValue<'a> {
-    DirectTarget(Address),
+    DirectTarget(Location),
     ComputedSpace(AddressSpaceId),
     KnownTargets(&'a [Address]),
 }
@@ -731,13 +731,13 @@ mod test {
         let target = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationValue::DirectTarget(target),
+            AddressAnnotationValue::DirectTarget(target.into()),
         )];
         let mut context = PCodeAddressContext::new(target, &annotations);
 
         assert!(matches!(
             context.take(ordinal, AddressAnnotationRole::DirectTarget),
-            Ok(AddressAnnotationValue::DirectTarget(taken)) if taken == target
+            Ok(AddressAnnotationValue::DirectTarget(taken)) if taken == target.into()
         ));
         assert!(context.ensure_consumed().is_ok());
     }
@@ -748,7 +748,7 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationValue::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source.into()),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -763,8 +763,8 @@ mod test {
         let ordinal = IlOpId::try_from_index(0).unwrap();
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [
-            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
-            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source.into())),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source.into())),
         ];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -781,7 +781,7 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             first,
-            AddressAnnotationValue::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source.into()),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 

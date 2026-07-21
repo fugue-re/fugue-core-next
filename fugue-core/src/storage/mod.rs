@@ -30,7 +30,7 @@ pub mod project;
 
 pub mod segments;
 pub use segments::{
-    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentStorage,
+    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentReader, SegmentStorage,
     SegmentStorageError, SegmentStorageProvider,
 };
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromStorage};
@@ -66,6 +66,9 @@ pub const DEFAULT_CODE_BLOCK_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 pub const ATTRIBUTE_SYMBOL_CACHE_SIZE: &str = "storage.entities.symbol.cache_size";
 pub const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+pub const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
+pub const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {

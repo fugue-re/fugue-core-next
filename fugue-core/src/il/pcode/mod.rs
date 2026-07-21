@@ -4,8 +4,8 @@ pub mod format;
 pub mod operation;
 pub mod transform;
 
-pub(crate) use builder::PCodeBuilder;
 pub use builder::{PCODE_SCHEMA_VERSION, PCodeIr};
+pub(crate) use builder::{PCodeBuilder, verify};
 pub use error::PCodeError;
 pub use format::{
     PCodeIrDisplay, PCodeLocationDisplay, PCodeOpDisplay, PCodeOpcodeDisplay, PCodeSourceDisplay,

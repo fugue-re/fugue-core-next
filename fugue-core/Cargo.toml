@@ -29,6 +29,7 @@ digest = "0.10"
 downcast-rs = "2"
 fallible-iterator = "0.3"
 flume = "0.12"
+fugue-bv = { version = "0.3", path = "../fugue-bv" }
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
 fugue-lifter = { version = "0.3", path = "../fugue-lifter", default-features = false }
@@ -69,7 +70,7 @@ uuid = { version = "1", features = ["serde", "v7"] }
 ustr = { version = "1.1", package = "fugue-ustr", features = ["rkyv", "serde"] }
 walkdir = "2.5"
 yaxpeax-arch = { version = "0.3", default-features = false }
-yaxpeax-arm = "0.4"
+yaxpeax-arm = { version = "0.4", git = "https://github.com/fugue-re/yaxpeax-arm.git", rev = "e34ced89551c607befc6dfc3186e2f6af9c77a10" }
 yaxpeax-x86 = "2.0"
 zip = { version = "7", default-features = false, features = ["zstd"] }
 

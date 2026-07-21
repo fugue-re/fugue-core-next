@@ -12,11 +12,12 @@ use super::{
     PartialFunctionWithContext, Translator,
 };
 use crate::analysis::control::{CancellationToken, Progress};
+use crate::analysis::switch::SwitchRecovery;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{Analyser, AnalyserProvider, AnalysisCx, Priority, Trigger};
 use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable, RawAddress,
-    RawAddressRangeSet,
+    RawAddressRangeSet, SwitchCase,
 };
 use crate::project::{Project, ProjectTransaction};
 use crate::registry::{self, Registration, submit};
@@ -365,9 +366,12 @@ impl FunctionRecovery {
     }
 
     pub fn new_with(config: FunctionRecoveryConfig) -> Self {
+        let mut builder = FunctionBuilder::new(config);
+        builder.add_post_lifting_pass("switch-recovery", SwitchRecovery::new());
+
         FunctionRecovery {
             candidates: VecDeque::new(),
-            builder: FunctionBuilder::new(config),
+            builder,
             discovery_passes: AnalysisGroup::new(),
             structuring_passes: AnalysisGroup::new(),
             commit_hook: None,
@@ -601,17 +605,114 @@ impl FunctionRecovery {
     fn commit_pending_function(
         transaction: &mut ProjectTransaction<'_>,
         address: Address,
-        function: PartialFunction,
+        mut function: PartialFunction,
     ) -> Result<(), AnalysisError> {
         tracing::debug!("committing pending function at {address}");
 
-        if let Err(e) = transaction.add_function(function) {
-            tracing::debug!("failed to commit function at {address}: {e}");
+        let switches = function.take_pending_switches();
 
-            return Err(AnalysisError::pass_failed("function-recovery", e));
+        let function_id = match transaction.add_function(function) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::debug!("failed to commit function at {address}: {e}");
+                return Err(AnalysisError::pass_failed("function-recovery", e));
+            }
+        };
+
+        let mut branches = Vec::with_capacity(switches.len());
+        for switch in switches {
+            let branch = switch.branch();
+            transaction
+                .add_switch(branch, move |id, _| {
+                    switch.with_id(id).with_function(function_id)
+                })
+                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+            branches.push(branch);
         }
 
+        Self::assign_switch_defaults(transaction, &branches);
+        Self::emit_switch_references(transaction, &branches)?;
+
         Ok(())
+    }
+
+    fn emit_switch_references(
+        transaction: &mut ProjectTransaction<'_>,
+        branches: &[Address],
+    ) -> Result<(), AnalysisError> {
+        for &branch in branches {
+            let references = transaction
+                .project()
+                .switches()
+                .get_by_branch(branch)
+                .map(|switch| switch.derived_references().collect::<Vec<_>>())
+                .unwrap_or_default();
+            transaction
+                .replace_switch_references(branch, references)
+                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+        }
+        Ok(())
+    }
+
+    fn assign_switch_defaults(transaction: &mut ProjectTransaction<'_>, branches: &[Address]) {
+        let mut defaults = Vec::new();
+        let mut predecessors = Vec::new();
+
+        for &branch in branches {
+            {
+                let switches = transaction.project().switches();
+                let Some(switch) = switches.get_by_branch(branch) else {
+                    continue;
+                };
+                if switch.is_override() || switch.is_assisted() || switch.has_default() {
+                    continue;
+                }
+            }
+
+            let blocks = transaction.project().blocks();
+            let Some(branch_block) = blocks.overlaps(branch).next() else {
+                continue;
+            };
+            let branch_block_id = branch_block.id();
+            predecessors.clear();
+            predecessors.extend(branch_block.predecessors().iter());
+            drop(branch_block);
+
+            for &predecessor in &predecessors {
+                let Some(guard) = blocks.get_by_id(predecessor) else {
+                    continue;
+                };
+                let pair = {
+                    let mut successors = guard.successors().iter();
+                    (successors.next(), successors.next(), successors.next())
+                };
+                drop(guard);
+                let (Some(first), Some(second), None) = pair else {
+                    continue;
+                };
+                let default = if first == branch_block_id && second != branch_block_id {
+                    second
+                } else if second == branch_block_id && first != branch_block_id {
+                    first
+                } else {
+                    continue;
+                };
+                let Some(block) = blocks.get_by_id(default) else {
+                    continue;
+                };
+                defaults.push((
+                    branch,
+                    AddressWithContext::new(block.address(), block.context().clone()),
+                ));
+                break;
+            }
+        }
+
+        for (branch, default) in defaults {
+            transaction.modify_switch(branch, |switch| {
+                switch.set_default_case(SwitchCase::new(default));
+            });
+        }
     }
 
     fn commit_pending_functions(
@@ -788,7 +889,7 @@ impl FunctionRecovery {
 
                     let function = commit_context.into_function();
 
-                    if let Err(e) = transaction.add_function(function) {
+                    if let Err(e) = Self::commit_pending_function(transaction, address, function) {
                         tracing::debug!("failed to commit function at {address}: {e}");
 
                         new_functions.into_iter().for_each(|(address, confidence)| {
@@ -799,7 +900,7 @@ impl FunctionRecovery {
                             );
                         });
 
-                        return Err(AnalysisError::pass_failed("function-recovery", e));
+                        return Err(e);
                     }
                     chunk_functions += 1;
                 } else {

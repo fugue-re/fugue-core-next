@@ -23,6 +23,8 @@ pub enum PCodeError {
         expected: u8,
         found: u8,
     },
+    #[error("operation at ordinal {ordinal} targets non-semantic PCode position {position}")]
+    InvalidLocalTarget { ordinal: u32, position: u16 },
     #[error("operation at ordinal {ordinal} is not a semantic PCode opcode")]
     InvalidOpcode { ordinal: u32 },
     #[error(transparent)]
@@ -71,6 +73,10 @@ impl PCodeError {
 
     pub const fn invalid_opcode(ordinal: u32) -> Self {
         Self::InvalidOpcode { ordinal }
+    }
+
+    pub const fn invalid_local_target(ordinal: u32, position: u16) -> Self {
+        Self::InvalidLocalTarget { ordinal, position }
     }
 
     pub const fn misplaced_arg(ordinal: u32) -> Self {

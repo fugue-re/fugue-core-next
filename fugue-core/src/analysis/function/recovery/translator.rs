@@ -48,6 +48,17 @@ impl Translator {
             .map_err(FunctionRecoveryError::from)
     }
 
+    pub fn lift_into(
+        &mut self,
+        address: Address,
+        bytes: impl AsRef<[u8]>,
+        output: &mut Vec<PCodeOp>,
+    ) -> Result<usize, FunctionRecoveryError> {
+        self.lifter
+            .lift_into(address, bytes.as_ref(), output)
+            .map_err(FunctionRecoveryError::from)
+    }
+
     pub fn context(&self) -> &LiftingContext {
         self.lifter.context()
     }

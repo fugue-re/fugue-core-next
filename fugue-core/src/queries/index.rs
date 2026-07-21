@@ -11,27 +11,30 @@ pub(crate) const CENSUS_INTERVAL: usize = 256;
 enum RegionGroupKind {
     Bytes,
     Functions,
-    Symbols,
-    Segments,
     References,
+    Segments,
+    Switches,
+    Symbols,
 }
 
 impl RegionGroupKind {
-    const ALL: [RegionGroupKind; 5] = [
+    const ALL: [RegionGroupKind; 6] = [
         RegionGroupKind::Bytes,
         RegionGroupKind::Functions,
-        RegionGroupKind::Symbols,
-        RegionGroupKind::Segments,
         RegionGroupKind::References,
+        RegionGroupKind::Segments,
+        RegionGroupKind::Switches,
+        RegionGroupKind::Symbols,
     ];
 
     fn index(self) -> usize {
         match self {
             RegionGroupKind::Bytes => 0,
             RegionGroupKind::Functions => 1,
-            RegionGroupKind::Symbols => 2,
+            RegionGroupKind::References => 2,
             RegionGroupKind::Segments => 3,
-            RegionGroupKind::References => 4,
+            RegionGroupKind::Switches => 4,
+            RegionGroupKind::Symbols => 5,
         }
     }
 
@@ -44,6 +47,7 @@ impl RegionGroupKind {
                 ChangeKinds::SEGMENT_MAPPED | ChangeKinds::SEGMENT_UNMAPPED
             }
             RegionGroupKind::References => ChangeKinds::REFERENCES,
+            RegionGroupKind::Switches => ChangeKinds::SWITCHES,
         }
     }
 

@@ -22,11 +22,12 @@ use fugue_core::engine::{
 };
 use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Endian, FunctionId, RawAddress, Reference,
-    ReferenceProperties, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex,
-    SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FunctionId,
+    RawAddress, Reference, ReferenceProperties, ReferenceTarget, SegmentProperties, Switch,
+    SwitchCase, SwitchId, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties,
+    SymbolTableSelector,
 };
-use fugue_core::lifter::resolve_language;
+use fugue_core::lifter::{ContextSet, resolve_language};
 use fugue_core::loader::{
     ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
@@ -3058,6 +3059,235 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
             .iter()
             .any(|reference| reference.target().address() == Some(callee) && reference.is_call())
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let switches = reader.switches().collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        !switches.is_empty(),
+        "recovered switches must persist in the switch table"
+    );
+    for (branch, cases) in [
+        (0x4f55u64, 277usize),
+        (0x6efd, 73),
+        (0x10612, 5),
+        (0x12116, 54),
+        (0x149dd, 123),
+    ] {
+        let switch = switches
+            .iter()
+            .find(|record| record.branch() == Address::from(branch))
+            .ok_or_else(|| io::Error::other(format!("switch missing at {branch:#x}")))?;
+        assert_eq!(switch.case_count(), cases);
+    }
+    let record = switches
+        .iter()
+        .find(|record| record.case_count() >= 2)
+        .ok_or_else(|| io::Error::other("no multi-case switch recovered from ls.elf"))?;
+    let switch = record.switch();
+
+    assert!(
+        !switch.function().is_invalid(),
+        "recovered switch must resolve its owning function"
+    );
+    let table = switch
+        .model()
+        .table()
+        .ok_or_else(|| io::Error::other("recovered switch has no table"))?;
+    assert!(
+        table.address().offset() != 0,
+        "recovered table must have a real address"
+    );
+
+    let outgoing = reader
+        .outgoing_references(record.branch())
+        .collect::<Result<Vec<_>, _>>()?;
+    for case in switch.cases() {
+        let target = case.target().address();
+        assert!(
+            outgoing.iter().any(|reference| {
+                reference.is_flow() && reference.target().address() == Some(target)
+            }),
+            "case target {target} must be integrated as a flow reference from the branch"
+        );
+    }
+
+    assert!(
+        switches.iter().any(|record| record.has_default()),
+        "a guarded switch must recover a default case"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/libipmi.so")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let switches = reader.switches().collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        switches
+            .iter()
+            .map(|record| record.branch().raw_address())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        94
+    );
+
+    let branch = Address::from(0x3bec0u64);
+    let record = switches
+        .iter()
+        .find(|record| record.branch() == branch)
+        .ok_or_else(|| io::Error::other("ARM inline switch missing"))?;
+    let switch = record.switch();
+    let SwitchModel::InlineBranchTable(table) = switch.model() else {
+        return Err(io::Error::other("ARM switch has the wrong model").into());
+    };
+    assert_eq!(table.address(), Address::from(0x3bec8u64));
+    assert_eq!(table.element_size(), 4);
+    assert_eq!(table.element_count(), 4);
+    assert_eq!(
+        switch
+            .cases()
+            .iter()
+            .flat_map(|case| case.labels())
+            .map(|label| label.value())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+    );
+    assert_eq!(
+        switch
+            .cases()
+            .iter()
+            .map(|case| case.target().address())
+            .collect::<Vec<_>>(),
+        vec![
+            Address::from(0x3bf28u64),
+            Address::from(0x3bf28u64),
+            Address::from(0x3bed8u64),
+            Address::from(0x3bed8u64),
+        ],
+    );
+    assert_eq!(
+        switch.default_case().map(|case| case.target().address()),
+        Some(Address::from(0x3bf78u64)),
+    );
+
+    for (address, count) in [(0x46df4u64, 33usize), (0x489c8, 6), (0x53d98, 8)] {
+        let recovered = switches
+            .iter()
+            .find(|record| record.branch() == Address::from(address))
+            .ok_or_else(|| io::Error::other(format!("ARM switch missing at {address:#x}")))?;
+        assert_eq!(recovered.case_count(), count);
+    }
+
+    let outgoing = reader
+        .outgoing_references(branch)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(outgoing.iter().all(|reference| {
+        !reference.is_data() || reference.target().address() != Some(table.address())
+    }));
+
+    let function_entry = Address::from(0x3be5cu64);
+    let function_id = {
+        let project = reader.project()?;
+        let function = project
+            .functions()
+            .get_by_address(function_entry)
+            .ok_or_else(|| io::Error::other("ARM fixture function missing"))?;
+        for (_, block_id) in function.blocks() {
+            let block = project
+                .blocks()
+                .get_by_id(block_id)
+                .ok_or_else(|| io::Error::other("ARM fixture block missing"))?;
+            assert!(!(0x3c318..0x3c330).contains(&block.address().offset()));
+            assert!(block.instructions().iter().all(|instruction| {
+                !(0x3c318..0x3c330).contains(&instruction.address().offset())
+            }));
+        }
+        function.id()
+    };
+
+    assert!(reader.pcode(function_id)?.is_some());
+    assert!(reader.ecode(function_id)?.is_some());
+    assert!(reader.ecode_ssa(function_id)?.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let table = entry + 0x400u64;
+    let mut switch = Switch::new(
+        SwitchId::default(),
+        entry,
+        SwitchModel::Absolute(AddressTable::new(table, 4).with_element_count(2)),
+    );
+    for offset in [0x40u64, 0x80] {
+        switch.add_case(SwitchCase::new(AddressWithContext::new(
+            entry + offset,
+            ContextSet::default(),
+        )));
+    }
+    switch.mark_override();
+
+    let changes = engine.add_switch(switch)?;
+    assert!(changes.contains(ChangeKinds::SWITCH_ADDED));
+
+    let record = engine
+        .query_reader()?
+        .switch_at(entry)?
+        .ok_or_else(|| io::Error::other("switch missing after add"))?;
+    assert!(record.switch().is_override());
+    assert!(matches!(record.switch().model(), SwitchModel::Absolute(_)));
+    assert!(
+        !record.switch().function().is_invalid(),
+        "owning function should be resolved from the branch"
+    );
+
+    let outgoing = engine
+        .query_reader()?
+        .outgoing_references(entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        outgoing
+            .iter()
+            .any(|reference| reference.is_data() && reference.target().address() == Some(table)),
+        "table should gain a derived data reference"
+    );
+    for offset in [0x40u64, 0x80] {
+        assert!(
+            outgoing.iter().any(|reference| {
+                reference.is_flow() && reference.target().address() == Some(entry + offset)
+            }),
+            "case target should gain a derived flow reference"
+        );
+    }
+
+    let removed = engine.remove_switch(entry)?;
+    assert!(removed.contains(ChangeKinds::SWITCH_REMOVED));
+    assert!(engine.query_reader()?.switch_at(entry)?.is_none());
 
     Ok(())
 }

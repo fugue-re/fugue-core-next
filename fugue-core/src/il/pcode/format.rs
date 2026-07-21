@@ -174,7 +174,11 @@ impl<'a> PCodeOpDisplay<'a> {
                 .target(self.operation.immediate())
                 .ok_or(fmt::Error)?;
 
-            write!(f, " -> {target}")?;
+            if target.position() == 0 {
+                write!(f, " -> {}", target.address())?;
+            } else {
+                write!(f, " -> {target}")?;
+            }
         }
 
         Ok(())
@@ -247,7 +251,7 @@ mod test {
         ));
 
         let target = Address::new(AddressSpaceId::new(2), 0x2000u64);
-        let branch_target = builder.push_target(target).unwrap();
+        let branch_target = builder.push_target(target.into()).unwrap();
         let branch_operands = builder.push_operands([input]).unwrap();
 
         builder.push_operation(PCodeOp::new(

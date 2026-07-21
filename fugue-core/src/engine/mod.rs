@@ -19,8 +19,8 @@ use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::function::recovery::PartialFunction;
 use crate::il::common::{IlError, IlLevel};
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
-    SymbolEntry, SymbolIndex,
+    Address, AddressRange, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference,
+    ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{QueryEngine, QueryReader};
@@ -654,6 +654,7 @@ pub enum ProjectUpdate {
     AddFunction(FunctionPatch),
     AddMappingToSpace(MappingPlacement),
     AddReference(Reference),
+    AddSwitch(Switch),
     DeprioritiseMapping(MappingPriorityUpdate),
     InsertSymbol(SymbolPatch),
     PrioritiseMapping(MappingPriorityUpdate),
@@ -661,6 +662,7 @@ pub enum ProjectUpdate {
     RemoveFunction(FunctionRemoval),
     RemoveMapping(MappingRemoval),
     RemoveReference(ReferenceRemoval),
+    RemoveSwitch(Address),
     RemoveSymbol(SymbolRemoval),
     ResizeMapping(MappingResize),
     UpdateMappingMetadata(MappingMetadataUpdate),
@@ -732,6 +734,14 @@ impl ProjectUpdate {
         Self::RemoveReference(ReferenceRemoval::new(from, target))
     }
 
+    pub fn add_switch(switch: Switch) -> Self {
+        Self::AddSwitch(switch)
+    }
+
+    pub fn remove_switch(branch: impl Into<Address>) -> Self {
+        Self::RemoveSwitch(branch.into())
+    }
+
     pub fn remove_symbol(index: SymbolIndex) -> Self {
         Self::RemoveSymbol(SymbolRemoval::new(index))
     }
@@ -772,6 +782,23 @@ impl ProjectUpdate {
                 transaction.add_reference(reference)?;
                 Ok(())
             }
+            Self::AddSwitch(switch) => {
+                let branch = switch.branch();
+                let function = {
+                    let project = transaction.project();
+                    project
+                        .functions()
+                        .overlaps(project.blocks(), &AddressRange::point(branch))
+                        .next()
+                };
+                let references = switch.derived_references().collect::<Vec<_>>();
+                transaction.add_switch(branch, move |id, _| match function {
+                    Some(function) => switch.with_id(id).with_function(function),
+                    None => switch.with_id(id),
+                })?;
+                transaction.replace_switch_references(branch, references)?;
+                Ok(())
+            }
             Self::InsertSymbol(patch) => {
                 let (index, entry) = patch.into_parts();
                 transaction.insert_symbol(index, entry);
@@ -785,6 +812,10 @@ impl ProjectUpdate {
             Self::RemoveMapping(removal) => transaction.remove_mapping(removal.mapping()),
             Self::RemoveReference(removal) => {
                 transaction.remove_reference(removal.from(), removal.target())?;
+                Ok(())
+            }
+            Self::RemoveSwitch(branch) => {
+                transaction.remove_switch(branch)?;
                 Ok(())
             }
             Self::RemoveSymbol(removal) => {
@@ -1171,6 +1202,14 @@ impl AnalysisEngine {
         target: ReferenceTarget,
     ) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::remove_reference(from, target))
+    }
+
+    pub fn add_switch(&self, switch: Switch) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::add_switch(switch))
+    }
+
+    pub fn remove_switch(&self, branch: impl Into<Address>) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::remove_switch(branch))
     }
 
     pub fn add_mapping_to_space(
@@ -1859,7 +1898,9 @@ impl Worker {
             | ChangeRecord::ReferenceRemoved { .. }
             | ChangeRecord::ReferencesChanged { .. }
             | ChangeRecord::LiftedMaterialised { .. }
-            | ChangeRecord::LiftedRemoved { .. } => {}
+            | ChangeRecord::LiftedRemoved { .. }
+            | ChangeRecord::SwitchAdded { .. }
+            | ChangeRecord::SwitchRemoved { .. } => {}
         }
     }
 

@@ -485,11 +485,12 @@ impl InsnProperties {
         for (_, target) in targets.iter() {
             match target {
                 InsnTarget::IntraBlk(_, true) => prop |= Self::FALL,
-                InsnTarget::IntraBlk(_, false)
-                | InsnTarget::InterBlk(_)
-                | InsnTarget::Unresolved => prop |= Self::BRANCH,
-                InsnTarget::InterSub(_) => prop |= Self::CALL,
-                InsnTarget::InterRet(_, _) => prop |= Self::RETURN,
+                InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
+                InsnTarget::Unresolved => prop |= Self::BRANCH | Self::INDIRECT,
+                InsnTarget::InterSub(Some(_)) => prop |= Self::CALL,
+                InsnTarget::InterSub(None) => prop |= Self::CALL | Self::INDIRECT,
+                InsnTarget::InterRet(Some(_), _) => prop |= Self::RETURN,
+                InsnTarget::InterRet(None, _) => prop |= Self::RETURN | Self::INDIRECT,
                 _ => (),
             }
         }

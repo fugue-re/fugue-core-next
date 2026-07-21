@@ -8,8 +8,8 @@ use tinyset::SetU64;
 
 pub mod address;
 pub use address::{
-    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, RawAddress,
-    RawAddressMap, RawAddressRangeSet, ToRawAddress,
+    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressTable, AddressWithContext,
+    RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
 };
 
 pub mod block;
@@ -42,6 +42,12 @@ pub use reference::{
 
 pub mod segment;
 pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
+
+pub mod switch;
+pub use switch::{
+    Switch, SwitchCase, SwitchCaseLabel, SwitchEvidence, SwitchId, SwitchModel, SwitchProperties,
+    SwitchProvenance, SwitchTable, SwitchTableError,
+};
 
 pub mod symbol;
 pub use symbol::{

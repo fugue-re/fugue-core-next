@@ -9,33 +9,63 @@ pub enum ECodeExprOpcode {
     Address = 1,
     ReadRegister = 2,
     ReadFlag = 3,
-    Load = 4,
-    Add = 5,
-    Sub = 6,
-    Mul = 7,
-    UnsignedDiv = 8,
-    SignedDiv = 9,
-    UnsignedRem = 10,
-    SignedRem = 11,
-    LeftShift = 12,
-    LogicalRightShift = 13,
-    ArithmeticRightShift = 14,
-    Compare = 15,
-    Carry = 16,
-    Borrow = 17,
-    Bool = 18,
-    Not = 19,
-    Negate = 20,
-    CountOnes = 21,
-    CountLeadingZeros = 22,
-    ZeroExtend = 23,
-    SignExtend = 24,
-    Truncate = 25,
-    Extract = 26,
-    Insert = 27,
-    IntrinsicResult = 28,
-    Undefined = 29,
-    Copy = 30,
+    Undefined = 4,
+    Load = 5,
+    Copy = 6,
+    Add = 7,
+    Sub = 8,
+    Mul = 9,
+    UnsignedDiv = 10,
+    SignedDiv = 11,
+    UnsignedRem = 12,
+    SignedRem = 13,
+    Negate = 14,
+    LeftShift = 15,
+    LogicalRightShift = 16,
+    ArithmeticRightShift = 17,
+    And = 18,
+    Or = 19,
+    Xor = 20,
+    Not = 21,
+    BoolAnd = 57,
+    BoolOr = 58,
+    BoolXor = 59,
+    BoolNot = 60,
+    IntEqual = 22,
+    IntNotEqual = 23,
+    IntLess = 24,
+    IntSignedLess = 25,
+    IntLessEqual = 26,
+    IntSignedLessEqual = 27,
+    Carry = 28,
+    SignedCarry = 29,
+    SignedBorrow = 30,
+    CountOnes = 31,
+    CountLeadingZeros = 32,
+    ZeroExtend = 33,
+    SignExtend = 34,
+    Truncate = 35,
+    Extract = 36,
+    Insert = 37,
+    FloatAdd = 38,
+    FloatSub = 39,
+    FloatMul = 40,
+    FloatDiv = 41,
+    FloatNegate = 42,
+    FloatAbs = 43,
+    FloatSqrt = 44,
+    FloatCeiling = 45,
+    FloatFloor = 46,
+    FloatRound = 47,
+    FloatIsNan = 48,
+    FloatEqual = 49,
+    FloatNotEqual = 50,
+    FloatLess = 51,
+    FloatLessEqual = 52,
+    FloatToInt = 53,
+    FloatToFloat = 54,
+    IntToFloat = 55,
+    IntrinsicResult = 56,
 }
 
 impl ECodeExprOpcode {
@@ -45,7 +75,9 @@ impl ECodeExprOpcode {
             Self::Address => "addr",
             Self::ReadRegister => "read_reg",
             Self::ReadFlag => "read_flag",
+            Self::Undefined => "undef",
             Self::Load => "load",
+            Self::Copy => "copy",
             Self::Add => "add",
             Self::Sub => "sub",
             Self::Mul => "mul",
@@ -53,15 +85,27 @@ impl ECodeExprOpcode {
             Self::SignedDiv => "sdiv",
             Self::UnsignedRem => "urem",
             Self::SignedRem => "srem",
+            Self::Negate => "neg",
             Self::LeftShift => "shl",
             Self::LogicalRightShift => "lshr",
             Self::ArithmeticRightShift => "ashr",
-            Self::Compare => "cmp",
-            Self::Carry => "carry",
-            Self::Borrow => "borrow",
-            Self::Bool => "bool",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
             Self::Not => "not",
-            Self::Negate => "neg",
+            Self::BoolAnd => "booland",
+            Self::BoolOr => "boolor",
+            Self::BoolXor => "boolxor",
+            Self::BoolNot => "boolnot",
+            Self::IntEqual => "eq",
+            Self::IntNotEqual => "ne",
+            Self::IntLess => "lt",
+            Self::IntSignedLess => "slt",
+            Self::IntLessEqual => "le",
+            Self::IntSignedLessEqual => "sle",
+            Self::Carry => "carry",
+            Self::SignedCarry => "scarry",
+            Self::SignedBorrow => "sborrow",
             Self::CountOnes => "popcount",
             Self::CountLeadingZeros => "clz",
             Self::ZeroExtend => "zext",
@@ -69,9 +113,25 @@ impl ECodeExprOpcode {
             Self::Truncate => "trunc",
             Self::Extract => "extract",
             Self::Insert => "insert",
+            Self::FloatAdd => "fadd",
+            Self::FloatSub => "fsub",
+            Self::FloatMul => "fmul",
+            Self::FloatDiv => "fdiv",
+            Self::FloatNegate => "fneg",
+            Self::FloatAbs => "fabs",
+            Self::FloatSqrt => "fsqrt",
+            Self::FloatCeiling => "fceil",
+            Self::FloatFloor => "ffloor",
+            Self::FloatRound => "fround",
+            Self::FloatIsNan => "fisnan",
+            Self::FloatEqual => "feq",
+            Self::FloatNotEqual => "fne",
+            Self::FloatLess => "flt",
+            Self::FloatLessEqual => "fle",
+            Self::FloatToInt => "f2i",
+            Self::FloatToFloat => "f2f",
+            Self::IntToFloat => "i2f",
             Self::IntrinsicResult => "intrinsic_result",
-            Self::Undefined => "undef",
-            Self::Copy => "copy",
         }
     }
 
@@ -84,14 +144,25 @@ impl ECodeExprOpcode {
             | Self::IntrinsicResult
             | Self::Undefined => Some(0),
             Self::Load
-            | Self::Not
+            | Self::Copy
             | Self::Negate
+            | Self::Not
             | Self::CountOnes
             | Self::CountLeadingZeros
             | Self::ZeroExtend
             | Self::SignExtend
             | Self::Truncate
-            | Self::Copy => Some(1),
+            | Self::BoolNot
+            | Self::FloatNegate
+            | Self::FloatAbs
+            | Self::FloatSqrt
+            | Self::FloatCeiling
+            | Self::FloatFloor
+            | Self::FloatRound
+            | Self::FloatIsNan
+            | Self::FloatToInt
+            | Self::FloatToFloat
+            | Self::IntToFloat => Some(1),
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -102,12 +173,31 @@ impl ECodeExprOpcode {
             | Self::LeftShift
             | Self::LogicalRightShift
             | Self::ArithmeticRightShift
-            | Self::Compare
+            | Self::And
+            | Self::Or
+            | Self::Xor
+            | Self::BoolAnd
+            | Self::BoolOr
+            | Self::BoolXor
+            | Self::IntEqual
+            | Self::IntNotEqual
+            | Self::IntLess
+            | Self::IntSignedLess
+            | Self::IntLessEqual
+            | Self::IntSignedLessEqual
             | Self::Carry
-            | Self::Borrow
-            | Self::Bool
+            | Self::SignedCarry
+            | Self::SignedBorrow
             | Self::Extract
-            | Self::Insert => Some(2),
+            | Self::Insert
+            | Self::FloatAdd
+            | Self::FloatSub
+            | Self::FloatMul
+            | Self::FloatDiv
+            | Self::FloatEqual
+            | Self::FloatNotEqual
+            | Self::FloatLess
+            | Self::FloatLessEqual => Some(2),
         }
     }
 

@@ -1,7 +1,7 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
+use super::{CallEdge, MappingRecord, QueryPage, SwitchRecord, SymbolRecord};
 use crate::ir::block::table::CodeBlockRef;
 use crate::ir::cfg::{FlowGraph, FlowTarget};
 use crate::ir::function::table::FunctionRef;
@@ -161,6 +161,33 @@ impl<'p> ProjectRead<'p> {
         if records.len() <= limit {
             Self::push_ordered_symbol_group(&mut records, &mut group, after, limit);
         }
+
+        Self::page(records, limit)
+    }
+
+    pub(crate) fn switch_at(&self, branch: Address) -> Option<SwitchRecord> {
+        self.project
+            .switches()
+            .get_by_branch(branch)
+            .map(|switch| SwitchRecord::from(&*switch))
+    }
+
+    pub(crate) fn switch_page(
+        &self,
+        after: Option<SwitchRecord>,
+        limit: usize,
+    ) -> QueryPage<SwitchRecord> {
+        let limit = Self::limit(limit);
+        let after = after.map(|record| record.branch());
+        let switches = self.project.switches();
+        let records = switches
+            .branches_after(after)
+            .take(limit + 1)
+            .filter_map(|branch| {
+                switches
+                    .get_by_branch(branch)
+                    .map(|switch| SwitchRecord::from(&*switch))
+            });
 
         Self::page(records, limit)
     }

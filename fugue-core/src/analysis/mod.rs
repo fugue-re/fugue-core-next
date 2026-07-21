@@ -11,12 +11,15 @@ use crate::project::Project;
 
 pub mod control;
 pub mod function;
+pub mod switch;
+pub mod value;
 
 pub mod core {
     pub use super::control::{CancellationToken, Cancelled, Progress};
     pub use super::function::recovery::{
         FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError,
     };
+    pub use super::switch::{SwitchRecovery, SwitchRecoveryConfig};
 }
 
 #[derive(Debug, Error)]

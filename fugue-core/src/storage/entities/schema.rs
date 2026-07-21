@@ -4,7 +4,7 @@ use std::mem;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::ir::symbol::Symbol;
-use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
+use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress, Switch};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
@@ -73,6 +73,7 @@ pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
 pub const ENTITY_KEY_CALL_GRAPH_EDGE_ID: EntityKeyId = EntityKeyId::new(7);
 pub const ENTITY_KEY_REFERENCE_FORWARD_ID: EntityKeyId = EntityKeyId::new(8);
 pub const ENTITY_KEY_REFERENCE_INVERSE_ID: EntityKeyId = EntityKeyId::new(9);
+pub const ENTITY_KEY_SWITCH_ENTITY_ID: EntityKeyId = EntityKeyId::new(10);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -94,6 +95,8 @@ pub const ENTITY_REFERENCE_INDEX_HEADER_ID: EntityId = EntityId::new(14);
 pub const ENTITY_IL_PCODE_ID: EntityId = EntityId::new(15);
 pub const ENTITY_IL_ECODE_ID: EntityId = EntityId::new(16);
 pub const ENTITY_IL_ECODE_SSA_ID: EntityId = EntityId::new(17);
+pub const ENTITY_SWITCH_ID: EntityId = EntityId::new(18);
+pub const ENTITY_SWITCH_TABLE_ID: EntityId = EntityId::new(19);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
 
@@ -119,6 +122,7 @@ pub enum ProjectEntity {
     CallGraphIndex = 0b0000_0101,
     Revision = 0b0000_0110,
     ReferenceIndex = 0b0000_0111,
+    SwitchTable = 0b0000_1000,
 }
 
 impl EntityKey for ProjectEntity {
@@ -135,6 +139,7 @@ impl EntityKey for ProjectEntity {
                 0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
                 0b0000_0110 => Some(ProjectEntity::Revision),
                 0b0000_0111 => Some(ProjectEntity::ReferenceIndex),
+                0b0000_1000 => Some(ProjectEntity::SwitchTable),
                 _ => None,
             }
         } else {
@@ -229,6 +234,18 @@ impl EntityKey for Id<Symbol> {
 
     fn encode(&self, buf: &mut BytesMut) {
         Id::<Symbol>::encode_as_key(self, buf);
+    }
+}
+
+impl EntityKey for Id<Switch> {
+    const ID: EntityKeyId = ENTITY_KEY_SWITCH_ENTITY_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<Switch>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<Switch>::encode_as_key(self, buf);
     }
 }
 

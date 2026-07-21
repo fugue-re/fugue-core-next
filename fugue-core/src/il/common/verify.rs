@@ -16,10 +16,7 @@ pub(crate) fn verify_bounds(range: IlIndexRange, len: usize) -> Result<(), Verif
     Ok(())
 }
 
-pub(crate) fn checked_slice<'a, T>(
-    range: IlIndexRange,
-    values: &'a [T],
-) -> Result<&'a [T], VerifyError> {
+pub(crate) fn checked_slice<T>(range: IlIndexRange, values: &[T]) -> Result<&[T], VerifyError> {
     verify_bounds(range, values.len())?;
 
     Ok(range.slice(values))
@@ -133,7 +130,7 @@ pub(crate) fn verify_blocks(
     blocks: &[IlBlock],
     successors: &[IlBlockId],
 ) -> Result<(), VerifyError> {
-    let mut previous_operation_end = 0usize;
+    let mut operation_ranges = Vec::new();
 
     for (index, block) in blocks.iter().enumerate() {
         let block_id = IlBlockId::try_from_index(index)?;
@@ -141,14 +138,7 @@ pub(crate) fn verify_blocks(
         verify_block_successors(block, block_id, successors)?;
 
         if !block.operations().is_empty() {
-            if block.operations().start() < previous_operation_end {
-                return Err(VerifyError::OverlappingBlockOperations {
-                    block: block_id.value(),
-                    operation: block.operations().start() as u32,
-                });
-            }
-
-            previous_operation_end = block.operations().end();
+            operation_ranges.push((block.operations(), block_id));
         }
 
         for successor in checked_slice(block.successors(), successors)? {
@@ -156,6 +146,18 @@ pub(crate) fn verify_blocks(
                 return Err(IlError::range_out_of_bounds(successor.value(), blocks.len()).into());
             }
         }
+    }
+
+    operation_ranges.sort_unstable_by_key(|(range, _)| range.start());
+    let mut previous_operation_end = 0usize;
+    for (operations, block_id) in operation_ranges {
+        if operations.start() < previous_operation_end {
+            return Err(VerifyError::OverlappingBlockOperations {
+                block: block_id.value(),
+                operation: operations.start() as u32,
+            });
+        }
+        previous_operation_end = operations.end();
     }
 
     Ok(())

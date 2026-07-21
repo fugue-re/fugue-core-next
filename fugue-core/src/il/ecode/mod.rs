@@ -5,8 +5,8 @@ pub mod operation;
 pub mod ssa;
 pub mod transform;
 
-pub(crate) use builder::ECodeBuilder;
 pub use builder::{ECODE_SCHEMA_VERSION, ECodeIr};
+pub(crate) use builder::{ECodeBuilder, verify};
 pub use expression::{ECodeExpr, ECodeExprOpcode};
 pub use format::{
     ECodeExprDisplay, ECodeExprOpcodeDisplay, ECodeIrDisplay, ECodeStmtDisplay,

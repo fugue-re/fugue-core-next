@@ -448,7 +448,19 @@ impl ToRawAddress for Varnode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
@@ -1408,6 +1420,74 @@ impl<T: RangeAddress> AddressRangeExt<T> for Range<T> {
 
     fn inclusive(&self) -> RangeInclusive<T> {
         self.start..=(self.end - 1usize)
+    }
+}
+
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct AddressTable {
+    address: Address,
+    element_size: u32,
+    element_count: u32,
+    shift: u8,
+}
+
+impl AddressTable {
+    pub fn new(address: Address, element_size: u32) -> Self {
+        Self {
+            address,
+            element_size,
+            element_count: 0,
+            shift: 0,
+        }
+    }
+
+    pub fn with_element_count(mut self, element_count: u32) -> Self {
+        self.set_element_count(element_count);
+        self
+    }
+
+    pub fn with_shift(mut self, shift: u8) -> Self {
+        self.shift = shift;
+        self
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn element_size(&self) -> u32 {
+        self.element_size
+    }
+
+    pub fn element_count(&self) -> u32 {
+        self.element_count
+    }
+
+    pub fn set_element_count(&mut self, count: u32) {
+        self.element_count = count;
+    }
+
+    pub fn shift(&self) -> u8 {
+        self.shift
+    }
+
+    pub fn size(&self) -> u64 {
+        self.element_count as u64 * self.element_size as u64
+    }
+
+    pub fn entry_address(&self, index: u32) -> Address {
+        self.address + index as u64 * self.element_size as u64
+    }
+
+    pub fn range(&self) -> AddressRange {
+        let start = self.address.raw_address();
+        AddressRange::new(
+            self.address.space(),
+            start,
+            start + self.size().saturating_sub(1),
+        )
     }
 }
 

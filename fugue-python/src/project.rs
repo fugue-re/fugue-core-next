@@ -1112,7 +1112,8 @@ impl PCodeOperation {
             operation.opcode(),
             CorePCodeOpcode::Branch | CorePCodeOpcode::CBranch | CorePCodeOpcode::Call
         ) {
-            ir.target(operation.immediate()).map(Address::from_core)
+            ir.target(operation.immediate())
+                .map(|target| Address::from_core(target.address()))
         } else {
             None
         };

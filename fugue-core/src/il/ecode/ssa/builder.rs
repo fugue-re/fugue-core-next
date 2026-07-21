@@ -1,12 +1,15 @@
+use fugue_bv::BitVec;
+use rustc_hash::FxHashMap;
+
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlBlockId, IlDominance, IlDominanceFrontier, IlError, IlGraph, IlHeader,
+    IlArtefact, IlBlock, IlBlockId, IlDominance, IlDominanceFrontier, IlError, IlGraph, IlHeader,
     IlIndexRange, IlLevel, IlOpId, IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::format::ECodeSsaIrDisplay;
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaLiveness, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaUses,
-    ECodeSsaValue,
+    ECodeSsaBlockArg, ECodeSsaLiveness, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode,
+    ECodeSsaUses, ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_SSA_ID;
@@ -28,9 +31,22 @@ pub struct ECodeSsaIr {
     operations: Vec<ECodeSsaOp>,
     value_operands: Vec<IlValueId>,
     memory_domains: Vec<ECodeSsaMemoryDomain>,
+    constants: Vec<u8>,
+}
+
+struct LiveEntities {
+    operations: Vec<bool>,
+    block_arguments: Vec<bool>,
+}
+
+#[derive(Clone, Copy)]
+enum LiveEntity {
+    BlockArgument(usize),
+    Operation(usize),
 }
 
 impl ECodeSsaIr {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         header: IlHeader,
         graph: IlGraph,
@@ -56,6 +72,7 @@ impl ECodeSsaIr {
             operations,
             value_operands,
             memory_domains,
+            constants: Vec::new(),
         }
     }
 
@@ -66,6 +83,11 @@ impl ECodeSsaIr {
     ) -> Self {
         self.edge_arguments = edge_arguments;
         self.edge_argument_values = edge_argument_values;
+        self
+    }
+
+    pub(crate) fn with_constants(mut self, constants: Vec<u8>) -> Self {
+        self.constants = constants;
         self
     }
 
@@ -121,6 +143,10 @@ impl ECodeSsaIr {
         &self.memory_domains
     }
 
+    pub(super) fn constant_storage(&self) -> &[u8] {
+        &self.constants
+    }
+
     pub fn memory_domain(&self, space: AddressSpaceId) -> Option<&ECodeSsaMemoryDomain> {
         self.memory_domains
             .iter()
@@ -131,11 +157,489 @@ impl ECodeSsaIr {
         operation.operands().slice(&self.value_operands)
     }
 
+    pub fn defining_operation(&self, value: IlValueId) -> Option<&ECodeSsaOp> {
+        self.operations.get(self.defining_operation_index(value)?)
+    }
+
+    pub fn value_width(&self, value: IlValueId) -> Option<u32> {
+        self.values.get(value.index()).map(ECodeSsaValue::width)
+    }
+
+    pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
+        self.defining_operation(value)?.constant(&self.constants)
+    }
+
+    pub fn fold_constants(&mut self) {
+        let uses = ECodeSsaUses::build(self);
+        let sources = self.block_argument_sources();
+        let mut feeds = vec![Vec::<IlValueId>::new(); self.values.len()];
+        for (&argument, feeders) in &sources {
+            for feeder in feeders {
+                feeds[feeder.index()].push(argument);
+            }
+        }
+
+        let mut folded = vec![None::<BitVec>; self.values.len()];
+        let mut worklist = Vec::new();
+        let mut operands = Vec::new();
+
+        for op in &self.operations {
+            if op.results().len() != 1 || !matches!(op.opcode(), ECodeSsaOpcode::Constant) {
+                continue;
+            }
+            if let Some(value) = op.constant(&self.constants) {
+                let result = op.results().start();
+                folded[result] = Some(value);
+                worklist.push(result);
+            }
+        }
+
+        while let Some(value_index) = worklist.pop() {
+            let defined =
+                IlValueId::try_from_index(value_index).expect("value id is representable");
+
+            for used in uses.uses_for(defined) {
+                let op = &self.operations[used.user().index()];
+                if op.results().len() != 1 || matches!(op.opcode(), ECodeSsaOpcode::Constant) {
+                    continue;
+                }
+                let result = op.results().start();
+                if folded[result].is_some() {
+                    continue;
+                }
+                operands.clear();
+                if op
+                    .operands()
+                    .slice(&self.value_operands)
+                    .iter()
+                    .all(|value| match &folded[value.index()] {
+                        Some(constant) => {
+                            operands.push(constant.clone());
+                            true
+                        }
+                        None => false,
+                    })
+                    && let Some(value) = op.opcode().evaluate(op.width(), &operands)
+                {
+                    folded[result] = Some(value);
+                    worklist.push(result);
+                }
+            }
+
+            for &argument in &feeds[value_index] {
+                let result = argument.index();
+                if folded[result].is_some() {
+                    continue;
+                }
+                let feeders = &sources[&argument];
+                let Some(first) = feeders.first() else {
+                    continue;
+                };
+                let Some(value) = folded[first.index()].clone() else {
+                    continue;
+                };
+                if feeders
+                    .iter()
+                    .all(|feeder| folded[feeder.index()].as_ref() == Some(&value))
+                {
+                    folded[result] = Some(value);
+                    worklist.push(result);
+                }
+            }
+        }
+
+        let mut interned = self.seed_interned();
+        for op_index in 0..self.operations.len() {
+            let op = &self.operations[op_index];
+            if matches!(op.opcode(), ECodeSsaOpcode::Constant) || op.results().len() != 1 {
+                continue;
+            }
+            let result = op.results().start();
+            let Some(value) = folded[result].clone() else {
+                continue;
+            };
+            let immediate = self.intern_constant(&value, &mut interned);
+            self.operations[op_index].replace_with_constant(immediate);
+        }
+    }
+
+    fn intern_constant(&mut self, value: &BitVec, interned: &mut FxHashMap<Box<[u8]>, u64>) -> u64 {
+        Self::intern_into(value, &mut self.constants, interned)
+    }
+
+    fn intern_into(
+        value: &BitVec,
+        constants: &mut Vec<u8>,
+        interned: &mut FxHashMap<Box<[u8]>, u64>,
+    ) -> u64 {
+        let width_bytes = value.bits().div_ceil(8) as usize;
+        if value.bits() <= 64 {
+            let mut inline = [0u8; 8];
+            value.to_le_bytes(&mut inline[..width_bytes]);
+            return u64::from_le_bytes(inline);
+        }
+
+        let mut bytes = vec![0u8; width_bytes];
+        value.to_le_bytes(&mut bytes);
+        if let Some(&offset) = interned.get(bytes.as_slice()) {
+            return offset;
+        }
+        let offset = constants.len() as u64;
+        constants.extend_from_slice(&bytes);
+        interned.insert(bytes.into_boxed_slice(), offset);
+        offset
+    }
+
+    fn seed_interned(&self) -> FxHashMap<Box<[u8]>, u64> {
+        let mut interned = FxHashMap::default();
+        for op in &self.operations {
+            if !matches!(op.opcode(), ECodeSsaOpcode::Constant) || op.width() <= 64 {
+                continue;
+            }
+            if let Some(value) = op.constant(&self.constants) {
+                let width_bytes = value.bits().div_ceil(8) as usize;
+                let mut bytes = vec![0u8; width_bytes];
+                value.to_le_bytes(&mut bytes);
+                interned.insert(bytes.into_boxed_slice(), op.immediate());
+            }
+        }
+        interned
+    }
+
+    pub fn eliminate_dead_code(&mut self) {
+        let live = self.compute_liveness();
+        for (index, operation) in self.operations.iter_mut().enumerate() {
+            if !live.operations[index] {
+                operation.make_undefined();
+            }
+        }
+    }
+
+    pub fn compact(&mut self) {
+        let live = self.compute_liveness();
+
+        let mut operation_index = vec![0u32; self.operations.len() + 1];
+        for index in 0..self.operations.len() {
+            operation_index[index + 1] = operation_index[index] + u32::from(live.operations[index]);
+        }
+
+        let mut block_argument_index = vec![0u32; self.block_arguments.len() + 1];
+        for index in 0..self.block_arguments.len() {
+            block_argument_index[index + 1] =
+                block_argument_index[index] + u32::from(live.block_arguments[index]);
+        }
+
+        let mut value_kept = vec![false; self.values.len()];
+        for (index, value) in self.values.iter().enumerate() {
+            value_kept[index] = match value.definition_kind() {
+                ECodeSsaValueKind::BlockArgument => {
+                    live.block_arguments[value.definition_index() as usize]
+                }
+                ECodeSsaValueKind::Operation => live.operations[value.definition_index() as usize],
+            };
+        }
+        let mut value_index = vec![0u32; self.values.len() + 1];
+        for index in 0..self.values.len() {
+            value_index[index + 1] = value_index[index] + u32::from(value_kept[index]);
+        }
+
+        let remap_value = |value: IlValueId| {
+            IlValueId::try_from_index(value_index[value.index()] as usize)
+                .expect("remapped value id is representable")
+        };
+        let remap_range = |range: IlIndexRange, map: &[u32]| {
+            IlIndexRange::new(map[range.start()] as usize, map[range.end()] as usize)
+                .expect("remapped range stays ordered")
+        };
+
+        let values = self
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| value_kept[*index])
+            .map(|(_, value)| {
+                let definition = match value.definition_kind() {
+                    ECodeSsaValueKind::Operation => {
+                        operation_index[value.definition_index() as usize]
+                    }
+                    ECodeSsaValueKind::BlockArgument => {
+                        block_argument_index[value.definition_index() as usize]
+                    }
+                };
+                ECodeSsaValue::new(value.width(), value.definition_kind(), definition)
+            })
+            .collect::<Vec<_>>();
+
+        let mut operations = Vec::new();
+        let mut value_operands = Vec::new();
+        for (index, operation) in self.operations.iter().enumerate() {
+            if !live.operations[index] {
+                continue;
+            }
+            let operand_start = value_operands.len();
+            for &operand in operation.operands().slice(&self.value_operands) {
+                value_operands.push(remap_value(operand));
+            }
+            let operands = IlIndexRange::new(operand_start, value_operands.len())
+                .expect("operand range stays ordered");
+            let mut compacted = *operation;
+            compacted.set_results(remap_range(operation.results(), &value_index));
+            compacted.set_operands(operands);
+            operations.push(compacted);
+        }
+
+        let mut constants = Vec::new();
+        let mut interned = FxHashMap::<Box<[u8]>, u64>::default();
+        for operation in &mut operations {
+            if !matches!(operation.opcode(), ECodeSsaOpcode::Constant) || operation.width() <= 64 {
+                continue;
+            }
+            if let Some(value) = operation.constant(&self.constants) {
+                let immediate = Self::intern_into(&value, &mut constants, &mut interned);
+                operation.replace_with_constant(immediate);
+            }
+        }
+
+        let block_arguments = self
+            .block_arguments
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| live.block_arguments[*index])
+            .map(|(_, argument)| {
+                ECodeSsaBlockArg::new(
+                    argument.block(),
+                    remap_value(argument.value()),
+                    argument.width(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut block_argument_kept = vec![Vec::new(); self.graph.blocks().len()];
+        for (index, argument) in self.block_arguments.iter().enumerate() {
+            block_argument_kept[argument.block().index()].push(live.block_arguments[index]);
+        }
+
+        let mut edge_arguments = Vec::with_capacity(self.edge_arguments.len());
+        let mut edge_argument_values = Vec::new();
+        for (edge, target) in self.graph.successors().iter().enumerate() {
+            let kept = &block_argument_kept[target.index()];
+            let start = edge_argument_values.len();
+            for (position, &value) in self.arguments_for_edge(edge).iter().enumerate() {
+                if kept.get(position).copied().unwrap_or(false) {
+                    edge_argument_values.push(remap_value(value));
+                }
+            }
+            edge_arguments.push(
+                IlIndexRange::new(start, edge_argument_values.len())
+                    .expect("edge argument range stays ordered"),
+            );
+        }
+
+        let source_spans = self
+            .source_spans
+            .iter()
+            .filter(|span| {
+                operation_index[span.destination().start()]
+                    != operation_index[span.destination().end()]
+            })
+            .map(|span| {
+                IlSourceSpan::new(
+                    remap_range(span.destination(), &operation_index),
+                    span.address(),
+                    span.first_pcode_index(),
+                    span.pcode_count(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let parent_spans = self
+            .parent_spans
+            .iter()
+            .filter(|span| {
+                operation_index[span.destination().start()]
+                    != operation_index[span.destination().end()]
+            })
+            .map(|span| {
+                IlParentSpan::new(
+                    remap_range(span.destination(), &operation_index),
+                    span.source(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let blocks = self
+            .graph
+            .blocks()
+            .iter()
+            .map(|block| {
+                IlBlock::new(
+                    remap_range(block.operations(), &operation_index),
+                    block.successors(),
+                    block.properties(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let graph = IlGraph::new(blocks, self.graph.successors().to_vec());
+
+        self.graph = graph;
+        self.source_spans = source_spans;
+        self.parent_spans = parent_spans;
+        self.values = values;
+        self.block_arguments = block_arguments;
+        self.operations = operations;
+        self.value_operands = value_operands;
+        self.edge_arguments = edge_arguments;
+        self.edge_argument_values = edge_argument_values;
+        self.constants = constants;
+    }
+
+    fn compute_liveness(&self) -> LiveEntities {
+        let sources = self.block_argument_sources();
+        let mut operations = vec![false; self.operations.len()];
+        let mut block_arguments = vec![false; self.block_arguments.len()];
+        let mut worklist = Vec::new();
+
+        for (index, operation) in self.operations.iter().enumerate() {
+            if operation.opcode().is_dce_root() {
+                operations[index] = true;
+                worklist.push(LiveEntity::Operation(index));
+            }
+        }
+
+        while let Some(entity) = worklist.pop() {
+            match entity {
+                LiveEntity::Operation(op_index) => {
+                    let operands = self.operations[op_index].operands();
+                    for &operand in operands.slice(&self.value_operands) {
+                        self.mark_value_live(
+                            operand,
+                            &mut operations,
+                            &mut block_arguments,
+                            &mut worklist,
+                        );
+                    }
+                }
+                LiveEntity::BlockArgument(argument_index) => {
+                    let value = self.block_arguments[argument_index].value();
+                    if let Some(feeders) = sources.get(&value) {
+                        for &feeder in feeders {
+                            self.mark_value_live(
+                                feeder,
+                                &mut operations,
+                                &mut block_arguments,
+                                &mut worklist,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        LiveEntities {
+            operations,
+            block_arguments,
+        }
+    }
+
+    fn mark_value_live(
+        &self,
+        value: IlValueId,
+        operations: &mut [bool],
+        block_arguments: &mut [bool],
+        worklist: &mut Vec<LiveEntity>,
+    ) {
+        let Some(record) = self.values.get(value.index()) else {
+            return;
+        };
+        let index = record.definition_index() as usize;
+        match record.definition_kind() {
+            ECodeSsaValueKind::Operation => {
+                if !operations[index] {
+                    operations[index] = true;
+                    worklist.push(LiveEntity::Operation(index));
+                }
+            }
+            ECodeSsaValueKind::BlockArgument => {
+                if !block_arguments[index] {
+                    block_arguments[index] = true;
+                    worklist.push(LiveEntity::BlockArgument(index));
+                }
+            }
+        }
+    }
+
+    fn defining_operation_index(&self, value: IlValueId) -> Option<usize> {
+        let record = self.values.get(value.index())?;
+        (record.definition_kind() == ECodeSsaValueKind::Operation)
+            .then(|| record.definition_index() as usize)
+    }
+
+    pub fn underlying_value(&self, value: IlValueId) -> IlValueId {
+        let mut current = value;
+        for _ in 0..self.values.len() {
+            let Some(operation) = self.defining_operation(current) else {
+                return current;
+            };
+            match operation.opcode() {
+                ECodeSsaOpcode::Copy
+                | ECodeSsaOpcode::ZeroExtend
+                | ECodeSsaOpcode::SignExtend
+                | ECodeSsaOpcode::Truncate => {
+                    let Some(&inner) = self.operation_operands(operation).first() else {
+                        return current;
+                    };
+                    current = inner;
+                }
+                _ => return current,
+            }
+        }
+        current
+    }
+
+    pub fn first_non_constant_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
+        self.operation_operands(operation)
+            .iter()
+            .copied()
+            .find(|&value| self.constant_value(value).is_none())
+    }
+
+    pub fn indirect_branch_input(&self, address: Address) -> Option<IlValueId> {
+        self.operations_for_source(address)
+            .find(|(_, operation)| matches!(operation.opcode(), ECodeSsaOpcode::BranchIndirect))
+            .and_then(|(_, operation)| self.operation_operands(operation).first().copied())
+    }
+
     pub fn arguments_for_edge(&self, edge: usize) -> &[IlValueId] {
         self.edge_arguments
             .get(edge)
             .expect("edge index is within the edge argument table")
             .slice(&self.edge_argument_values)
+    }
+
+    pub fn block_argument_sources(&self) -> FxHashMap<IlValueId, Vec<IlValueId>> {
+        let block_count = self.graph.blocks().len();
+        let mut arguments = vec![Vec::new(); block_count];
+        for argument in &self.block_arguments {
+            arguments[argument.block().index()].push(argument.value());
+        }
+
+        let mut incoming = vec![Vec::new(); block_count];
+        for (edge, target) in self.graph.successors().iter().enumerate() {
+            incoming[target.index()].push(edge);
+        }
+
+        let mut sources = FxHashMap::default();
+        for (block, positions) in arguments.iter().enumerate() {
+            for (position, &argument) in positions.iter().enumerate() {
+                let feeders = incoming[block]
+                    .iter()
+                    .filter_map(|&edge| self.arguments_for_edge(edge).get(position).copied())
+                    .collect();
+                sources.insert(argument, feeders);
+            }
+        }
+
+        sources
     }
 
     pub const fn display(&self) -> ECodeSsaIrDisplay<'_> {
@@ -191,6 +695,7 @@ impl ECodeSsaIr {
         self.operations.shrink_to_fit();
         self.value_operands.shrink_to_fit();
         self.memory_domains.shrink_to_fit();
+        self.constants.shrink_to_fit();
     }
 }
 
@@ -236,6 +741,7 @@ pub(crate) struct ECodeSsaBuilder {
     operations: Vec<ECodeSsaOp>,
     value_operands: IlPool<IlValueId>,
     memory_domains: Vec<ECodeSsaMemoryDomain>,
+    constants: Vec<u8>,
 }
 
 impl ECodeSsaBuilder {
@@ -252,6 +758,7 @@ impl ECodeSsaBuilder {
             operations: Vec::new(),
             value_operands: IlPool::new(),
             memory_domains: Vec::new(),
+            constants: Vec::new(),
         }
     }
 
@@ -370,7 +877,8 @@ impl ECodeSsaBuilder {
             self.value_operands.into_values(),
             self.memory_domains,
         )
-        .with_edge_argument_storage(self.edge_arguments, self.edge_argument_values.into_values());
+        .with_edge_argument_storage(self.edge_arguments, self.edge_argument_values.into_values())
+        .with_constants(self.constants);
 
         body.shrink_to_fit();
 
@@ -379,860 +887,5 @@ impl ECodeSsaBuilder {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-    use crate::il::common::verify::{
-        VerifyError, checked_slice, verify_bounds, verify_graph, verify_graph_bounds,
-        verify_parent_spans, verify_source_spans,
-    };
-    use crate::il::common::{IlBlock, IlBlockProperties, IlSourceSpan};
-    use crate::il::ecode::ssa::{ECodeSsaOpcode, ECodeSsaValueKind};
-    use crate::ir::{Address, FunctionId};
-    use crate::storage::segments::space::AddressSpaceId;
-
-    pub(crate) fn verify(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
-        if ir.header().schema() != ECodeSsaIr::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                ECodeSsaIr::LEVEL,
-                ECodeSsaIr::SCHEMA.value(),
-                ir.header().schema().value(),
-            )
-            .into());
-        }
-
-        verify_graph(ir.graph())?;
-        verify_graph_bounds(ir.graph(), ir.operations().len())?;
-        verify_source_spans(ir.source_spans(), ir.operations().len())?;
-        verify_parent_spans(ir.parent_spans(), ir.operations().len())?;
-        verify_memory_domains(ir)?;
-        verify_edge_arguments(ir)?;
-
-        for (argument_index, argument) in ir.block_arguments().iter().enumerate() {
-            ir.graph().blocks().get(argument.block().index()).ok_or(
-                IlError::range_out_of_bounds(argument.block().value(), ir.graph().blocks().len()),
-            )?;
-
-            ir.values()
-                .get(argument.value().index())
-                .ok_or(IlError::range_out_of_bounds(
-                    argument.value().value(),
-                    ir.values().len(),
-                ))?;
-
-            let value = ir.values()[argument.value().index()];
-
-            if value.definition_kind() != ECodeSsaValueKind::BlockArgument
-                || value.definition_index() != argument_index as u32
-                || value.width() != argument.width()
-            {
-                return Err(VerifyError::InvalidValueDefinition {
-                    level: IlLevel::ECodeSsa,
-                });
-            }
-        }
-
-        for (operation_index, operation) in ir.operations().iter().enumerate() {
-            verify_bounds(operation.results(), ir.values().len())?;
-            verify_bounds(operation.operands(), ir.value_operands().len())?;
-
-            for result_index in operation.results().start()..operation.results().end() {
-                let value = ir.values()[result_index];
-
-                if value.definition_kind() != ECodeSsaValueKind::Operation
-                    || value.definition_index() != operation_index as u32
-                {
-                    return Err(VerifyError::InvalidValueDefinition {
-                        level: IlLevel::ECodeSsa,
-                    });
-                }
-
-                if value.width() != operation.width() {
-                    return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
-                }
-            }
-
-            for operand in checked_slice(operation.operands(), ir.value_operands())? {
-                ir.values()
-                    .get(operand.index())
-                    .ok_or(IlError::range_out_of_bounds(
-                        operand.value(),
-                        ir.values().len(),
-                    ))?;
-            }
-
-            if operation.opcode().requires_memory_domain() {
-                let Some(address_space) = operation.address_space() else {
-                    return Err(
-                        IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into(),
-                    );
-                };
-
-                if ir.memory_domain(address_space).is_none() {
-                    return Err(
-                        IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into(),
-                    );
-                }
-
-                verify_memory_operation(ir, operation)?;
-            }
-        }
-
-        for (value_index, value) in ir.values().iter().enumerate() {
-            let value_id = IlValueId::try_from_index(value_index)?;
-
-            match value.definition_kind() {
-                ECodeSsaValueKind::Operation => {
-                    let Some(operation) = ir.operations().get(value.definition_index() as usize)
-                    else {
-                        return Err(VerifyError::InvalidValueDefinition {
-                            level: IlLevel::ECodeSsa,
-                        });
-                    };
-
-                    if !operation.results().contains_index(value_id.index()) {
-                        return Err(VerifyError::InvalidValueDefinition {
-                            level: IlLevel::ECodeSsa,
-                        });
-                    }
-                }
-                ECodeSsaValueKind::BlockArgument => {
-                    let Some(argument) =
-                        ir.block_arguments().get(value.definition_index() as usize)
-                    else {
-                        return Err(VerifyError::InvalidValueDefinition {
-                            level: IlLevel::ECodeSsa,
-                        });
-                    };
-
-                    if argument.value() != value_id || argument.width() != value.width() {
-                        return Err(VerifyError::InvalidValueDefinition {
-                            level: IlLevel::ECodeSsa,
-                        });
-                    }
-                }
-            }
-        }
-
-        verify_dominating_uses(ir)?;
-
-        Ok(())
-    }
-
-    fn verify_memory_domains(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
-        for (index, domain) in ir.memory_domains().iter().enumerate() {
-            if ir.memory_domains()[..index]
-                .iter()
-                .any(|existing| existing.space() == domain.space())
-            {
-                return Err(VerifyError::DuplicateMemoryDomain {
-                    level: IlLevel::ECodeSsa,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn verify_memory_operation(ir: &ECodeSsaIr, operation: &ECodeSsaOp) -> Result<(), VerifyError> {
-        let operands = ir.operation_operands(operation);
-        let Some(memory) = operands.last() else {
-            return Err(IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into());
-        };
-        let memory = ir.values()[memory.index()];
-
-        if memory.width() != 0 {
-            return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
-        }
-
-        if operation.opcode() == ECodeSsaOpcode::Store {
-            if operation.results().len() != 1 {
-                return Err(IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into());
-            }
-
-            let result = ir.values()[operation.results().start()];
-
-            if result.width() != 0 {
-                return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
-            }
-        }
-
-        Ok(())
-    }
-
-    fn verify_edge_arguments(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
-        if ir.edge_arguments().len() != ir.graph().successors().len() {
-            return Err(VerifyError::BlockArgumentCount {
-                block: 0,
-                expected: ir.graph().successors().len(),
-                found: ir.edge_arguments().len(),
-            });
-        }
-
-        for range in ir.edge_arguments() {
-            verify_bounds(*range, ir.edge_argument_values().len())?;
-        }
-
-        for value in ir.edge_argument_values() {
-            ir.values()
-                .get(value.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    value.value(),
-                    ir.values().len(),
-                ))?;
-        }
-
-        Ok(())
-    }
-
-    fn verify_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
-        if ir.graph().blocks().is_empty() {
-            return verify_linear_dominating_uses(ir);
-        }
-
-        let operation_blocks = operation_blocks(ir)?;
-        let dominance = ir.dominance();
-
-        verify_edge_argument_uses(ir, &operation_blocks, &dominance)?;
-
-        for (operation_index, operation) in ir.operations().iter().enumerate() {
-            let operation_id = IlOpId::try_from_index(operation_index)?;
-            let Some(user_block) = operation_blocks[operation_index] else {
-                return Err(VerifyError::InvalidOperationPlacement {
-                    level: IlLevel::ECodeSsa,
-                    operation: operation_id.value(),
-                });
-            };
-
-            if !dominance.is_reachable(user_block) {
-                continue;
-            }
-
-            for operand in ir.operation_operands(operation) {
-                if !value_dominates_operation(
-                    ir,
-                    *operand,
-                    user_block,
-                    operation_index,
-                    &operation_blocks,
-                    &dominance,
-                )? {
-                    return Err(VerifyError::NonDominatingUse {
-                        level: IlLevel::ECodeSsa,
-                        value: operand.value(),
-                        user: operation_id.value(),
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn verify_edge_argument_uses(
-        ir: &ECodeSsaIr,
-        operation_blocks: &[Option<IlBlockId>],
-        dominance: &IlDominance,
-    ) -> Result<(), VerifyError> {
-        for (predecessor_index, predecessor) in ir.graph().blocks().iter().enumerate() {
-            let predecessor_id = IlBlockId::try_from_index(predecessor_index)?;
-
-            for (successor_offset, successor) in
-                checked_slice(predecessor.successors(), ir.graph().successors())?
-                    .iter()
-                    .enumerate()
-            {
-                let edge = predecessor.successors().start() + successor_offset;
-                let arguments = ir.arguments_for_edge(edge);
-                let block_arguments = block_arguments_for_block(ir, *successor);
-
-                if arguments.len() != block_arguments.len() {
-                    return Err(VerifyError::BlockArgumentCount {
-                        block: successor.value(),
-                        expected: block_arguments.len(),
-                        found: arguments.len(),
-                    });
-                }
-
-                if !dominance.is_reachable(predecessor_id) {
-                    continue;
-                }
-
-                for (value, argument) in arguments.iter().zip(block_arguments) {
-                    let incoming = ir.values()[value.index()];
-
-                    if incoming.width() != argument.width() {
-                        return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
-                    }
-
-                    if !value_dominates_edge(
-                        ir,
-                        *value,
-                        predecessor_id,
-                        operation_blocks,
-                        dominance,
-                    )? {
-                        return Err(VerifyError::NonDominatingEdgeArgument {
-                            level: IlLevel::ECodeSsa,
-                            value: value.value(),
-                            predecessor: predecessor_id.value(),
-                            successor: successor.value(),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn block_arguments_for_block(ir: &ECodeSsaIr, block: IlBlockId) -> Vec<ECodeSsaBlockArg> {
-        ir.block_arguments()
-            .iter()
-            .copied()
-            .filter(|argument| argument.block() == block)
-            .collect()
-    }
-
-    fn verify_linear_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
-        for (operation_index, operation) in ir.operations().iter().enumerate() {
-            let operation_id = IlOpId::try_from_index(operation_index)?;
-
-            for operand in ir.operation_operands(operation) {
-                let value = ir.values()[operand.index()];
-
-                if value.definition_kind() == ECodeSsaValueKind::Operation
-                    && value.definition_index() as usize >= operation_index
-                {
-                    return Err(VerifyError::NonDominatingUse {
-                        level: IlLevel::ECodeSsa,
-                        value: operand.value(),
-                        user: operation_id.value(),
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn operation_blocks(ir: &ECodeSsaIr) -> Result<Vec<Option<IlBlockId>>, VerifyError> {
-        let mut operation_blocks = vec![None; ir.operations().len()];
-
-        for (block_index, block) in ir.graph().blocks().iter().enumerate() {
-            let block_id = IlBlockId::try_from_index(block_index)?;
-            verify_bounds(block.operations(), ir.operations().len())?;
-
-            for (operation_index, operation_block) in operation_blocks
-                .iter_mut()
-                .enumerate()
-                .take(block.operations().end())
-                .skip(block.operations().start())
-            {
-                if operation_block.is_some() {
-                    let operation_id = IlOpId::try_from_index(operation_index)?;
-                    return Err(VerifyError::InvalidOperationPlacement {
-                        level: IlLevel::ECodeSsa,
-                        operation: operation_id.value(),
-                    });
-                }
-
-                *operation_block = Some(block_id);
-            }
-        }
-
-        Ok(operation_blocks)
-    }
-
-    fn value_dominates_operation(
-        ir: &ECodeSsaIr,
-        value_id: IlValueId,
-        user_block: IlBlockId,
-        user_operation: usize,
-        operation_blocks: &[Option<IlBlockId>],
-        dominance: &IlDominance,
-    ) -> Result<bool, VerifyError> {
-        let value = ir.values()[value_id.index()];
-
-        match value.definition_kind() {
-            ECodeSsaValueKind::Operation => {
-                let definition_operation = value.definition_index() as usize;
-                let Some(definition_block) = operation_blocks
-                    .get(definition_operation)
-                    .copied()
-                    .flatten()
-                else {
-                    let operation_id = IlOpId::try_from_index(definition_operation)?;
-                    return Err(VerifyError::InvalidOperationPlacement {
-                        level: IlLevel::ECodeSsa,
-                        operation: operation_id.value(),
-                    });
-                };
-
-                if definition_block == user_block {
-                    Ok(definition_operation < user_operation)
-                } else {
-                    Ok(dominance.dominates(definition_block, user_block))
-                }
-            }
-            ECodeSsaValueKind::BlockArgument => {
-                let argument = ir.block_arguments()[value.definition_index() as usize];
-
-                Ok(dominance.dominates(argument.block(), user_block))
-            }
-        }
-    }
-
-    fn value_dominates_edge(
-        ir: &ECodeSsaIr,
-        value_id: IlValueId,
-        predecessor: IlBlockId,
-        operation_blocks: &[Option<IlBlockId>],
-        dominance: &IlDominance,
-    ) -> Result<bool, VerifyError> {
-        let value = ir.values()[value_id.index()];
-
-        match value.definition_kind() {
-            ECodeSsaValueKind::Operation => {
-                let definition_operation = value.definition_index() as usize;
-                let Some(definition_block) = operation_blocks
-                    .get(definition_operation)
-                    .copied()
-                    .flatten()
-                else {
-                    let operation_id = IlOpId::try_from_index(definition_operation)?;
-                    return Err(VerifyError::InvalidOperationPlacement {
-                        level: IlLevel::ECodeSsa,
-                        operation: operation_id.value(),
-                    });
-                };
-
-                Ok(definition_block == predecessor
-                    || dominance.dominates(definition_block, predecessor))
-            }
-            ECodeSsaValueKind::BlockArgument => {
-                let argument = ir.block_arguments()[value.definition_index() as usize];
-
-                Ok(dominance.dominates(argument.block(), predecessor))
-            }
-        }
-    }
-
-    #[test]
-    fn ssa_builder_finishes_verified_body() {
-        assert!(std::mem::size_of::<ECodeSsaValue>() <= 12);
-        assert!(std::mem::size_of::<ECodeSsaBlockArg>() <= 12);
-        assert!(std::mem::size_of::<ECodeSsaOp>() <= 64);
-        assert!(std::mem::size_of::<ECodeSsaMemoryDomain>() <= 4);
-
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
-        let (value, results) = builder.push_result_value(64).unwrap();
-
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Constant,
-                results,
-                IlIndexRange::EMPTY,
-                64,
-            ))
-            .unwrap();
-
-        let operands = builder.push_value_operands([value]).unwrap();
-
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Return,
-                IlIndexRange::EMPTY,
-                operands,
-                0,
-            ))
-            .unwrap();
-
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&body).unwrap();
-        let decoded = rkyv::from_bytes::<ECodeSsaIr, rkyv::rancor::Error>(&bytes).unwrap();
-
-        assert_eq!(body.values().len(), 1);
-        assert_eq!(body.operations().len(), 2);
-        assert_eq!(decoded, body);
-    }
-
-    #[test]
-    fn ssa_body_returns_operations_for_source() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let address = Address::new(AddressSpaceId::new(1), 0x1000u64);
-        let other = Address::new(AddressSpaceId::new(1), 0x2000u64);
-        let body = ECodeSsaIr::new(
-            header,
-            IlGraph::default(),
-            vec![
-                IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
-                IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
-            ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Trap,
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    0,
-                ),
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Trap,
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    0,
-                ),
-            ],
-            Vec::new(),
-            Vec::new(),
-        );
-
-        let operations = body.operations_for_source(other).collect::<Vec<_>>();
-
-        assert_eq!(operations.len(), 1);
-        assert_eq!(operations[0].0, 1);
-        assert_eq!(operations[0].1.opcode(), ECodeSsaOpcode::Trap);
-    }
-
-    #[test]
-    fn ssa_builder_records_block_argument_definition() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let block = IlBlockId::try_from_index(0).unwrap();
-        let graph = IlGraph::new(
-            vec![IlBlock::new(
-                IlIndexRange::EMPTY,
-                IlIndexRange::EMPTY,
-                IlBlockProperties::ENTRY,
-            )],
-            Vec::new(),
-        );
-        let mut builder = ECodeSsaBuilder::new(header, graph);
-        let value = builder.push_block_argument_value(block, 32).unwrap();
-
-        let body = builder.build(&CancellationToken::default()).unwrap();
-
-        assert_eq!(body.block_arguments().len(), 1);
-        assert_eq!(body.block_arguments()[0].block(), block);
-        assert_eq!(body.block_arguments()[0].value(), value);
-        assert_eq!(
-            body.values()[value.index()].definition_kind(),
-            ECodeSsaValueKind::BlockArgument
-        );
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_invalid_value_definition() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let body = ECodeSsaIr::new(
-            header,
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::InvalidValueDefinition { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_builder_interns_memory_domains() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
-        let space = AddressSpaceId::new(7);
-
-        assert_eq!(builder.ensure_memory_domain(space), 0);
-        assert_eq!(builder.ensure_memory_domain(space), 0);
-
-        let body = builder.build(&CancellationToken::default()).unwrap();
-
-        assert_eq!(body.memory_domains().len(), 1);
-        assert_eq!(body.memory_domains()[0].space(), space);
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_duplicate_memory_domains() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let space = AddressSpaceId::new(7);
-        let body = ECodeSsaIr::new(
-            header,
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
-                ECodeSsaMemoryDomain::new(space),
-                ECodeSsaMemoryDomain::new(space),
-            ],
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::DuplicateMemoryDomain { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_load_without_memory_domain() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let space = AddressSpaceId::new(7);
-        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
-        let (_value, results) = builder.push_result_value(8).unwrap();
-
-        builder
-            .push_operation(
-                ECodeSsaOp::new(ECodeSsaOpcode::Load, results, IlIndexRange::EMPTY, 8)
-                    .with_address_space(space),
-            )
-            .unwrap();
-
-        let body = builder.build(&CancellationToken::default()).unwrap();
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::Il(IlError::MissingComponent { .. }))
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_non_dominating_linear_use() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let value = IlValueId::try_from_index(0).unwrap();
-        let result = IlIndexRange::new(0, 1).unwrap();
-        let operands = IlIndexRange::new(0, 1).unwrap();
-        let body = ECodeSsaIr::new(
-            header,
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            vec![ECodeSsaValue::operation_result(
-                32,
-                IlOpId::try_from_index(1).unwrap(),
-            )],
-            Vec::new(),
-            vec![
-                ECodeSsaOp::new(ECodeSsaOpcode::Return, IlIndexRange::EMPTY, operands, 0),
-                ECodeSsaOp::new(ECodeSsaOpcode::Constant, result, IlIndexRange::EMPTY, 32),
-            ],
-            vec![value],
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::NonDominatingUse { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_non_dominating_block_use() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let left = IlBlockId::try_from_index(1).unwrap();
-        let right = IlBlockId::try_from_index(2).unwrap();
-        let value = IlValueId::try_from_index(0).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::empty(),
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(1, 2).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::empty(),
-                ),
-            ],
-            vec![left, right],
-        );
-        let body = ECodeSsaIr::new(
-            header,
-            graph,
-            Vec::new(),
-            Vec::new(),
-            vec![ECodeSsaValue::operation_result(
-                32,
-                IlOpId::try_from_index(0).unwrap(),
-            )],
-            Vec::new(),
-            vec![
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Constant,
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    32,
-                ),
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Return,
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 1).unwrap(),
-                    0,
-                ),
-            ],
-            vec![value],
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::NonDominatingUse { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_wrong_edge_argument_count() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let successor = IlBlockId::try_from_index(1).unwrap();
-        let argument_value = IlValueId::try_from_index(0).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![successor],
-        );
-        let body = ECodeSsaIr::new(
-            header,
-            graph,
-            Vec::new(),
-            Vec::new(),
-            vec![ECodeSsaValue::block_argument(32, 0)],
-            vec![ECodeSsaBlockArg::new(successor, argument_value, 32)],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .with_edge_argument_storage(vec![IlIndexRange::EMPTY], Vec::new());
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::BlockArgumentCount { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_non_dominating_edge_argument() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let left = IlBlockId::try_from_index(1).unwrap();
-        let right = IlBlockId::try_from_index(2).unwrap();
-        let value = IlValueId::try_from_index(0).unwrap();
-        let argument_value = IlValueId::try_from_index(1).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::empty(),
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![left, right],
-        );
-        let body = ECodeSsaIr::new(
-            header,
-            graph,
-            Vec::new(),
-            Vec::new(),
-            vec![
-                ECodeSsaValue::operation_result(32, IlOpId::try_from_index(0).unwrap()),
-                ECodeSsaValue::block_argument(32, 0),
-            ],
-            vec![ECodeSsaBlockArg::new(right, argument_value, 32)],
-            vec![ECodeSsaOp::new(
-                ECodeSsaOpcode::Constant,
-                IlIndexRange::new(0, 1).unwrap(),
-                IlIndexRange::EMPTY,
-                32,
-            )],
-            Vec::new(),
-            Vec::new(),
-        )
-        .with_edge_argument_storage(
-            vec![IlIndexRange::EMPTY, IlIndexRange::new(0, 1).unwrap()],
-            vec![value],
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::NonDominatingEdgeArgument { .. })
-        ));
-    }
-
-    #[test]
-    fn ssa_verifier_rejects_duplicate_operation_placement() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::empty(),
-                ),
-            ],
-            Vec::new(),
-        );
-        let body = ECodeSsaIr::new(
-            header,
-            graph,
-            Vec::new(),
-            Vec::new(),
-            vec![ECodeSsaValue::operation_result(
-                32,
-                IlOpId::try_from_index(0).unwrap(),
-            )],
-            Vec::new(),
-            vec![ECodeSsaOp::new(
-                ECodeSsaOpcode::Constant,
-                IlIndexRange::new(0, 1).unwrap(),
-                IlIndexRange::EMPTY,
-                32,
-            )],
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            verify(&body),
-            Err(VerifyError::OverlappingBlockOperations { .. })
-        ));
-    }
-}
+#[path = "builder/test.rs"]
+mod test;

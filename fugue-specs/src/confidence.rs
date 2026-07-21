@@ -72,6 +72,17 @@ unsafe impl rkyv::Portable for ArchivedConfidence {}
 unsafe impl rkyv::traits::NoUndef for ArchivedConfidence {}
 
 #[cfg(feature = "rkyv")]
+unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
+    for ArchivedConfidence
+where
+    rkyv::primitive::ArchivedF32: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe { rkyv::primitive::ArchivedF32::check_bytes(value.cast(), context) }
+    }
+}
+
+#[cfg(feature = "rkyv")]
 impl Archive for Confidence {
     type Archived = ArchivedConfidence;
     type Resolver = ();

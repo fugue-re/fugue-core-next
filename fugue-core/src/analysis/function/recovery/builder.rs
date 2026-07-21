@@ -14,6 +14,7 @@ use crate::project::ProjectTransaction;
 use crate::storage::SegmentStorage;
 
 pub struct PartialFunctionWithContext {
+    cancellation: CancellationToken,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
     function: PartialFunction,
@@ -171,6 +172,10 @@ impl<'a> CodeBlockStructuringContext<'a> {
 }
 
 impl PartialFunctionWithContext {
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
     pub fn config(&self) -> &FunctionRecoveryConfig {
         &self.config
     }
@@ -237,8 +242,23 @@ impl FunctionBuilderContext {
         to: impl Into<Address>,
         kind: FlowKind,
     ) {
-        self.local_targets
-            .insert(FlowTarget::new(from.into(), to.into(), kind));
+        self.add_local_target_with_context(from, AddressWithContext::from(to.into()), kind);
+    }
+
+    pub fn add_local_target_with_context(
+        &mut self,
+        from: impl Into<Address>,
+        to: AddressWithContext,
+        kind: FlowKind,
+    ) {
+        let from = from.into();
+        let address = to.address();
+        if self
+            .local_targets
+            .insert(FlowTarget::new(from, address, kind))
+        {
+            self.candidates.push_back(to);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -256,6 +276,7 @@ impl FunctionBuilderContext {
         translator: &mut Translator,
         f: &mut PartialFunction,
         token: &CancellationToken,
+        use_mapping_hints: bool,
     ) -> Result<(), Cancelled> {
         // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
         // create a "cheap" view over the containing segment and use that to avoid lookups for each
@@ -294,6 +315,16 @@ impl FunctionBuilderContext {
                 }
             }
 
+            if use_mapping_hints && let Some(hint) = view.mapping_hint_at(block) {
+                if hint.is_data() {
+                    tracing::trace!("skipping {block}: marked as data in segment mapping hints");
+                    continue 'outer;
+                }
+                if let Some(hinted) = hint.context() {
+                    context.merge(hinted);
+                }
+            }
+
             if self.avoids.contains(block) {
                 tracing::trace!("skipping {block}: in avoidance set");
                 continue 'outer;
@@ -308,7 +339,7 @@ impl FunctionBuilderContext {
             context.apply(block, translator.context_mut());
 
             // Save the context so we can associate it with a block later.
-            self.contexts.entry(block).or_insert(context);
+            self.contexts.entry(block).or_insert(context.clone());
 
             let mut offset = 0usize;
 
@@ -316,6 +347,26 @@ impl FunctionBuilderContext {
                 token.check()?;
 
                 let address = block + offset;
+
+                if use_mapping_hints
+                    && offset != 0
+                    && let Some(hint) = view.mapping_hint_at(address)
+                {
+                    if hint.is_data() {
+                        tracing::trace!(
+                            "stopping at {address}: marked as data in segment mapping hints"
+                        );
+                        continue 'outer;
+                    }
+
+                    let mut boundary_context = context.clone();
+                    if let Some(hinted) = hint.context() {
+                        boundary_context.merge(hinted);
+                    }
+                    self.candidates
+                        .push_front(AddressWithContext::new(address, boundary_context));
+                    continue 'outer;
+                }
 
                 tracing::trace!("lifting at {address}");
 
@@ -535,6 +586,7 @@ impl FunctionBuilderContext {
                 analysis.translator,
                 &mut partial,
                 analysis.token,
+                analysis.config.use_segment_mapping_hints(),
             ) {
                 return Ok(ControlFlow::Break(cancelled));
             }
@@ -549,6 +601,7 @@ impl FunctionBuilderContext {
             let num_local_targets = self.local_targets.len();
 
             let mut function_with_context = PartialFunctionWithContext {
+                cancellation: analysis.token.clone(),
                 config: *analysis.config,
                 context: mem::take(self),
                 function: mem::take(&mut partial),

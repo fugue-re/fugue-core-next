@@ -1,7 +1,11 @@
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
-use crate::il::common::{IlError, IlExprId, IlHeader, IlIndexRange, IlLevel};
+use crate::il::common::{
+    IlBlock, IlBlockId, IlBlockProperties, IlError, IlExprId, IlGraph, IlHeader, IlIndexRange,
+    IlLevel, IlSourceSpan,
+};
 use crate::il::ecode::{
     ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt,
     ECodeStmtOpcode,
@@ -24,14 +28,257 @@ impl PCodeToECode {
             ECODE_SCHEMA_VERSION,
             source.header().input_revision(),
         );
-        let mut builder = ECodeBuilder::new(header, source.graph().clone());
-        builder.replace_source_spans(source.source_spans().to_vec());
+        let mut builder = ECodeBuilder::new(header, IlGraph::default());
         let mut lifting = ECodeLifting::new(source, &mut builder);
 
-        lifting.lift(cancellation)?;
+        let offsets = lifting.lift(cancellation)?;
         drop(lifting);
 
+        builder.replace_graph(Self::remap_graph(source, &offsets)?);
+        builder.replace_source_spans(Self::remap_source_spans(source, &offsets)?);
+
         builder.build(cancellation)
+    }
+
+    fn remap_graph(source: &PCodeIr, offsets: &[u32]) -> Result<IlGraph, IlError> {
+        let mut partitions = Vec::new();
+        let mut partition_ranges = Vec::with_capacity(source.graph().blocks().len());
+        let mut first_blocks = Vec::with_capacity(source.graph().blocks().len());
+        let mut refined_block_count = 0usize;
+        let mut boundaries = Vec::new();
+
+        for block in source.graph().blocks() {
+            let operations = block.operations();
+            boundaries.clear();
+            boundaries.push(operations.start());
+            boundaries.push(operations.end());
+
+            for operation_index in operations.start()..operations.end() {
+                let operation = &source.operations()[operation_index];
+                if matches!(
+                    operation.opcode(),
+                    PCodeOpcode::Branch
+                        | PCodeOpcode::CBranch
+                        | PCodeOpcode::IBranch
+                        | PCodeOpcode::Return
+                ) {
+                    boundaries.push(operation_index + 1);
+                }
+                if let Some(target) =
+                    Self::internal_target(source, operations, operation_index, operation)
+                {
+                    boundaries.push(target);
+                }
+            }
+
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            let partition_start = partitions.len();
+            for pair in boundaries.windows(2) {
+                partitions.push(IlIndexRange::new(pair[0], pair[1])?);
+            }
+            if partition_start == partitions.len() {
+                partitions.push(operations);
+            }
+
+            first_blocks.push(IlBlockId::try_from_index(refined_block_count)?);
+            refined_block_count += partitions.len() - partition_start;
+            partition_ranges.push(IlIndexRange::new(partition_start, partitions.len())?);
+        }
+
+        let mut blocks = Vec::with_capacity(refined_block_count);
+        let mut successors = Vec::new();
+
+        for (block_index, (source_block, ranges)) in source
+            .graph()
+            .blocks()
+            .iter()
+            .zip(&partition_ranges)
+            .enumerate()
+        {
+            let ranges = ranges.slice(&partitions);
+            for (range_index, range) in ranges.iter().copied().enumerate() {
+                let mut block_successors = SmallVec::<[IlBlockId; 2]>::new();
+                let next = (range_index + 1 < ranges.len()).then(|| {
+                    IlBlockId::try_from_index(first_blocks[block_index].index() + range_index + 1)
+                        .expect("refined block id was validated while partitioning")
+                });
+                let original_successors =
+                    source_block.successors().slice(source.graph().successors());
+
+                match range.end().checked_sub(1).and_then(|index| {
+                    source
+                        .operations()
+                        .get(index)
+                        .map(|operation| (index, operation))
+                }) {
+                    Some((operation_index, operation))
+                        if operation.opcode() == PCodeOpcode::Branch =>
+                    {
+                        if let Some(target) = Self::internal_target(
+                            source,
+                            source_block.operations(),
+                            operation_index,
+                            operation,
+                        )
+                        .and_then(|target| {
+                            Self::refined_target(first_blocks[block_index], ranges, target)
+                        }) {
+                            Self::push_successor(&mut block_successors, target);
+                        } else {
+                            Self::push_mapped_successors(
+                                &mut block_successors,
+                                original_successors,
+                                &first_blocks,
+                            );
+                        }
+                    }
+                    Some((operation_index, operation))
+                        if operation.opcode() == PCodeOpcode::CBranch =>
+                    {
+                        if let Some(target) = Self::internal_target(
+                            source,
+                            source_block.operations(),
+                            operation_index,
+                            operation,
+                        )
+                        .and_then(|target| {
+                            Self::refined_target(first_blocks[block_index], ranges, target)
+                        }) {
+                            Self::push_successor(&mut block_successors, target);
+                        } else {
+                            Self::push_mapped_successors(
+                                &mut block_successors,
+                                original_successors,
+                                &first_blocks,
+                            );
+                        }
+                        if let Some(next) = next {
+                            Self::push_successor(&mut block_successors, next);
+                        } else {
+                            Self::push_mapped_successors(
+                                &mut block_successors,
+                                original_successors,
+                                &first_blocks,
+                            );
+                        }
+                    }
+                    Some((_, operation)) if operation.opcode() == PCodeOpcode::IBranch => {}
+                    Some((_, operation)) if operation.opcode() == PCodeOpcode::Return => {}
+                    _ => {
+                        if let Some(next) = next {
+                            Self::push_successor(&mut block_successors, next);
+                        } else {
+                            Self::push_mapped_successors(
+                                &mut block_successors,
+                                original_successors,
+                                &first_blocks,
+                            );
+                        }
+                    }
+                }
+
+                let successor_start = successors.len();
+                successors.extend(block_successors);
+                let mut properties = IlBlockProperties::empty();
+                if source_block.is_entry() && range_index == 0 {
+                    properties |= IlBlockProperties::ENTRY;
+                }
+                if successor_start == successors.len() {
+                    properties |= IlBlockProperties::EXIT;
+                }
+                blocks.push(IlBlock::new(
+                    IlIndexRange::new(
+                        offsets[range.start()] as usize,
+                        offsets[range.end()] as usize,
+                    )?,
+                    IlIndexRange::new(successor_start, successors.len())?,
+                    properties,
+                ));
+            }
+        }
+
+        Ok(IlGraph::new(blocks, successors))
+    }
+
+    fn push_successor(successors: &mut SmallVec<[IlBlockId; 2]>, successor: IlBlockId) {
+        if !successors.contains(&successor) {
+            successors.push(successor);
+        }
+    }
+
+    fn push_mapped_successors(
+        successors: &mut SmallVec<[IlBlockId; 2]>,
+        additions: &[IlBlockId],
+        first_blocks: &[IlBlockId],
+    ) {
+        for successor in additions {
+            Self::push_successor(successors, first_blocks[successor.index()]);
+        }
+    }
+
+    fn refined_target(
+        first: IlBlockId,
+        ranges: &[IlIndexRange],
+        operation: usize,
+    ) -> Option<IlBlockId> {
+        let offset = ranges
+            .binary_search_by_key(&operation, IlIndexRange::start)
+            .ok()?;
+        IlBlockId::try_from_index(first.index() + offset).ok()
+    }
+
+    fn internal_target(
+        source: &PCodeIr,
+        block: IlIndexRange,
+        operation_index: usize,
+        operation: &PCodeOp,
+    ) -> Option<usize> {
+        if !matches!(
+            operation.opcode(),
+            PCodeOpcode::Branch | PCodeOpcode::CBranch
+        ) {
+            return None;
+        }
+        let target = source.target(operation.immediate())?;
+        let source_span = source.source_span_for(u32::try_from(operation_index).ok()?)?;
+
+        if target.address() != source_span.address() {
+            return source
+                .source_spans()
+                .iter()
+                .find(|span| {
+                    span.address() == target.address()
+                        && block.start() <= span.destination().start()
+                        && span.destination().start() < block.end()
+                })
+                .map(|span| span.destination().start());
+        }
+
+        let relative = u32::from(target.position()).checked_sub(source_span.first_pcode_index())?;
+        let relative = usize::try_from(relative).ok()?;
+        let target_operation = source_span.destination().start().checked_add(relative)?;
+        (block.start() <= target_operation && target_operation <= block.end())
+            .then_some(target_operation)
+    }
+
+    fn remap_source_spans(source: &PCodeIr, offsets: &[u32]) -> Result<Vec<IlSourceSpan>, IlError> {
+        source
+            .source_spans()
+            .iter()
+            .map(|span| {
+                let destination = span.destination();
+                Ok(IlSourceSpan::new(
+                    IlIndexRange::new(
+                        offsets[destination.start()] as usize,
+                        offsets[destination.end()] as usize,
+                    )?,
+                    span.address(),
+                    span.first_pcode_index(),
+                    span.pcode_count(),
+                ))
+            })
+            .collect()
     }
 }
 
@@ -50,13 +297,28 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         }
     }
 
-    fn lift(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
-        for operation in self.source.operations() {
+    fn lift(&mut self, cancellation: &CancellationToken) -> Result<Vec<u32>, IlError> {
+        let mut offsets = Vec::with_capacity(self.source.operations().len() + 1);
+        let mut source_span = 0usize;
+
+        for (index, operation) in self.source.operations().iter().enumerate() {
             cancellation.check()?;
+            if self
+                .source
+                .source_spans()
+                .get(source_span)
+                .is_some_and(|span| span.destination().start() == index)
+            {
+                self.values.clear();
+                source_span += 1;
+            }
+            offsets.push(self.builder.statement_count() as u32);
             self.lift_operation(operation)?;
         }
 
-        Ok(())
+        offsets.push(self.builder.statement_count() as u32);
+
+        Ok(offsets)
     }
 
     fn lift_operation(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
@@ -72,8 +334,25 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             PCodeOpcode::Call => self.lift_direct_flow(operation, ECodeStmtOpcode::Call),
             PCodeOpcode::ICall => self.lift_indirect_flow(operation, ECodeStmtOpcode::CallIndirect),
             PCodeOpcode::Return => self.lift_indirect_flow(operation, ECodeStmtOpcode::Return),
+            PCodeOpcode::UserOp if operation.output().is_none() => self.lift_intrinsic(operation),
             opcode => self.lift_expression_operation(operation, opcode),
         }
+    }
+
+    fn lift_intrinsic(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
+        let operands = self.lift_statement_operands(operation)?;
+        self.builder.push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::Intrinsic,
+                operands,
+                None,
+                None,
+                operation.effect_space(),
+            )
+            .with_immediate(operation.immediate() as u64),
+        )?;
+
+        Ok(())
     }
 
     fn lift_expression_operation(
@@ -133,14 +412,19 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         operation: &PCodeOp,
         opcode: ECodeStmtOpcode,
     ) -> Result<(), IlError> {
-        let operands = self.lift_statement_operands(operation)?;
+        let operands = self.lift_direct_flow_operands(operation)?;
         let target = self
             .source
             .target(operation.immediate())
             .expect("direct flow target is within the target pool");
 
-        self.builder
-            .push_statement(ECodeStmt::new(opcode, operands, None, Some(target), None))?;
+        self.builder.push_statement(ECodeStmt::new(
+            opcode,
+            operands,
+            None,
+            Some(target.address()),
+            None,
+        ))?;
 
         Ok(())
     }
@@ -175,6 +459,19 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         self.builder.push_statement_operands(operands)
     }
 
+    fn lift_direct_flow_operands(&mut self, operation: &PCodeOp) -> Result<IlIndexRange, IlError> {
+        let operands = self
+            .source
+            .operation_operands(operation)
+            .iter()
+            .skip(1)
+            .copied()
+            .map(|operand| self.lift_location(operand))
+            .collect::<Result<Vec<_>, IlError>>()?;
+
+        self.builder.push_statement_operands(operands)
+    }
+
     fn lift_operand_values(&mut self, operation: &PCodeOp) -> Result<Vec<IlExprId>, IlError> {
         let operands = self
             .source
@@ -187,11 +484,11 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
     }
 
     fn lift_location(&mut self, id: PCodeLocationId) -> Result<IlExprId, IlError> {
+        let location = *self.location(id);
         if let Some(expression) = self.values.get(&id).copied() {
             return Ok(expression);
         }
 
-        let location = *self.location(id);
         let expression = if location.is_constant() {
             ECodeExpr::new(
                 ECodeExprOpcode::Constant,
@@ -236,47 +533,48 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             PCodeOpcode::IntLeftShift => Ok(ECodeExprOpcode::LeftShift),
             PCodeOpcode::IntRightShift => Ok(ECodeExprOpcode::LogicalRightShift),
             PCodeOpcode::IntSignedRightShift => Ok(ECodeExprOpcode::ArithmeticRightShift),
-            PCodeOpcode::IntEq
-            | PCodeOpcode::IntNotEq
-            | PCodeOpcode::IntLess
-            | PCodeOpcode::IntSignedLess
-            | PCodeOpcode::IntLessEq
-            | PCodeOpcode::IntSignedLessEq
-            | PCodeOpcode::FloatEq
-            | PCodeOpcode::FloatNotEq
-            | PCodeOpcode::FloatLess
-            | PCodeOpcode::FloatLessEq => Ok(ECodeExprOpcode::Compare),
-            PCodeOpcode::IntCarry | PCodeOpcode::IntSignedCarry => Ok(ECodeExprOpcode::Carry),
-            PCodeOpcode::IntSignedBorrow => Ok(ECodeExprOpcode::Borrow),
-            PCodeOpcode::IntXor | PCodeOpcode::IntOr | PCodeOpcode::IntAnd => {
-                Ok(ECodeExprOpcode::Bool)
-            }
+            PCodeOpcode::IntEq => Ok(ECodeExprOpcode::IntEqual),
+            PCodeOpcode::IntNotEq => Ok(ECodeExprOpcode::IntNotEqual),
+            PCodeOpcode::IntLess => Ok(ECodeExprOpcode::IntLess),
+            PCodeOpcode::IntSignedLess => Ok(ECodeExprOpcode::IntSignedLess),
+            PCodeOpcode::IntLessEq => Ok(ECodeExprOpcode::IntLessEqual),
+            PCodeOpcode::IntSignedLessEq => Ok(ECodeExprOpcode::IntSignedLessEqual),
+            PCodeOpcode::IntCarry => Ok(ECodeExprOpcode::Carry),
+            PCodeOpcode::IntSignedCarry => Ok(ECodeExprOpcode::SignedCarry),
+            PCodeOpcode::IntSignedBorrow => Ok(ECodeExprOpcode::SignedBorrow),
+            PCodeOpcode::IntAnd => Ok(ECodeExprOpcode::And),
+            PCodeOpcode::IntOr => Ok(ECodeExprOpcode::Or),
+            PCodeOpcode::IntXor => Ok(ECodeExprOpcode::Xor),
             PCodeOpcode::IntNot => Ok(ECodeExprOpcode::Not),
+            PCodeOpcode::BoolAnd => Ok(ECodeExprOpcode::BoolAnd),
+            PCodeOpcode::BoolOr => Ok(ECodeExprOpcode::BoolOr),
+            PCodeOpcode::BoolXor => Ok(ECodeExprOpcode::BoolXor),
+            PCodeOpcode::BoolNot => Ok(ECodeExprOpcode::BoolNot),
             PCodeOpcode::IntNeg => Ok(ECodeExprOpcode::Negate),
             PCodeOpcode::CountOnes => Ok(ECodeExprOpcode::CountOnes),
             PCodeOpcode::CountLeadingZeros => Ok(ECodeExprOpcode::CountLeadingZeros),
             PCodeOpcode::ZeroExt => Ok(ECodeExprOpcode::ZeroExtend),
             PCodeOpcode::SignExt => Ok(ECodeExprOpcode::SignExtend),
-            PCodeOpcode::BoolAnd | PCodeOpcode::BoolOr | PCodeOpcode::BoolXor => {
-                Ok(ECodeExprOpcode::Bool)
-            }
-            PCodeOpcode::BoolNot => Ok(ECodeExprOpcode::Not),
             PCodeOpcode::Subpiece => Ok(ECodeExprOpcode::Extract),
-            PCodeOpcode::FloatAdd => Ok(ECodeExprOpcode::Add),
-            PCodeOpcode::FloatSub => Ok(ECodeExprOpcode::Sub),
-            PCodeOpcode::FloatMul => Ok(ECodeExprOpcode::Mul),
-            PCodeOpcode::FloatDiv => Ok(ECodeExprOpcode::UnsignedDiv),
-            PCodeOpcode::FloatNeg => Ok(ECodeExprOpcode::Negate),
-            PCodeOpcode::FloatAbs
-            | PCodeOpcode::FloatSqrt
-            | PCodeOpcode::FloatCeiling
-            | PCodeOpcode::FloatFloor
-            | PCodeOpcode::FloatRound
-            | PCodeOpcode::FloatIsNan
-            | PCodeOpcode::FloatToInt
-            | PCodeOpcode::FloatToFloat
-            | PCodeOpcode::IntToFloat
-            | PCodeOpcode::UserOp => Ok(ECodeExprOpcode::IntrinsicResult),
+            PCodeOpcode::FloatAdd => Ok(ECodeExprOpcode::FloatAdd),
+            PCodeOpcode::FloatSub => Ok(ECodeExprOpcode::FloatSub),
+            PCodeOpcode::FloatMul => Ok(ECodeExprOpcode::FloatMul),
+            PCodeOpcode::FloatDiv => Ok(ECodeExprOpcode::FloatDiv),
+            PCodeOpcode::FloatNeg => Ok(ECodeExprOpcode::FloatNegate),
+            PCodeOpcode::FloatAbs => Ok(ECodeExprOpcode::FloatAbs),
+            PCodeOpcode::FloatSqrt => Ok(ECodeExprOpcode::FloatSqrt),
+            PCodeOpcode::FloatCeiling => Ok(ECodeExprOpcode::FloatCeiling),
+            PCodeOpcode::FloatFloor => Ok(ECodeExprOpcode::FloatFloor),
+            PCodeOpcode::FloatRound => Ok(ECodeExprOpcode::FloatRound),
+            PCodeOpcode::FloatIsNan => Ok(ECodeExprOpcode::FloatIsNan),
+            PCodeOpcode::FloatEq => Ok(ECodeExprOpcode::FloatEqual),
+            PCodeOpcode::FloatNotEq => Ok(ECodeExprOpcode::FloatNotEqual),
+            PCodeOpcode::FloatLess => Ok(ECodeExprOpcode::FloatLess),
+            PCodeOpcode::FloatLessEq => Ok(ECodeExprOpcode::FloatLessEqual),
+            PCodeOpcode::FloatToInt => Ok(ECodeExprOpcode::FloatToInt),
+            PCodeOpcode::FloatToFloat => Ok(ECodeExprOpcode::FloatToFloat),
+            PCodeOpcode::IntToFloat => Ok(ECodeExprOpcode::IntToFloat),
+            PCodeOpcode::UserOp => Ok(ECodeExprOpcode::IntrinsicResult),
             PCodeOpcode::Store
             | PCodeOpcode::Branch
             | PCodeOpcode::CBranch
@@ -292,6 +590,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
 mod test {
     use super::*;
     use crate::il::common::IlGraph;
+    use crate::il::ecode::verify;
     use crate::il::pcode::{
         LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
         PCodeLocationProperties, PCodeOp, PCodeOpcode,
@@ -377,6 +676,7 @@ mod test {
         assert_eq!(lifted.statements().len(), 1);
         assert_eq!(lifted.statements()[0].opcode(), ECodeStmtOpcode::Branch);
         assert_eq!(lifted.statements()[0].address(), Some(target));
+        verify(&lifted).unwrap();
     }
 
     #[test]
@@ -503,7 +803,7 @@ mod test {
             ))
             .unwrap();
         let operands = builder.push_operands([target_location]).unwrap();
-        let target = builder.push_target(target).unwrap();
+        let target = builder.push_target(target.into()).unwrap();
 
         builder.push_operation(PCodeOp::new(
             PCodeOpcode::Branch,

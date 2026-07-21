@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
+use fugue_lifter::runtime::language::Language;
+
 use crate::analysis::control::CancellationToken;
+use crate::analysis::function::recovery::PartialFunction;
 use crate::il::common::{
     IlBlock, IlBlockId, IlDominance, IlError, IlExprId, IlGraph, IlHeader, IlIndexRange, IlLevel,
     IlParentSpan, IlSourceSpan, IlValueId,
@@ -9,11 +12,31 @@ use crate::il::common::{
 use crate::il::ecode::ssa::{
     ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode,
 };
-use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
+use crate::il::ecode::{
+    ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode, PCodeToECode,
+};
+use crate::il::pcode::{PCodeCanonicaliser, PCodeError};
+use crate::ir::Address;
+use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Default)]
 pub struct ECodeToSsa;
+
+pub(crate) struct PartialECodeSsaBuild {
+    ir: Option<ECodeSsaIr>,
+    omitted_blocks: Vec<Address>,
+}
+
+impl PartialECodeSsaBuild {
+    pub(crate) fn ir(&self) -> Option<&ECodeSsaIr> {
+        self.ir.as_ref()
+    }
+
+    pub(crate) fn omits(&self, address: Address) -> bool {
+        self.omitted_blocks.binary_search(&address).is_ok()
+    }
+}
 
 impl ECodeToSsa {
     pub fn transform(
@@ -36,6 +59,42 @@ impl ECodeToSsa {
 
         builder.build(cancellation)
     }
+
+    pub(crate) fn build_partial_function_tolerant(
+        &mut self,
+        language: &'static Language,
+        function: &PartialFunction,
+        segments: &SegmentStorage,
+        input_revision: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<PartialECodeSsaBuild, PCodeError> {
+        let mut canonicaliser = PCodeCanonicaliser::default();
+        let partial = canonicaliser.build_partial_function_tolerant(
+            language,
+            function,
+            segments,
+            input_revision,
+            cancellation,
+        )?;
+        let (pcode, omitted_blocks) = partial.into_parts();
+        if omitted_blocks.binary_search(&function.entry()).is_ok() {
+            return Ok(PartialECodeSsaBuild {
+                ir: None,
+                omitted_blocks,
+            });
+        }
+
+        let ecode = PCodeToECode.transform(&pcode, cancellation)?;
+        let mut ir = self.transform(&ecode, cancellation)?;
+        ir.fold_constants();
+        ir.eliminate_dead_code();
+        ir.compact();
+
+        Ok(PartialECodeSsaBuild {
+            ir: Some(ir),
+            omitted_blocks,
+        })
+    }
 }
 
 struct SsaConstruction<'a, 'b> {
@@ -45,6 +104,8 @@ struct SsaConstruction<'a, 'b> {
     block_argument_domains: BTreeMap<IlValueId, SsaDomain>,
     block_arguments: Vec<Vec<(SsaDomain, IlValueId)>>,
     domain_widths: BTreeMap<SsaDomain, u32>,
+    entry_block: Option<IlBlockId>,
+    input_domains: Vec<(SsaDomain, u32)>,
     blocks: Vec<Option<IlBlock>>,
     edge_arguments: Vec<Vec<IlValueId>>,
     statement_ranges: Vec<IlIndexRange>,
@@ -52,9 +113,9 @@ struct SsaConstruction<'a, 'b> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SsaDomain {
-    Register(u64),
     Flag(u64),
     Memory(AddressSpaceId),
+    Register(u64),
 }
 
 impl SsaDomain {
@@ -70,6 +131,7 @@ impl SsaDomain {
 struct SsaDomains {
     widths: BTreeMap<SsaDomain, u32>,
     definitions: BTreeMap<SsaDomain, Vec<IlBlockId>>,
+    reads: BTreeSet<SsaDomain>,
 }
 
 impl<'a, 'b> SsaConstruction<'a, 'b> {
@@ -81,6 +143,8 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
             block_argument_domains: BTreeMap::new(),
             block_arguments: vec![Vec::new(); source.graph().blocks().len()],
             domain_widths: BTreeMap::new(),
+            entry_block: None,
+            input_domains: Vec::new(),
             blocks: vec![None; source.graph().blocks().len()],
             edge_arguments: vec![Vec::new(); source.graph().successors().len()],
             statement_ranges: vec![IlIndexRange::EMPTY; source.statements().len()],
@@ -125,6 +189,13 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
         let domains = self.discover_domains()?;
 
         self.place_block_arguments(&domains, &dominance)?;
+        self.entry_block = Some(entry);
+        self.input_domains = domains
+            .reads
+            .iter()
+            .filter(|domain| !domains.definitions.contains_key(domain))
+            .map(|domain| (*domain, domains.widths[domain]))
+            .collect();
         self.domain_widths = domains.widths;
         self.blocks = vec![None; source_graph.blocks().len()];
         self.edge_arguments = vec![Vec::new(); source_graph.successors().len()];
@@ -209,16 +280,16 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
 
         for expression in self.source.expressions() {
             match expression.opcode() {
-                ECodeExprOpcode::ReadRegister => Self::record_domain_width(
-                    &mut domains.widths,
-                    SsaDomain::Register(expression.immediate()),
-                    expression.width(),
-                )?,
-                ECodeExprOpcode::ReadFlag => Self::record_domain_width(
-                    &mut domains.widths,
-                    SsaDomain::Flag(expression.immediate()),
-                    expression.width(),
-                )?,
+                ECodeExprOpcode::ReadRegister => {
+                    let domain = SsaDomain::Register(expression.immediate());
+                    Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
+                    domains.reads.insert(domain);
+                }
+                ECodeExprOpcode::ReadFlag => {
+                    let domain = SsaDomain::Flag(expression.immediate());
+                    Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
+                    domains.reads.insert(domain);
+                }
                 ECodeExprOpcode::Load => {
                     let space = expression
                         .address_space()
@@ -333,6 +404,10 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
         )?;
         let start = self.builder.operation_count();
 
+        if self.entry_block == Some(block) {
+            self.seed_input_domains(&mut current)?;
+        }
+
         for statement_index in source_block.operations().start()..source_block.operations().end() {
             cancellation.check()?;
             self.construct_statement_at(statement_index, &mut current)?;
@@ -395,6 +470,24 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
         Ok(())
     }
 
+    fn seed_input_domains(
+        &mut self,
+        current: &mut BTreeMap<SsaDomain, IlValueId>,
+    ) -> Result<(), IlError> {
+        for index in 0..self.input_domains.len() {
+            let (domain, width) = self.input_domains[index];
+
+            if current.contains_key(&domain) {
+                continue;
+            }
+
+            let value = self.push_undefined(domain, width)?;
+            current.insert(domain, value);
+        }
+
+        Ok(())
+    }
+
     fn construct_statement_at(
         &mut self,
         index: usize,
@@ -445,6 +538,10 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
                 current.insert(SsaDomain::Memory(address_space), memory);
             }
             opcode => {
+                let invalidates_state = matches!(
+                    statement.opcode(),
+                    ECodeStmtOpcode::Call | ECodeStmtOpcode::CallIndirect
+                );
                 let operands = self.construct_statement_operands(statement, current)?;
                 let operands = self.builder.push_value_operands(operands)?;
                 let opcode = ECodeSsaOpcode::from_statement(opcode)
@@ -465,6 +562,9 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
                 }
 
                 self.builder.push_operation(operation)?;
+                if invalidates_state {
+                    current.clear();
+                }
             }
         }
 
@@ -659,77 +759,73 @@ impl<'a, 'b> SsaConstruction<'a, 'b> {
     }
 
     fn remap_source_spans(&self) -> Result<Vec<IlSourceSpan>, IlError> {
-        let mut runs = Vec::<IlSourceSpan>::new();
+        let mut destinations = Vec::new();
+        let mut runs = Vec::new();
 
         for run in self.source.source_spans() {
-            let destination = self.remap_destination(run.destination())?;
-
-            if destination.is_empty() {
-                continue;
+            self.remap_destination_runs(run.destination(), &mut destinations)?;
+            for &destination in &destinations {
+                runs.push(IlSourceSpan::new(
+                    destination,
+                    run.address(),
+                    run.first_pcode_index(),
+                    run.pcode_count(),
+                ));
             }
+        }
 
-            let run = IlSourceSpan::new(
-                destination,
-                run.address(),
-                run.first_pcode_index(),
-                run.pcode_count(),
-            );
-
-            if let Some(previous) = runs.last_mut()
+        runs.sort_unstable_by_key(|run| run.destination().start());
+        let mut merged = Vec::<IlSourceSpan>::with_capacity(runs.len());
+        for run in runs {
+            if let Some(previous) = merged.last_mut()
                 && previous.try_merge(run)?
             {
                 continue;
             }
-
-            runs.push(run);
+            merged.push(run);
         }
-
-        Ok(runs)
+        Ok(merged)
     }
 
     fn remap_parent_spans(&self) -> Result<Vec<IlParentSpan>, IlError> {
-        let mut runs = Vec::<IlParentSpan>::new();
+        let mut destinations = Vec::new();
+        let mut runs = Vec::new();
 
         for run in self.source.parent_spans() {
-            let destination = self.remap_destination(run.destination())?;
-
-            if destination.is_empty() {
-                continue;
+            self.remap_destination_runs(run.destination(), &mut destinations)?;
+            for &destination in &destinations {
+                runs.push(IlParentSpan::new(destination, run.source()));
             }
-
-            let run = IlParentSpan::new(destination, run.source());
-
-            if let Some(previous) = runs.last_mut()
-                && previous.try_merge(run)?
-            {
-                continue;
-            }
-
-            runs.push(run);
         }
 
+        runs.sort_unstable_by_key(|run| run.destination().start());
         Ok(runs)
     }
 
-    fn remap_destination(&self, destination: IlIndexRange) -> Result<IlIndexRange, IlError> {
-        let mut start = None;
-        let mut end = None;
+    fn remap_destination_runs(
+        &self,
+        destination: IlIndexRange,
+        runs: &mut Vec<IlIndexRange>,
+    ) -> Result<(), IlError> {
+        runs.clear();
 
         for statement_index in destination.start()..destination.end() {
-            let range = &self.statement_ranges[statement_index];
+            let range = self.statement_ranges[statement_index];
 
             if range.is_empty() {
                 continue;
             }
 
-            start.get_or_insert(range.start());
-            end = Some(range.end());
+            if let Some(previous) = runs.last_mut()
+                && previous.end() == range.start()
+            {
+                *previous = IlIndexRange::new(previous.start(), range.end())?;
+            } else {
+                runs.push(range);
+            }
         }
 
-        match (start, end) {
-            (Some(start), Some(end)) => IlIndexRange::new(start, end),
-            _ => Ok(IlIndexRange::EMPTY),
-        }
+        Ok(())
     }
 }
 

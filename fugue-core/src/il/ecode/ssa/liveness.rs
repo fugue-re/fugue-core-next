@@ -18,49 +18,54 @@ impl ECodeSsaLiveness {
             return Self::default();
         }
 
-        let mut block_use = vec![vec![false; value_count]; block_count];
-        let mut block_def = vec![vec![false; value_count]; block_count];
+        let words = value_count.div_ceil(64).max(1);
 
-        Self::collect_block_arguments(body, &mut block_def);
-        Self::collect_operation_uses(body, &mut block_use, &mut block_def);
+        let mut block_use = vec![0u64; block_count * words];
+        let mut block_def = vec![0u64; block_count * words];
 
-        let mut live_in = vec![vec![false; value_count]; block_count];
-        let mut live_out = vec![vec![false; value_count]; block_count];
+        Self::collect_block_arguments(body, &mut block_def, words);
+        Self::collect_operation_uses(body, &mut block_use, &mut block_def, words);
+        let edge_uses = Self::collect_edge_uses(body, block_count, words);
+
+        let mut live_in = vec![0u64; block_count * words];
+        let mut live_out = vec![0u64; block_count * words];
+        let mut next_live_out = vec![0u64; words];
+        let mut next_live_in = vec![0u64; words];
         let mut changed = true;
 
         while changed {
             changed = false;
 
             for (block_index, block) in body.graph().blocks().iter().enumerate().rev() {
-                let mut next_live_out = vec![false; value_count];
+                let base = block_index * words;
+                next_live_out.copy_from_slice(&edge_uses[base..base + words]);
 
                 for successor in block.successors().slice(body.graph().successors()) {
-                    for (value_index, live) in live_in[successor.index()].iter().enumerate() {
-                        next_live_out[value_index] |= *live;
+                    let successor_base = successor.index() * words;
+                    for word in 0..words {
+                        next_live_out[word] |= live_in[successor_base + word];
                     }
                 }
 
-                let mut next_live_in = block_use[block_index].clone();
-
-                for value_index in 0..value_count {
-                    next_live_in[value_index] |=
-                        next_live_out[value_index] && !block_def[block_index][value_index];
+                for word in 0..words {
+                    next_live_in[word] =
+                        block_use[base + word] | (next_live_out[word] & !block_def[base + word]);
                 }
 
-                if live_out[block_index] != next_live_out {
-                    live_out[block_index] = next_live_out;
+                if live_out[base..base + words] != next_live_out[..] {
+                    live_out[base..base + words].copy_from_slice(&next_live_out);
                     changed = true;
                 }
 
-                if live_in[block_index] != next_live_in {
-                    live_in[block_index] = next_live_in;
+                if live_in[base..base + words] != next_live_in[..] {
+                    live_in[base..base + words].copy_from_slice(&next_live_in);
                     changed = true;
                 }
             }
         }
 
-        let (live_in_offsets, live_in_values) = Self::pack_sets(&live_in);
-        let (live_out_offsets, live_out_values) = Self::pack_sets(&live_out);
+        let (live_in_offsets, live_in_values) = Self::pack_sets(&live_in, block_count, words);
+        let (live_out_offsets, live_out_values) = Self::pack_sets(&live_out, block_count, words);
 
         Self {
             live_in_offsets,
@@ -68,6 +73,14 @@ impl ECodeSsaLiveness {
             live_out_offsets,
             live_out_values,
         }
+    }
+
+    fn set_bit(rows: &mut [u64], base: usize, value: usize) {
+        rows[base + value / 64] |= 1u64 << (value % 64);
+    }
+
+    fn test_bit(rows: &[u64], base: usize, value: usize) -> bool {
+        (rows[base + value / 64] >> (value % 64)) & 1 == 1
     }
 
     pub fn live_in(&self, block: IlBlockId) -> &[IlValueId] {
@@ -78,49 +91,73 @@ impl ECodeSsaLiveness {
         Self::values_for(block, &self.live_out_offsets, &self.live_out_values)
     }
 
-    fn collect_block_arguments(body: &ECodeSsaIr, block_def: &mut [Vec<bool>]) {
+    fn collect_block_arguments(body: &ECodeSsaIr, block_def: &mut [u64], words: usize) {
         for argument in body.block_arguments() {
-            block_def[argument.block().index()][argument.value().index()] = true;
+            Self::set_bit(
+                block_def,
+                argument.block().index() * words,
+                argument.value().index(),
+            );
         }
+    }
+
+    fn collect_edge_uses(body: &ECodeSsaIr, block_count: usize, words: usize) -> Vec<u64> {
+        let mut edge_uses = vec![0u64; block_count * words];
+
+        for (block_index, block) in body.graph().blocks().iter().enumerate() {
+            let base = block_index * words;
+            let successors = block.successors();
+            for offset in 0..successors.len() {
+                for argument in body.arguments_for_edge(successors.start() + offset) {
+                    Self::set_bit(&mut edge_uses, base, argument.index());
+                }
+            }
+        }
+
+        edge_uses
     }
 
     fn collect_operation_uses(
         body: &ECodeSsaIr,
-        block_use: &mut [Vec<bool>],
-        block_def: &mut [Vec<bool>],
+        block_use: &mut [u64],
+        block_def: &mut [u64],
+        words: usize,
     ) {
         for (block_index, block) in body.graph().blocks().iter().enumerate() {
+            let base = block_index * words;
             for operation in block.operations().slice(body.operations()) {
                 for operand in operation.operands().slice(body.value_operands()) {
                     let value_index = operand.index();
 
-                    if !block_def[block_index][value_index] {
-                        block_use[block_index][value_index] = true;
+                    if !Self::test_bit(block_def, base, value_index) {
+                        Self::set_bit(block_use, base, value_index);
                     }
                 }
 
-                for defined in &mut block_def[block_index]
-                    [operation.results().start()..operation.results().end()]
-                {
-                    *defined = true;
+                for defined in operation.results().start()..operation.results().end() {
+                    Self::set_bit(block_def, base, defined);
                 }
             }
         }
     }
 
-    fn pack_sets(sets: &[Vec<bool>]) -> (Vec<u32>, Vec<IlValueId>) {
-        let mut offsets = Vec::with_capacity(sets.len() + 1);
+    fn pack_sets(rows: &[u64], block_count: usize, words: usize) -> (Vec<u32>, Vec<IlValueId>) {
+        let mut offsets = Vec::with_capacity(block_count + 1);
         let mut values = Vec::new();
 
         offsets.push(0);
 
-        for set in sets {
-            for (value_index, live) in set.iter().enumerate() {
-                if *live {
+        for block_index in 0..block_count {
+            let base = block_index * words;
+            for word in 0..words {
+                let mut bits = rows[base + word];
+                while bits != 0 {
+                    let value_index = word * 64 + bits.trailing_zeros() as usize;
                     values.push(
                         IlValueId::try_from_index(value_index)
                             .expect("value count fits the value id space"),
                     );
+                    bits &= bits - 1;
                 }
             }
 
@@ -279,5 +316,58 @@ mod test {
 
         assert_eq!(liveness.live_in(block), &[]);
         assert_eq!(liveness.live_out(block), &[]);
+    }
+
+    #[test]
+    fn liveness_tracks_value_used_only_as_edge_argument() {
+        let block0 = IlBlockId::try_from_index(0).unwrap();
+        let block1 = IlBlockId::try_from_index(1).unwrap();
+        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let graph = IlGraph::new(
+            vec![
+                IlBlock::new(
+                    IlIndexRange::new(0, 1).unwrap(),
+                    IlIndexRange::new(0, 1).unwrap(),
+                    IlBlockProperties::ENTRY,
+                ),
+                IlBlock::new(
+                    IlIndexRange::new(1, 2).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::EXIT,
+                ),
+            ],
+            vec![block1],
+        );
+        let mut builder = ECodeSsaBuilder::new(header, graph);
+
+        let (value, results) = builder.push_result_value(64).unwrap();
+        builder
+            .push_operation(ECodeSsaOp::new(
+                ECodeSsaOpcode::Constant,
+                results,
+                IlIndexRange::EMPTY,
+                64,
+            ))
+            .unwrap();
+
+        let argument = builder.push_block_argument_value(block1, 64).unwrap();
+        let operands = builder.push_value_operands([argument]).unwrap();
+        builder
+            .push_operation(ECodeSsaOp::new(
+                ECodeSsaOpcode::Return,
+                IlIndexRange::EMPTY,
+                operands,
+                0,
+            ))
+            .unwrap();
+
+        builder.push_edge_arguments([value]).unwrap();
+
+        let body = builder.build(&CancellationToken::default()).unwrap();
+        let liveness = ECodeSsaLiveness::build(&body);
+
+        assert_eq!(liveness.live_out(block0), &[value]);
+        assert_eq!(liveness.live_in(block0), &[]);
+        assert_eq!(liveness.live_in(block1), &[]);
     }
 }
