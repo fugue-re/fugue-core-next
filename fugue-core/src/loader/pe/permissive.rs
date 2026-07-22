@@ -3,13 +3,19 @@ use std::mem::size_of;
 use std::ops::Range;
 
 use object::endian::LittleEndian as LE;
-use object::pe::{ImageDosHeader, ImageNtHeaders32, ImageNtHeaders64, ImageSectionHeader};
-use object::read::pe::{ImageNtHeaders, ImageOptionalHeader};
-use object::{FileKind, pod};
+use object::pe::{
+    IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_IMPORT, ImageDosHeader, ImageNtHeaders32,
+    ImageNtHeaders64, ImageSectionHeader,
+};
+use object::read::pe::{
+    ExportTable, ImageNtHeaders, ImageOptionalHeader, ImportTable, PeFile, PeSection,
+};
+use object::{FileKind, ObjectSection, ReadRef, pod};
 use thiserror::Error;
 
 use crate::ir::RawAddress;
 use crate::loader::LoaderError;
+use crate::loader::pe::PeLoaderProperties;
 use crate::types::BytesOrMapping;
 
 #[derive(Debug, Error)]
@@ -18,6 +24,109 @@ enum SectionTableRepairError {
     InvalidSectionAlignment,
     #[error("invalid section table")]
     InvalidSectionTable,
+}
+
+pub(super) fn read_exports<'data, Pe, R>(
+    pe: &PeFile<'data, Pe, R>,
+    config: PeLoaderProperties,
+) -> Result<Option<ExportTable<'data>>, LoaderError>
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+{
+    match pe.export_table() {
+        Ok(exports) => Ok(exports),
+        Err(err) => {
+            if !config.is_permissive() {
+                return Err(LoaderError::format(err));
+            }
+            tracing::warn!(
+                "unable to read PE export directory: {err}; recovering from present bytes"
+            );
+            let Some(directory) = pe.data_directory(IMAGE_DIRECTORY_ENTRY_EXPORT) else {
+                return Ok(None);
+            };
+            let export_rva = directory.virtual_address.get(LE);
+            let export_size = directory.size.get(LE);
+            let data = pe.section_table().iter().find_map(|section| {
+                let section_address = section.virtual_address.get(LE);
+                let (offset, size) = section.pe_file_range();
+                let relative = export_rva.checked_sub(section_address)?;
+                if export_rva == 0 || relative >= size {
+                    return None;
+                }
+
+                let offset = u64::from(offset).checked_add(u64::from(relative))?;
+                Some(read_available_file_range(
+                    pe.data(),
+                    offset,
+                    export_size.into(),
+                ))
+            });
+            let Some(data) = data.filter(|data| !data.is_empty()) else {
+                return Ok(None);
+            };
+            Ok(ExportTable::parse(data, export_rva).ok())
+        }
+    }
+}
+
+pub(super) fn read_imports<'data, Pe, R>(
+    pe: &PeFile<'data, Pe, R>,
+    config: PeLoaderProperties,
+) -> Result<Option<ImportTable<'data>>, LoaderError>
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+{
+    match pe.import_table() {
+        Ok(imports) => Ok(imports),
+        Err(err) => {
+            if !config.is_permissive() {
+                return Err(LoaderError::format(err));
+            }
+            tracing::warn!(
+                "unable to read PE import directory: {err}; recovering from present bytes"
+            );
+            let import_rva = pe
+                .data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT)
+                .map(|directory| directory.virtual_address.get(LE))
+                .unwrap_or_default();
+            Ok(pe.section_table().iter().find_map(|section| {
+                let section_address = section.virtual_address.get(LE);
+                let (offset, size) = section.pe_file_range();
+                let relative = import_rva.checked_sub(section_address)?;
+                if import_rva == 0 || relative >= size {
+                    return None;
+                }
+
+                let data = read_available_file_range(pe.data(), offset.into(), size.into());
+                (!data.is_empty()).then(|| ImportTable::new(data, section_address, import_rva))
+            }))
+        }
+    }
+}
+
+pub(super) fn read_section_data<'data, Pe, R>(
+    pe: &PeFile<'data, Pe, R>,
+    section: &PeSection<'data, '_, Pe, R>,
+) -> &'data [u8]
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+{
+    section
+        .file_range()
+        .map(|(offset, size)| read_available_file_range(pe.data(), offset, size))
+        .unwrap_or_default()
+}
+
+fn read_available_file_range<'data, R>(data: R, offset: u64, size: u64) -> &'data [u8]
+where
+    R: ReadRef<'data>,
+{
+    let available = size.min(data.len().unwrap_or(0).saturating_sub(offset));
+    data.read_bytes_at(offset, available).unwrap_or_default()
 }
 
 pub(super) fn try_repair<'data>(
