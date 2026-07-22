@@ -158,16 +158,26 @@ impl PatternExpression {
                 })
             };
             let field_range = |input: &LiftingContextState<'_>,
+                               big_endian: bool,
                                byte_start: u8,
+                               byte_end: u8,
                                bit_start: u8,
                                bit_end: u8,
                                size: isize| {
-                let soff = 8u32 * ((byte_start as u32) + input.inputs.input.offset() as u32);
-                let eoff = 8u32 * (size as u32);
-                let loff = soff + eoff;
-                let soff_bits = loff - (bit_end as u32 + 1);
-                let eoff_bits = loff - (bit_start as u32);
-                soff_bits..eoff_bits
+                let off = input.inputs.input.offset() as u32;
+                let soff = 8u32 * ((byte_start as u32) + off);
+                if big_endian {
+                    let eoff = 8u32 * ((byte_end as u32) + off);
+                    let soff_bits = soff + (8 - ((bit_end as u32 + 1) % 8)) % 8;
+                    let eoff_bits = eoff + (8 - (bit_start as u32) % 8);
+                    soff_bits..eoff_bits
+                } else {
+                    let eoff = 8u32 * (size as u32);
+                    let loff = soff + eoff;
+                    let soff_bits = loff - (bit_end as u32 + 1);
+                    let eoff_bits = loff - (bit_start as u32);
+                    soff_bits..eoff_bits
+                }
             };
 
             'outer: for op in operations {
@@ -216,7 +226,15 @@ impl PatternExpression {
 
                         update_range(
                             &mut range,
-                            field_range(input, *byte_start, *bit_start, *bit_end, size as _),
+                            field_range(
+                                input,
+                                *big_endian,
+                                *byte_start,
+                                *byte_end,
+                                *bit_start,
+                                *bit_end,
+                                size as _,
+                            ),
                         );
 
                         stack.push(if *sign_bit {
@@ -233,24 +251,25 @@ impl PatternExpression {
                         byte_end,
                         shift,
                     } => {
+                        let size = usize::from(byte_end - byte_start + 1);
                         let shift = u32::from(*shift);
 
                         let mut res = 0i64;
-                        let mut size = (*byte_end as isize) - (*byte_start as isize) + 1;
                         let mut start = *byte_start as isize;
+                        let mut tsize = size as isize;
 
-                        while size >= size_of::<u32>() as isize {
+                        while tsize >= size_of::<u32>() as isize {
                             let tmp = input
                                 .input()
                                 .context_bytes(start as usize, size_of::<u32>());
                             res = res.checked_shl(8 * size_of::<u32>() as u32).unwrap_or(0);
                             res = (res as u64 | tmp as u64) as i64;
                             start += size_of::<u32>() as isize;
-                            size = (*byte_end as isize) - start + 1;
+                            tsize = (*byte_end as isize) - start + 1;
                         }
-                        if size > 0 {
-                            let tmp = input.input().context_bytes(start as usize, size as usize);
-                            res = res.checked_shl(8 * size as u32).unwrap_or(0);
+                        if tsize > 0 {
+                            let tmp = input.input().context_bytes(start as usize, tsize as usize);
+                            res = res.checked_shl(8 * tsize as u32).unwrap_or(0);
                             res = (res as u64 | tmp as u64) as i64;
                         }
 
@@ -260,7 +279,15 @@ impl PatternExpression {
 
                         update_range(
                             &mut range,
-                            field_range(input, *byte_start, *bit_start, *bit_end, size),
+                            field_range(
+                                input,
+                                false,
+                                *byte_start,
+                                *byte_end,
+                                *bit_start,
+                                *bit_end,
+                                size as _,
+                            ),
                         );
 
                         stack.push(if *sign_bit {
