@@ -79,7 +79,7 @@ struct PeInner<'a> {
     data: BytesOrMapping<'a>,
     #[borrows(data)]
     #[covariant]
-    loaded: PeLoadedRepr<'this, 'a>,
+    view: PeFileRepr<'this, 'a>,
 }
 
 pub enum PeFileRepr<'this, 'data> {
@@ -117,24 +117,17 @@ impl<'this, 'data> PeFileRepr<'this, 'data> {
 }
 
 impl<'a> PeInner<'a> {
-    fn from_bytes(
-        data: BytesOrMapping<'a>,
-        attributes: &AttributeMap,
-    ) -> Result<Self, LoaderError> {
-        Self::try_new(data, |data| PeLoadedRepr::parse(data, attributes))
-    }
-
     fn from_bytes_or_recover(
         data: BytesOrMapping<'a>,
-        attributes: &AttributeMap,
     ) -> Result<Self, (BytesOrMapping<'a>, LoaderError)> {
-        Self::try_new_or_recover(data, |data| PeLoadedRepr::parse(data, attributes))
+        Self::try_new_or_recover(data, |data| PeFileRepr::parse(data))
             .map_err(|(error, heads)| (heads.data, error))
     }
 }
 
 pub struct Pe<'a> {
     object: PeInner<'a>,
+    state: PeLoadState,
     metadata: OnceLock<LoadableMetadata>,
     path: Option<String>,
     attributes: AttributeMap,
@@ -149,11 +142,22 @@ impl<'a> Pe<'a> {
         data: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
+        let data = data.into();
         let attributes = attributes.into();
         let config = PeLoaderProperties::new(&attributes);
+        let try_load = |data| {
+            let object = PeInner::from_bytes_or_recover(data)?;
+            let view = object.borrow_view();
+            let state = PeLoadState::try_load(view, &attributes, config);
 
-        let (data, error) = match PeInner::from_bytes_or_recover(data.into(), &attributes) {
-            Ok(object) => return Ok(Self::from_inner(object, attributes)),
+            match state {
+                Ok(state) => Ok((object, state)),
+                Err(error) => Err((object.into_heads().data, error)),
+            }
+        };
+
+        let (data, error) = match try_load(data) {
+            Ok((object, state)) => return Ok(Self::from_loaded(object, state, attributes)),
             Err(failed) => failed,
         };
 
@@ -165,13 +169,14 @@ impl<'a> Pe<'a> {
             return Err(error);
         };
 
-        let object = PeInner::from_bytes(repaired, &attributes)?;
-        Ok(Self::from_inner(object, attributes))
+        let (object, state) = try_load(repaired).map_err(|(_, error)| error)?;
+        Ok(Self::from_loaded(object, state, attributes))
     }
 
-    fn from_inner(object: PeInner<'a>, attributes: AttributeMap) -> Self {
+    fn from_loaded(object: PeInner<'a>, state: PeLoadState, attributes: AttributeMap) -> Self {
         let mut slf = Self {
             object,
+            state,
             metadata: OnceLock::new(),
             path: None,
             attributes,
@@ -200,10 +205,8 @@ impl<'a> Pe<'a> {
     }
 
     pub fn entry(&self) -> Option<RawAddress> {
-        let loaded = self.object.borrow_loaded();
-        let state = &loaded.state;
-        let entry = with_pe!(&loaded.view, pe | pe.entry());
-        (entry != 0).then(|| RawAddress::from(state.rebase_offset(entry)))
+        let entry = with_pe!(self.object.borrow_view(), pe | pe.entry());
+        (entry != 0).then(|| RawAddress::from(self.state.rebase_offset(entry)))
     }
 
     pub fn convention(&self) -> Option<&'a str> {
@@ -211,36 +214,19 @@ impl<'a> Pe<'a> {
     }
 
     pub fn loaded_view(&self) -> &PeFileRepr<'_, 'a> {
-        &self.object.borrow_loaded().view
+        self.object.borrow_view()
     }
 
     pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
-        &self.object.borrow_loaded().state.mapping_hints
+        &self.state.mapping_hints
     }
 
     pub fn image_symbols(&self) -> &SymbolTable<ImageAddress> {
-        &self.object.borrow_loaded().state.symbols
+        &self.state.symbols
     }
 
     pub fn extern_segment(&self) -> &ExternSegment {
-        &self.object.borrow_loaded().state.extern_segm
-    }
-}
-
-struct PeLoadedRepr<'this, 'data> {
-    view: PeFileRepr<'this, 'data>,
-    state: PeLoadState,
-}
-
-impl<'this, 'data> PeLoadedRepr<'this, 'data> {
-    fn parse(
-        data: &'this BytesOrMapping<'data>,
-        attributes: &AttributeMap,
-    ) -> Result<Self, LoaderError> {
-        let view = PeFileRepr::parse(data)?;
-        let state = PeLoadState::from_view(&view, attributes)?;
-
-        Ok(Self { view, state })
+        &self.state.extern_segm
     }
 }
 
@@ -258,9 +244,10 @@ struct PeLoadState {
 }
 
 impl PeLoadState {
-    fn from_view(
+    fn try_load(
         view: &PeFileRepr<'_, '_>,
         attributes: &AttributeMap,
+        config: PeLoaderProperties,
     ) -> Result<Self, LoaderError> {
         let preferred_base = RawAddress::from(with_pe!(view, pe | pe.relative_address_base()));
 
@@ -298,7 +285,7 @@ impl PeLoadState {
 
         let symbols = with_pe!(
             view,
-            pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base)
+            pe | PeSymbolData::from_pe(pe, &architecture, base, preferred_base, config)
         )?;
 
         let PeSymbolData {
@@ -418,6 +405,7 @@ impl PeSymbolData {
         arch: &Arch,
         base: RawAddress,
         preferred_base: RawAddress,
+        config: PeLoaderProperties,
     ) -> Result<Self, LoaderError>
     where
         Pe: ImageNtHeaders,
@@ -470,31 +458,54 @@ impl PeSymbolData {
         let mut import_slots = BTreeMap::new();
         let mut externs = BTreeMap::<String, RawAddress>::new();
 
-        for (index, export) in pe
-            .exports()
-            .map_err(LoaderError::format)?
-            .into_iter()
-            .enumerate()
+        let exports = (|| -> Result<(), LoaderError> {
+            let Some(export_table) = permissive::read_exports(pe, config)? else {
+                return Ok(());
+            };
+            let mut export_index = 0usize;
+
+            for (name_pointer, address_index) in export_table.name_iter() {
+                let name = export_table
+                    .name_from_pointer(name_pointer)
+                    .map_err(LoaderError::format)?;
+                let export_address = export_table
+                    .address_by_index(address_index.into())
+                    .map_err(LoaderError::format)?;
+                if export_table.is_forward(export_address) {
+                    continue;
+                }
+
+                let address = base
+                    .checked_add(export_address)
+                    .ok_or_else(|| LoaderError::address_overflow(base))?;
+                let properties = symbol_properties_for_address(address, &sections)
+                    | SymbolProperties::LOCAL
+                    | SymbolProperties::EXPORT;
+                symbols.insert(
+                    SymbolIndex::new(PE_EXPORT_SELECTOR, export_index),
+                    RawPeSymbol {
+                        address,
+                        name: String::from_utf8_lossy(name).into_owned(),
+                        properties,
+                    },
+                );
+                export_index += 1;
+            }
+
+            Ok(())
+        })();
+        if let Err(err) = &exports
+            && config.is_permissive()
         {
-            let address = export
-                .address()
-                .checked_sub(preferred_base.offset())
-                .and_then(|offset| base.checked_add(offset))
-                .ok_or_else(|| LoaderError::address_overflow(base))?;
-            let properties = symbol_properties_for_address(address, &sections)
-                | SymbolProperties::LOCAL
-                | SymbolProperties::EXPORT;
-            symbols.insert(
-                SymbolIndex::new(PE_EXPORT_SELECTOR, index),
-                RawPeSymbol {
-                    address,
-                    name: String::from_utf8_lossy(export.name()).into_owned(),
-                    properties,
-                },
-            );
+            tracing::warn!("unable to fully read PE export table ({err}); keeping partial exports");
+        } else {
+            exports?;
         }
 
-        if let Some(import_table) = pe.import_table().map_err(LoaderError::format)? {
+        let imports = (|| -> Result<(), LoaderError> {
+            let Some(import_table) = permissive::read_imports(pe, config)? else {
+                return Ok(());
+            };
             let mut descriptors = import_table.descriptors().map_err(LoaderError::format)?;
             let mut import_index = 0usize;
 
@@ -565,6 +576,15 @@ impl PeSymbolData {
                         .ok_or_else(|| LoaderError::address_overflow(base))?;
                 }
             }
+
+            Ok(())
+        })();
+        if let Err(err) = &imports
+            && config.is_permissive()
+        {
+            tracing::warn!("unable to fully read PE import table ({err}); keeping partial imports");
+        } else {
+            imports?;
         }
 
         let max_addr = extern_segm.last_address().unwrap_or(max_addr);
@@ -735,7 +755,7 @@ where
                 continue;
             }
 
-            let data = sect.data().unwrap_or_default();
+            let data = permissive::read_section_data(self.pe, &sect);
             let emit = (data.len() as u64).min(sect.size()) as usize;
 
             let mut bytes = ImageSegmentContents::new(address, self.endian, &data[..emit]);
@@ -1032,49 +1052,45 @@ impl Loadable for Pe<'_> {
     }
 
     fn architecture(&self) -> Arch {
-        self.object.borrow_loaded().state.architecture.clone()
+        self.state.architecture.clone()
     }
 
     fn image_symbols(&self) -> Option<&SymbolTable<ImageAddress>> {
-        Some(&self.object.borrow_loaded().state.symbols)
+        Some(&self.state.symbols)
     }
 
     fn entry_point(&self) -> Option<ImageAddress> {
-        self.object.borrow_loaded().state.entry
+        self.state.entry
     }
 
     fn image_segments<'b>(
         &'b self,
     ) -> impl FallibleIterator<Item = ImageSegment<'b>, Error = LoaderError> + 'b {
-        let state = &self.object.borrow_loaded().state;
-
         Box::new(PeImageSegments::new(
-            &state.segments,
-            &state.mapping_hints,
-            &state.symbols,
+            &self.state.segments,
+            &self.state.mapping_hints,
+            &self.state.symbols,
         )) as ImageSegmentIterator<'b>
     }
 
     fn image_layout(&self) -> &ImageLayout {
-        &self.object.borrow_loaded().state.layout
+        &self.state.layout
     }
 
     fn image_contents<'b>(
         &'b self,
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'b>, Error = LoaderError> + 'b {
-        let loaded = self.object.borrow_loaded();
-        let view = &loaded.view;
-        let state = &loaded.state;
+        let view = self.object.borrow_view();
 
         with_pe!(
             view,
             pe | Box::new(PeImageSegmentContents::new(
                 pe,
                 self.architecture().endian(),
-                state.base,
-                state.preferred_base,
-                &state.import_slots,
-                &state.extern_segm,
+                self.state.base,
+                self.state.preferred_base,
+                &self.state.import_slots,
+                &self.state.extern_segm,
             )) as ImageSegmentContentsIterator<'b>
         )
     }
@@ -1258,6 +1274,77 @@ mod test {
         };
 
         Ok((name, preferred_base + address_table as u64))
+    }
+
+    #[test]
+    fn test_truncated_section_recovers_present_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let full = BytesOrMapping::from_file("tests/hello-pe.exe")?;
+        let cut = 0x30000;
+        let data = BytesOrMapping::from_bytes(&full[..cut]);
+        let pe = PeFile64::parse(&data)?;
+
+        let text = pe
+            .sections()
+            .find(|section| section.name().ok() == Some(".text"))
+            .expect(".text section");
+        let (offset, _) = text.file_range().expect(".text file range");
+        let offset = offset as usize;
+
+        assert!(
+            text.data().is_err(),
+            "object should refuse the truncated section"
+        );
+
+        let present = super::permissive::read_section_data(&pe, &text);
+        assert_eq!(present.len(), cut - offset);
+        assert_eq!(present, &full[offset..cut]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_truncated_import_table_recovers_descriptors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let full = BytesOrMapping::from_file("tests/hello-pe.exe")?;
+        let cut = 0x84000;
+        let data = BytesOrMapping::from_bytes(&full[..cut]);
+        let pe = PeFile64::parse(&data)?;
+
+        assert!(
+            pe.import_table().ok().flatten().is_none(),
+            "object should fail the all-or-nothing import read on a truncated section"
+        );
+
+        let table = super::permissive::read_imports(&pe, super::PeLoaderProperties::PERMISSIVE)?
+            .expect("recovered import table");
+        let mut descriptors = table.descriptors()?;
+        let mut count = 0usize;
+        while descriptors.next()?.is_some() {
+            count += 1;
+        }
+        assert!(
+            count >= 1,
+            "expected recovered import descriptors, got {count}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_truncated_loads() -> Result<(), Box<dyn std::error::Error>> {
+        let full = BytesOrMapping::from_file("tests/hello-pe.exe")?;
+        let data = BytesOrMapping::from_bytes(&full[..0x30000]);
+        let pe = Pe::new_with(data, attributes! { ATTRIBUTE_PERMISSIVE => true })?;
+        let segments = load_segments(&pe)?;
+
+        assert!(!segments.is_empty());
+        let entry = pe.entry().expect("entry point");
+        assert!(
+            read_u64_at(&segments, Address::from(entry.offset())).is_some(),
+            "present .text code around the entry point should be materialised"
+        );
+
+        Ok(())
     }
 
     #[test]
