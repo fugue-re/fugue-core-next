@@ -1,3 +1,5 @@
+use rustc_hash::FxHashMap;
+
 use crate::il::common::{IlOpId, IlValueId};
 use crate::il::ecode::ssa::ECodeSsaIr;
 
@@ -81,6 +83,38 @@ impl ECodeSsaUses {
     }
 }
 
+impl ECodeSsaIr {
+    pub fn uses(&self) -> ECodeSsaUses {
+        ECodeSsaUses::build(self)
+    }
+
+    pub fn block_argument_sources(&self) -> FxHashMap<IlValueId, Vec<IlValueId>> {
+        let block_count = self.graph().blocks().len();
+        let mut arguments = vec![Vec::new(); block_count];
+        for argument in self.block_arguments() {
+            arguments[argument.block().index()].push(argument.value());
+        }
+
+        let mut incoming = vec![Vec::new(); block_count];
+        for (edge, target) in self.graph().successors().iter().enumerate() {
+            incoming[target.index()].push(edge);
+        }
+
+        let mut sources = FxHashMap::default();
+        for (block, positions) in arguments.iter().enumerate() {
+            for (position, &argument) in positions.iter().enumerate() {
+                let argument_sources = incoming[block]
+                    .iter()
+                    .filter_map(|&edge| self.arguments_for_edge(edge).get(position).copied())
+                    .collect();
+                sources.insert(argument, argument_sources);
+            }
+        }
+
+        sources
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -90,18 +124,6 @@ mod test {
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
     };
     use crate::ir::FunctionId;
-
-    #[test]
-    fn uses_returns_value_uses() {
-        let value = IlValueId::try_from_index(0).unwrap();
-        let user = IlOpId::try_from_index(2).unwrap();
-        let index = ECodeSsaUses {
-            offsets: vec![0, 1],
-            uses: vec![ECodeSsaUse::new(user, 3)],
-        };
-
-        assert_eq!(index.uses_for(value), &[ECodeSsaUse::new(user, 3)]);
-    }
 
     #[test]
     fn uses_builds_from_ssa_body() {

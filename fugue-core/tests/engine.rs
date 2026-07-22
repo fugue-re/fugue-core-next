@@ -3087,7 +3087,15 @@ fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn std::error
             .iter()
             .find(|record| record.branch() == Address::from(branch))
             .ok_or_else(|| io::Error::other(format!("switch missing at {branch:#x}")))?;
-        assert_eq!(switch.case_count(), cases);
+        assert_eq!(
+            switch.case_count(),
+            cases,
+            "switch at {branch:#x}: model={:?}, evidence={:?}, confidence={}, default={}",
+            switch.switch().model(),
+            switch.switch().evidence(),
+            switch.confidence(),
+            switch.has_default(),
+        );
     }
     let record = switches
         .iter()

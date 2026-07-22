@@ -27,6 +27,12 @@ impl<'a> ECodeSsaIrDisplay<'a> {
     }
 }
 
+impl ECodeSsaIr {
+    pub const fn display(&self) -> ECodeSsaIrDisplay<'_> {
+        ECodeSsaIrDisplay::new(self)
+    }
+}
+
 impl fmt::Display for ECodeSsaIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, value) in self.body.values().iter().enumerate() {

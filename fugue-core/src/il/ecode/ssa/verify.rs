@@ -7,6 +7,10 @@ use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind,
 };
 
+#[cfg(test)]
+#[path = "verify/test.rs"]
+mod test;
+
 pub(crate) fn verify(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
     if ir.header().schema() != ECodeSsaIr::SCHEMA {
         return Err(IlError::schema_mismatch(

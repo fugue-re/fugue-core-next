@@ -649,6 +649,49 @@ mod test {
     }
 
     #[test]
+    fn user_op_result_preserves_operands() {
+        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let input = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                1,
+                8,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .unwrap();
+        let output = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(1),
+                8,
+                8,
+                PCodeLocationProperties::UNIQUE,
+            ))
+            .unwrap();
+        let operands = builder.push_operands([input]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::UserOp,
+            Some(output),
+            operands,
+            7,
+            None,
+        ));
+        let source = builder.build(&CancellationToken::default()).unwrap();
+        let mut transform = PCodeToECode;
+
+        let lifted = transform
+            .transform(&source, &CancellationToken::default())
+            .unwrap();
+
+        assert_eq!(lifted.expressions().len(), 2);
+        assert_eq!(
+            lifted.expressions()[1].opcode(),
+            ECodeExprOpcode::IntrinsicResult
+        );
+        assert_eq!(lifted.expressions()[1].operands().len(), 1);
+        verify(&lifted).unwrap();
+    }
+
+    #[test]
     fn store_pcode_lifts_to_ecode_store_with_fugue_space() {
         let source = store_source();
         let cancellation = CancellationToken::default();

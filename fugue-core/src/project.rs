@@ -456,8 +456,10 @@ impl ProjectTransaction<'_> {
             cancellation,
         )?;
 
-        if cfg!(debug_assertions) {
-            verify_pcode(&ir).expect("canonicalised pcode fails verification");
+        if cfg!(debug_assertions)
+            && let Err(error) = verify_pcode(&ir)
+        {
+            panic!("canonicalised pcode for {function:?} fails verification: {error}");
         }
 
         self.materialise_lifted(&mut ir)?;

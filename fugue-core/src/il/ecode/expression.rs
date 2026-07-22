@@ -141,7 +141,6 @@ impl ECodeExprOpcode {
             | Self::Address
             | Self::ReadRegister
             | Self::ReadFlag
-            | Self::IntrinsicResult
             | Self::Undefined => Some(0),
             Self::Load
             | Self::Copy
@@ -198,6 +197,7 @@ impl ECodeExprOpcode {
             | Self::FloatNotEqual
             | Self::FloatLess
             | Self::FloatLessEqual => Some(2),
+            Self::IntrinsicResult => None,
         }
     }
 

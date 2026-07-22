@@ -951,6 +951,40 @@ mod test {
     }
 
     #[test]
+    fn verifier_accepts_float_width_conversion() {
+        let mut builder = PCodeBuilder::new(language(), header(), IlGraph::default());
+        let input = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(1),
+                0,
+                10,
+                PCodeLocationProperties::empty(),
+            ))
+            .unwrap();
+        let output = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(1),
+                16,
+                8,
+                PCodeLocationProperties::empty(),
+            ))
+            .unwrap();
+        let operands = builder.push_operands([input]).unwrap();
+
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::FloatToFloat,
+            Some(output),
+            operands,
+            0,
+            None,
+        ));
+
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+
+        assert!(verify(&ir).is_ok());
+    }
+
+    #[test]
     fn verifier_rejects_missing_output() {
         let mut builder = PCodeBuilder::new(language(), header(), IlGraph::default());
         let input = builder

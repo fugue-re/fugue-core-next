@@ -230,7 +230,7 @@ impl SwitchRecord {
     }
 
     pub fn confidence(&self) -> Confidence {
-        self.switch.provenance().confidence()
+        self.switch.confidence()
     }
 }
 

@@ -182,6 +182,12 @@ impl ECodeSsaLiveness {
     }
 }
 
+impl ECodeSsaIr {
+    pub fn liveness(&self) -> ECodeSsaLiveness {
+        ECodeSsaLiveness::build(self)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

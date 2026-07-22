@@ -1,5 +1,6 @@
 use fugue_bv::BitVec;
 
+use super::SwitchSliceEvaluator;
 use crate::analysis::function::recovery::Translator;
 use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
@@ -7,18 +8,16 @@ use crate::il::common::{IlBlockId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
-use crate::storage::segments::SegmentReader;
 
-use super::SwitchSliceEvaluator;
-
-enum GuardDefault {
+#[derive(Clone, Copy)]
+enum SwitchGuardDefault {
     Block(IlBlockId),
-    Staging(Address),
+    DirectBranch(Address),
 }
 
-struct GuardMatch {
+pub(crate) struct SwitchGuard {
     interval: StridedInterval,
-    default: GuardDefault,
+    default: SwitchGuardDefault,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,33 +52,65 @@ impl Relation {
             Self::NotEqual => Self::Equal,
         }
     }
+
+    fn interval(self, bound: &BitVec, width: u32) -> StridedInterval {
+        let zero = BitVec::zero(width);
+        let one = BitVec::one(width);
+        let ceiling = BitVec::max_value_with(width, false);
+        let range = |lower: BitVec, upper: BitVec| {
+            if lower > upper {
+                StridedInterval::empty(width)
+            } else {
+                StridedInterval::range(lower, upper, one.clone())
+            }
+        };
+        match self {
+            Self::Less if bound.is_zero() => StridedInterval::empty(width),
+            Self::Less => range(zero, bound - &one),
+            Self::LessEqual => range(zero, bound.clone()),
+            Self::Greater if *bound >= ceiling => StridedInterval::empty(width),
+            Self::Greater => range(bound + &one, ceiling),
+            Self::GreaterEqual => range(bound.clone(), ceiling),
+            Self::Equal => StridedInterval::single(bound.clone()),
+            Self::NotEqual => StridedInterval::full(width),
+        }
+    }
+}
+
+impl SwitchGuard {
+    pub(crate) fn upper_bound(&self, width: u32) -> Option<BitVec> {
+        Some(self.interval.upper()?.unsigned_cast(width))
+    }
 }
 
 impl<'a> SwitchSliceEvaluator<'a> {
-    fn find_guard(&self, index: IlValueId, branch: Address) -> Option<GuardMatch> {
-        if let Some(guard) = self.same_source_guard(index, branch) {
+    pub(crate) fn find_guard(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
+        if let Some(guard) = self.find_intra_instruction_guard(index, branch) {
             return Some(guard);
         }
         let switch_block = self.block_of_source(branch)?;
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
-        for (op_index, op) in self.ssa.operations().iter().enumerate() {
-            if op.opcode() != ECodeSsaOpcode::ConditionalBranch {
+        for (operation_index, operation) in self.ssa.operations().iter().enumerate() {
+            if operation.opcode() != ECodeSsaOpcode::ConditionalBranch {
                 continue;
             }
-            let Some(&condition) = self.ssa.operation_operands(op).first() else {
+            let Some(&condition) = self.ssa.operation_operands(operation).first() else {
                 continue;
             };
-            let Some(guard_block) = self.operation_blocks[op_index] else {
+            let Some(guard_block) = self.operation_blocks[operation_index] else {
                 continue;
             };
             if !self.dominates(guard_block, switch_block) {
                 continue;
             }
-            let Some(taken) = op.address().and_then(|taken| self.block_of_source(taken)) else {
+            let Some(taken) = operation
+                .address()
+                .and_then(|taken| self.block_of_source(taken))
+            else {
                 continue;
             };
-            let Some(fallthrough) = self.other_successor(guard_block, taken) else {
+            let Some(fallthrough) = self.alternate_successor(guard_block, taken) else {
                 continue;
             };
 
@@ -93,7 +124,7 @@ impl<'a> SwitchSliceEvaluator<'a> {
                 continue;
             };
 
-            let Some(interval) = self.guard_interval(
+            let Some(interval) = self.index_interval_for_condition(
                 condition,
                 index,
                 switch_taken,
@@ -107,31 +138,39 @@ impl<'a> SwitchSliceEvaluator<'a> {
             if *upper >= ceiling {
                 continue;
             }
-            return Some(GuardMatch {
+            return Some(SwitchGuard {
                 interval,
-                default: GuardDefault::Block(default_block),
+                default: SwitchGuardDefault::Block(default_block),
             });
         }
         None
     }
 
-    fn same_source_guard(&self, index: IlValueId, branch: Address) -> Option<GuardMatch> {
+    fn find_intra_instruction_guard(
+        &self,
+        index: IlValueId,
+        branch: Address,
+    ) -> Option<SwitchGuard> {
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
-        let operation = self.same_source_conditional(branch)?;
+        let operation = self.find_intra_instruction_conditional_branch(branch)?;
         let condition = *self.ssa.operation_operands(operation).first()?;
-        let interval =
-            self.guard_interval(condition, index, false, self.config.max_trace_depth())?;
+        let interval = self.index_interval_for_condition(
+            condition,
+            index,
+            false,
+            self.config.max_trace_depth(),
+        )?;
         if interval.upper()? >= &ceiling {
             return None;
         }
-        Some(GuardMatch {
+        Some(SwitchGuard {
             interval,
-            default: GuardDefault::Staging(operation.address()?),
+            default: SwitchGuardDefault::DirectBranch(operation.address()?),
         })
     }
 
-    fn same_source_conditional(&self, branch: Address) -> Option<&ECodeSsaOp> {
+    fn find_intra_instruction_conditional_branch(&self, branch: Address) -> Option<&ECodeSsaOp> {
         let mut conditional = None;
         for (_, operation) in self.ssa.operations_for_source(branch) {
             match operation.opcode() {
@@ -143,7 +182,7 @@ impl<'a> SwitchSliceEvaluator<'a> {
         conditional
     }
 
-    fn guard_interval(
+    fn index_interval_for_condition(
         &self,
         condition: IlValueId,
         index: IlValueId,
@@ -153,53 +192,44 @@ impl<'a> SwitchSliceEvaluator<'a> {
         if depth == 0 {
             return None;
         }
-        let op = self.ssa.defining_operation(condition)?;
-        let operands = self.ssa.operation_operands(op);
-        match op.opcode() {
+        let operation = self.ssa.defining_operation(condition)?;
+        let operands = self.ssa.operation_operands(operation);
+        match operation.opcode() {
             ECodeSsaOpcode::BoolNot => {
                 let inner = *operands.first()?;
-                self.guard_interval(inner, index, !taken, depth - 1)
+                self.index_interval_for_condition(inner, index, !taken, depth - 1)
             }
             ECodeSsaOpcode::BoolAnd | ECodeSsaOpcode::BoolOr => {
-                let a = self.guard_interval(*operands.first()?, index, taken, depth - 1);
-                let b = self.guard_interval(*operands.get(1)?, index, taken, depth - 1);
-                let conjunction = (op.opcode() == ECodeSsaOpcode::BoolAnd) == taken;
+                let a =
+                    self.index_interval_for_condition(*operands.first()?, index, taken, depth - 1);
+                let b =
+                    self.index_interval_for_condition(*operands.get(1)?, index, taken, depth - 1);
+                let conjunction = (operation.opcode() == ECodeSsaOpcode::BoolAnd) == taken;
                 if conjunction {
-                    Self::intersect(a, b)
+                    match (a, b) {
+                        (Some(a), Some(b)) => Some(a.meet(&b)),
+                        (Some(interval), None) | (None, Some(interval)) => Some(interval),
+                        (None, None) => None,
+                    }
                 } else {
-                    Self::unite(a, b)
+                    match (a, b) {
+                        (Some(a), Some(b)) => Some(a.join(&b)),
+                        _ => None,
+                    }
                 }
             }
-            _ => self.comparison_interval(op, index, taken),
+            _ => self.index_interval_for_comparison(operation, index, taken),
         }
     }
 
-    fn intersect(
-        a: Option<StridedInterval>,
-        b: Option<StridedInterval>,
-    ) -> Option<StridedInterval> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a.meet(&b)),
-            (Some(interval), None) | (None, Some(interval)) => Some(interval),
-            (None, None) => None,
-        }
-    }
-
-    fn unite(a: Option<StridedInterval>, b: Option<StridedInterval>) -> Option<StridedInterval> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a.join(&b)),
-            _ => None,
-        }
-    }
-
-    fn comparison_interval(
+    fn index_interval_for_comparison(
         &self,
-        op: &ECodeSsaOp,
+        operation: &ECodeSsaOp,
         index: IlValueId,
         taken: bool,
     ) -> Option<StridedInterval> {
         let width = self.ssa.value_width(index)?;
-        let relation = match op.opcode() {
+        let relation = match operation.opcode() {
             ECodeSsaOpcode::IntLess | ECodeSsaOpcode::IntSignedLess => Relation::Less,
             ECodeSsaOpcode::IntLessEqual | ECodeSsaOpcode::IntSignedLessEqual => {
                 Relation::LessEqual
@@ -208,13 +238,13 @@ impl<'a> SwitchSliceEvaluator<'a> {
             ECodeSsaOpcode::IntNotEqual => Relation::NotEqual,
             _ => return None,
         };
-        let operands = self.ssa.operation_operands(op);
+        let operands = self.ssa.operation_operands(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
 
-        let (relation, offset, constant) = if let Some(offset) = self.index_affine(a, index, width)
+        let (relation, offset, constant) = if let Some(offset) = self.index_offset(a, index, width)
         {
             (relation, offset, self.ssa.constant_value(b)?)
-        } else if let Some(offset) = self.index_affine(b, index, width) {
+        } else if let Some(offset) = self.index_offset(b, index, width) {
             (
                 relation.invert_operands(),
                 offset,
@@ -231,70 +261,32 @@ impl<'a> SwitchSliceEvaluator<'a> {
             _ => return None,
         };
         let effective = if taken { relation } else { relation.negate() };
-        Some(self.relation_interval(effective, &bound, width))
+        Some(effective.interval(&bound, width))
     }
 
-    fn relation_interval(&self, relation: Relation, bound: &BitVec, width: u32) -> StridedInterval {
-        let zero = BitVec::zero(width);
-        let one = BitVec::one(width);
-        let ceiling = BitVec::max_value_with(width, false);
-        let range = |lo: BitVec, hi: BitVec| {
-            if lo > hi {
-                StridedInterval::empty(width)
-            } else {
-                StridedInterval::range(lo, hi, one.clone())
-            }
-        };
-        match relation {
-            Relation::Less if bound.is_zero() => StridedInterval::empty(width),
-            Relation::Less => range(zero, bound - &one),
-            Relation::LessEqual => range(zero, bound.clone()),
-            Relation::Greater if *bound >= ceiling => StridedInterval::empty(width),
-            Relation::Greater => range(bound + &one, ceiling),
-            Relation::GreaterEqual => range(bound.clone(), ceiling),
-            Relation::Equal => StridedInterval::single(bound.clone()),
-            Relation::NotEqual => StridedInterval::full(width),
-        }
-    }
-
-    fn index_affine(&self, value: IlValueId, index: IlValueId, width: u32) -> Option<BitVec> {
-        let value = self.ssa.underlying_value(value);
-        if self.same_index(value, index) {
+    fn index_offset(&self, value: IlValueId, index: IlValueId, width: u32) -> Option<BitVec> {
+        let value = self.underlying_value(value);
+        if self.matches_index(value, index) {
             return Some(BitVec::zero(width));
         }
-        let op = self.ssa.defining_operation(value)?;
-        let operands = self.ssa.operation_operands(op);
+        let operation = self.ssa.defining_operation(value)?;
+        let operands = self.ssa.operation_operands(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
-        match op.opcode() {
-            ECodeSsaOpcode::Sub if self.same_index(a, index) => {
+        match operation.opcode() {
+            ECodeSsaOpcode::Sub if self.matches_index(a, index) => {
                 Some(&BitVec::zero(width) - &self.ssa.constant_value(b)?.unsigned_cast(width))
             }
-            ECodeSsaOpcode::Add if self.same_index(a, index) => {
+            ECodeSsaOpcode::Add if self.matches_index(a, index) => {
                 Some(self.ssa.constant_value(b)?.unsigned_cast(width))
             }
-            ECodeSsaOpcode::Add if self.same_index(b, index) => {
+            ECodeSsaOpcode::Add if self.matches_index(b, index) => {
                 Some(self.ssa.constant_value(a)?.unsigned_cast(width))
             }
             _ => None,
         }
     }
 
-    pub(super) fn canonical(&self, value: IlValueId) -> IlValueId {
-        let mut current = self.ssa.underlying_value(value);
-        for _ in 0..self.config.max_trace_depth() {
-            let Some(feeder) = self.single_source_feeder(current) else {
-                break;
-            };
-            let next = self.ssa.underlying_value(feeder);
-            if next == current {
-                break;
-            }
-            current = next;
-        }
-        current
-    }
-
-    fn same_index(&self, operand: IlValueId, index: IlValueId) -> bool {
+    fn matches_index(&self, operand: IlValueId, index: IlValueId) -> bool {
         let a = self.canonical(operand);
         let b = self.canonical(index);
         if a == b {
@@ -311,62 +303,27 @@ impl<'a> SwitchSliceEvaluator<'a> {
             && oa.immediate() == ob.immediate()
     }
 
-    pub(super) fn guard_bound(
+    pub(crate) fn resolve_guard_default_target(
         &self,
-        index: IlValueId,
-        width: u32,
-        branch: Address,
-    ) -> Option<BitVec> {
-        let guard = self.find_guard(index, branch)?;
-        Some(guard.interval.upper()?.unsigned_cast(width))
-    }
-
-    pub(super) fn guard_default(
-        &self,
-        index: IlValueId,
-        branch: Address,
+        guard: &SwitchGuard,
         context: &ContextSet,
         translator: &mut Translator,
     ) -> Option<AddressWithContext> {
-        if let Some(address) = self
-            .same_source_conditional(branch)
-            .and_then(ECodeSsaOp::address)
-        {
-            let mut entries = SegmentReader::new(self.segments);
-            let mut resolver = SwitchTargetResolver::new(self.arch, self.segments, address.space());
-            return self.decode_direct_branch(
-                address,
-                None,
-                context,
-                translator,
-                &mut entries,
-                &mut resolver,
-            );
-        }
-        let guard = self.find_guard(index, branch)?;
         let address = match guard.default {
-            GuardDefault::Block(block) => {
+            SwitchGuardDefault::Block(block) => {
                 let address = self.block_address(block)?;
                 context.apply(address, translator.context_mut());
                 let mut resolver =
                     SwitchTargetResolver::new(self.arch, self.segments, address.space());
                 return resolver.resolve_address(address.raw_address(), translator.context());
             }
-            GuardDefault::Staging(address) => address,
+            SwitchGuardDefault::DirectBranch(address) => address,
         };
-        let mut entries = SegmentReader::new(self.segments);
         let mut resolver = SwitchTargetResolver::new(self.arch, self.segments, address.space());
-        self.decode_direct_branch(
-            address,
-            None,
-            context,
-            translator,
-            &mut entries,
-            &mut resolver,
-        )
+        resolver.resolve_direct_branch(address, None, context, translator)
     }
 
-    fn other_successor(&self, block: IlBlockId, exclude: IlBlockId) -> Option<IlBlockId> {
+    fn alternate_successor(&self, block: IlBlockId, exclude: IlBlockId) -> Option<IlBlockId> {
         let graph = self.ssa.graph();
         let range = graph.blocks().get(block.index())?.successors();
         graph.successors()[range.start()..range.end()]

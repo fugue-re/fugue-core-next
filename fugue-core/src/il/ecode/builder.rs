@@ -27,27 +27,27 @@ pub struct ECodeIr {
     statement_operands: Vec<IlExprId>,
 }
 
-#[derive(Default)]
-struct ECodeIrParts {
-    source_spans: Vec<IlSourceSpan>,
-    parent_spans: Vec<IlParentSpan>,
-    expressions: Vec<ECodeExpr>,
-    expression_operands: Vec<IlExprId>,
-    statements: Vec<ECodeStmt>,
-    statement_operands: Vec<IlExprId>,
-}
-
 impl ECodeIr {
-    fn new(header: IlHeader, graph: IlGraph, parts: ECodeIrParts) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        header: IlHeader,
+        graph: IlGraph,
+        source_spans: Vec<IlSourceSpan>,
+        parent_spans: Vec<IlParentSpan>,
+        expressions: Vec<ECodeExpr>,
+        expression_operands: Vec<IlExprId>,
+        statements: Vec<ECodeStmt>,
+        statement_operands: Vec<IlExprId>,
+    ) -> Self {
         Self {
             header,
             graph,
-            source_spans: parts.source_spans,
-            parent_spans: parts.parent_spans,
-            expressions: parts.expressions,
-            expression_operands: parts.expression_operands,
-            statements: parts.statements,
-            statement_operands: parts.statement_operands,
+            source_spans,
+            parent_spans,
+            expressions,
+            expression_operands,
+            statements,
+            statement_operands,
         }
     }
 
@@ -230,14 +230,12 @@ impl ECodeBuilder {
         let mut body = ECodeIr::new(
             self.header,
             self.graph,
-            ECodeIrParts {
-                source_spans: self.source_spans,
-                parent_spans: self.parent_spans,
-                expressions: self.expressions,
-                expression_operands: self.expression_operands.into_values(),
-                statements: self.statements,
-                statement_operands: self.statement_operands.into_values(),
-            },
+            self.source_spans,
+            self.parent_spans,
+            self.expressions,
+            self.expression_operands.into_values(),
+            self.statements,
+            self.statement_operands.into_values(),
         );
 
         body.shrink_to_fit();
@@ -402,29 +400,18 @@ mod test {
         let body = ECodeIr::new(
             header,
             IlGraph::default(),
-            ECodeIrParts {
-                source_spans: vec![
-                    IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
-                    IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
-                ],
-                statements: vec![
-                    ECodeStmt::new(
-                        ECodeStmtOpcode::Trap,
-                        IlIndexRange::EMPTY,
-                        None,
-                        None,
-                        None,
-                    ),
-                    ECodeStmt::new(
-                        ECodeStmtOpcode::Trap,
-                        IlIndexRange::EMPTY,
-                        None,
-                        None,
-                        None,
-                    ),
-                ],
-                ..ECodeIrParts::default()
-            },
+            vec![
+                IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
+                IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
+                ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
+            ],
+            Vec::new(),
         );
 
         let statements = body.statements_for_source(address).collect::<Vec<_>>();

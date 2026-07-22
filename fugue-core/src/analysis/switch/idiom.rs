@@ -4,32 +4,42 @@ use rustc_hash::FxHashMap;
 use crate::ir::RawAddress;
 use crate::lifter::{Op, PCodeOp, Varnode};
 
+fn constant_and_value(a: Varnode, b: Varnode) -> Option<(u64, Varnode)> {
+    if a.is_constant() && !b.is_constant() {
+        Some((a.offset(), b))
+    } else if b.is_constant() && !a.is_constant() {
+        Some((b.offset(), a))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(super) struct OffsetBase {
+pub(crate) struct SwitchOffsetBase {
     address: RawAddress,
     signed: bool,
 }
 
-impl OffsetBase {
-    pub(super) fn address(&self) -> RawAddress {
+impl SwitchOffsetBase {
+    pub(crate) fn address(&self) -> RawAddress {
         self.address
     }
 
-    pub(super) fn is_signed(&self) -> bool {
+    pub(crate) fn is_signed(&self) -> bool {
         self.signed
     }
 }
 
-struct MatchedTable {
+struct SwitchTableMatch {
     table: RawAddress,
-    base: Option<OffsetBase>,
+    base: Option<SwitchOffsetBase>,
     element_size: u32,
     shift: u8,
     index: Varnode,
     index_before: usize,
 }
 
-struct LoadedOffset {
+struct SwitchLoadedOffset {
     table: RawAddress,
     index: Varnode,
     element_size: u32,
@@ -39,68 +49,70 @@ struct LoadedOffset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SwitchShapeInfo {
+pub(crate) struct SwitchIdiomMatch {
     table: RawAddress,
-    base: Option<OffsetBase>,
+    base: Option<SwitchOffsetBase>,
     element_size: u32,
     shift: u8,
     bound: Option<BitVec>,
     label_offset: i64,
 }
 
-impl SwitchShapeInfo {
-    pub(super) fn table(&self) -> RawAddress {
+impl SwitchIdiomMatch {
+    pub(crate) fn table(&self) -> RawAddress {
         self.table
     }
 
-    pub(super) fn base(&self) -> Option<OffsetBase> {
+    pub(crate) fn base(&self) -> Option<SwitchOffsetBase> {
         self.base
     }
 
-    pub(super) fn element_size(&self) -> u32 {
+    pub(crate) fn element_size(&self) -> u32 {
         self.element_size
     }
 
-    pub(super) fn shift(&self) -> u8 {
+    pub(crate) fn shift(&self) -> u8 {
         self.shift
     }
 
-    pub(super) fn bound(&self) -> Option<&BitVec> {
+    pub(crate) fn bound(&self) -> Option<&BitVec> {
         self.bound.as_ref()
     }
 
-    pub(super) fn label_offset(&self) -> i64 {
+    pub(crate) fn label_offset(&self) -> i64 {
         self.label_offset
     }
 }
 
-pub(super) struct SwitchIdiomMatcher<'a> {
-    ops: &'a [PCodeOp],
-    defs: FxHashMap<Varnode, Vec<usize>>,
+pub(crate) struct SwitchIdiomMatcher<'a> {
+    operations: &'a [PCodeOp],
+    definitions: FxHashMap<Varnode, Vec<usize>>,
     branch: usize,
     max_trace_depth: u32,
 }
 
 impl<'a> SwitchIdiomMatcher<'a> {
-    pub(super) fn new(ops: &'a [PCodeOp], max_trace_depth: u32) -> Option<Self> {
-        let branch = ops.iter().rposition(|op| matches!(op.op(), Op::IBranch))?;
-        let mut defs = FxHashMap::<Varnode, Vec<usize>>::default();
-        for (index, op) in ops[..branch].iter().enumerate() {
-            if let Some(output) = op.output() {
-                defs.entry(*output).or_default().push(index);
+    pub(crate) fn new(operations: &'a [PCodeOp], max_trace_depth: u32) -> Option<Self> {
+        let branch = operations
+            .iter()
+            .rposition(|operation| matches!(operation.op(), Op::IBranch))?;
+        let mut definitions = FxHashMap::<Varnode, Vec<usize>>::default();
+        for (index, operation) in operations[..branch].iter().enumerate() {
+            if let Some(output) = operation.output() {
+                definitions.entry(*output).or_default().push(index);
             }
         }
         Some(Self {
-            ops,
-            defs,
+            operations,
+            definitions,
             branch,
             max_trace_depth,
         })
     }
 
-    pub(super) fn recover(&self) -> Option<SwitchShapeInfo> {
+    pub(crate) fn match_idiom(&self) -> Option<SwitchIdiomMatch> {
         let table = self.match_table()?;
-        Some(SwitchShapeInfo {
+        Some(SwitchIdiomMatch {
             table: table.table,
             base: table.base,
             element_size: table.element_size,
@@ -112,26 +124,16 @@ impl<'a> SwitchIdiomMatcher<'a> {
 
     fn defining_operation(&self, varnode: &Varnode, before: usize) -> Option<(usize, &PCodeOp)> {
         let index = *self
-            .defs
+            .definitions
             .get(varnode)?
             .iter()
             .rev()
             .find(|&&index| index < before)?;
-        Some((index, &self.ops[index]))
+        Some((index, &self.operations[index]))
     }
 
-    fn split_constant(a: Varnode, b: Varnode) -> Option<(u64, Varnode)> {
-        if a.is_constant() && !b.is_constant() {
-            Some((a.offset(), b))
-        } else if b.is_constant() && !a.is_constant() {
-            Some((b.offset(), a))
-        } else {
-            None
-        }
-    }
-
-    fn match_table(&self) -> Option<MatchedTable> {
-        let mut target = self.ops[self.branch].inputs().first().copied()?;
+    fn match_table(&self) -> Option<SwitchTableMatch> {
+        let mut target = self.operations[self.branch].inputs().first().copied()?;
         let mut before = self.branch;
         for _ in 0..self.max_trace_depth {
             let (index, defining) = self.defining_operation(&target, before)?;
@@ -139,7 +141,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 Op::Load(_) => {
                     let pointer = defining.inputs().first().copied()?;
                     let (table, table_index, index_before) = self.match_pointer(&pointer, index)?;
-                    return Some(MatchedTable {
+                    return Some(SwitchTableMatch {
                         table,
                         base: None,
                         element_size: u32::try_from(target.size()).ok()?,
@@ -176,7 +178,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
         }
         let a = defining.inputs().first().copied()?;
         let b = defining.inputs().get(1).copied()?;
-        let (table, scaled) = Self::split_constant(a, b)?;
+        let (table, scaled) = constant_and_value(a, b)?;
         let (index, index_before) = self.strip_index(&scaled, index);
         Some((RawAddress::from(table), index, index_before))
     }
@@ -195,7 +197,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                         .first()
                         .copied()
                         .zip(defining.inputs().get(1).copied())
-                        .and_then(|(a, b)| Self::split_constant(a, b))
+                        .and_then(|(a, b)| constant_and_value(a, b))
                     else {
                         return (current, before);
                     };
@@ -220,11 +222,11 @@ impl<'a> SwitchIdiomMatcher<'a> {
         base: &Varnode,
         offset: &Varnode,
         before: usize,
-    ) -> Option<MatchedTable> {
+    ) -> Option<SwitchTableMatch> {
         let loaded = self.match_loaded_offset(offset, before)?;
-        Some(MatchedTable {
+        Some(SwitchTableMatch {
             table: loaded.table,
-            base: Some(OffsetBase {
+            base: Some(SwitchOffsetBase {
                 address: self.resolve_constant(base, before)?,
                 signed: loaded.signed,
             }),
@@ -235,7 +237,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
         })
     }
 
-    fn match_loaded_offset(&self, value: &Varnode, before: usize) -> Option<LoadedOffset> {
+    fn match_loaded_offset(&self, value: &Varnode, before: usize) -> Option<SwitchLoadedOffset> {
         let mut current = *value;
         let mut before = before;
         let mut signed = false;
@@ -265,7 +267,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 Op::IntMul => {
                     let a = defining.inputs().first().copied()?;
                     let b = defining.inputs().get(1).copied()?;
-                    let (constant, variable) = Self::split_constant(a, b)?;
+                    let (constant, variable) = constant_and_value(a, b)?;
                     if !constant.is_power_of_two() {
                         return None;
                     }
@@ -276,7 +278,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 Op::Load(_) => {
                     let pointer = defining.inputs().first().copied()?;
                     let (table, table_index, index_before) = self.match_pointer(&pointer, index)?;
-                    return Some(LoadedOffset {
+                    return Some(SwitchLoadedOffset {
                         table,
                         index: table_index,
                         element_size: u32::try_from(current.size()).ok()?,
@@ -308,7 +310,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 Op::IntAdd => {
                     let a = defining.inputs().first().copied()?;
                     let b = defining.inputs().get(1).copied()?;
-                    let (constant, variable) = Self::split_constant(a, b)?;
+                    let (constant, variable) = constant_and_value(a, b)?;
                     accumulated += RawAddress::from(constant);
                     current = variable;
                     before = index;
@@ -320,14 +322,14 @@ impl<'a> SwitchIdiomMatcher<'a> {
     }
 
     fn guard_bound(&self, index: Varnode) -> Option<BitVec> {
-        for op in self.ops {
-            let inclusive = match op.op() {
+        for operation in self.operations {
+            let inclusive = match operation.op() {
                 Op::IntLess | Op::IntSignedLess => false,
                 Op::IntLessEq | Op::IntSignedLessEq => true,
                 _ => continue,
             };
-            let a = op.inputs().first().copied();
-            let b = op.inputs().get(1).copied();
+            let a = operation.inputs().first().copied();
+            let b = operation.inputs().get(1).copied();
             let (Some(a), Some(b)) = (a, b) else {
                 continue;
             };
@@ -347,16 +349,19 @@ impl<'a> SwitchIdiomMatcher<'a> {
     }
 
     fn label_offset(&self, index: Varnode, before: usize) -> i64 {
-        let Some((_, op)) = self.defining_operation(&index, before) else {
+        let Some((_, operation)) = self.defining_operation(&index, before) else {
             return 0;
         };
-        let (Some(a), Some(b)) = (op.inputs().first().copied(), op.inputs().get(1).copied()) else {
+        let (Some(a), Some(b)) = (
+            operation.inputs().first().copied(),
+            operation.inputs().get(1).copied(),
+        ) else {
             return 0;
         };
-        let Some((constant, _)) = Self::split_constant(a, b) else {
+        let Some((constant, _)) = constant_and_value(a, b) else {
             return 0;
         };
-        match op.op() {
+        match operation.op() {
             Op::IntSub => constant as i64,
             Op::IntAdd => (constant as i64).wrapping_neg(),
             _ => 0,

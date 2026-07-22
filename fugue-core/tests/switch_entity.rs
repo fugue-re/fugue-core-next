@@ -1,11 +1,10 @@
 use fugue_core::ir::{
-    Address, AddressTable, AddressWithContext, Switch, SwitchCase, SwitchCaseLabel, SwitchModel,
-    SwitchProvenance, SwitchTable,
+    Address, AddressTable, AddressWithContext, Switch, SwitchCase, SwitchCaseLabel, SwitchEvidence,
+    SwitchModel, SwitchTable,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::storage::EntityStorage;
 use fugue_core::storage::entities::InMemoryEntityStorage;
-use fugue_specs::Confidence;
 
 fn table_of(size: u32, shift: u8) -> AddressTable {
     AddressTable::new(Address::from(0x2000u64), size)
@@ -81,10 +80,7 @@ fn switch_survives_rkyv_roundtrip() {
             ));
             case.add_label(SwitchCaseLabel::new(7));
             switch.add_case(case);
-            switch.set_provenance(SwitchProvenance::new(
-                Confidence::somewhat_certain(),
-                Default::default(),
-            ));
+            switch.set_evidence(SwitchEvidence::GUARD_FOUND);
             switch.mark_truncated();
             switch
         })
@@ -98,6 +94,7 @@ fn switch_survives_rkyv_roundtrip() {
     assert_eq!(restored.case_count(), 1);
     assert_eq!(restored.cases()[0].labels(), &[SwitchCaseLabel::new(7)]);
     assert!(restored.is_truncated());
+    assert!(restored.evidence().contains(SwitchEvidence::TRUNCATED));
     assert!(matches!(
         restored.model(),
         SwitchModel::OffsetRelative { signed: true, .. }

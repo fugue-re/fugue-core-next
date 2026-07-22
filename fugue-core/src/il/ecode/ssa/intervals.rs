@@ -19,9 +19,9 @@ impl StridedIntervals {
 
         let block_arguments = body.block_argument_sources();
         let mut dependents = vec![Vec::new(); body.values().len()];
-        for (argument, feeders) in &block_arguments {
-            for feeder in feeders {
-                dependents[feeder.index()].push(argument.index());
+        for (argument, sources) in &block_arguments {
+            for source in sources {
+                dependents[source.index()].push(argument.index());
             }
         }
 
@@ -31,13 +31,13 @@ impl StridedIntervals {
         while let Some(index) = worklist.pop() {
             let value = IlValueId::try_from_index(index).expect("value id is representable");
             let next = match block_arguments.get(&value) {
-                Some(feeders) if feeders.is_empty() => {
+                Some(sources) if sources.is_empty() => {
                     StridedInterval::full(body.value_width(value).unwrap_or(0))
                 }
-                Some(feeders) => {
-                    let joined = feeders.iter().fold(
+                Some(sources) => {
+                    let joined = sources.iter().fold(
                         StridedInterval::empty(body.value_width(value).unwrap_or(0)),
-                        |accumulated, feeder| accumulated.join(&this.intervals[feeder.index()]),
+                        |accumulated, source| accumulated.join(&this.intervals[source.index()]),
                     );
                     this.intervals[index].widen(&joined)
                 }
@@ -124,7 +124,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange, IlValueId,
+        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange,
     };
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
@@ -297,10 +297,9 @@ mod test {
             ))
             .unwrap();
 
-        let empty: [IlValueId; 0] = [];
         builder.push_edge_arguments([seed]).unwrap();
         builder.push_edge_arguments([next]).unwrap();
-        builder.push_edge_arguments(empty).unwrap();
+        builder.push_edge_arguments([]).unwrap();
 
         let body = builder.build(&CancellationToken::default()).unwrap();
         let intervals = StridedIntervals::build(&body);

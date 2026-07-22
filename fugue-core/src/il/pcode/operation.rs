@@ -527,7 +527,6 @@ impl PCodeOpcode {
                 | Self::FloatCeiling
                 | Self::FloatFloor
                 | Self::FloatRound
-                | Self::FloatToFloat
         )
     }
 
@@ -600,15 +599,15 @@ impl PCodeOp {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AddressAnnotationRole {
-    DirectTarget,
     ComputedSpace,
+    DirectTarget,
     KnownTargets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressAnnotationValue<'a> {
-    DirectTarget(Location),
     ComputedSpace(AddressSpaceId),
+    DirectTarget(Location),
     KnownTargets(&'a [Address]),
 }
 

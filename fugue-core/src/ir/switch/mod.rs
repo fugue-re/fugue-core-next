@@ -29,7 +29,7 @@ pub struct Switch {
     model: SwitchModel,
     cases: Vec<SwitchCase>,
     default: Option<SwitchCase>,
-    provenance: SwitchProvenance,
+    evidence: SwitchEvidence,
     properties: SwitchProperties,
 }
 
@@ -66,7 +66,7 @@ impl Switch {
             model,
             cases: Vec::new(),
             default: None,
-            provenance: SwitchProvenance::default(),
+            evidence: SwitchEvidence::default(),
             properties: SwitchProperties::NONE,
         }
     }
@@ -121,12 +121,25 @@ impl Switch {
         self.default = Some(case);
     }
 
-    pub fn provenance(&self) -> &SwitchProvenance {
-        &self.provenance
+    pub fn evidence(&self) -> SwitchEvidence {
+        self.evidence
     }
 
-    pub fn set_provenance(&mut self, provenance: SwitchProvenance) {
-        self.provenance = provenance;
+    pub fn set_evidence(&mut self, evidence: SwitchEvidence) {
+        self.evidence = evidence;
+        self.properties.set(
+            SwitchProperties::TRUNCATED,
+            evidence.contains(SwitchEvidence::TRUNCATED),
+        );
+    }
+
+    pub fn with_evidence(mut self, evidence: SwitchEvidence) -> Self {
+        self.set_evidence(evidence);
+        self
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.evidence.confidence()
     }
 
     pub fn properties(&self) -> SwitchProperties {
@@ -138,6 +151,7 @@ impl Switch {
     }
 
     pub fn mark_truncated(&mut self) {
+        self.evidence.insert(SwitchEvidence::TRUNCATED);
         self.properties.insert(SwitchProperties::TRUNCATED);
     }
 
@@ -162,7 +176,7 @@ impl Switch {
     }
 
     pub fn is_truncated(&self) -> bool {
-        self.properties.contains(SwitchProperties::TRUNCATED)
+        self.evidence.contains(SwitchEvidence::TRUNCATED)
     }
 
     pub fn has_default(&self) -> bool {
@@ -305,31 +319,6 @@ impl SwitchCase {
     }
 }
 
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
-pub struct SwitchProvenance {
-    confidence: Confidence,
-    evidence: SwitchEvidence,
-}
-
-impl SwitchProvenance {
-    pub fn new(confidence: Confidence, evidence: SwitchEvidence) -> Self {
-        Self {
-            confidence,
-            evidence,
-        }
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
-    pub fn evidence(&self) -> SwitchEvidence {
-        self.evidence
-    }
-}
-
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SwitchProperties: u32 {
@@ -338,6 +327,27 @@ bitflags::bitflags! {
         const TRUNCATED   = 0x0000_0002;
         const ASSISTED    = 0x0000_0008;
         const OVERRIDE    = 0x0000_0010;
+    }
+}
+
+impl SwitchEvidence {
+    pub(crate) fn from_recovery(guarded: bool, truncated: bool) -> Self {
+        let mut evidence = Self::TARGETS_IN_EXECUTABLE;
+        if guarded {
+            evidence |= Self::GUARD_FOUND;
+        }
+        if truncated {
+            evidence |= Self::TRUNCATED;
+        }
+        evidence
+    }
+
+    pub fn confidence(self) -> Confidence {
+        if self.contains(Self::GUARD_FOUND) && !self.contains(Self::TRUNCATED) {
+            Confidence::somewhat_certain()
+        } else {
+            Confidence::uncertain()
+        }
     }
 }
 

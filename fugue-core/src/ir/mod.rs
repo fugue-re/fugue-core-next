@@ -46,7 +46,7 @@ pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 pub mod switch;
 pub use switch::{
     Switch, SwitchCase, SwitchCaseLabel, SwitchEvidence, SwitchId, SwitchModel, SwitchProperties,
-    SwitchProvenance, SwitchTable, SwitchTableError,
+    SwitchTable, SwitchTableError,
 };
 
 pub mod symbol;
