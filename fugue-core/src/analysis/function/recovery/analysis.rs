@@ -8,16 +8,15 @@ use tracing::Level;
 
 use super::{
     FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
-    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError, PartialFunction,
-    PartialFunctionWithContext, Translator,
+    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError,
+    FunctionRecoveryState, InsnResolver,
 };
 use crate::analysis::control::{CancellationToken, Progress};
-use crate::analysis::switch::SwitchRecovery;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{Analyser, AnalyserProvider, AnalysisCx, Priority, Trigger};
 use crate::ir::{
-    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable, RawAddress,
-    RawAddressRangeSet, SwitchCase,
+    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable,
+    IncompleteFunction, RawAddress, RawAddressRangeSet, SwitchCase,
 };
 use crate::project::{Project, ProjectTransaction};
 use crate::registry::{self, Registration, submit};
@@ -36,7 +35,7 @@ pub struct FunctionRecovery {
     commit_hook: Option<Box<dyn FunctionRecoveryCommitHook + 'static>>,
     chunk_candidate_limit: Option<usize>,
     chunk_function_limit: Option<usize>,
-    pending_functions: BTreeMap<Address, PartialFunction>,
+    pending_functions: BTreeMap<Address, IncompleteFunction>,
     cancellation: CancellationToken,
     progress: Progress,
 }
@@ -87,7 +86,7 @@ pub struct FunctionStructuringContext {
     failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
-    pending_functions: BTreeMap<Address, PartialFunction>,
+    pending_functions: BTreeMap<Address, IncompleteFunction>,
     committed_functions: BTreeSet<Address>,
     removed_functions: BTreeSet<Address>,
 }
@@ -258,14 +257,14 @@ impl FunctionStructuringContext {
         &self.new_functions
     }
 
-    pub fn pending_functions(&self) -> &BTreeMap<Address, PartialFunction> {
+    pub fn pending_functions(&self) -> &BTreeMap<Address, IncompleteFunction> {
         &self.pending_functions
     }
 
     pub fn add_function(
         &mut self,
         address: impl Into<Address>,
-        function: PartialFunction,
+        function: IncompleteFunction,
         confidence: Confidence,
     ) -> bool {
         let address = address.into();
@@ -293,7 +292,7 @@ impl FunctionStructuringContext {
         f: F,
     ) -> Result<(), FunctionRecoveryError>
     where
-        F: FnOnce(&mut PartialFunction) -> Result<(), FunctionRecoveryError>,
+        F: FnOnce(&mut IncompleteFunction) -> Result<(), FunctionRecoveryError>,
     {
         let address = address.into();
         let Some(function) = self.pending_functions.get_mut(&address) else {
@@ -342,7 +341,7 @@ impl FunctionDiscoveryContext {
 
     fn candidate_known(
         project: &Project,
-        pending_functions: &BTreeMap<Address, PartialFunction>,
+        pending_functions: &BTreeMap<Address, IncompleteFunction>,
         functions: &BTreeMap<Address, Confidence>,
         new_functions: &BTreeMap<Address, Confidence>,
         address: Address,
@@ -366,12 +365,9 @@ impl FunctionRecovery {
     }
 
     pub fn new_with(config: FunctionRecoveryConfig) -> Self {
-        let mut builder = FunctionBuilder::new(config);
-        builder.add_post_lifting_pass("switch-recovery", SwitchRecovery::new());
-
         FunctionRecovery {
             candidates: VecDeque::new(),
-            builder,
+            builder: FunctionBuilder::new(config),
             discovery_passes: AnalysisGroup::new(),
             structuring_passes: AnalysisGroup::new(),
             commit_hook: None,
@@ -446,6 +442,7 @@ impl FunctionRecovery {
     ) -> &mut AnalysisGroup<FunctionStructuringContext> {
         &mut self.structuring_passes
     }
+
     pub fn add_candidate_discovery_pass(
         &mut self,
         name: impl Into<String>,
@@ -470,12 +467,12 @@ impl FunctionRecovery {
         self.builder.add_initialisation_pass(name, pass);
     }
 
-    pub fn add_builder_post_lifting_pass(
+    pub fn add_builder_post_structuring_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
+        pass: impl AnalysisPass<FunctionRecoveryState> + 'static,
     ) {
-        self.builder.add_post_lifting_pass(name, pass);
+        self.builder.add_post_structuring_pass(name, pass);
     }
 
     pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook + 'static) {
@@ -605,7 +602,7 @@ impl FunctionRecovery {
     fn commit_pending_function(
         transaction: &mut ProjectTransaction<'_>,
         address: Address,
-        mut function: PartialFunction,
+        mut function: IncompleteFunction,
     ) -> Result<(), AnalysisError> {
         tracing::debug!("committing pending function at {address}");
 
@@ -757,7 +754,7 @@ impl FunctionRecovery {
         // global state
         let mut failures = BTreeSet::new();
         let mut functions = BTreeMap::new();
-        let mut translator = Translator::new(transaction.project());
+        let mut resolver = InsnResolver::new(transaction.project());
 
         // per pass state
         let mut new_functions = BTreeMap::new();
@@ -855,7 +852,7 @@ impl FunctionRecovery {
 
                 let function = match self.builder.analyse(
                     transaction,
-                    &mut translator,
+                    &mut resolver,
                     candidate,
                     &self.cancellation,
                 ) {

@@ -71,7 +71,7 @@ impl SwitchIndex {
     }
 }
 
-struct SwitchTableAllocation {
+pub(crate) struct SwitchTableAllocation {
     free_ids_len: usize,
     free_ids_tail: Vec<SwitchId>,
     next_index: usize,

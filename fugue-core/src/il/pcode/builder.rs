@@ -23,7 +23,7 @@ use crate::storage::entities::schema::ENTITY_IL_PCODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 
-pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
+pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(3);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PCodeIr {

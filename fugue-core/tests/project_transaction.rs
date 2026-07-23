@@ -2,12 +2,11 @@ use std::io;
 use std::path::PathBuf;
 
 use fugue_core::analysis::control::CancellationToken;
-use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 use fugue_core::engine::change::{ChangeRecord, FunctionChangeKind};
 use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, FunctionId, IncompleteCodeBlock, IncompleteFunction,
+    SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{Project, ProjectError};
@@ -40,14 +39,12 @@ fn cancelled_token() -> CancellationToken {
     cancellation
 }
 
-fn partial_function(entry: Address, len: usize) -> PartialFunction {
-    let mut function = PartialFunction::new(entry);
-    function.push_block(PartialCodeBlock::new(
-        entry,
-        len,
-        Vec::new(),
-        ContextSet::default(),
-    ));
+fn incomplete_function(entry: Address, len: usize) -> IncompleteFunction {
+    let mut function = IncompleteFunction::new(entry);
+    function.push_block(
+        IncompleteCodeBlock::try_new(entry, len, Vec::new(), ContextSet::default())
+            .expect("test block length must fit"),
+    );
 
     function
 }
@@ -84,7 +81,7 @@ fn test_ensure_lifted_rebuilds_deterministic_content() -> Result<(), Box<dyn std
     let entry = writable_address(&project)?;
     let function = {
         let mut transaction = project.transaction("test");
-        let function = transaction.add_function(partial_function(entry, 1))?;
+        let function = transaction.add_function(incomplete_function(entry, 1))?;
         transaction.commit()?;
         function
     };
@@ -392,12 +389,48 @@ fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn test_adding_function_preserves_incomplete_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let entry = Address::from(0x4000u64);
+    let mut function = IncompleteFunction::new_with(Some("named".into()), entry);
+    function.mark_non_returning();
+    let mut block = IncompleteCodeBlock::new(entry, 1, Vec::new(), ContextSet::default());
+    block.mark_entry();
+    block.mark_exit();
+    function.push_block(block);
+
+    let mut transaction = project.transaction("test");
+    let function_id = transaction.add_function(function)?;
+    transaction.commit()?;
+
+    let function = project
+        .functions()
+        .get_by_id(function_id)
+        .expect("function should exist");
+    assert_eq!(function.name().as_deref(), Some("named"));
+    assert!(function.is_non_returning());
+    let block_id = function
+        .blocks()
+        .next()
+        .map(|(_, block)| block)
+        .expect("function should have one block");
+    let block = project
+        .blocks()
+        .get_by_id(block_id)
+        .expect("block should exist");
+    assert!(block.is_entry());
+    assert!(block.is_exit());
+
+    Ok(())
+}
+
+#[test]
 fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
-    let mut first = PartialFunction::new(entry);
-    first.push_block(PartialCodeBlock::new(
+    let mut first = IncompleteFunction::new(entry);
+    first.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),
@@ -425,8 +458,8 @@ fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error
         .and_then(|function| function.blocks().next().map(|(_, id)| id))
         .expect("function should have one block");
 
-    let mut second = PartialFunction::new(entry);
-    second.push_block(PartialCodeBlock::new(
+    let mut second = IncompleteFunction::new(entry);
+    second.push_block(IncompleteCodeBlock::new(
         entry,
         2,
         Vec::new(),
@@ -461,8 +494,8 @@ fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::er
     let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
-    let mut first = PartialFunction::new(entry);
-    first.push_block(PartialCodeBlock::new(
+    let mut first = IncompleteFunction::new(entry);
+    first.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),
@@ -479,8 +512,8 @@ fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::er
         .and_then(|function| function.blocks().next().map(|(_, id)| id))
         .expect("function should have one block");
 
-    let mut second = PartialFunction::new(entry);
-    second.push_block(PartialCodeBlock::new(
+    let mut second = IncompleteFunction::new(entry);
+    second.push_block(IncompleteCodeBlock::new(
         entry,
         2,
         Vec::new(),
@@ -508,8 +541,8 @@ fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::E
     let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
-    let mut function = PartialFunction::new(entry);
-    function.push_block(PartialCodeBlock::new(
+    let mut function = IncompleteFunction::new(entry);
+    function.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),
@@ -531,8 +564,8 @@ fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::er
     let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
-    let mut first = PartialFunction::new(entry);
-    first.push_block(PartialCodeBlock::new(
+    let mut first = IncompleteFunction::new(entry);
+    first.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),
@@ -549,8 +582,8 @@ fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::er
         .expect("function should have one block");
     transaction.rollback()?;
 
-    let mut second = PartialFunction::new(entry);
-    second.push_block(PartialCodeBlock::new(
+    let mut second = IncompleteFunction::new(entry);
+    second.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),

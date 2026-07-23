@@ -94,7 +94,6 @@ fn switch_survives_rkyv_roundtrip() {
     assert_eq!(restored.case_count(), 1);
     assert_eq!(restored.cases()[0].labels(), &[SwitchCaseLabel::new(7)]);
     assert!(restored.is_truncated());
-    assert!(restored.evidence().contains(SwitchEvidence::TRUNCATED));
     assert!(matches!(
         restored.model(),
         SwitchModel::OffsetRelative { signed: true, .. }

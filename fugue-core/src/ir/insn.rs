@@ -68,6 +68,16 @@ impl Insn {
         })
     }
 
+    pub(crate) fn resolve_flow(
+        &mut self,
+        language: &'static Language,
+        length: usize,
+        operations: &[PCodeOp],
+    ) -> Result<(), InsnError> {
+        *self = Self::from_resolved_flow(language, self.address, length, operations)?;
+        Ok(())
+    }
+
     pub(crate) fn from_disassembly(
         address: Address,
         length: usize,

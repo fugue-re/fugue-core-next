@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use fugue_lifter::runtime::language::Language;
 use fugue_lifter::{Op, PCodeOp as RawPCodeOp};
 use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
-use crate::analysis::function::recovery::PartialFunction;
 use crate::il::common::{
     IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlHeader, IlIndexRange, IlLevel,
     IlOpId, IlSourceSpan,
@@ -15,29 +14,30 @@ use crate::il::pcode::{
     PCodeBuilder, PCodeError, PCodeIr,
 };
 use crate::ir::{
-    Address, CodeBlockId, CodeBlockTable, FunctionId, FunctionTable, Insn, InsnTarget, Location,
+    Address, CodeBlockId, CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction, Insn,
+    InsnTarget, Location,
 };
-use crate::lifter::Lifter;
+use crate::lifter::{ContextSet, Lifter};
 use crate::storage::SegmentStorageError;
-use crate::storage::segments::{SegmentReader, SegmentStorage};
+use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
 
 #[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
     code_block_ids: Vec<CodeBlockId>,
     block_id_by_code_block: BTreeMap<CodeBlockId, IlBlockId>,
+}
+
+struct PCodeFunctionBuilder<'a> {
+    language: &'static Language,
+    builder: PCodeBuilder,
+    mapping_cache: SegmentMappingCache<'a>,
+    lifter: Lifter,
+    blocks: Vec<IlBlock>,
+    successors: Vec<IlBlockId>,
+    block_sources: Vec<Address>,
+    source_spans: Vec<IlSourceSpan>,
     annotations: Vec<AddressAnnotation<'static>>,
     operations: Vec<RawPCodeOp>,
-}
-
-pub(crate) struct PartialPCodeBuild {
-    ir: PCodeIr,
-    omitted_blocks: Vec<Address>,
-}
-
-impl PartialPCodeBuild {
-    pub(crate) fn into_parts(self) -> (PCodeIr, Vec<Address>) {
-        (self.ir, self.omitted_blocks)
-    }
 }
 
 impl PCodeCanonicaliser {
@@ -56,7 +56,6 @@ impl PCodeCanonicaliser {
             return Err(IlError::missing_artefact(function, IlLevel::PCode).into());
         };
 
-        let mut lifter = Lifter::new(language);
         self.code_block_ids.clear();
         self.block_id_by_code_block.clear();
 
@@ -67,11 +66,8 @@ impl PCodeCanonicaliser {
         }
 
         let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
-        let mut cfg_blocks = Vec::new();
+        let mut builder = PCodeFunctionBuilder::new(language, header, segments);
         let mut successors = Vec::new();
-        let mut source_spans = Vec::new();
-        let mut reader = SegmentReader::new(segments);
 
         for index in 0..self.code_block_ids.len() {
             cancellation.check()?;
@@ -81,290 +77,136 @@ impl PCodeCanonicaliser {
                 return Err(IlError::missing_artefact(function, IlLevel::PCode).into());
             };
 
-            let block_start = builder.operation_count();
-
-            code_block
-                .context()
-                .apply(code_block.address(), lifter.context_mut());
-
-            self.append_instructions(
-                language,
-                &mut builder,
-                &mut reader,
-                &mut lifter,
+            successors.clear();
+            successors.extend(
+                code_block
+                    .successors()
+                    .iter()
+                    .filter_map(|successor| self.block_id_by_code_block.get(&successor).copied()),
+            );
+            builder.append_block(
+                code_block.address(),
+                code_block.context(),
                 code_block.instructions(),
-                &mut source_spans,
+                &successors,
+                code_block.address() == function_body.entry(),
             )?;
-
-            let successor_start = successors.len();
-
-            for successor in code_block.successors().iter() {
-                if let Some(successor) = self.block_id_by_code_block.get(&successor).copied() {
-                    successors.push(successor);
-                }
-            }
-
-            let mut props = IlBlockProperties::empty();
-            if code_block.address() == function_body.entry() {
-                props |= IlBlockProperties::ENTRY;
-            }
-            if code_block.successors().is_empty() {
-                props |= IlBlockProperties::EXIT;
-            }
-
-            cfg_blocks.push(IlBlock::new(
-                IlIndexRange::new(block_start, builder.operation_count())?,
-                IlIndexRange::new(successor_start, successors.len())?,
-                props,
-            ));
         }
 
         self.code_block_ids.clear();
 
-        builder.replace_graph(IlGraph::new(cfg_blocks, successors));
-        builder.replace_source_spans(source_spans);
-
-        Ok(builder.build(cancellation)?)
+        builder.build(cancellation)
     }
 
-    pub fn build_partial_function(
+    pub fn build_incomplete_function(
         &mut self,
         language: &'static Language,
-        function: &PartialFunction,
+        function: &IncompleteFunction,
         segments: &SegmentStorage,
         input_revision: u64,
         cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
-        let mut lifter = Lifter::new(language);
-
         let header = IlHeader::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
-        let mut cfg_blocks = Vec::new();
+        let mut builder = PCodeFunctionBuilder::new(language, header, segments);
         let mut successors = Vec::new();
-        let mut source_spans = Vec::new();
-        let mut reader = SegmentReader::new(segments);
 
         for block in function.blocks() {
             cancellation.check()?;
 
-            let block_start = builder.operation_count();
-
-            block.context().apply(block.address(), lifter.context_mut());
-
-            self.append_instructions(
-                language,
-                &mut builder,
-                &mut reader,
-                &mut lifter,
-                block.insns().iter().map(|&insn| &function.insns()[insn]),
-                &mut source_spans,
+            successors.clear();
+            for successor in block.successors().iter() {
+                successors.push(IlBlockId::try_from_index(successor.index())?);
+            }
+            builder.append_block(
+                block.address(),
+                block.context(),
+                block
+                    .insns()
+                    .iter()
+                    .map(|&insn| function.insn(insn).expect("block instruction must exist")),
+                &successors,
+                block.address() == function.entry(),
             )?;
-
-            let successor_start = successors.len();
-
-            for &successor in block.successors() {
-                successors.push(IlBlockId::try_from_index(successor)?);
-            }
-
-            let mut props = IlBlockProperties::empty();
-            if block.address() == function.entry() {
-                props |= IlBlockProperties::ENTRY;
-            }
-            if block.successors().is_empty() {
-                props |= IlBlockProperties::EXIT;
-            }
-
-            cfg_blocks.push(IlBlock::new(
-                IlIndexRange::new(block_start, builder.operation_count())?,
-                IlIndexRange::new(successor_start, successors.len())?,
-                props,
-            ));
         }
 
-        builder.replace_graph(IlGraph::new(cfg_blocks, successors));
-        builder.replace_source_spans(source_spans);
+        builder.build(cancellation)
+    }
+}
 
-        Ok(builder.build(cancellation)?)
+impl<'a> PCodeFunctionBuilder<'a> {
+    fn new(language: &'static Language, header: IlHeader, segments: &'a SegmentStorage) -> Self {
+        Self {
+            language,
+            builder: PCodeBuilder::new(language, header, IlGraph::default()),
+            mapping_cache: SegmentMappingCache::new(segments),
+            lifter: Lifter::new(language),
+            blocks: Vec::new(),
+            successors: Vec::new(),
+            block_sources: Vec::new(),
+            source_spans: Vec::new(),
+            annotations: Vec::new(),
+            operations: Vec::new(),
+        }
     }
 
-    pub(crate) fn build_partial_function_tolerant(
+    fn append_block<'i>(
         &mut self,
-        language: &'static Language,
-        function: &PartialFunction,
-        segments: &SegmentStorage,
-        input_revision: u64,
-        cancellation: &CancellationToken,
-    ) -> Result<PartialPCodeBuild, PCodeError> {
-        let block_count = function.blocks().len();
-        let entry = function
-            .blocks()
-            .iter()
-            .position(|block| block.address() == function.entry())
-            .ok_or_else(|| IlError::missing_component(IlLevel::PCode, "entry block"))?;
-        let mut omitted = vec![false; block_count];
-        let mut failed = VecDeque::new();
-        let mut reader = SegmentReader::new(segments);
+        source: Address,
+        context: &ContextSet,
+        instructions: impl IntoIterator<Item = &'i Insn>,
+        successors: &[IlBlockId],
+        is_entry: bool,
+    ) -> Result<(), PCodeError> {
+        let operation_start = self.builder.operation_count();
+        context.apply(source, self.lifter.context_mut());
+        self.append_instructions(instructions)?;
 
-        for (index, block) in function.blocks().iter().enumerate() {
-            cancellation.check()?;
+        let successor_start = self.successors.len();
+        self.successors.extend_from_slice(successors);
 
-            let header = IlHeader::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
-            let mut scratch = PCodeBuilder::new(language, header, IlGraph::default());
-            let mut lifter = Lifter::new(language);
-            let mut source_spans = Vec::new();
-            block.context().apply(block.address(), lifter.context_mut());
-            let result = self.append_instructions(
-                language,
-                &mut scratch,
-                &mut reader,
-                &mut lifter,
-                block.insns().iter().map(|&insn| &function.insns()[insn]),
-                &mut source_spans,
-            );
-
-            match result {
-                Ok(()) => {}
-                Err(error) if Self::is_omittable_partial_error(&error) => {
-                    omitted[index] = true;
-                    failed.push_back(index);
-                }
-                Err(error) => return Err(error),
-            }
+        let mut properties = IlBlockProperties::empty();
+        if is_entry {
+            properties |= IlBlockProperties::ENTRY;
+        }
+        if successors.is_empty() {
+            properties |= IlBlockProperties::EXIT;
         }
 
-        while let Some(index) = failed.pop_front() {
-            for &successor in function.blocks()[index].successors() {
-                let Some(successor_omitted) = omitted.get_mut(successor) else {
-                    return Err(IlError::range_out_of_bounds(successor as u32, block_count).into());
-                };
-                if !*successor_omitted {
-                    *successor_omitted = true;
-                    failed.push_back(successor);
-                }
-            }
-        }
+        self.blocks.push(IlBlock::new(
+            IlIndexRange::new(operation_start, self.builder.operation_count())?,
+            IlIndexRange::new(successor_start, self.successors.len())?,
+            properties,
+        ));
+        self.block_sources.push(source);
 
-        let mut retained = vec![false; block_count];
-        if !omitted[entry] {
-            let mut reachable = VecDeque::from([entry]);
-            while let Some(index) = reachable.pop_front() {
-                if retained[index] {
-                    continue;
-                }
-                retained[index] = true;
-                for &successor in function.blocks()[index].successors() {
-                    let Some(&successor_omitted) = omitted.get(successor) else {
-                        return Err(
-                            IlError::range_out_of_bounds(successor as u32, block_count).into()
-                        );
-                    };
-                    if !successor_omitted {
-                        reachable.push_back(successor);
-                    }
-                }
-            }
-        }
-
-        let mut remapped = vec![None; block_count];
-        let mut retained_count = 0usize;
-        for (index, is_retained) in retained.iter().copied().enumerate() {
-            if is_retained {
-                remapped[index] = Some(IlBlockId::try_from_index(retained_count)?);
-                retained_count += 1;
-            }
-        }
-
-        let header = IlHeader::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
-        let mut cfg_blocks = Vec::with_capacity(retained_count);
-        let mut successors = Vec::new();
-        let mut source_spans = Vec::new();
-        let mut lifter = Lifter::new(language);
-
-        for (index, block) in function.blocks().iter().enumerate() {
-            if !retained[index] {
-                continue;
-            }
-
-            cancellation.check()?;
-            let block_start = builder.operation_count();
-            block.context().apply(block.address(), lifter.context_mut());
-            self.append_instructions(
-                language,
-                &mut builder,
-                &mut reader,
-                &mut lifter,
-                block.insns().iter().map(|&insn| &function.insns()[insn]),
-                &mut source_spans,
-            )?;
-
-            let successor_start = successors.len();
-            for &successor in block.successors() {
-                if let Some(successor) = remapped.get(successor).copied().flatten() {
-                    successors.push(successor);
-                }
-            }
-
-            let mut properties = IlBlockProperties::empty();
-            if index == entry {
-                properties |= IlBlockProperties::ENTRY;
-            }
-            if successor_start == successors.len() {
-                properties |= IlBlockProperties::EXIT;
-            }
-            cfg_blocks.push(IlBlock::new(
-                IlIndexRange::new(block_start, builder.operation_count())?,
-                IlIndexRange::new(successor_start, successors.len())?,
-                properties,
-            ));
-        }
-
-        builder.replace_graph(IlGraph::new(cfg_blocks, successors));
-        builder.replace_source_spans(source_spans);
-        let ir = builder.build(cancellation)?;
-        let mut omitted_blocks = function
-            .blocks()
-            .iter()
-            .zip(retained)
-            .filter_map(|(block, retained)| (!retained).then_some(block.address()))
-            .collect::<Vec<_>>();
-        omitted_blocks.sort_unstable();
-
-        Ok(PartialPCodeBuild { ir, omitted_blocks })
-    }
-
-    fn is_omittable_partial_error(error: &PCodeError) -> bool {
-        !matches!(error, PCodeError::Common(_))
+        Ok(())
     }
 
     fn append_instructions<'i>(
         &mut self,
-        language: &'static Language,
-        builder: &mut PCodeBuilder,
-        reader: &mut SegmentReader,
-        lifter: &mut Lifter,
         instructions: impl IntoIterator<Item = &'i Insn>,
-        source_spans: &mut Vec<IlSourceSpan>,
     ) -> Result<(), PCodeError> {
         for insn in instructions {
             self.operations.clear();
 
-            let Some(window) = reader
-                .view(insn.address())
-                .and_then(|view| view.bytes_from(insn.address()))
-            else {
+            let Some(view) = self.mapping_cache.view_containing(insn.address()) else {
+                return Err(SegmentStorageError::InvalidAddress.into());
+            };
+            let Some(window) = view.bytes_from(insn.address()) else {
                 return Err(SegmentStorageError::InvalidAddress.into());
             };
             let Some(bytes) = window.as_contiguous() else {
                 return Err(SegmentStorageError::InvalidAddress.into());
             };
 
-            let lifted_len = lifter.lift_into(insn.address(), bytes, &mut self.operations)?;
-            let source_start = builder.operation_count();
+            let lifted_len = self
+                .lifter
+                .lift(insn.address(), bytes, &mut self.operations)?;
+            let source_start = self.builder.operation_count();
 
             self.annotations.clear();
             let emitted = Self::push_address_annotations(
-                language,
+                self.language,
                 insn.address(),
                 lifted_len,
                 &self.operations,
@@ -372,10 +214,11 @@ impl PCodeCanonicaliser {
                 &mut self.annotations,
             )?;
             let mut context = PCodeAddressContext::new(insn.address(), &self.annotations);
-            builder.push_lifted_operations(&self.operations, &mut context)?;
+            self.builder
+                .push_lifted_operations(&self.operations, &mut context)?;
 
-            source_spans.push(IlSourceSpan::new(
-                IlIndexRange::new(source_start, builder.operation_count())?,
+            self.source_spans.push(IlSourceSpan::new(
+                IlIndexRange::new(source_start, self.builder.operation_count())?,
                 insn.address(),
                 0,
                 u32::try_from(emitted).expect("instruction pcode count fits in u32"),
@@ -469,6 +312,15 @@ impl PCodeCanonicaliser {
         }
 
         (raw_index == raw_target).then(|| Location::new(target.address(), semantic_index))
+    }
+
+    fn build(mut self, cancellation: &CancellationToken) -> Result<PCodeIr, PCodeError> {
+        self.builder.replace_graph(
+            IlGraph::new(self.blocks, self.successors).with_block_sources(self.block_sources),
+        );
+        self.builder.replace_source_spans(self.source_spans);
+
+        Ok(self.builder.build(cancellation)?)
     }
 }
 

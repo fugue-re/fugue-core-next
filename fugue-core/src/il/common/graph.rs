@@ -1,4 +1,5 @@
 use crate::il::common::{IlBlockId, IlIndexRange};
+use crate::ir::Address;
 
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
@@ -96,6 +97,7 @@ impl IlBlock {
 pub struct IlGraph {
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
+    block_sources: Vec<Address>,
 }
 
 impl IlGraph {
@@ -114,7 +116,21 @@ impl IlGraph {
             );
         }
 
-        Self { blocks, successors }
+        Self {
+            blocks,
+            successors,
+            block_sources: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_block_sources(mut self, block_sources: Vec<Address>) -> Self {
+        debug_assert_eq!(
+            block_sources.len(),
+            self.blocks.len(),
+            "block source count matches the block count",
+        );
+        self.block_sources = block_sources;
+        self
     }
 
     pub fn blocks(&self) -> &[IlBlock] {
@@ -123,6 +139,14 @@ impl IlGraph {
 
     pub fn successors(&self) -> &[IlBlockId] {
         &self.successors
+    }
+
+    pub fn block_sources(&self) -> &[Address] {
+        &self.block_sources
+    }
+
+    pub fn block_source(&self, block: IlBlockId) -> Option<Address> {
+        self.block_sources.get(block.index()).copied()
     }
 
     pub fn entry_block(&self) -> Option<IlBlockId> {
@@ -142,6 +166,7 @@ impl IlGraph {
     pub fn shrink_to_fit(&mut self) {
         self.blocks.shrink_to_fit();
         self.successors.shrink_to_fit();
+        self.block_sources.shrink_to_fit();
     }
 }
 

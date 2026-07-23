@@ -30,6 +30,8 @@ pub(crate) enum VerifyError {
         expected: usize,
         found: usize,
     },
+    #[error("block source count mismatch: expected {expected}, found {found}")]
+    BlockSourceCount { expected: usize, found: usize },
     #[error("{level} operation has a duplicate memory domain")]
     DuplicateMemoryDomain { level: IlLevel },
     #[error("block {block} has duplicate successor {successor}")]
@@ -72,7 +74,14 @@ pub(crate) enum VerifyError {
 }
 
 pub(crate) fn verify_graph(graph: &IlGraph) -> Result<(), VerifyError> {
-    verify_blocks(graph.blocks(), graph.successors())
+    verify_blocks(graph.blocks(), graph.successors())?;
+    if !graph.block_sources().is_empty() && graph.block_sources().len() != graph.blocks().len() {
+        return Err(VerifyError::BlockSourceCount {
+            expected: graph.blocks().len(),
+            found: graph.block_sources().len(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_graph_bounds(graph: &IlGraph, node_count: usize) -> Result<(), VerifyError> {

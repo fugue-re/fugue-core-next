@@ -88,6 +88,8 @@ impl PCodeToECode {
 
         let mut blocks = Vec::with_capacity(refined_block_count);
         let mut successors = Vec::new();
+        let mut block_sources = (!source.graph().block_sources().is_empty())
+            .then(|| Vec::with_capacity(refined_block_count));
 
         for (block_index, (source_block, ranges)) in source
             .graph()
@@ -195,10 +197,26 @@ impl PCodeToECode {
                     IlIndexRange::new(successor_start, successors.len())?,
                     properties,
                 ));
+                if let Some(block_sources) = block_sources.as_mut() {
+                    let source_address = if range_index == 0 {
+                        source.graph().block_sources()[block_index]
+                    } else {
+                        u32::try_from(range.start())
+                            .ok()
+                            .and_then(|operation| source.source_span_for(operation))
+                            .map(|span| span.address())
+                            .unwrap_or(source.graph().block_sources()[block_index])
+                    };
+                    block_sources.push(source_address);
+                }
             }
         }
 
-        Ok(IlGraph::new(blocks, successors))
+        let graph = IlGraph::new(blocks, successors);
+        Ok(match block_sources {
+            Some(block_sources) => graph.with_block_sources(block_sources),
+            None => graph,
+        })
     }
 
     fn push_successor(successors: &mut SmallVec<[IlBlockId; 2]>, successor: IlBlockId) {

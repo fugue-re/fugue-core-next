@@ -13,7 +13,10 @@ pub use address::{
 };
 
 pub mod block;
-pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable};
+pub use block::{
+    CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable, IncompleteCodeBlock,
+    IncompleteCodeBlockId,
+};
 
 pub mod call_graph;
 pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
@@ -23,7 +26,10 @@ pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
 pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
+pub use function::{
+    Function, FunctionId, FunctionProperties, FunctionTable, IncompleteFunction,
+    IncompleteFunctionError, InsnEntry,
+};
 
 pub mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};

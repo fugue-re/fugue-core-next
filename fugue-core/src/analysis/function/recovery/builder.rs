@@ -2,39 +2,34 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
 use std::ops::ControlFlow;
 
-use super::{
-    FunctionRecoveryConfig, FunctionRecoveryError, InsnEntry, PartialFunction, Translator,
-};
+use super::structuring::CodeBlockStructurer;
+use super::{FunctionRecoveryConfig, FunctionRecoveryError, InsnResolver};
 use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::ir::{Address, AddressWithContext, FlowKind, FlowTarget, RawAddressRangeSet};
+use crate::ir::{
+    Address, AddressWithContext, FlowKind, FlowTarget, IncompleteCodeBlockId, IncompleteFunction,
+    InsnEntry, RawAddressRangeSet,
+};
 use crate::lifter::ContextSet;
 use crate::project::ProjectTransaction;
 use crate::storage::SegmentStorage;
 
-pub struct PartialFunctionWithContext {
+pub struct FunctionRecoveryState {
     cancellation: CancellationToken,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
-    function: PartialFunction,
-}
-
-pub(crate) struct CodeBlockStructuringContext<'a> {
-    pub(crate) block_starts: &'a mut BTreeMap<Address, usize>,
-    pub(crate) block_ends: &'a mut BTreeMap<Address, usize>,
-    pub(crate) cut_points: &'a mut Vec<usize>,
-    pub(crate) contexts: &'a BTreeMap<Address, ContextSet>,
+    function: IncompleteFunction,
 }
 
 struct FunctionBuilderAnalysis<'a, 'p> {
     transaction: &'a mut ProjectTransaction<'p>,
-    translator: &'a mut Translator,
+    resolver: &'a mut InsnResolver,
     candidate: AddressWithContext,
     token: &'a CancellationToken,
     config: &'a FunctionRecoveryConfig,
     initialisation_passes: &'a mut AnalysisGroup<FunctionBuilderContext>,
-    post_lifting_passes: &'a mut AnalysisGroup<PartialFunctionWithContext>,
+    post_structuring_passes: &'a mut AnalysisGroup<FunctionRecoveryState>,
 }
 
 #[derive(Default)]
@@ -45,12 +40,7 @@ pub struct FunctionBuilderContext {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<AddressWithContext>,
-    // These are used to structure the blocks after lifting; we keep them here
-    // to avoid having to reallocate on each function analysis. They refer to
-    // the partial function being constructed.
-    block_starts: BTreeMap<Address, usize>,
-    block_ends: BTreeMap<Address, usize>,
-    cut_points: Vec<usize>,
+    structurer: CodeBlockStructurer,
 }
 
 pub struct FunctionBuilder {
@@ -58,12 +48,10 @@ pub struct FunctionBuilder {
     config: FunctionRecoveryConfig,
     // The context of the function being built.
     context: FunctionBuilderContext,
-    // These passes run once per function prior to the main lifting loop.
+    // These passes run once per function prior to instruction resolution.
     initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
-    // These passes run each iteration of the main lifting loop after all candidates within the
-    // pass have been lifted and the function's control-flow has been structured based on the
-    // identified blocks and flows.
-    post_lifting_passes: AnalysisGroup<PartialFunctionWithContext>,
+    // These passes run after the function's control flow has been structured on each iteration.
+    post_structuring_passes: AnalysisGroup<FunctionRecoveryState>,
 }
 
 impl FunctionBuilder {
@@ -72,7 +60,7 @@ impl FunctionBuilder {
             config,
             context: FunctionBuilderContext::new(),
             initialisation_passes: AnalysisGroup::new(),
-            post_lifting_passes: AnalysisGroup::new(),
+            post_structuring_passes: AnalysisGroup::new(),
         }
     }
 
@@ -88,12 +76,12 @@ impl FunctionBuilder {
         &mut self.initialisation_passes
     }
 
-    pub fn post_lifting_passes(&self) -> &AnalysisGroup<PartialFunctionWithContext> {
-        &self.post_lifting_passes
+    pub fn post_structuring_passes(&self) -> &AnalysisGroup<FunctionRecoveryState> {
+        &self.post_structuring_passes
     }
 
-    pub fn post_lifting_passes_mut(&mut self) -> &mut AnalysisGroup<PartialFunctionWithContext> {
-        &mut self.post_lifting_passes
+    pub fn post_structuring_passes_mut(&mut self) -> &mut AnalysisGroup<FunctionRecoveryState> {
+        &mut self.post_structuring_passes
     }
 
     pub fn context(&self) -> &FunctionBuilderContext {
@@ -107,18 +95,18 @@ impl FunctionBuilder {
     pub fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        translator: &mut Translator,
+        resolver: &mut InsnResolver,
         candidate: impl Into<AddressWithContext>,
         token: &CancellationToken,
-    ) -> Result<ControlFlow<Cancelled, PartialFunction>, FunctionRecoveryError> {
+    ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
         self.context.analyse(FunctionBuilderAnalysis {
             transaction,
-            translator,
+            resolver,
             candidate: candidate.into(),
             token,
             config: &self.config,
             initialisation_passes: &mut self.initialisation_passes,
-            post_lifting_passes: &mut self.post_lifting_passes,
+            post_structuring_passes: &mut self.post_structuring_passes,
         })
     }
 
@@ -146,32 +134,16 @@ impl FunctionBuilder {
         self.initialisation_passes.add_pass(name, pass);
     }
 
-    pub fn add_post_lifting_pass(
+    pub fn add_post_structuring_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<PartialFunctionWithContext> + 'static,
+        pass: impl AnalysisPass<FunctionRecoveryState> + 'static,
     ) {
-        self.post_lifting_passes.add_pass(name, pass);
+        self.post_structuring_passes.add_pass(name, pass);
     }
 }
 
-impl<'a> CodeBlockStructuringContext<'a> {
-    pub fn mark_cut_point(&mut self, insn_idx: usize) {
-        self.cut_points.push(insn_idx);
-    }
-
-    pub fn is_flow_target(&self, address: Address) -> bool {
-        self.contexts.contains_key(&address)
-    }
-
-    pub fn clear(&mut self) {
-        self.block_starts.clear();
-        self.block_ends.clear();
-        self.cut_points.clear();
-    }
-}
-
-impl PartialFunctionWithContext {
+impl FunctionRecoveryState {
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
@@ -188,17 +160,17 @@ impl PartialFunctionWithContext {
         &mut self.context
     }
 
-    pub fn function(&self) -> &PartialFunction {
+    pub fn function(&self) -> &IncompleteFunction {
         &self.function
     }
 
-    pub fn function_mut(&mut self) -> &mut PartialFunction {
+    pub fn function_mut(&mut self) -> &mut IncompleteFunction {
         &mut self.function
     }
 
     pub fn structure_blocks(&mut self) -> Result<(), FunctionRecoveryError> {
-        self.function
-            .structure_blocks(&self.config, &mut self.context)
+        self.context
+            .structure_blocks(&mut self.function, &self.config)
     }
 }
 
@@ -267,14 +239,15 @@ impl FunctionBuilderContext {
         self.contexts.clear();
         self.local_targets.clear();
         self.global_targets.clear();
+        self.structurer.clear();
     }
 
-    fn lift_insns(
+    fn resolve_insns(
         &mut self,
         arch: &Arch,
         segments: &SegmentStorage,
-        translator: &mut Translator,
-        f: &mut PartialFunction,
+        resolver: &mut InsnResolver,
+        f: &mut IncompleteFunction,
         token: &CancellationToken,
         use_mapping_hints: bool,
     ) -> Result<(), Cancelled> {
@@ -284,7 +257,7 @@ impl FunctionBuilderContext {
 
         // We assume that most (all?) of a function's blocks will be in the same segment.
         let mut view = segments
-            .view_at(self.entry())
+            .view_containing(self.entry())
             .expect("function entry is valid");
 
         // This is the stage where we build blocks by collecting instructions and marking them.
@@ -297,8 +270,7 @@ impl FunctionBuilderContext {
             // the address space, and also extracts context updates indicated by the address,
             // e.g., if we are in Thumb context or not for ARM.
             let block_space = block.space();
-            let Some((block, ncontext)) =
-                arch.canonicalise_address_with(block, translator.context())
+            let Some((block, ncontext)) = arch.canonicalise_address_with(block, resolver.context())
             else {
                 tracing::trace!("skipping {block}: not a viable block start address");
                 continue 'outer;
@@ -306,9 +278,12 @@ impl FunctionBuilderContext {
             let block = Address::new(block_space, block);
 
             if !view.contains(block) {
-                if let Ok(nview) = segments.view_at(block) {
-                    tracing::debug!("switching segment for {block} to segment {}", nview.name());
-                    view = nview;
+                if let Ok(next_view) = segments.view_containing(block) {
+                    tracing::debug!(
+                        "switching segment for {block} to segment {}",
+                        next_view.name()
+                    );
+                    view = next_view;
                 } else {
                     tracing::trace!("skipping {block}: not mapped in any segment");
                     continue 'outer;
@@ -330,13 +305,13 @@ impl FunctionBuilderContext {
                 continue 'outer;
             }
 
-            tracing::trace!("lifting new block {block}");
+            tracing::trace!("resolving new block {block}");
 
             // Merge the context updates with the specified context taking precedence.
             context.merge(&ncontext);
 
             // Applies the context updates to the lifter context.
-            context.apply(block, translator.context_mut());
+            context.apply(block, resolver.context_mut());
 
             // Save the context so we can associate it with a block later.
             self.contexts.entry(block).or_insert(context.clone());
@@ -368,7 +343,7 @@ impl FunctionBuilderContext {
                     continue 'outer;
                 }
 
-                tracing::trace!("lifting at {address}");
+                tracing::trace!("resolving instruction at {address}");
 
                 // If we've already disassembled this instruction select the next candidate,
                 // otherwise get the entry ready for update.
@@ -403,11 +378,12 @@ impl FunctionBuilderContext {
 
                 let size = bytes.len();
 
-                tracing::trace!("lifting {address} ({size} bytes available)");
+                tracing::trace!("resolving {address} ({size} bytes available)");
 
-                match translator.disassemble(address, bytes) {
+                match resolver.resolve(address, bytes) {
                     Ok(insn) => {
                         let insn = entry.insert(insn);
+                        let insn = f.insn(insn).expect("inserted instruction must exist");
 
                         // Explicit control-flow
                         if insn.is_flow() {
@@ -415,7 +391,7 @@ impl FunctionBuilderContext {
 
                             // These targets are what we can statically compute by scanning the
                             // instruction's PCode branch operations--we will miss things like PC
-                            // relative jumps; these constructs will be handled in post lifting
+                            // relative jumps; these constructs will be handled in post-structuring
                             // passes.
                             for (target, kind, addr) in insn.iter_targets() {
                                 let addr_space = addr.space();
@@ -458,7 +434,7 @@ impl FunctionBuilderContext {
                     }
                     Err(e) => {
                         // Flows into bad data; we skip this block and remove its context
-                        tracing::debug!("skipping {address}; lifting failed: {e}");
+                        tracing::debug!("skipping {address}; instruction resolution failed: {e}");
                         self.contexts.remove(&address);
                         self.avoids.insert(address);
                         continue 'outer;
@@ -486,40 +462,32 @@ impl FunctionBuilderContext {
         &self.global_targets
     }
 
-    pub fn block_starts(&self) -> &BTreeMap<Address, usize> {
-        &self.block_starts
+    pub fn block_starts(&self) -> &BTreeMap<Address, IncompleteCodeBlockId> {
+        self.structurer.block_starts()
     }
 
-    pub fn block_ends(&self) -> &BTreeMap<Address, usize> {
-        &self.block_ends
+    pub fn block_ends(&self) -> &BTreeMap<Address, IncompleteCodeBlockId> {
+        self.structurer.block_ends()
     }
 
-    pub fn cut_points(&self) -> &Vec<usize> {
-        &self.cut_points
-    }
-
-    pub fn mark_cut_point(&mut self, insn_idx: usize) {
-        self.cut_points.push(insn_idx);
-    }
-
-    pub(crate) fn structuring_context(&mut self) -> CodeBlockStructuringContext {
-        CodeBlockStructuringContext {
-            block_starts: &mut self.block_starts,
-            block_ends: &mut self.block_ends,
-            cut_points: &mut self.cut_points,
-            contexts: &self.contexts,
-        }
+    fn structure_blocks(
+        &mut self,
+        function: &mut IncompleteFunction,
+        config: &FunctionRecoveryConfig,
+    ) -> Result<(), FunctionRecoveryError> {
+        self.structurer
+            .structure(function, config, &self.contexts, &self.local_targets)
     }
 
     fn analyse(
         &mut self,
         analysis: FunctionBuilderAnalysis<'_, '_>,
-    ) -> Result<ControlFlow<Cancelled, PartialFunction>, FunctionRecoveryError> {
+    ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
         // We have three main stages:
         //
         // 1. We first initialise the function builder with the entry point and the context
         //    of the entry block.
-        // 2. We enter the main loop where we lift instructions block by block, and add newly
+        // 2. We enter the main loop where we resolve instructions block by block, and add newly
         //    discovered blocks (and edges) to the candidates queue.
         // 3. We structure the blocks into a basic function-like structure; we use this
         //    structure as input to resolve jump tables, indirect jumps, etc. this part of
@@ -528,9 +496,6 @@ impl FunctionBuilderContext {
         // Stage 1 and 3 are hookable; we may register analysis passes to be run prior to the
         // main loop and after each block discovery pass has completed within the main loop.
         //
-        // By default these passes are added via `add_XXX_pass` methods during `FunctionRecovery`
-        // initialisation.
-
         let mut candidate = analysis.candidate;
 
         tracing::debug!("exploring from {candidate}");
@@ -545,7 +510,7 @@ impl FunctionBuilderContext {
                 .transaction
                 .project()
                 .segments()
-                .view_at(self.entry)
+                .view_containing(self.entry)
                 .expect("valid entry");
 
             if let Some(hint) = view.mapping_hint_at(self.entry) {
@@ -570,7 +535,7 @@ impl FunctionBuilderContext {
             .analyse_with(analysis.initialisation_passes, self)
             .map_err(FunctionRecoveryError::InitialisationPass)?;
 
-        let mut partial = PartialFunction::new(self.entry);
+        let mut incomplete = IncompleteFunction::new(self.entry);
 
         loop {
             if let Err(cancelled) = analysis.token.check() {
@@ -580,42 +545,42 @@ impl FunctionBuilderContext {
             let arch = analysis.transaction.project().arch();
             let segments = analysis.transaction.project().segments();
 
-            if let Err(cancelled) = self.lift_insns(
+            if let Err(cancelled) = self.resolve_insns(
                 arch,
                 segments,
-                analysis.translator,
-                &mut partial,
+                analysis.resolver,
+                &mut incomplete,
                 analysis.token,
                 analysis.config.use_segment_mapping_hints(),
             ) {
                 return Ok(ControlFlow::Break(cancelled));
             }
 
-            if !partial.has_insns() {
-                tracing::debug!("no instructions lifted; invalid function");
+            if !incomplete.has_insns() {
+                tracing::debug!("no instructions resolved; invalid function");
                 return Err(FunctionRecoveryError::InvalidFunction);
             }
 
-            partial.structure_blocks(analysis.config, self)?;
+            self.structure_blocks(&mut incomplete, analysis.config)?;
 
             let num_local_targets = self.local_targets.len();
 
-            let mut function_with_context = PartialFunctionWithContext {
+            let mut state = FunctionRecoveryState {
                 cancellation: analysis.token.clone(),
                 config: *analysis.config,
                 context: mem::take(self),
-                function: mem::take(&mut partial),
+                function: mem::take(&mut incomplete),
             };
 
-            // Run post-lifting passes
+            // Run post-structuring passes
             let result = analysis
                 .transaction
-                .analyse_with(analysis.post_lifting_passes, &mut function_with_context);
+                .analyse_with(analysis.post_structuring_passes, &mut state);
 
-            *self = function_with_context.context;
-            partial = function_with_context.function;
+            *self = state.context;
+            incomplete = state.function;
 
-            result.map_err(FunctionRecoveryError::PostLiftingPass)?;
+            result.map_err(FunctionRecoveryError::PostStructuringPass)?;
 
             if let Err(cancelled) = analysis.token.check() {
                 return Ok(ControlFlow::Break(cancelled));
@@ -629,6 +594,6 @@ impl FunctionBuilderContext {
             }
         }
 
-        Ok(ControlFlow::Continue(partial))
+        Ok(ControlFlow::Continue(incomplete))
     }
 }

@@ -227,7 +227,7 @@ fn verify_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
     }
 
     let operation_blocks = operation_blocks(ir)?;
-    let dominance = ir.dominance();
+    let dominance = ir.analyse::<IlDominance>();
 
     verify_edge_argument_uses(ir, &operation_blocks, &dominance)?;
 

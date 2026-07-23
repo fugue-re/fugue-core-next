@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 
-use crate::il::common::{IlOpId, IlValueId};
+use crate::il::common::{IlAnalysis, IlOpId, IlValueId};
 use crate::il::ecode::ssa::ECodeSsaIr;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -34,7 +34,19 @@ pub struct ECodeSsaUses {
 }
 
 impl ECodeSsaUses {
-    pub fn build(body: &ECodeSsaIr) -> Self {
+    pub fn uses_for(&self, value: IlValueId) -> &[ECodeSsaUse] {
+        let index = value.index();
+        let Some(start) = self.offsets.get(index).copied() else {
+            return &[];
+        };
+        let end = self.offsets.get(index + 1).copied().unwrap_or(start);
+
+        &self.uses[start as usize..end as usize]
+    }
+}
+
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaUses {
+    fn analyse(body: &ECodeSsaIr) -> Self {
         let mut offsets = vec![0u32; body.values().len() + 1];
 
         for operation in body.operations() {
@@ -71,47 +83,50 @@ impl ECodeSsaUses {
 
         Self { offsets, uses }
     }
+}
 
-    pub fn uses_for(&self, value: IlValueId) -> &[ECodeSsaUse] {
-        let index = value.index();
-        let Some(start) = self.offsets.get(index).copied() else {
-            return &[];
-        };
-        let end = self.offsets.get(index + 1).copied().unwrap_or(start);
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ECodeSsaBlockArgumentInputs {
+    inputs: FxHashMap<IlValueId, Vec<IlValueId>>,
+}
 
-        &self.uses[start as usize..end as usize]
+impl ECodeSsaBlockArgumentInputs {
+    pub fn get(&self, argument: IlValueId) -> Option<&[IlValueId]> {
+        self.inputs.get(&argument).map(Vec::as_slice)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (IlValueId, &[IlValueId])> {
+        self.inputs
+            .iter()
+            .map(|(&argument, inputs)| (argument, inputs.as_slice()))
     }
 }
 
-impl ECodeSsaIr {
-    pub fn uses(&self) -> ECodeSsaUses {
-        ECodeSsaUses::build(self)
-    }
-
-    pub fn block_argument_sources(&self) -> FxHashMap<IlValueId, Vec<IlValueId>> {
-        let block_count = self.graph().blocks().len();
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgumentInputs {
+    fn analyse(body: &ECodeSsaIr) -> Self {
+        let block_count = body.graph().blocks().len();
         let mut arguments = vec![Vec::new(); block_count];
-        for argument in self.block_arguments() {
+        for argument in body.block_arguments() {
             arguments[argument.block().index()].push(argument.value());
         }
 
         let mut incoming = vec![Vec::new(); block_count];
-        for (edge, target) in self.graph().successors().iter().enumerate() {
+        for (edge, target) in body.graph().successors().iter().enumerate() {
             incoming[target.index()].push(edge);
         }
 
-        let mut sources = FxHashMap::default();
+        let mut inputs = FxHashMap::default();
         for (block, positions) in arguments.iter().enumerate() {
             for (position, &argument) in positions.iter().enumerate() {
-                let argument_sources = incoming[block]
+                let argument_inputs = incoming[block]
                     .iter()
-                    .filter_map(|&edge| self.arguments_for_edge(edge).get(position).copied())
+                    .filter_map(|&edge| body.arguments_for_edge(edge).get(position).copied())
                     .collect();
-                sources.insert(argument, argument_sources);
+                inputs.insert(argument, argument_inputs);
             }
         }
 
-        sources
+        Self { inputs }
     }
 }
 
@@ -119,7 +134,7 @@ impl ECodeSsaIr {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange};
+    use crate::il::common::{IlArtefact, IlGraph, IlHeader, IlIndexRange};
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
     };
@@ -161,7 +176,7 @@ mod test {
             ))
             .unwrap();
         let body = builder.build(&CancellationToken::default()).unwrap();
-        let index = ECodeSsaUses::build(&body);
+        let index = body.analyse::<ECodeSsaUses>();
 
         assert_eq!(
             index.uses_for(left),

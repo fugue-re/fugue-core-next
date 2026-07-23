@@ -7,6 +7,9 @@ use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 
+pub mod incomplete;
+pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
+
 pub mod table;
 pub use table::CodeBlockTable;
 

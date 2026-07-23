@@ -1,4 +1,4 @@
-use crate::il::common::{IlBlock, IlBlockId, IlBlockPredecessors};
+use crate::il::common::{IlAnalysis, IlArtefact, IlBlock, IlBlockId, IlBlockPredecessors};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominance {
@@ -136,6 +136,16 @@ impl IlDominance {
     }
 }
 
+impl<I: IlArtefact> IlAnalysis<I> for IlDominance {
+    fn analyse(ir: &I) -> Self {
+        let Some(entry) = ir.graph().entry_block() else {
+            return Self::default();
+        };
+
+        Self::from_blocks(ir.graph().blocks(), ir.graph().successors(), entry)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominanceFrontier {
     offsets: Vec<u32>,
@@ -216,6 +226,13 @@ impl IlDominanceFrontier {
             offsets,
             frontiers: values,
         }
+    }
+}
+
+impl<I: IlArtefact> IlAnalysis<I> for IlDominanceFrontier {
+    fn analyse(ir: &I) -> Self {
+        ir.analyse::<IlDominance>()
+            .frontiers(ir.graph().blocks(), ir.graph().successors())
     }
 }
 

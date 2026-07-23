@@ -6,14 +6,13 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fugue_core::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeKinds;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Reference, ReferenceProperties, SymbolEntry,
-    SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
+    ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
@@ -224,8 +223,8 @@ fn add_symbols(
 }
 
 fn add_empty_function(engine: &AnalysisEngine, entry: Address) -> Result<(), Box<dyn Error>> {
-    let mut function = PartialFunction::new(entry);
-    function.push_block(PartialCodeBlock::new(
+    let mut function = IncompleteFunction::new(entry);
+    function.push_block(IncompleteCodeBlock::new(
         entry,
         1,
         Vec::new(),

@@ -8,7 +8,7 @@ use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use fugue_lifter::{Lifter as FugueLifter, LifterBuilderError};
 use thiserror::Error;
 
-use crate::ir::{Address, Insn, InsnError, InsnProperties};
+use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
 use crate::lifter::traits::Disassembler;
 use crate::lifter::{PCodeOp, resolve_language};
@@ -17,8 +17,6 @@ use crate::lifter::{PCodeOp, resolve_language};
 pub enum LifterError {
     #[error(transparent)]
     Builder(#[from] LifterBuilderError),
-    #[error(transparent)]
-    Instruction(#[from] InsnError),
     #[error("invalid instruction at {0}")]
     InvalidInstruction(Address),
     #[error(transparent)]
@@ -202,43 +200,18 @@ impl Lifter {
             .disassemble_parts(address.offset(), bytes, mnemonic, operands)
     }
 
-    pub fn lift(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Result<Insn, LifterError> {
-        let address = address.into();
-        let mut operations = Vec::new();
-
-        self.resolve_insn_flow_into(address, bytes, &mut operations)
-    }
-
-    pub fn lift_into(
+    pub fn lift(
         &mut self,
-        addr: impl Into<Address>,
+        address: impl Into<Address>,
         bytes: &[u8],
         output: &mut Vec<PCodeOp>,
     ) -> Result<usize, LifterError> {
-        let address = addr.into();
+        let address = address.into();
         let Some(length) = self.0.lift(address.offset(), bytes, output) else {
             return Err(LifterError::invalid_instruction(address));
         };
 
         Ok(length)
-    }
-
-    pub fn resolve_insn_flow_into(
-        &mut self,
-        address: impl Into<Address>,
-        bytes: &[u8],
-        output: &mut Vec<PCodeOp>,
-    ) -> Result<Insn, LifterError> {
-        output.clear();
-        let address = address.into();
-        let length = self.lift_into(address, bytes, output)?;
-
-        Ok(Insn::from_resolved_flow(
-            self.language(),
-            address,
-            length,
-            output,
-        )?)
     }
 }
 
@@ -330,30 +303,6 @@ mod test {
 
         let op1_2 = op1.group().unwrap().get(2).unwrap();
         assert_eq!(op1_2.value(), Some(0x10));
-    }
-
-    #[test]
-    fn test_resolve_insn_flow_into_reuses_operation_buffer() {
-        let mut lifter = x86_64_lifter();
-        let bytes = [0x48, 0x89, 0xd8];
-        let mut operations = Vec::new();
-
-        let insn = lifter
-            .resolve_insn_flow_into(0x1000, &bytes, &mut operations)
-            .unwrap();
-        let capacity = operations.capacity();
-
-        assert_eq!(insn.address().offset(), 0x1000);
-        assert_eq!(insn.len(), bytes.len());
-        assert!(insn.has_resolved_flow());
-        assert!(!operations.is_empty());
-
-        let insn = lifter
-            .resolve_insn_flow_into(0x1003, &bytes, &mut operations)
-            .unwrap();
-
-        assert_eq!(insn.address().offset(), 0x1003);
-        assert_eq!(operations.capacity(), capacity);
     }
 
     #[test]

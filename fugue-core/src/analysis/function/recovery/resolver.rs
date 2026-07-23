@@ -3,13 +3,13 @@ use crate::ir::{Address, Insn};
 use crate::lifter::{Disassembler, Lifter, LiftingContext, PCodeOp};
 use crate::project::Project;
 
-pub struct Translator {
+pub struct InsnResolver {
     disassembler: Disassembler,
     lifter: Lifter,
     operations: Vec<PCodeOp>,
 }
 
-impl Translator {
+impl InsnResolver {
     pub fn new(project: &Project) -> Self {
         let disassembler = project.arch().disassembler();
         let lifter = project.arch().lifter();
@@ -21,42 +21,34 @@ impl Translator {
         }
     }
 
-    pub fn disassemble(
+    pub fn resolve(
         &mut self,
         address: Address,
         bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, FunctionRecoveryError> {
         let bytes = bytes.as_ref();
-        let insn = self
+        let mut insn = self
             .disassembler
             .disassemble(address, bytes, self.lifter.context_mut())?;
 
-        if !insn.needs_flow_resolution() && !insn.is_empty() {
-            return Ok(insn);
+        if insn.needs_flow_resolution() || insn.is_empty() {
+            self.resolve_flow(&mut insn, bytes)?;
         }
 
-        self.lift(address, bytes)
+        Ok(insn)
     }
 
-    pub fn lift(
+    fn resolve_flow(
         &mut self,
-        address: Address,
+        insn: &mut Insn,
         bytes: impl AsRef<[u8]>,
-    ) -> Result<Insn, FunctionRecoveryError> {
-        self.lifter
-            .resolve_insn_flow_into(address, bytes.as_ref(), &mut self.operations)
-            .map_err(FunctionRecoveryError::from)
-    }
-
-    pub fn lift_into(
-        &mut self,
-        address: Address,
-        bytes: impl AsRef<[u8]>,
-        output: &mut Vec<PCodeOp>,
-    ) -> Result<usize, FunctionRecoveryError> {
-        self.lifter
-            .lift_into(address, bytes.as_ref(), output)
-            .map_err(FunctionRecoveryError::from)
+    ) -> Result<(), FunctionRecoveryError> {
+        self.operations.clear();
+        let length = self
+            .lifter
+            .lift(insn.address(), bytes.as_ref(), &mut self.operations)?;
+        insn.resolve_flow(self.lifter.language(), length, &self.operations)?;
+        Ok(())
     }
 
     pub fn context(&self) -> &LiftingContext {

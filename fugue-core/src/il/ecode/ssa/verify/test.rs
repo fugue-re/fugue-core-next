@@ -3,9 +3,10 @@ use fugue_bv::BitVec;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::verify::VerifyError;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlHeader, IlIndexRange, IlOpId,
-    IlValueId,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlHeader, IlIndexRange,
+    IlOpId, IlValueId,
 };
+use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
     ECODE_SSA_SCHEMA_VERSION, ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaMemoryDomain,
     ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind, verify,
@@ -178,7 +179,7 @@ fn ssa_verifier_accepts_wide_constant_within_pool() {
     let mut body = builder.build(&CancellationToken::default()).unwrap();
     verify(&body).unwrap();
 
-    body.fold_constants();
+    body.rewrite(ECodeSsaConstantFolding);
 
     verify(&body).unwrap();
     assert_eq!(

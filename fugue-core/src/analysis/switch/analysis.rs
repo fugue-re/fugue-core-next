@@ -1,14 +1,14 @@
 use crate::analysis::control::Cancelled;
-use crate::analysis::function::recovery::{PartialFunctionWithContext, Translator};
+use crate::analysis::function::recovery::{FunctionRecoveryState, InsnResolver};
+use crate::analysis::switch::SwitchRecoveryConfig;
 use crate::analysis::switch::slice::SwitchSliceEvaluator;
-use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig};
+use crate::analysis::switch::syntactic::SwitchSyntacticRecoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::il::common::IlError;
 use crate::il::ecode::ssa::ECodeToSsa;
 use crate::il::pcode::PCodeError;
 use crate::ir::{FlowKind, FunctionId, SwitchEvidence, SwitchId};
 use crate::project::Project;
-use crate::storage::segments::SegmentReader;
 
 #[derive(Default)]
 pub struct SwitchRecovery {
@@ -29,29 +29,28 @@ impl SwitchRecovery {
     }
 }
 
-impl AnalysisPass<PartialFunctionWithContext> for SwitchRecovery {
+impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
     fn analyse_with(
         &mut self,
         project: &mut Project,
-        state: &mut PartialFunctionWithContext,
+        state: &mut FunctionRecoveryState,
     ) -> Result<(), AnalysisError> {
         let mut resolved = Vec::new();
         {
             let arch = project.arch();
             let segments = project.segments();
-            let mut translator = Translator::new(project);
-            let mut reader = SegmentReader::new(segments);
+            let mut resolver = InsnResolver::new(project);
+            let mut syntactic = SwitchSyntacticRecoveryContext::new(self.config, arch, segments);
             let function = state.function();
             let mut branches = function.indirect_branches().peekable();
             if branches.peek().is_none() {
                 return Ok(());
             }
-            let mut operations = Vec::new();
             let mut unresolved = Vec::new();
             let mut retry = Vec::new();
 
-            for (block_index, site) in branches {
-                let Some(block) = function.blocks().get(block_index) else {
+            for (block_id, site) in branches {
+                let Some(block) = function.block(block_id) else {
                     continue;
                 };
                 let predecessors = block.predecessors();
@@ -61,43 +60,11 @@ impl AnalysisPass<PartialFunctionWithContext> for SwitchRecovery {
 
                 let sources = predecessors
                     .iter()
-                    .copied()
                     .map(Some)
                     .chain(predecessors.is_empty().then_some(None));
                 for source in sources {
-                    operations.clear();
-                    if let Some(predecessor) = source
-                        && function
-                            .append_block_pcode(
-                                predecessor,
-                                &mut reader,
-                                &mut translator,
-                                &mut operations,
-                            )
-                            .is_err()
-                    {
-                        continue;
-                    }
-                    if function
-                        .append_block_pcode(
-                            block_index,
-                            &mut reader,
-                            &mut translator,
-                            &mut operations,
-                        )
-                        .is_err()
-                    {
-                        continue;
-                    }
-
-                    let Some(candidate) = RecoveredSwitch::from_syntactic(
-                        self.config,
-                        arch,
-                        segments,
-                        site,
-                        &operations,
-                        translator.context(),
-                    ) else {
+                    let Some(candidate) = syntactic.recover(function, source, block_id, site)
+                    else {
                         continue;
                     };
                     outcome = match outcome.take() {
@@ -121,17 +88,17 @@ impl AnalysisPass<PartialFunctionWithContext> for SwitchRecovery {
                             recovered.confidence(),
                         );
                         if !recovered.is_guarded() {
-                            retry.push((block_index, site));
+                            retry.push((block_id, site));
                         }
                         resolved.push((site, recovered));
                     }
-                    _ => unresolved.push((block_index, site)),
+                    _ => unresolved.push((block_id, site)),
                 }
             }
 
             if !unresolved.is_empty() || !retry.is_empty() {
-                match ECodeToSsa
-                    .build_partial_function_tolerant(
+                let ssa = ECodeToSsa
+                    .build_incomplete_function(
                         project.language(),
                         function,
                         project.segments(),
@@ -143,55 +110,34 @@ impl AnalysisPass<PartialFunctionWithContext> for SwitchRecovery {
                             AnalysisError::Cancelled(Cancelled)
                         }
                         error => AnalysisError::pass_failed("switch-recovery", error),
-                    }) {
-                    Ok(local) => {
-                        if let Some(ssa) = local.ir() {
-                            let evaluator =
-                                SwitchSliceEvaluator::new(ssa, arch, segments, self.config);
+                    })?;
+                let evaluator = SwitchSliceEvaluator::new(&ssa, arch, segments, self.config);
 
-                            for (block_index, site) in unresolved {
-                                let block = &function.blocks()[block_index];
-                                if local.omits(block.address()) {
-                                    continue;
-                                }
-                                if let Some(recovered) =
-                                    evaluator.recover(site, block.context(), &mut translator)
-                                {
-                                    tracing::debug!(
-                                        "recovered switch at {} with {} cases (confidence {})",
-                                        site,
-                                        recovered.cases().len(),
-                                        recovered.confidence(),
-                                    );
-                                    resolved.push((site, recovered));
-                                }
-                            }
-
-                            for (block_index, site) in retry {
-                                let block = &function.blocks()[block_index];
-                                if local.omits(block.address()) {
-                                    continue;
-                                }
-                                let Some(recovered) =
-                                    evaluator.recover(site, block.context(), &mut translator)
-                                else {
-                                    continue;
-                                };
-                                if let Some((_, existing)) =
-                                    resolved.iter_mut().find(|(existing, _)| *existing == site)
-                                    && existing.should_replace_with(&recovered)
-                                {
-                                    *existing = recovered;
-                                }
-                            }
-                        }
-                    }
-                    Err(error @ AnalysisError::Cancelled(_)) => return Err(error),
-                    Err(error) => {
+                for (block_id, site) in unresolved {
+                    let block = function.block(block_id).expect("switch block must exist");
+                    if let Some(recovered) = evaluator.recover(site, block.context(), &mut resolver)
+                    {
                         tracing::debug!(
-                            "skipping semantic switch recovery for function at {}: {error}",
-                            function.entry(),
+                            "recovered switch at {} with {} cases (confidence {})",
+                            site,
+                            recovered.cases().len(),
+                            recovered.confidence(),
                         );
+                        resolved.push((site, recovered));
+                    }
+                }
+
+                for (block_id, site) in retry {
+                    let block = function.block(block_id).expect("switch block must exist");
+                    let Some(recovered) = evaluator.recover(site, block.context(), &mut resolver)
+                    else {
+                        continue;
+                    };
+                    if let Some((_, existing)) =
+                        resolved.iter_mut().find(|(existing, _)| *existing == site)
+                        && existing.should_replace_with(&recovered)
+                    {
+                        *existing = recovered;
                     }
                 }
             }

@@ -1,14 +1,17 @@
 use crate::analysis::value::StridedInterval;
-use crate::il::common::IlValueId;
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses};
+use crate::il::common::{IlAnalysis, IlArtefact, IlValueId};
+use crate::il::ecode::ssa::{
+    ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct StridedIntervals {
+pub struct ECodeSsaStridedIntervals {
     intervals: Vec<StridedInterval>,
 }
 
-impl StridedIntervals {
-    pub(crate) fn build(body: &ECodeSsaIr) -> Self {
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
+    fn analyse(body: &ECodeSsaIr) -> Self {
+        let block_argument_inputs = body.analyse::<ECodeSsaBlockArgumentInputs>();
         let mut this = Self {
             intervals: body
                 .values()
@@ -17,27 +20,24 @@ impl StridedIntervals {
                 .collect(),
         };
 
-        let block_arguments = body.block_argument_sources();
         let mut dependents = vec![Vec::new(); body.values().len()];
-        for (argument, sources) in &block_arguments {
-            for source in sources {
-                dependents[source.index()].push(argument.index());
+        for (argument, inputs) in block_argument_inputs.iter() {
+            for input in inputs {
+                dependents[input.index()].push(argument.index());
             }
         }
 
-        let uses = ECodeSsaUses::build(body);
+        let uses = body.analyse::<ECodeSsaUses>();
         let mut worklist = (0..body.values().len()).rev().collect::<Vec<_>>();
 
         while let Some(index) = worklist.pop() {
             let value = IlValueId::try_from_index(index).expect("value id is representable");
-            let next = match block_arguments.get(&value) {
-                Some(sources) if sources.is_empty() => {
-                    StridedInterval::full(body.value_width(value).unwrap_or(0))
-                }
-                Some(sources) => {
-                    let joined = sources.iter().fold(
+            let next = match block_argument_inputs.get(value) {
+                Some([]) => StridedInterval::full(body.value_width(value).unwrap_or(0)),
+                Some(inputs) => {
+                    let joined = inputs.iter().fold(
                         StridedInterval::empty(body.value_width(value).unwrap_or(0)),
-                        |accumulated, source| accumulated.join(&this.intervals[source.index()]),
+                        |accumulated, input| accumulated.join(&this.intervals[input.index()]),
                     );
                     this.intervals[index].widen(&joined)
                 }
@@ -60,8 +60,10 @@ impl StridedIntervals {
 
         this
     }
+}
 
-    pub(crate) fn interval(&self, value: IlValueId) -> Option<&StridedInterval> {
+impl ECodeSsaStridedIntervals {
+    pub fn get(&self, value: IlValueId) -> Option<&StridedInterval> {
         self.intervals.get(value.index())
     }
 
@@ -174,10 +176,10 @@ mod test {
             .unwrap();
 
         let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = StridedIntervals::build(&body);
+        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
 
         assert_eq!(
-            intervals.interval(index),
+            intervals.get(index),
             Some(&StridedInterval::masked(&BitVec::from_u64(0xff, 32)))
         );
     }
@@ -223,10 +225,10 @@ mod test {
             .unwrap();
 
         let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = StridedIntervals::build(&body);
+        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
 
         assert_eq!(
-            intervals.interval(sum),
+            intervals.get(sum),
             Some(&StridedInterval::single(BitVec::from_u64(15, 32)))
         );
     }
@@ -302,11 +304,8 @@ mod test {
         builder.push_edge_arguments([]).unwrap();
 
         let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = StridedIntervals::build(&body);
+        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
 
-        assert_eq!(
-            intervals.interval(counter),
-            Some(&StridedInterval::full(32))
-        );
+        assert_eq!(intervals.get(counter), Some(&StridedInterval::full(32)));
     }
 }

@@ -2,13 +2,14 @@ use fugue_specs::Confidence;
 
 use crate::ir::{
     Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchEvidence,
-    SwitchId, SwitchModel,
+    SwitchId, SwitchModel, SwitchProperties,
 };
 
 pub(crate) struct RecoveredSwitch {
     model: SwitchModel,
     cases: Vec<SwitchCase>,
     evidence: SwitchEvidence,
+    properties: SwitchProperties,
     default: Option<AddressWithContext>,
 }
 
@@ -17,11 +18,13 @@ impl RecoveredSwitch {
         model: SwitchModel,
         cases: Vec<SwitchCase>,
         evidence: SwitchEvidence,
+        properties: SwitchProperties,
     ) -> Self {
         Self {
             model,
             cases,
             evidence,
+            properties,
             default: None,
         }
     }
@@ -36,7 +39,7 @@ impl RecoveredSwitch {
     }
 
     pub(crate) fn confidence(&self) -> Confidence {
-        self.evidence.confidence()
+        self.evidence.confidence(self.properties)
     }
 
     pub(crate) fn is_guarded(&self) -> bool {
@@ -66,8 +69,8 @@ impl RecoveredSwitch {
     }
 
     pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
-        let partial = self.evidence.contains(SwitchEvidence::TRUNCATED)
-            && !self.evidence.contains(SwitchEvidence::GUARD_FOUND);
+        let truncated = self.properties.contains(SwitchProperties::TRUNCATED);
+        let partial = truncated && !self.evidence.contains(SwitchEvidence::GUARD_FOUND);
         let mut switch = Switch::new(id, branch, self.model).with_function(function);
         for case in self.cases {
             switch.add_case(case);
@@ -75,6 +78,9 @@ impl RecoveredSwitch {
         switch.set_evidence(self.evidence);
         if let Some(default) = self.default {
             switch.set_default_case(SwitchCase::new(default));
+        }
+        if truncated {
+            switch.mark_truncated();
         }
         if partial {
             switch.mark_partial();

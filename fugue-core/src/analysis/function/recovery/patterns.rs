@@ -12,7 +12,7 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::project::Project;
-use crate::storage::segments::SegmentReader;
+use crate::storage::segments::SegmentMappingCache;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
 
@@ -79,7 +79,7 @@ impl FunctionRecoveryPatternMatcher {
 
     // NOTE: all segments are in the same space
     fn for_each_segment(
-        reader: &mut SegmentReader<'_>,
+        mapping_cache: &mut SegmentMappingCache<'_>,
         space_id: AddressSpaceId,
         gap: RangeInclusive<RawAddress>,
         mut f: impl FnMut(RangeInclusive<RawAddress>, &[u8]),
@@ -87,10 +87,10 @@ impl FunctionRecoveryPatternMatcher {
         let gap_end = *gap.end();
         let mut current_start = *gap.start();
 
-        let calculate_end = |segm: &SegmentMappingView| -> RawAddress {
-            let segm_end = segm.last().raw_address();
-            if segm_end <= gap_end {
-                segm_end
+        let calculate_end = |view: &SegmentMappingView| -> RawAddress {
+            let view_end = view.last().raw_address();
+            if view_end <= gap_end {
+                view_end
             } else {
                 gap_end
             }
@@ -98,16 +98,16 @@ impl FunctionRecoveryPatternMatcher {
 
         while current_start <= gap_end {
             let current_meta = Address::new(space_id, current_start);
-            let Some(segm) = reader.view(current_meta) else {
+            let Some(view) = mapping_cache.view_containing(current_meta) else {
                 break;
             };
 
-            let match_end = calculate_end(segm);
+            let match_end = calculate_end(view);
             let range = current_start..=match_end;
             current_start = match_end + 1usize;
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(window) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
+            let Some(window) = view.bytes_at(Address::new(space_id, *range.start()), size) else {
                 break;
             };
             let Some(bytes) = window.as_contiguous() else {
@@ -137,11 +137,11 @@ impl FunctionRecoveryPatternMatcher {
         let arch = project.arch();
         let language = project.language();
 
-        let mut reader = SegmentReader::new(segments);
+        let mut mapping_cache = SegmentMappingCache::new(segments);
 
         for gap in gaps.ranges() {
             tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
-            Self::for_each_segment(&mut reader, space_id, gap, |gap, bytes| {
+            Self::for_each_segment(&mut mapping_cache, space_id, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = Address::new(space_id, *gap.start() + range.start);

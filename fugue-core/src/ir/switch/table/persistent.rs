@@ -55,18 +55,18 @@ impl SwitchTable {
         self.entries.flush()
     }
 
-    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
         SwitchTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
     }
 
-    pub(super) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
+    pub(crate) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
         let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
         self.index.free_ids.truncate(tail_start);
         self.index.free_ids.extend(allocation.free_ids_tail);
         self.index.next_index = allocation.next_index;
     }
 
-    pub(super) fn restore_entry(&mut self, switch: Switch) -> Result<(), EntityStorageError> {
+    pub(crate) fn restore_entry(&mut self, switch: Switch) -> Result<(), EntityStorageError> {
         let id = switch.id();
         self.index.branches.insert(switch.branch(), id);
         self.index.link(switch.function(), switch.branch());
@@ -77,7 +77,7 @@ impl SwitchTable {
         self.entries.try_put(id, switch).map(|_| ())
     }
 
-    pub(super) fn clear_entry(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
+    pub(crate) fn clear_entry(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
         let Some(switch) = self.entries.try_get(&id)? else {
             return Ok(false);
         };

@@ -127,10 +127,6 @@ impl Switch {
 
     pub fn set_evidence(&mut self, evidence: SwitchEvidence) {
         self.evidence = evidence;
-        self.properties.set(
-            SwitchProperties::TRUNCATED,
-            evidence.contains(SwitchEvidence::TRUNCATED),
-        );
     }
 
     pub fn with_evidence(mut self, evidence: SwitchEvidence) -> Self {
@@ -139,7 +135,7 @@ impl Switch {
     }
 
     pub fn confidence(&self) -> Confidence {
-        self.evidence.confidence()
+        self.evidence.confidence(self.properties)
     }
 
     pub fn properties(&self) -> SwitchProperties {
@@ -151,7 +147,6 @@ impl Switch {
     }
 
     pub fn mark_truncated(&mut self) {
-        self.evidence.insert(SwitchEvidence::TRUNCATED);
         self.properties.insert(SwitchProperties::TRUNCATED);
     }
 
@@ -176,7 +171,7 @@ impl Switch {
     }
 
     pub fn is_truncated(&self) -> bool {
-        self.evidence.contains(SwitchEvidence::TRUNCATED)
+        self.properties.contains(SwitchProperties::TRUNCATED)
     }
 
     pub fn has_default(&self) -> bool {
@@ -330,20 +325,25 @@ bitflags::bitflags! {
     }
 }
 
+impl SwitchProperties {
+    pub(crate) fn from_recovery(truncated: bool) -> Self {
+        let mut properties = Self::NONE;
+        properties.set(Self::TRUNCATED, truncated);
+        properties
+    }
+}
+
 impl SwitchEvidence {
-    pub(crate) fn from_recovery(guarded: bool, truncated: bool) -> Self {
+    pub(crate) fn from_recovery(guarded: bool) -> Self {
         let mut evidence = Self::TARGETS_IN_EXECUTABLE;
         if guarded {
             evidence |= Self::GUARD_FOUND;
         }
-        if truncated {
-            evidence |= Self::TRUNCATED;
-        }
         evidence
     }
 
-    pub fn confidence(self) -> Confidence {
-        if self.contains(Self::GUARD_FOUND) && !self.contains(Self::TRUNCATED) {
+    pub(crate) fn confidence(self, properties: SwitchProperties) -> Confidence {
+        if self.contains(Self::GUARD_FOUND) && !properties.contains(SwitchProperties::TRUNCATED) {
             Confidence::somewhat_certain()
         } else {
             Confidence::uncertain()
@@ -360,7 +360,6 @@ bitflags::bitflags! {
         const TARGETS_ALIGNED      = 0x0000_0004;
         const TARGETS_IN_EXECUTABLE = 0x0000_0008;
         const CONTIGUOUS_ENTRIES   = 0x0000_0010;
-        const TRUNCATED            = 0x0000_0020;
     }
 }
 

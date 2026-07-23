@@ -7,6 +7,9 @@ use crate::storage::entities::{Entity, EntityId, MutableEntity};
 pub mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
+pub mod incomplete;
+pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
+
 pub mod table;
 pub use table::FunctionTable;
 

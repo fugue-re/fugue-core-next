@@ -30,8 +30,8 @@ pub mod project;
 
 pub mod segments;
 pub use segments::{
-    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentReader, SegmentStorage,
-    SegmentStorageError, SegmentStorageProvider,
+    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentMappingCache,
+    SegmentStorage, SegmentStorageError, SegmentStorageProvider,
 };
 use segments::{InMemorySegmentStorage, SegmentStorageProviderFromStorage};
 

@@ -21,13 +21,14 @@ use crate::storage::segments::provider::SegmentStorageProviderDescriptor;
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
+pub mod cache;
 pub mod mapping;
 pub mod overlay;
 pub mod provider;
-pub mod reader;
 pub mod space;
 pub mod view;
 
+pub use cache::SegmentMappingCache;
 use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind, SegmentMappingLocation, SegmentMappingMetadata, SegmentMappingProvenance,
@@ -39,7 +40,6 @@ pub use provider::{
     SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
     SegmentStorageProviderId,
 };
-pub use reader::SegmentReader;
 use space::{AddressSpace, AddressSpaceId, AddressSpaceKind, AddressSpaceRevert};
 use view::SegmentMappingView;
 
@@ -1628,20 +1628,20 @@ impl SegmentStorage {
             .then(|| mapping.properties())
     }
 
-    pub fn view_at(
+    pub fn view_containing(
         &self,
-        addr: impl Into<Address>,
+        address: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
-        let addr = addr.into();
-        self.view_of_space_at(addr.space(), addr)
+        let address = address.into();
+        self.view_containing_in_space(address.space(), address)
     }
 
-    pub fn view_of_space_at(
+    pub fn view_containing_in_space(
         &self,
         space_id: AddressSpaceId,
-        addr: impl Into<Address>,
+        address: impl Into<Address>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
-        let addr = addr.into();
+        let address = address.into();
 
         let space = self
             .spaces
@@ -1649,7 +1649,7 @@ impl SegmentStorage {
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
         let mapping_view = space
-            .find_containing(addr)
+            .find_containing(address)
             .ok_or(SegmentStorageError::InvalidAddress)?;
 
         let mapping = self
@@ -2009,7 +2009,7 @@ mod test {
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, segment_id)?;
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, section_id)?;
 
-        let visible = storage.view_at(0x1000u64)?;
+        let visible = storage.view_containing(0x1000u64)?;
         assert_eq!(visible.name(), "section");
         assert_eq!(visible.provenance(), SegmentMappingProvenance::Section);
 
@@ -2096,11 +2096,11 @@ mod test {
         storage.add_mapping_to_space_top(DEFAULT_SPACE_ID, a_id)?;
         storage.add_mapping_to_space_top(DEFAULT_SPACE_ID, b_id)?;
 
-        assert_eq!(storage.view_at(0x1000u64)?.name(), "b");
+        assert_eq!(storage.view_containing(0x1000u64)?.name(), "b");
 
         storage.prioritise_mapping(DEFAULT_SPACE_ID, a_id)?;
 
-        assert_eq!(storage.view_at(0x1000u64)?.name(), "a");
+        assert_eq!(storage.view_containing(0x1000u64)?.name(), "a");
         let mut buf = [0u8; 4];
         storage.read_bytes_exact(0x1000u64, &mut buf)?;
         assert_eq!(&buf, &[0xAA; 4]);
@@ -2184,7 +2184,7 @@ mod test {
             SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes)?
                 .into_parts();
 
-        let view = storage.view_at(0x1000u64)?;
+        let view = storage.view_containing(0x1000u64)?;
         let hints = view.function_hints().collect::<Vec<_>>();
         assert!(
             hints.iter().any(|hint| hint.offset() == 0x1040),

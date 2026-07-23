@@ -32,18 +32,18 @@ impl SwitchTable {
         self.index.branches_of_function(function)
     }
 
-    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
+    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
         SwitchTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
     }
 
-    pub(super) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
+    pub(crate) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
         let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
         self.index.free_ids.truncate(tail_start);
         self.index.free_ids.extend(allocation.free_ids_tail);
         self.index.next_index = allocation.next_index;
     }
 
-    pub(super) fn restore_entry(&mut self, switch: Switch) {
+    pub(crate) fn restore_entry(&mut self, switch: Switch) {
         let id = switch.id();
         self.index.branches.insert(switch.branch(), id);
         self.index.link(switch.function(), switch.branch());
@@ -59,7 +59,7 @@ impl SwitchTable {
         self.entries[slot] = Some(switch);
     }
 
-    pub(super) fn clear_entry(&mut self, id: SwitchId) -> bool {
+    pub(crate) fn clear_entry(&mut self, id: SwitchId) -> bool {
         let Some(switch) = self.entries.get_mut(id.index()).and_then(Option::take) else {
             return false;
         };

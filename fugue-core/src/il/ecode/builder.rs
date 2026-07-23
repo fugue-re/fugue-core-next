@@ -13,7 +13,7 @@ use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
-pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
+pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ECodeIr {

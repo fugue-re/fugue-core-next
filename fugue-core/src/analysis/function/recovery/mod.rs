@@ -1,9 +1,7 @@
-use std::error::Error as StdError;
-
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::ir::Address;
+use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId};
 use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
@@ -11,37 +9,36 @@ pub mod analysis;
 pub use analysis::{FunctionRecovery, FunctionRecoveryExtension};
 
 pub mod builder;
-pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
+pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
 
 pub mod hooks;
 pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
-pub mod ir;
-pub use ir::{InsnEntry, PartialCodeBlock, PartialFunction};
-
 pub mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
-pub mod translator;
-pub use translator::Translator;
+pub mod resolver;
+pub use resolver::InsnResolver;
+
+mod structuring;
 
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = u16::MAX as usize;
 pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
-    #[error("failed to create block: {0}")]
-    BlockCreation(anyhow::Error),
     #[error("commit hook failed: {0}")]
     CommitHook(AnalysisError),
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
-    #[error("failed to create function: {0}")]
-    FunctionCreation(anyhow::Error),
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
-    #[error("invalid block index: {0}")]
-    InvalidBlockId(usize),
+    #[error(transparent)]
+    Instruction(#[from] InsnError),
+    #[error("invalid block id: {0:?}")]
+    InvalidBlockId(IncompleteCodeBlockId),
+    #[error("invalid block length at {address}: {length} bytes exceeds u16 capacity")]
+    InvalidBlockLength { address: Address, length: usize },
     #[error(
         "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
     )]
@@ -50,33 +47,23 @@ pub enum FunctionRecoveryError {
     InvalidFunction,
     #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
     InvalidFunctionSize(Address, usize, usize),
-    #[error("invalid instruction index: {0}")]
-    InvalidInstructionId(usize),
+    #[error("invalid instruction id: {0:?}")]
+    InvalidInstructionId(InsnId),
     #[error(transparent)]
     Lifting(#[from] LifterError),
-    #[error("post-lifting pass failed: {0}")]
-    PostLiftingPass(AnalysisError),
+    #[error("post-structuring pass failed: {0}")]
+    PostStructuringPass(AnalysisError),
     #[error(transparent)]
     SegmentStorage(#[from] SegmentStorageError),
 }
 
 impl FunctionRecoveryError {
-    pub fn block_creation<E>(err: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        FunctionRecoveryError::BlockCreation(err.into())
-    }
-
-    pub fn function_creation<E>(err: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        FunctionRecoveryError::FunctionCreation(err.into())
-    }
-
-    pub fn invalid_block_id(id: usize) -> Self {
+    pub fn invalid_block_id(id: IncompleteCodeBlockId) -> Self {
         FunctionRecoveryError::InvalidBlockId(id)
+    }
+
+    pub fn invalid_block_length(address: Address, length: usize) -> Self {
+        FunctionRecoveryError::InvalidBlockLength { address, length }
     }
 
     pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
@@ -87,7 +74,7 @@ impl FunctionRecoveryError {
         FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
     }
 
-    pub fn invalid_instruction_id(id: usize) -> Self {
+    pub fn invalid_instruction_id(id: InsnId) -> Self {
         FunctionRecoveryError::InvalidInstructionId(id)
     }
 }

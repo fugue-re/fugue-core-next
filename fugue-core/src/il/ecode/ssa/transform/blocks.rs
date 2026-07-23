@@ -23,10 +23,16 @@ impl SsaConstruction<'_, '_> {
             self.construct_statement_at(index, &mut current)?;
         }
 
-        self.builder.replace_graph(IlGraph::new(
+        let graph = IlGraph::new(
             self.source.graph().blocks().to_vec(),
             self.source.graph().successors().to_vec(),
-        ));
+        );
+        let graph = if self.source.graph().block_sources().is_empty() {
+            graph
+        } else {
+            graph.with_block_sources(self.source.graph().block_sources().to_vec())
+        };
+        self.builder.replace_graph(graph);
         self.builder
             .replace_source_spans(self.remap_source_spans()?);
         self.builder
@@ -70,13 +76,19 @@ impl SsaConstruction<'_, '_> {
         for arguments in mem::take(&mut self.edge_arguments) {
             self.builder.push_edge_arguments(arguments)?;
         }
-        self.builder.replace_graph(IlGraph::new(
+        let graph = IlGraph::new(
             mem::take(&mut self.blocks)
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
                 .expect("every block is constructed before the graph is replaced"),
             source_graph.successors().to_vec(),
-        ));
+        );
+        let graph = if source_graph.block_sources().is_empty() {
+            graph
+        } else {
+            graph.with_block_sources(source_graph.block_sources().to_vec())
+        };
+        self.builder.replace_graph(graph);
         self.builder
             .replace_source_spans(self.remap_source_spans()?);
         self.builder

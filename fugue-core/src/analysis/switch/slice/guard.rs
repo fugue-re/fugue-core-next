@@ -1,7 +1,7 @@
 use fugue_bv::BitVec;
 
 use super::SwitchSliceEvaluator;
-use crate::analysis::function::recovery::Translator;
+use crate::analysis::function::recovery::InsnResolver;
 use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlValueId};
@@ -9,15 +9,9 @@ use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
 
-#[derive(Clone, Copy)]
-enum SwitchGuardDefault {
-    Block(IlBlockId),
-    DirectBranch(Address),
-}
-
 pub(crate) struct SwitchGuard {
     interval: StridedInterval,
-    default: SwitchGuardDefault,
+    default_block: Option<IlBlockId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,17 +72,18 @@ impl Relation {
 }
 
 impl SwitchGuard {
-    pub(crate) fn upper_bound(&self, width: u32) -> Option<BitVec> {
-        Some(self.interval.upper()?.unsigned_cast(width))
+    pub(crate) fn interval(&self) -> &StridedInterval {
+        &self.interval
     }
 }
 
 impl<'a> SwitchSliceEvaluator<'a> {
-    pub(crate) fn find_guard(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
-        if let Some(guard) = self.find_intra_instruction_guard(index, branch) {
+    pub(crate) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
+        if let Some(guard) = self.guard_within_branch_instruction(index, branch) {
+            tracing::trace!("switch at {branch}: using intra-instruction guard");
             return Some(guard);
         }
-        let switch_block = self.block_of_source(branch)?;
+        let switch_block = self.block_for_source(branch)?;
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
         for (operation_index, operation) in self.ssa.operations().iter().enumerate() {
@@ -106,11 +101,11 @@ impl<'a> SwitchSliceEvaluator<'a> {
             }
             let Some(taken) = operation
                 .address()
-                .and_then(|taken| self.block_of_source(taken))
+                .and_then(|taken| self.block_for_source(taken))
             else {
                 continue;
             };
-            let Some(fallthrough) = self.alternate_successor(guard_block, taken) else {
+            let Some(fallthrough) = self.other_successor(guard_block, taken) else {
                 continue;
             };
 
@@ -124,7 +119,7 @@ impl<'a> SwitchSliceEvaluator<'a> {
                 continue;
             };
 
-            let Some(interval) = self.index_interval_for_condition(
+            let Some(interval) = self.index_interval_from_condition(
                 condition,
                 index,
                 switch_taken,
@@ -138,24 +133,27 @@ impl<'a> SwitchSliceEvaluator<'a> {
             if *upper >= ceiling {
                 continue;
             }
+            tracing::trace!(
+                "switch at {branch}: using guard in block {guard_block:?} with default block {default_block:?}"
+            );
             return Some(SwitchGuard {
                 interval,
-                default: SwitchGuardDefault::Block(default_block),
+                default_block: Some(default_block),
             });
         }
         None
     }
 
-    fn find_intra_instruction_guard(
+    fn guard_within_branch_instruction(
         &self,
         index: IlValueId,
         branch: Address,
     ) -> Option<SwitchGuard> {
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
-        let operation = self.find_intra_instruction_conditional_branch(branch)?;
+        let operation = self.conditional_branch_within_instruction(branch)?;
         let condition = *self.ssa.operation_operands(operation).first()?;
-        let interval = self.index_interval_for_condition(
+        let interval = self.index_interval_from_condition(
             condition,
             index,
             false,
@@ -166,11 +164,11 @@ impl<'a> SwitchSliceEvaluator<'a> {
         }
         Some(SwitchGuard {
             interval,
-            default: SwitchGuardDefault::DirectBranch(operation.address()?),
+            default_block: None,
         })
     }
 
-    fn find_intra_instruction_conditional_branch(&self, branch: Address) -> Option<&ECodeSsaOp> {
+    fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeSsaOp> {
         let mut conditional = None;
         for (_, operation) in self.ssa.operations_for_source(branch) {
             match operation.opcode() {
@@ -182,7 +180,7 @@ impl<'a> SwitchSliceEvaluator<'a> {
         conditional
     }
 
-    fn index_interval_for_condition(
+    fn index_interval_from_condition(
         &self,
         condition: IlValueId,
         index: IlValueId,
@@ -197,13 +195,13 @@ impl<'a> SwitchSliceEvaluator<'a> {
         match operation.opcode() {
             ECodeSsaOpcode::BoolNot => {
                 let inner = *operands.first()?;
-                self.index_interval_for_condition(inner, index, !taken, depth - 1)
+                self.index_interval_from_condition(inner, index, !taken, depth - 1)
             }
             ECodeSsaOpcode::BoolAnd | ECodeSsaOpcode::BoolOr => {
                 let a =
-                    self.index_interval_for_condition(*operands.first()?, index, taken, depth - 1);
+                    self.index_interval_from_condition(*operands.first()?, index, taken, depth - 1);
                 let b =
-                    self.index_interval_for_condition(*operands.get(1)?, index, taken, depth - 1);
+                    self.index_interval_from_condition(*operands.get(1)?, index, taken, depth - 1);
                 let conjunction = (operation.opcode() == ECodeSsaOpcode::BoolAnd) == taken;
                 if conjunction {
                     match (a, b) {
@@ -218,11 +216,11 @@ impl<'a> SwitchSliceEvaluator<'a> {
                     }
                 }
             }
-            _ => self.index_interval_for_comparison(operation, index, taken),
+            _ => self.index_interval_from_comparison(operation, index, taken),
         }
     }
 
-    fn index_interval_for_comparison(
+    fn index_interval_from_comparison(
         &self,
         operation: &ECodeSsaOp,
         index: IlValueId,
@@ -241,18 +239,18 @@ impl<'a> SwitchSliceEvaluator<'a> {
         let operands = self.ssa.operation_operands(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
 
-        let (relation, offset, constant) = if let Some(offset) = self.index_offset(a, index, width)
-        {
-            (relation, offset, self.ssa.constant_value(b)?)
-        } else if let Some(offset) = self.index_offset(b, index, width) {
-            (
-                relation.invert_operands(),
-                offset,
-                self.ssa.constant_value(a)?,
-            )
-        } else {
-            return None;
-        };
+        let (relation, offset, constant) =
+            if let Some(offset) = self.offset_from_index(a, index, width) {
+                (relation, offset, self.ssa.constant_value(b)?)
+            } else if let Some(offset) = self.offset_from_index(b, index, width) {
+                (
+                    relation.invert_operands(),
+                    offset,
+                    self.ssa.constant_value(a)?,
+                )
+            } else {
+                return None;
+            };
         let constant = constant.unsigned_cast(width);
 
         let bound = match relation {
@@ -264,7 +262,7 @@ impl<'a> SwitchSliceEvaluator<'a> {
         Some(effective.interval(&bound, width))
     }
 
-    fn index_offset(&self, value: IlValueId, index: IlValueId, width: u32) -> Option<BitVec> {
+    fn offset_from_index(&self, value: IlValueId, index: IlValueId, width: u32) -> Option<BitVec> {
         let value = self.underlying_value(value);
         if self.matches_index(value, index) {
             return Some(BitVec::zero(width));
@@ -287,8 +285,8 @@ impl<'a> SwitchSliceEvaluator<'a> {
     }
 
     fn matches_index(&self, operand: IlValueId, index: IlValueId) -> bool {
-        let a = self.canonical(operand);
-        let b = self.canonical(index);
+        let a = self.canonical_value(operand);
+        let b = self.canonical_value(index);
         if a == b {
             return true;
         }
@@ -303,27 +301,33 @@ impl<'a> SwitchSliceEvaluator<'a> {
             && oa.immediate() == ob.immediate()
     }
 
-    pub(crate) fn resolve_guard_default_target(
+    pub(crate) fn resolve_default_branch_target(
         &self,
-        guard: &SwitchGuard,
+        guard: Option<&SwitchGuard>,
+        branch: Address,
         context: &ContextSet,
-        translator: &mut Translator,
+        insn_resolver: &mut InsnResolver,
     ) -> Option<AddressWithContext> {
-        let address = match guard.default {
-            SwitchGuardDefault::Block(block) => {
-                let address = self.block_address(block)?;
-                context.apply(address, translator.context_mut());
-                let mut resolver =
-                    SwitchTargetResolver::new(self.arch, self.segments, address.space());
-                return resolver.resolve_address(address.raw_address(), translator.context());
-            }
-            SwitchGuardDefault::DirectBranch(address) => address,
-        };
+        if let Some(address) = self
+            .conditional_branch_within_instruction(branch)
+            .and_then(ECodeSsaOp::address)
+        {
+            tracing::trace!(
+                "switch at {branch}: resolving intra-instruction default branch at {address}"
+            );
+            let mut resolver = SwitchTargetResolver::new(self.arch, self.segments, address.space());
+            return resolver.resolve_branch_target(address, None, context, insn_resolver);
+        }
+
+        let block = guard?.default_block?;
+        let address = self.block_address(block)?;
+        tracing::trace!("switch at {branch}: resolving guard default block {block:?} at {address}");
+        context.apply(address, insn_resolver.context_mut());
         let mut resolver = SwitchTargetResolver::new(self.arch, self.segments, address.space());
-        resolver.resolve_direct_branch(address, None, context, translator)
+        resolver.resolve_address(address.raw_address(), insn_resolver.context())
     }
 
-    fn alternate_successor(&self, block: IlBlockId, exclude: IlBlockId) -> Option<IlBlockId> {
+    fn other_successor(&self, block: IlBlockId, exclude: IlBlockId) -> Option<IlBlockId> {
         let graph = self.ssa.graph();
         let range = graph.blocks().get(block.index())?.successors();
         graph.successors()[range.start()..range.end()]
@@ -333,6 +337,9 @@ impl<'a> SwitchSliceEvaluator<'a> {
     }
 
     fn block_address(&self, block: IlBlockId) -> Option<Address> {
+        if let Some(address) = self.ssa.graph().block_source(block) {
+            return Some(address);
+        }
         let range = self.ssa.graph().blocks().get(block.index())?.operations();
         self.ssa
             .source_span_for(range.start() as u32)

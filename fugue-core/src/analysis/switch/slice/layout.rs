@@ -102,7 +102,7 @@ impl SwitchSliceEvaluator<'_> {
         pointer: IlValueId,
         element_size: u32,
     ) -> Option<(RawAddress, IlValueId)> {
-        let pointer = self.canonical(pointer);
+        let pointer = self.canonical_value(pointer);
         let operation = self.ssa.defining_operation(pointer)?;
         if operation.opcode() != ECodeSsaOpcode::Add {
             return None;
@@ -111,7 +111,7 @@ impl SwitchSliceEvaluator<'_> {
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         let (address, scaled) = self.constant_and_value(a, b)?;
         let address = RawAddress::from(address.to_u64()?);
-        let scaled = self.canonical(scaled);
+        let scaled = self.canonical_value(scaled);
         let Some(operation) = self.ssa.defining_operation(scaled) else {
             return (element_size == 1).then_some((address, scaled));
         };
@@ -133,11 +133,11 @@ impl SwitchSliceEvaluator<'_> {
         if stride != u64::from(element_size) {
             return None;
         }
-        Some((address, self.canonical(index)))
+        Some((address, self.canonical_value(index)))
     }
 
     pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
-        let mut target = self.canonical(target);
+        let mut target = self.canonical_value(target);
         if let Some(operation) = self.ssa.defining_operation(target)
             && operation.opcode() == ECodeSsaOpcode::And
         {
@@ -149,7 +149,7 @@ impl SwitchSliceEvaluator<'_> {
             if mask.unsigned_cast(width) != expected {
                 return None;
             }
-            target = self.canonical(unmasked);
+            target = self.canonical_value(unmasked);
         }
 
         let operation = self.ssa.defining_operation(target)?;
@@ -160,7 +160,7 @@ impl SwitchSliceEvaluator<'_> {
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         let (address, scaled) = self.constant_and_value(a, b)?;
         let address = RawAddress::from(address.to_u64()?);
-        let scaled = self.canonical(scaled);
+        let scaled = self.canonical_value(scaled);
         let operation = self.ssa.defining_operation(scaled)?;
         let operands = self.ssa.operation_operands(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
@@ -179,7 +179,7 @@ impl SwitchSliceEvaluator<'_> {
         Some(SwitchInlineTableLayout {
             address,
             stride,
-            index: self.canonical(index),
+            index: self.canonical_value(index),
         })
     }
 

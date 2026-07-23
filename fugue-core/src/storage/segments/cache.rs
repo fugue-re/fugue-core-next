@@ -2,32 +2,35 @@ use crate::ir::{Address, SegmentProperties};
 use crate::storage::segments::view::SegmentMappingView;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
-pub struct SegmentReader<'a> {
+pub struct SegmentMappingCache<'a> {
     segments: &'a SegmentStorage,
-    view: Option<SegmentMappingView<'a>>,
+    cached_view: Option<SegmentMappingView<'a>>,
 }
 
-impl<'a> SegmentReader<'a> {
+impl<'a> SegmentMappingCache<'a> {
     pub fn new(segments: &'a SegmentStorage) -> Self {
         Self {
             segments,
-            view: None,
+            cached_view: None,
         }
     }
 
-    pub fn view(&mut self, address: Address) -> Option<&SegmentMappingView<'a>> {
+    pub fn view_containing(&mut self, address: Address) -> Option<&SegmentMappingView<'a>> {
         let cached = self
-            .view
+            .cached_view
             .as_ref()
             .is_some_and(|view| view.is_valid() && view.contains(address));
         if !cached {
-            self.view = self.segments.view_at(address).ok();
+            self.cached_view = self.segments.view_containing(address).ok();
         }
-        self.view.as_ref().filter(|view| view.contains(address))
+        self.cached_view
+            .as_ref()
+            .filter(|view| view.contains(address))
     }
 
-    pub fn properties(&mut self, address: Address) -> Option<SegmentProperties> {
-        self.view(address).map(SegmentMappingView::properties)
+    pub fn properties_at(&mut self, address: Address) -> Option<SegmentProperties> {
+        self.view_containing(address)
+            .map(SegmentMappingView::properties)
     }
 
     pub fn read_bytes(
@@ -35,7 +38,7 @@ impl<'a> SegmentReader<'a> {
         address: Address,
         buffer: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
-        match self.view(address) {
+        match self.view_containing(address) {
             Some(view) => view.read_bytes(address, buffer),
             None => Err(SegmentStorageError::InvalidAddress),
         }

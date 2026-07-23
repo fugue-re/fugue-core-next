@@ -16,11 +16,10 @@ use self::change::{
 };
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
-use crate::analysis::function::recovery::PartialFunction;
 use crate::il::common::{IlError, IlLevel};
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference,
-    ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
+    Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, RawAddressRangeSet,
+    Reference, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{QueryEngine, QueryReader};
@@ -293,19 +292,19 @@ impl BytePatch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionPatch {
-    function: PartialFunction,
+    function: IncompleteFunction,
 }
 
 impl FunctionPatch {
-    pub fn new(function: PartialFunction) -> Self {
+    pub fn new(function: IncompleteFunction) -> Self {
         Self { function }
     }
 
-    pub fn function(&self) -> &PartialFunction {
+    pub fn function(&self) -> &IncompleteFunction {
         &self.function
     }
 
-    fn into_function(self) -> PartialFunction {
+    fn into_function(self) -> IncompleteFunction {
         self.function
     }
 }
@@ -670,7 +669,7 @@ pub enum ProjectUpdate {
 }
 
 impl ProjectUpdate {
-    pub fn add_function(function: PartialFunction) -> Self {
+    pub fn add_function(function: IncompleteFunction) -> Self {
         Self::AddFunction(FunctionPatch::new(function))
     }
 
@@ -1188,7 +1187,7 @@ impl AnalysisEngine {
         self.apply_update(ProjectUpdate::insert_symbol(index, entry))
     }
 
-    pub fn add_function(&self, function: PartialFunction) -> Result<ChangeSet, EngineError> {
+    pub fn add_function(&self, function: IncompleteFunction) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::add_function(function))
     }
 

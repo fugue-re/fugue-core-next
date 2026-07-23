@@ -3,12 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use fugue_lifter::runtime::language::Language;
 
 use crate::analysis::control::CancellationToken;
-use crate::analysis::function::recovery::PartialFunction;
-use crate::il::common::{IlBlock, IlBlockId, IlError, IlHeader, IlIndexRange, IlValueId};
-use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaIr};
+use crate::il::common::{
+    IlArtefact, IlBlock, IlBlockId, IlError, IlHeader, IlIndexRange, IlValueId,
+};
+use crate::il::ecode::ssa::{
+    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOptimiser,
+};
 use crate::il::ecode::{ECodeIr, PCodeToECode};
 use crate::il::pcode::{PCodeCanonicaliser, PCodeError};
-use crate::ir::Address;
+use crate::ir::IncompleteFunction;
 use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -19,21 +22,6 @@ mod spans;
 
 #[derive(Debug, Default)]
 pub struct ECodeToSsa;
-
-pub(crate) struct PartialECodeSsaBuild {
-    ir: Option<ECodeSsaIr>,
-    omitted_blocks: Vec<Address>,
-}
-
-impl PartialECodeSsaBuild {
-    pub(crate) fn ir(&self) -> Option<&ECodeSsaIr> {
-        self.ir.as_ref()
-    }
-
-    pub(crate) fn omits(&self, address: Address) -> bool {
-        self.omitted_blocks.binary_search(&address).is_ok()
-    }
-}
 
 impl ECodeToSsa {
     pub fn transform(
@@ -57,39 +45,27 @@ impl ECodeToSsa {
         builder.build(cancellation)
     }
 
-    pub(crate) fn build_partial_function_tolerant(
+    pub(crate) fn build_incomplete_function(
         &mut self,
         language: &'static Language,
-        function: &PartialFunction,
+        function: &IncompleteFunction,
         segments: &SegmentStorage,
         input_revision: u64,
         cancellation: &CancellationToken,
-    ) -> Result<PartialECodeSsaBuild, PCodeError> {
+    ) -> Result<ECodeSsaIr, PCodeError> {
         let mut canonicaliser = PCodeCanonicaliser::default();
-        let partial = canonicaliser.build_partial_function_tolerant(
+        let lifted = canonicaliser.build_incomplete_function(
             language,
             function,
             segments,
             input_revision,
             cancellation,
         )?;
-        let (pcode, omitted_blocks) = partial.into_parts();
-        if omitted_blocks.binary_search(&function.entry()).is_ok() {
-            return Ok(PartialECodeSsaBuild {
-                ir: None,
-                omitted_blocks,
-            });
-        }
-
-        let ecode = PCodeToECode.transform(&pcode, cancellation)?;
+        let ecode = PCodeToECode.transform(&lifted, cancellation)?;
         let mut ir = self.transform(&ecode, cancellation)?;
-        ir.fold_constants();
-        ir.eliminate_dead_code();
+        ir.rewrite(ECodeSsaOptimiser);
 
-        Ok(PartialECodeSsaBuild {
-            ir: Some(ir),
-            omitted_blocks,
-        })
+        Ok(ir)
     }
 }
 

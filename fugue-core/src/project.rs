@@ -5,12 +5,13 @@ use thiserror::Error;
 use tracing::Span;
 
 use crate::analysis::control::{CancellationToken, Cancelled};
-use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
 use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
 use crate::il::common::{IlArtefact, IlError, IlLevel};
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa, verify as verify_ecode_ssa};
+use crate::il::ecode::ssa::{
+    ECodeSsaIr, ECodeSsaOptimiser, ECodeToSsa, verify as verify_ecode_ssa,
+};
 use crate::il::ecode::{ECodeIr, PCodeToECode, verify as verify_ecode};
 use crate::il::pcode::{PCodeCanonicaliser, PCodeError, PCodeIr, verify as verify_pcode};
 use crate::il::storage::{IlPersist, IlRevert, IlStorageError};
@@ -20,9 +21,9 @@ use crate::ir::switch::SwitchTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphIndex, CodeBlockTable, FunctionId,
-    FunctionTable, RawAddress, Reference, ReferenceIndex, ReferenceKind, ReferenceOrigin,
-    ReferenceTarget, Switch, SwitchId, SwitchTable, SwitchTableError, Symbol, SymbolEntry,
-    SymbolId, SymbolIndex, SymbolTable,
+    FunctionTable, IncompleteFunction, IncompleteFunctionError, RawAddress, Reference,
+    ReferenceIndex, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SwitchId, SwitchTable,
+    SwitchTableError, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter, LifterError};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -137,9 +138,9 @@ pub enum ProjectError {
     #[error("failed to create entity cache: {0}")]
     EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
-    FunctionRecovery(#[from] FunctionRecoveryError),
-    #[error(transparent)]
     Il(#[from] IlError),
+    #[error(transparent)]
+    IncompleteFunction(#[from] IncompleteFunctionError),
     #[error(transparent)]
     Lifter(#[from] LifterError),
     #[error(transparent)]
@@ -510,9 +511,7 @@ impl ProjectTransaction<'_> {
         let (_, source) = self.ensure_ecode_ir(function, cancellation)?;
         let mut ir = ECodeToSsa.transform(&source, cancellation)?;
 
-        ir.fold_constants();
-        ir.eliminate_dead_code();
-        ir.compact();
+        ir.rewrite(ECodeSsaOptimiser);
 
         if cfg!(debug_assertions) {
             verify_ecode_ssa(&ir).expect("optimised ECode SSA fails verification");
@@ -551,7 +550,10 @@ impl ProjectTransaction<'_> {
         passes.analyse_with(self.project, state)
     }
 
-    pub fn add_function(&mut self, function: PartialFunction) -> Result<FunctionId, ProjectError> {
+    pub fn add_function(
+        &mut self,
+        function: IncompleteFunction,
+    ) -> Result<FunctionId, ProjectError> {
         let entry = function.entry();
         let revert = FunctionTableRevert::capture(
             &self.project.functions,
@@ -1989,22 +1991,23 @@ mod test {
     use fugue_lifter::{Op, PCodeOp as RawPCodeOp, Varnode};
 
     use super::*;
-    use crate::analysis::function::recovery::{InsnEntry, PartialCodeBlock};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::attributes;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange, IlSchemaVersion,
-        IlSourceSpan, IlValueId,
+        IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlHeader,
+        IlIndexRange, IlSchemaVersion, IlSourceSpan, IlValueId,
     };
-    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::ssa::{
+        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses,
+    };
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeStmtOpcode};
     use crate::il::pcode::{
         LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
         PCodeLocationProperties, PCodeOp, PCodeOpcode,
     };
     use crate::ir::{
-        AddressWithContext, Insn, InsnProperties, ReferenceProperties, SwitchCase, SwitchModel,
-        SymbolProperties, SymbolTableSelector,
+        AddressWithContext, IncompleteCodeBlock, Insn, InsnEntry, InsnProperties,
+        ReferenceProperties, SwitchCase, SwitchModel, SymbolProperties, SymbolTableSelector,
     };
     use crate::lifter::{ContextSet, resolve_language};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
@@ -2120,7 +2123,7 @@ mod test {
     fn flow_resolved_load_function(
         entry: Address,
         data_offset: u64,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let operation = RawPCodeOp {
             op: Op::Load(language.default_space()),
@@ -2129,21 +2132,19 @@ mod test {
         };
         let operations = [operation];
         let insn = Insn::from_resolved_flow(language, entry, 1, &operations)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
+        function.push_block(IncompleteCodeBlock::new(
             entry,
             1,
-            vec![0],
+            vec![insn],
             ContextSet::default(),
         ));
 
@@ -2154,7 +2155,7 @@ mod test {
         entry: Address,
         callee: Address,
         length: usize,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let operation = RawPCodeOp {
             op: Op::Call,
@@ -2163,23 +2164,19 @@ mod test {
         };
         let operations = [operation];
         let insn = Insn::from_resolved_flow(language, entry, length, &operations)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            length,
-            vec![0],
-            ContextSet::default(),
-        ));
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         Ok(function)
     }
@@ -2187,25 +2184,21 @@ mod test {
     fn disassembled_function(
         entry: Address,
         length: usize,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let insn = Insn::from_disassembly(entry, length, InsnProperties::NEEDS_FLOW_RESOLUTION)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            length,
-            vec![0],
-            ContextSet::default(),
-        ));
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         Ok(function)
     }
@@ -2219,14 +2212,12 @@ mod test {
             .ok_or_else(|| io::Error::other("fixture writable segment missing").into())
     }
 
-    fn partial_function(entry: Address, len: usize) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            len,
-            Vec::new(),
-            ContextSet::default(),
-        ));
+    fn incomplete_function(entry: Address, len: usize) -> IncompleteFunction {
+        let mut function = IncompleteFunction::new(entry);
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, len, Vec::new(), ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         function
     }
@@ -3026,10 +3017,10 @@ mod test {
         let ir = project
             .ecode_ssa(function)?
             .expect("SSA IR should be available");
-        let uses = ir.uses();
-        let dominance = ir.dominance();
-        let frontiers = ir.dominance_frontiers();
-        let liveness = ir.liveness();
+        let uses = ir.analyse::<ECodeSsaUses>();
+        let dominance = ir.analyse::<IlDominance>();
+        let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert!(uses.uses_for(value).is_empty());
         assert!(dominance.dominates(entry, entry));
@@ -3171,7 +3162,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3186,7 +3177,7 @@ mod test {
         let changes = {
             let mut transaction = project.transaction("test");
             assert_eq!(
-                transaction.add_function(partial_function(entry, 2))?,
+                transaction.add_function(incomplete_function(entry, 2))?,
                 function
             );
             transaction.commit()?
@@ -3214,7 +3205,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3228,7 +3219,7 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.add_function(partial_function(entry, 2))?;
+            transaction.add_function(incomplete_function(entry, 2))?;
             transaction.rollback()?;
         }
 
@@ -3252,7 +3243,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3285,7 +3276,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
@@ -3318,7 +3309,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
@@ -3359,7 +3350,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.insert_symbol(
                 index,
                 SymbolEntry::new(entry, "old_display_name", SymbolProperties::FUNCTION),
@@ -3412,7 +3403,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
@@ -3475,7 +3466,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3506,7 +3497,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3540,7 +3531,7 @@ mod test {
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
@@ -3579,8 +3570,8 @@ mod test {
 
         let (old_function, new_function) = {
             let mut transaction = project.transaction("test");
-            let old_function = transaction.add_function(partial_function(old_entry, 1))?;
-            let new_function = transaction.add_function(partial_function(new_entry, 1))?;
+            let old_function = transaction.add_function(incomplete_function(old_entry, 1))?;
+            let new_function = transaction.add_function(incomplete_function(new_entry, 1))?;
             transaction.commit()?;
             (old_function, new_function)
         };

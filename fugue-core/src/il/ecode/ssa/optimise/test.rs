@@ -1,12 +1,16 @@
 use fugue_bv::BitVec;
 
+use super::{ECodeSsaCompaction, ECodeSsaConstantFolding, ECodeSsaDeadCodeElimination};
 use crate::analysis::control::CancellationToken;
-use crate::il::common::{IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange};
+use crate::il::common::{
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange,
+};
 use crate::il::ecode::ssa::{
     ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind,
     verify,
 };
-use crate::ir::FunctionId;
+use crate::ir::{Address, FunctionId};
+use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn fold_constants_materialises_wide_result_in_pool() {
@@ -39,7 +43,7 @@ fn fold_constants_materialises_wide_result_in_pool() {
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
 
-    ssa.fold_constants();
+    ssa.rewrite(ECodeSsaConstantFolding);
 
     let folded = ssa.defining_operation(widened).unwrap();
     assert_eq!(folded.opcode(), ECodeSsaOpcode::Constant);
@@ -152,7 +156,7 @@ fn fold_constants_propagates_through_block_argument() {
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
     verify(&ssa).unwrap();
 
-    ssa.fold_constants();
+    ssa.rewrite(ECodeSsaConstantFolding);
 
     let folded = ssa.defining_operation(sum).unwrap();
     assert_eq!(folded.opcode(), ECodeSsaOpcode::Constant);
@@ -259,7 +263,7 @@ fn fold_constants_leaves_disagreeing_block_argument_unfolded() {
     builder.push_edge_arguments([right]).unwrap();
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
-    ssa.fold_constants();
+    ssa.rewrite(ECodeSsaConstantFolding);
 
     assert_eq!(
         ssa.defining_operation(sum).unwrap().opcode(),
@@ -307,7 +311,7 @@ fn fold_constants_leaves_sourceless_block_argument_unfolded() {
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
     verify(&ssa).unwrap();
 
-    ssa.fold_constants();
+    ssa.rewrite(ECodeSsaConstantFolding);
 
     assert_eq!(
         ssa.defining_operation(copied).unwrap().opcode(),
@@ -383,7 +387,7 @@ fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
     builder.push_edge_arguments([]).unwrap();
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
-    ssa.fold_constants();
+    ssa.rewrite(ECodeSsaConstantFolding);
 
     assert_eq!(
         ssa.defining_operation(sum).unwrap().opcode(),
@@ -429,7 +433,7 @@ fn eliminate_dead_code_neutralises_unused_operations() {
         .unwrap();
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
-    ssa.eliminate_dead_code();
+    ssa.rewrite(ECodeSsaDeadCodeElimination);
 
     assert_eq!(
         ssa.defining_operation(used).unwrap().opcode(),
@@ -507,7 +511,7 @@ fn compact_removes_dead_operations_and_remaps_indices() {
     assert_eq!(ssa.operations().len(), 5);
     assert_eq!(ssa.values().len(), 4);
 
-    ssa.compact();
+    ssa.rewrite(ECodeSsaCompaction);
 
     assert_eq!(ssa.operations().len(), 4);
     assert_eq!(ssa.values().len(), 3);
@@ -532,6 +536,62 @@ fn compact_removes_dead_operations_and_remaps_indices() {
         ssa.constant_value(operands[1]),
         Some(BitVec::from_u64(7, 64))
     );
+}
+
+#[test]
+fn compact_preserves_sources_for_operation_empty_blocks() {
+    let entry = IlBlockId::try_from_index(0).unwrap();
+    let exit = IlBlockId::try_from_index(1).unwrap();
+    let space = AddressSpaceId::new(1);
+    let entry_source = Address::new(space, 0x1000u64);
+    let exit_source = Address::new(space, 0x2000u64);
+    let graph = IlGraph::new(
+        vec![
+            IlBlock::new(
+                IlIndexRange::new(0, 1).unwrap(),
+                IlIndexRange::new(0, 1).unwrap(),
+                IlBlockProperties::ENTRY,
+            ),
+            IlBlock::new(
+                IlIndexRange::new(1, 2).unwrap(),
+                IlIndexRange::EMPTY,
+                IlBlockProperties::EXIT,
+            ),
+        ],
+        vec![exit],
+    )
+    .with_block_sources(vec![entry_source, exit_source]);
+    let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let mut builder = ECodeSsaBuilder::new(header, graph);
+
+    let (_, dead_results) = builder.push_result_value(32).unwrap();
+    builder
+        .push_operation(
+            ECodeSsaOp::new(
+                ECodeSsaOpcode::Constant,
+                dead_results,
+                IlIndexRange::EMPTY,
+                32,
+            )
+            .with_immediate(1),
+        )
+        .unwrap();
+    builder
+        .push_operation(ECodeSsaOp::new(
+            ECodeSsaOpcode::Return,
+            IlIndexRange::EMPTY,
+            IlIndexRange::EMPTY,
+            0,
+        ))
+        .unwrap();
+
+    let mut ssa = builder.build(&CancellationToken::default()).unwrap();
+    ssa.rewrite(ECodeSsaCompaction);
+
+    assert!(ssa.graph().blocks()[entry.index()].operations().is_empty());
+    assert_eq!(ssa.graph().block_source(entry), Some(entry_source));
+    assert_eq!(ssa.graph().block_source(exit), Some(exit_source));
+    verify(&ssa).unwrap();
 }
 
 #[test]
@@ -615,7 +675,7 @@ fn compact_drops_dead_loop_phi_and_sources() {
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
     verify(&ssa).unwrap();
 
-    ssa.compact();
+    ssa.rewrite(ECodeSsaCompaction);
     verify(&ssa).unwrap();
 
     assert_eq!(ssa.operations().len(), 1);
@@ -717,7 +777,7 @@ fn compact_preserves_live_phi_and_remaps_edge_arguments() {
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
     verify(&ssa).unwrap();
 
-    ssa.compact();
+    ssa.rewrite(ECodeSsaCompaction);
     verify(&ssa).unwrap();
 
     assert_eq!(ssa.operations().len(), 3);
@@ -845,7 +905,7 @@ fn compact_drops_one_of_two_phis_by_position() {
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
     verify(&ssa).unwrap();
 
-    ssa.compact();
+    ssa.rewrite(ECodeSsaCompaction);
     verify(&ssa).unwrap();
 
     assert_eq!(ssa.block_arguments().len(), 1);
@@ -933,7 +993,7 @@ fn eliminate_dead_code_undefines_phi_source_but_keeps_edge_argument() {
     builder.push_edge_arguments([]).unwrap();
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
-    ssa.eliminate_dead_code();
+    ssa.rewrite(ECodeSsaDeadCodeElimination);
     verify(&ssa).unwrap();
 
     assert_eq!(
@@ -997,8 +1057,8 @@ fn fold_then_compact_collapses_constant_expression() {
 
     let mut ssa = builder.build(&CancellationToken::default()).unwrap();
 
-    ssa.fold_constants();
-    ssa.compact();
+    ssa.rewrite(ECodeSsaConstantFolding);
+    ssa.rewrite(ECodeSsaCompaction);
 
     assert_eq!(ssa.operations().len(), 2);
     verify(&ssa).unwrap();

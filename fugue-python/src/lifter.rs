@@ -171,7 +171,7 @@ impl Lifter {
         let mut operations = Vec::new();
         let length = self
             .inner
-            .lift_into(address, &bytes, &mut operations)
+            .lift(address, &bytes, &mut operations)
             .map_err(lifter_error)?;
         let language = self.inner.language();
 

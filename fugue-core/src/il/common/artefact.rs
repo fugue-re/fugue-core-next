@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::il::common::IlGraph;
+use crate::il::common::{IlAnalysis, IlGraph, IlRewrite};
 use crate::ir::FunctionId;
 use crate::storage::entities::MutableEntity;
 
@@ -150,6 +150,14 @@ pub trait IlArtefact: MutableEntity<Key = FunctionId> {
     fn header(&self) -> &IlHeader;
     fn header_mut(&mut self) -> &mut IlHeader;
     fn graph(&self) -> &IlGraph;
+
+    fn analyse<A: IlAnalysis<Self>>(&self) -> A {
+        A::analyse(self)
+    }
+
+    fn rewrite<R: IlRewrite<Self>>(&mut self, mut rewrite: R) {
+        rewrite.rewrite(self);
+    }
 }
 
 #[cfg(test)]
