@@ -13,10 +13,9 @@ use thiserror::Error;
 
 use super::schema::{ENTITY_PREFIX_SIZE, STORED_ENTITY_PREFIXES};
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 use crate::loader::Loadable;
@@ -25,7 +24,6 @@ use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrSlice};
 
 const PROJECT_SQLITE_DATA: &str = "entities.db";
-const BATCH_SIZE: usize = 1024;
 const DEFAULT_POOL_SIZE: u32 = 16;
 
 #[derive(Debug, Error)]
@@ -413,10 +411,6 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         SqliteEntityBytesAsIterator::new(&self.pool, prefix, f)
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        SqliteEntityBytesBulkInserter::new(self)
-    }
-
     fn transactional_reader(
         &self,
     ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
@@ -649,91 +643,6 @@ impl<T> Iterator for SqliteEntityBytesAsIterator<'_, T> {
                 Some(value)
             })
         })
-    }
-}
-
-struct SqliteEntityBytesBulkInserter<'a, const P: StoragePersistence> {
-    storage: &'a SqliteEntityStorage<P>,
-    conn: r2d2::PooledConnection<SqliteConnectionManager>,
-    batch_size: usize,
-    in_transaction: bool,
-}
-
-impl<'a, const P: StoragePersistence> SqliteEntityBytesBulkInserter<'a, P> {
-    #[allow(clippy::new_ret_no_self)]
-    fn new(
-        storage: &'a SqliteEntityStorage<P>,
-    ) -> Result<EntityBytesBulkInserter<'a>, EntityStorageError> {
-        let conn = storage.pool.get().map_err(EntityStorageError::backing)?;
-        conn.execute_batch("BEGIN TRANSACTION")?;
-
-        Ok(Box::new(Self {
-            storage,
-            conn,
-            batch_size: 0,
-            in_transaction: true,
-        }))
-    }
-
-    fn force_commit(&mut self) -> Result<(), EntityStorageError> {
-        if self.in_transaction {
-            self.conn.execute_batch("COMMIT")?;
-            self.in_transaction = false;
-        }
-
-        self.conn = self
-            .storage
-            .pool
-            .get()
-            .map_err(EntityStorageError::backing)?;
-        self.conn.execute_batch("BEGIN TRANSACTION")?;
-        self.in_transaction = true;
-        self.batch_size = 0;
-
-        Ok(())
-    }
-}
-
-impl<const P: StoragePersistence> Drop for SqliteEntityBytesBulkInserter<'_, P> {
-    fn drop(&mut self) {
-        if self.in_transaction
-            && let Err(e) = self.conn.execute_batch("COMMIT")
-        {
-            tracing::warn!("failed to flush batch to storage: {e}");
-        }
-    }
-}
-
-impl<'a, const P: StoragePersistence> EntityStorageBulkInserter<'a>
-    for SqliteEntityBytesBulkInserter<'a, P>
-{
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'_>,
-        value: BytesOrSlice<'_>,
-    ) -> Result<(), EntityStorageError> {
-        if self.batch_size >= BATCH_SIZE {
-            self.force_commit()?;
-        }
-
-        let (prefix, key_rest) =
-            extract_key_parts(key.as_slice()).ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-        let query = build_insert_query(&prefix);
-        let mut stmt = self.conn.prepare_cached(&query)?;
-        stmt.execute(params![key_rest, value.as_slice()])?;
-
-        self.batch_size += 1;
-
-        Ok(())
-    }
-
-    fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
-        if self.in_transaction {
-            self.conn.execute_batch("COMMIT")?;
-            self.in_transaction = false;
-        }
-        Ok(())
     }
 }
 

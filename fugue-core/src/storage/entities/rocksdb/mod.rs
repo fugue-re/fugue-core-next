@@ -1,6 +1,6 @@
+use std::io;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::{io, mem};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -9,21 +9,15 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
 
 const PROJECT_ROCKSDB_DATA: &str = "entities.db";
-
-// Maximum batch size for bulk operations
-const BATCH_SIZE: usize = 1024;
-// Maximum size of a batch in bytes
-const BATCH_MEMORY_LIMIT: usize = 4 * 1024 * 1024; // 4 MiB
 
 impl From<rocksdb::Error> for EntityStorageError {
     fn from(error: rocksdb::Error) -> Self {
@@ -178,10 +172,6 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         T: 'a,
     {
         Ok(RocksDbEntityBytesAsIterator::new(self, prefix, f))
-    }
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        Ok(RocksDbEntityInserter::new(self))
     }
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
@@ -349,64 +339,6 @@ impl<'a, T> Iterator for RocksDbEntityBytesAsIterator<'a, T> {
             let kv = kv.map_err(EntityStorageError::backing);
             kv.and_then(|(key, val)| (self.f)(key.as_ref(), val.as_ref()))
         })
-    }
-}
-
-struct RocksDbEntityInserter<'a> {
-    storage: &'a RocksDbEntityStorage,
-    batch: rocksdb::WriteBatchWithTransaction<true>,
-}
-
-impl<'a> RocksDbEntityInserter<'a> {
-    fn new(storage: &'a RocksDbEntityStorage) -> EntityBytesBulkInserter<'a> {
-        Box::new(Self {
-            storage,
-            batch: rocksdb::WriteBatchWithTransaction::<true>::default(),
-        })
-    }
-}
-
-impl<'a> Drop for RocksDbEntityInserter<'a> {
-    fn drop(&mut self) {
-        // if the inserter is dropped without committing, we should still flush the batch
-        if self.batch.is_empty() {
-            return;
-        }
-
-        let batch = mem::take(&mut self.batch);
-
-        if let Err(e) = self.storage.database.write(batch) {
-            tracing::warn!("failed to flush batch to storage: {e}")
-        }
-    }
-}
-
-impl<'a> EntityStorageBulkInserter<'a> for RocksDbEntityInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError> {
-        // flush the current batch before inserting more, if it exceeds the limits
-        if self.batch.len() >= BATCH_SIZE || self.batch.size_in_bytes() >= BATCH_MEMORY_LIMIT {
-            let batch = std::mem::take(&mut self.batch);
-            self.storage
-                .database
-                .write(batch)
-                .map_err(EntityStorageError::backing)?;
-        }
-
-        self.batch.put(key, value);
-
-        Ok(())
-    }
-
-    fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
-        let batch = mem::take(&mut self.batch);
-        self.storage
-            .database
-            .write(batch)
-            .map_err(EntityStorageError::backing)
     }
 }
 

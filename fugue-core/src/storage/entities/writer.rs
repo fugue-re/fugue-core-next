@@ -275,7 +275,7 @@ impl Worker {
     fn write_batch(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
         let writer = match self.backing.transactional_writer() {
             Ok(writer) => writer,
-            Err(EntityStorageError::Unsupported(_)) => return self.write_batch_buffered(snapshot),
+            Err(EntityStorageError::Unsupported(_)) => return self.write_batch_direct(snapshot),
             Err(error) => return Err(error),
         };
 
@@ -291,21 +291,13 @@ impl Worker {
         writer.commit()
     }
 
-    fn write_batch_buffered(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
-        let mut inserter = self.backing.bulk_inserter()?;
+    fn write_batch_direct(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
         for write in snapshot {
-            if let Some(bytes) = &write.value {
-                inserter.insert(
-                    BytesOrSlice::from(write.key.as_ref()),
-                    BytesOrSlice::from(bytes.as_ref()),
-                )?;
-            }
-        }
-        inserter.commit()?;
-
-        for write in snapshot {
-            if write.value.is_none() {
-                self.backing.remove(write.key.as_ref())?;
+            match &write.value {
+                Some(bytes) => self
+                    .backing
+                    .insert(write.key.as_ref(), BytesOrSlice::from(bytes.as_ref()))?,
+                None => self.backing.remove(write.key.as_ref())?,
             }
         }
 

@@ -3,9 +3,9 @@ use std::ops::Bound;
 use thiserror::Error;
 
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
@@ -92,10 +92,6 @@ impl EntityStorageProvider for DummyEntityStorage {
         T: 'a,
     {
         Err(DummyEntityStorageError("iter_prefix_as").into())
-    }
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        Err(DummyEntityStorageError("bulk_inserter").into())
     }
 
     fn transactional_reader(

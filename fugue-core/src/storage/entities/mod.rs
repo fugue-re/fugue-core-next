@@ -131,16 +131,6 @@ impl EntityStorageError {
     }
 }
 
-pub trait EntityStorageBulkInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError>;
-
-    fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
-}
-
 pub type EntityBytesIterator<'a> =
     Box<dyn Iterator<Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>> + 'a>;
 
@@ -313,38 +303,6 @@ impl<'a> Drop for EntityTransactionalWriter<'a> {
     }
 }
 
-pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
-
-pub struct EntityBulkInserter<'a> {
-    inner: EntityBytesBulkInserter<'a>,
-}
-
-impl<'a> EntityBulkInserter<'a> {
-    pub fn new(inner: EntityBytesBulkInserter<'a>) -> Self {
-        Self { inner }
-    }
-
-    pub fn insert<K: EntityKey, E: Entity>(
-        &mut self,
-        key: &K,
-        entity: &E,
-    ) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
-            .map(|v| v.to_vec())
-            .map_err(EntityStorageError::encode)?;
-
-        let key = BytesOrSlice::from(key);
-        let encoded = BytesOrSlice::from(encoded);
-
-        self.inner.insert(key, encoded)
-    }
-
-    pub fn commit(self) -> Result<(), EntityStorageError> {
-        self.inner.commit()
-    }
-}
-
 pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
@@ -461,8 +419,6 @@ pub trait EntityStorageProvider: Send + Sync {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a;
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
-
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
 
@@ -574,8 +530,6 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         mapper: OutMapper2<'a>,
     ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError>;
 
-    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
-
     fn erased_transactional_reader(
         &self,
     ) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
@@ -649,10 +603,6 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         Ok(Box::new(iter))
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.erased_bulk_inserter()
-    }
-
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
         self.erased_transactional_reader()
     }
@@ -724,10 +674,6 @@ where
         let iter =
             self.iter_prefix_as(prefix, move |kbytes, ebytes| mapper.apply(kbytes, ebytes))?;
         Ok(Box::new(iter))
-    }
-
-    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.bulk_inserter()
     }
 
     fn erased_transactional_reader(
@@ -838,10 +784,6 @@ impl EntityStorage {
     ) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
         self.backing.insert(&key, value)
-    }
-
-    pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
-        Ok(EntityBulkInserter::new(self.backing.bulk_inserter()?))
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {

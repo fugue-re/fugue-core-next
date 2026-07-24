@@ -41,7 +41,7 @@ use fugue_core::storage::PersistentStorageProvider;
 use fugue_core::storage::entities::SqliteEntityStorage;
 use fugue_core::storage::entities::schema::{self, ENTITY_PROJECT_REVISION_ID};
 use fugue_core::storage::entities::{
-    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
+    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator,
     EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
     EntityStorageProvider, EntityStorageProviderFromLoadable, InMemoryEntityStorage, ProjectEntity,
 };
@@ -169,10 +169,6 @@ impl EntityStorageProvider for FailingSaveEntityStorage {
         T: 'a,
     {
         self.inner.iter_prefix_as(prefix, f)
-    }
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.inner.bulk_inserter()
     }
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {

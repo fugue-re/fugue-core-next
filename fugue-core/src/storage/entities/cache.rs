@@ -675,10 +675,9 @@ mod test {
     use super::*;
     use crate::ir::Address;
     use crate::storage::entities::{
-        Entity, EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-        EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityId,
-        EntityKeyBytesIterator, EntityStorage, EntityStorageError, EntityStorageProvider,
-        InMemoryEntityStorage, WriteBackWorker,
+        Entity, EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+        EntityBytesTransactionalWriter, EntityId, EntityKeyBytesIterator, EntityStorage,
+        EntityStorageError, EntityStorageProvider, InMemoryEntityStorage, WriteBackWorker,
     };
     use crate::types::BytesOrSlice;
 
@@ -700,9 +699,9 @@ mod test {
         }
     }
 
-    struct FailingBulkProvider(InMemoryEntityStorage);
+    struct FailingWriteProvider(InMemoryEntityStorage);
 
-    impl EntityStorageProvider for FailingBulkProvider {
+    impl EntityStorageProvider for FailingWriteProvider {
         fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
             self.0.get(key)
         }
@@ -714,8 +713,8 @@ mod test {
             self.0.get_as(key, f)
         }
 
-        fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-            self.0.insert(key, value)
+        fn insert(&self, _key: &[u8], _value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+            Err(EntityStorageError::backing_with("write failed"))
         }
 
         fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
@@ -758,12 +757,6 @@ mod test {
             T: 'a,
         {
             self.0.iter_prefix_as(prefix, f)
-        }
-
-        fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-            Err(EntityStorageError::backing_with(
-                "bulk inserter unavailable",
-            ))
         }
 
         fn transactional_reader(
@@ -1003,7 +996,7 @@ mod test {
 
     #[test]
     fn write_back_commit_failure_poisons_worker() {
-        let storage = EntityStorage::new(FailingBulkProvider(InMemoryEntityStorage::new()));
+        let storage = EntityStorage::new(FailingWriteProvider(InMemoryEntityStorage::new()));
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache = EntityCache::<Address, CacheEntity>::with_worker(storage, worker, 64 * 1024);
 

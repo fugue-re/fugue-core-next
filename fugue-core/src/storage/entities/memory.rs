@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-use std::mem;
 use std::ops::Bound;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -10,17 +8,13 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
-
-// Maximum batch size for bulk operations
-const BATCH_SIZE: usize = 1024;
 
 pub struct InMemoryEntityStorage {
     data: DashMap<EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
@@ -229,10 +223,6 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         ))
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        Ok(Box::new(InMemoryEntityInserter::new(self)))
-    }
-
     fn transactional_reader(
         &self,
     ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
@@ -303,60 +293,6 @@ impl<'a> Iterator for InMemoryIterator<'a> {
                 ))
             })
         })
-    }
-}
-
-struct InMemoryEntityInserter<'a> {
-    batches: BTreeMap<EntityKeyPrefix, BTreeMap<BytesOrSlice<'a>, BytesOrSlice<'a>>>,
-    inner: &'a InMemoryEntityStorage,
-}
-
-impl<'a> InMemoryEntityInserter<'a> {
-    pub fn new(inner: &'a InMemoryEntityStorage) -> Self {
-        Self {
-            batches: BTreeMap::new(),
-            inner,
-        }
-    }
-}
-
-impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError> {
-        let (prefix, key) = InMemoryEntityStorage::extract_key_parts(key.as_slice())
-            .ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-        let entry = self.batches.entry(prefix).or_default();
-
-        if entry.len() >= BATCH_SIZE {
-            let mut dentry = self.inner.data.entry(prefix).or_default();
-            dentry.extend(
-                mem::take(entry)
-                    .into_iter()
-                    .map(|(k, v)| (Bytes::copy_from_slice(&k), v.into_bytes())),
-            );
-
-            return Ok(());
-        }
-
-        entry.insert(Bytes::copy_from_slice(key).into(), value);
-
-        Ok(())
-    }
-
-    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        for (prefix, batch) in self.batches {
-            let mut map = self.inner.data.entry(prefix).or_default();
-            map.extend(
-                batch
-                    .into_iter()
-                    .map(|(key, value)| (key.into_bytes(), value.into_bytes())),
-            );
-        }
-        Ok(())
     }
 }
 
