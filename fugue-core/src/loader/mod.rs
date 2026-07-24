@@ -6,7 +6,7 @@ use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
+use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::Address;
 use crate::ir::symbol::TransientSymbolTable;
@@ -50,10 +50,10 @@ pub enum LoaderError {
     Language(#[from] LanguageError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
-    #[error("cannot load object: unsupported file format")]
-    UnsupportedFormat,
     #[error("cannot load object: unsupported architecture")]
     UnsupportedArch,
+    #[error("cannot load object: unsupported file format")]
+    UnsupportedFormat,
 }
 
 impl LoaderError {
@@ -447,11 +447,10 @@ impl Loadable for Loader<'_> {
     fn image_segments<'a>(
         &'a self,
     ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
-        let segments: ImageSegmentIterator<'a> = match self {
-            Self::Elf(elf) => Box::new(elf.image_segments()),
-            Self::Pe(pe) => Box::new(pe.image_segments()),
-        };
-        segments
+        match self {
+            Self::Elf(elf) => Box::new(elf.image_segments()) as ImageSegmentIterator<'a>,
+            Self::Pe(pe) => Box::new(pe.image_segments()) as ImageSegmentIterator<'a>,
+        }
     }
 
     fn image_layout(&self) -> &ImageLayout {

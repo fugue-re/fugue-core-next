@@ -1,4 +1,4 @@
-use crate::il::common::artefact::IlArtefact;
+use super::IlArtefact;
 
 pub trait IlRewrite<I: IlArtefact> {
     fn rewrite(&mut self, ir: &mut I);

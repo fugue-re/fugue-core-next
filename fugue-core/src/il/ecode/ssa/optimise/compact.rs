@@ -1,6 +1,7 @@
-use super::reachability::ECodeSsaReachability;
+use super::required::ECodeSsaRequiredDefinitions;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlGraph, IlIndexRange, IlParentSpan, IlRewrite, IlSourceSpan, IlValueId,
+    IlArtefact, IlBlock, IlCsr, IlGraph, IlIndexRange, IlParentSpan, IlRewrite, IlSourceSpan,
+    IlValueId,
 };
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaValue,
@@ -11,33 +12,33 @@ pub(crate) struct ECodeSsaCompaction;
 
 impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
     fn rewrite(&mut self, ir: &mut ECodeSsaIr) {
-        let reachable = ir.analyse::<ECodeSsaReachability>();
+        let required = ir.analyse::<ECodeSsaRequiredDefinitions>();
 
-        let mut operation_index = vec![0u32; ir.operations.len() + 1];
-        for index in 0..ir.operations.len() {
+        let mut operation_index = vec![0u32; ir.operations().len() + 1];
+        for index in 0..ir.operations().len() {
             operation_index[index + 1] =
-                operation_index[index] + u32::from(reachable.operation_is_reachable(index));
+                operation_index[index] + u32::from(required.operation_is_required(index));
         }
 
-        let mut block_argument_index = vec![0u32; ir.block_arguments.len() + 1];
-        for index in 0..ir.block_arguments.len() {
-            block_argument_index[index + 1] = block_argument_index[index]
-                + u32::from(reachable.block_argument_is_reachable(index));
+        let mut block_argument_index = vec![0u32; ir.block_arguments().len() + 1];
+        for index in 0..ir.block_arguments().len() {
+            block_argument_index[index + 1] =
+                block_argument_index[index] + u32::from(required.block_argument_is_required(index));
         }
 
-        let mut value_kept = vec![false; ir.values.len()];
-        for (index, value) in ir.values.iter().enumerate() {
+        let mut value_kept = vec![false; ir.values().len()];
+        for (index, value) in ir.values().iter().enumerate() {
             value_kept[index] = match value.definition_kind() {
                 ECodeSsaValueKind::BlockArgument => {
-                    reachable.block_argument_is_reachable(value.definition_index() as usize)
+                    required.block_argument_is_required(value.definition_index() as usize)
                 }
                 ECodeSsaValueKind::Operation => {
-                    reachable.operation_is_reachable(value.definition_index() as usize)
+                    required.operation_is_required(value.definition_index() as usize)
                 }
             };
         }
-        let mut value_index = vec![0u32; ir.values.len() + 1];
-        for index in 0..ir.values.len() {
+        let mut value_index = vec![0u32; ir.values().len() + 1];
+        for index in 0..ir.values().len() {
             value_index[index + 1] = value_index[index] + u32::from(value_kept[index]);
         }
 
@@ -51,7 +52,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
         };
 
         let values = ir
-            .values
+            .values()
             .iter()
             .enumerate()
             .filter(|(index, _)| value_kept[*index])
@@ -70,12 +71,12 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
 
         let mut operations = Vec::new();
         let mut value_operands = Vec::new();
-        for (index, operation) in ir.operations.iter().enumerate() {
-            if !reachable.operation_is_reachable(index) {
+        for (index, operation) in ir.operations().iter().enumerate() {
+            if !required.operation_is_required(index) {
                 continue;
             }
             let operand_start = value_operands.len();
-            for &operand in operation.operands().slice(&ir.value_operands) {
+            for &operand in ir.operation_operands(operation) {
                 value_operands.push(remap_value(operand));
             }
             let operands = IlIndexRange::new(operand_start, value_operands.len())
@@ -92,17 +93,17 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             if !matches!(operation.opcode(), ECodeSsaOpcode::Constant) || operation.width() <= 64 {
                 continue;
             }
-            if let Some(value) = operation.constant(&ir.constants) {
+            if let Some(value) = operation.constant(ir.constant_storage()) {
                 let immediate = interner.intern(&value);
                 operation.replace_with_constant(immediate);
             }
         }
 
         let block_arguments = ir
-            .block_arguments
+            .block_arguments()
             .iter()
             .enumerate()
-            .filter(|(index, _)| reachable.block_argument_is_reachable(*index))
+            .filter(|(index, _)| required.block_argument_is_required(*index))
             .map(|(_, argument)| {
                 ECodeSsaBlockArg::new(
                     argument.block(),
@@ -112,16 +113,23 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             })
             .collect::<Vec<_>>();
 
-        let mut block_argument_kept = vec![Vec::new(); ir.graph.blocks().len()];
-        for (index, argument) in ir.block_arguments.iter().enumerate() {
-            block_argument_kept[argument.block().index()]
-                .push(reachable.block_argument_is_reachable(index));
-        }
+        let block_argument_kept = IlCsr::from_entries(
+            ir.graph().blocks().len(),
+            ir.block_arguments()
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| {
+                    (
+                        argument.block().index(),
+                        required.block_argument_is_required(index),
+                    )
+                }),
+        );
 
-        let mut edge_arguments = Vec::with_capacity(ir.edge_arguments.len());
+        let mut edge_arguments = Vec::with_capacity(ir.edge_arguments().len());
         let mut edge_argument_values = Vec::new();
-        for (edge, target) in ir.graph.successors().iter().enumerate() {
-            let kept = &block_argument_kept[target.index()];
+        for (edge, target) in ir.graph().successors().iter().enumerate() {
+            let kept = block_argument_kept.row(target.index());
             let start = edge_argument_values.len();
             for (position, &value) in ir.arguments_for_edge(edge).iter().enumerate() {
                 if kept.get(position).copied().unwrap_or(false) {
@@ -135,7 +143,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
         }
 
         let source_spans = ir
-            .source_spans
+            .source_spans()
             .iter()
             .filter(|span| {
                 operation_index[span.destination().start()]
@@ -152,7 +160,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             .collect::<Vec<_>>();
 
         let parent_spans = ir
-            .parent_spans
+            .parent_spans()
             .iter()
             .filter(|span| {
                 operation_index[span.destination().start()]
@@ -167,7 +175,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             .collect::<Vec<_>>();
 
         let blocks = ir
-            .graph
+            .graph()
             .blocks()
             .iter()
             .map(|block| {
@@ -178,22 +186,19 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
                 )
             })
             .collect::<Vec<_>>();
-        let graph = IlGraph::new(blocks, ir.graph.successors().to_vec());
-        let graph = if ir.graph.block_sources().is_empty() {
+        let graph = IlGraph::new(blocks, ir.graph().successors().to_vec());
+        let graph = if ir.graph().block_sources().is_empty() {
             graph
         } else {
-            graph.with_block_sources(ir.graph.block_sources().to_vec())
+            graph.with_block_sources(ir.graph().block_sources().to_vec())
         };
 
-        ir.graph = graph;
-        ir.source_spans = source_spans;
-        ir.parent_spans = parent_spans;
-        ir.values = values;
-        ir.block_arguments = block_arguments;
-        ir.operations = operations;
-        ir.value_operands = value_operands;
-        ir.edge_arguments = edge_arguments;
-        ir.edge_argument_values = edge_argument_values;
-        ir.constants = constants;
+        ir.replace_graph(graph);
+        ir.replace_source_spans(source_spans);
+        ir.replace_parent_spans(parent_spans);
+        ir.replace_values(values, block_arguments);
+        ir.replace_operation_storage(operations, value_operands);
+        ir.replace_edge_argument_storage(edge_arguments, edge_argument_values);
+        ir.replace_constant_storage(constants);
     }
 }

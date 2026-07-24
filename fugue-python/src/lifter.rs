@@ -1,6 +1,6 @@
 use fugue_core::ir::Address as CoreAddress;
 use fugue_core::lifter::{
-    Language as CoreLanguage, Lifter as CoreLifter, Op as CoreOp, PCodeOp as CorePCodeOp,
+    Language as CoreLanguage, Lifter as CoreLifter, Op as CoreOp, RawPCodeOp as CorePCodeOp,
     Varnode as CoreVarnode,
 };
 use pyo3::prelude::*;

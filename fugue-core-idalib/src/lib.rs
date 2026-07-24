@@ -3,9 +3,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
-use fugue_core::analysis::core::FunctionRecoveryConfig;
 use fugue_core::analysis::function::recovery::analysis::FunctionDiscoveryContext;
-use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
+use fugue_core::analysis::function::recovery::{
+    FunctionBuilderContext, FunctionRecovery, FunctionRecoveryConfig,
+};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::aarch64::AArch64;
 use fugue_core::arch::arm::Arm;

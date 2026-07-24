@@ -248,6 +248,24 @@ impl StorageContainer {
         self.write_back.as_ref()
     }
 
+    pub(crate) fn table<T>(
+        &self,
+        cache_bytes: usize,
+        with_worker: fn(
+            EntityStorage,
+            Arc<WriteBackWorker>,
+            usize,
+        ) -> Result<T, EntityStorageError>,
+        new_transient: fn() -> T,
+        table: &str,
+    ) -> Result<T, EntityStorageError> {
+        match self.write_back() {
+            Some(worker) => with_worker(self.entities.clone(), worker.clone(), cache_bytes)
+                .inspect_err(|e| tracing::error!("failed to load {table} table: {e}")),
+            None => Ok(new_transient()),
+        }
+    }
+
     pub fn segments(&self) -> &SegmentStorage {
         &self.segments
     }

@@ -21,7 +21,7 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::arch::Arch;
 use crate::ir::{
-    Endian, ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, SymbolIndex,
+    Endian, ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, Symbol, SymbolIndex,
     SymbolProperties, SymbolTableSelector, TransientSymbolTable,
 };
 use crate::lifter::ContextHint;
@@ -350,7 +350,7 @@ impl PeLoadState {
                     ImageBank::new_in_default(bank_base..=bank_last),
                     &extern_segm,
                     config,
-                );
+                )?;
                 let mut placements = Vec::new();
                 while let Some(placement) = walk.next_segment()? {
                     placements.push(placement);
@@ -395,7 +395,7 @@ impl PeLoadState {
             image_symbols.insert(
                 index,
                 ImageAddress::new(space, symbol.address),
-                symbol.name,
+                symbol.symbol,
                 symbol.properties,
             );
         }
@@ -428,7 +428,7 @@ impl PeLoadState {
 
 struct RawPeSymbol {
     address: RawAddress,
-    name: String,
+    symbol: Symbol,
     properties: SymbolProperties,
 }
 
@@ -479,11 +479,9 @@ impl PeSymbolData {
 
         let (min_addr, max_addr) = bounds.unwrap_or((base, base));
         let extern_base = max_addr
-            .offset()
-            .checked_add(addr_size as u64)
+            .checked_add(addr_size)
             .ok_or_else(|| LoaderError::address_overflow(base))?;
-        let align_mask = (addr_align as u64).wrapping_sub(1);
-        let aligned_extern_base = extern_base.wrapping_add(align_mask) & !align_mask;
+        let aligned_extern_base = extern_base.align(addr_align);
 
         if aligned_extern_base < extern_base {
             return Err(LoaderError::address_overflow(base));
@@ -496,7 +494,7 @@ impl PeSymbolData {
             arch.external_thunk_template(),
         );
         let mut import_slots = BTreeMap::new();
-        let mut externs = BTreeMap::<String, RawAddress>::new();
+        let mut externs = BTreeMap::<Symbol, RawAddress>::new();
 
         for (index, export) in pe
             .exports()
@@ -516,7 +514,7 @@ impl PeSymbolData {
                 SymbolIndex::new(PE_EXPORT_SELECTOR, index),
                 RawPeSymbol {
                     address,
-                    name: String::from_utf8_lossy(export.name()).into_owned(),
+                    symbol: String::from_utf8_lossy(export.name()).into_owned().into(),
                     properties,
                 },
             );
@@ -556,7 +554,8 @@ impl PeSymbolData {
                         }
                     };
 
-                    let extern_address = match externs.entry(name.clone()) {
+                    let symbol = Symbol::from(&name);
+                    let extern_address = match externs.entry(symbol) {
                         Entry::Occupied(entry) => *entry.get(),
                         Entry::Vacant(entry) => {
                             let addr = extern_segm
@@ -570,7 +569,7 @@ impl PeSymbolData {
                         SymbolIndex::new(PE_IMPORT_SELECTOR, import_index),
                         RawPeSymbol {
                             address: extern_address,
-                            name,
+                            symbol,
                             properties: SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
                         },
                     );
@@ -623,7 +622,7 @@ fn symbol_properties_for_address(
         })
 }
 
-pub fn pe_section_properties<'data, Pe, R>(sect: &PeSection<'data, '_, Pe, R>) -> SegmentProperties
+fn pe_section_properties<'data, Pe, R>(sect: &PeSection<'data, '_, Pe, R>) -> SegmentProperties
 where
     Pe: ImageNtHeaders,
     R: ReadRef<'data>,
@@ -767,7 +766,7 @@ where
     extern_segm: Option<&'file ExternSegment>,
     endian: Endian,
     region_bank: &'file PeRegionBankMap,
-    header: Option<PeHeaderRegion<'data>>,
+    header: Option<Result<Option<PeHeaderRegion<'data>>, LoaderError>>,
     config: PeLoaderProperties,
 }
 
@@ -788,10 +787,7 @@ where
         region_bank: &'file PeRegionBankMap,
         config: PeLoaderProperties,
     ) -> Self {
-        let header = config
-            .load_headers()
-            .then(|| PeHeaderRegion::new(pe).ok().flatten())
-            .flatten();
+        let header = config.load_headers().then(|| PeHeaderRegion::new(pe));
         Self {
             pe,
             sects: pe.sections(),
@@ -818,6 +814,9 @@ where
 
     fn header_segment(&mut self) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
         let Some(header) = self.header.take() else {
+            return Ok(None);
+        };
+        let Some(header) = header? else {
             return Ok(None);
         };
         let size = header.size();
@@ -855,14 +854,11 @@ where
         let address = externs.address();
         let last_address = externs.last_address().expect("not empty");
 
-        let bytes = externs
-            .iter()
-            .flat_map(|_| {
-                let mut bytes = externs.template().bytes().to_vec();
-                bytes.resize(bytes.len() + extern_padding, 0);
-                bytes
-            })
-            .collect::<Vec<_>>();
+        let mut bytes = Vec::with_capacity(externs.size());
+        for _ in externs.iter() {
+            bytes.extend_from_slice(externs.template().bytes());
+            bytes.resize(bytes.len() + extern_padding, 0);
+        }
 
         let range = address..=last_address;
         let bank = self
@@ -1023,14 +1019,15 @@ where
         default_bank: ImageBank,
         extern_segm: &'file ExternSegment,
         config: PeLoaderProperties,
-    ) -> Self {
+    ) -> Result<Self, LoaderError> {
         let base_space = ImageSpaceHandle::default();
         let bank_base = *default_bank.range().start();
-        let header = config
-            .load_headers()
-            .then(|| PeHeaderRegion::new(pe).ok().flatten())
-            .flatten();
-        Self {
+        let header = if config.load_headers() {
+            PeHeaderRegion::new(pe)?
+        } else {
+            None
+        };
+        Ok(Self {
             base,
             preferred_base,
             bank_base,
@@ -1042,7 +1039,7 @@ where
             spaces: smallvec![ImageSpace::base(base_space)],
             bank_layout: PeBankLayout::new(default_bank),
             config,
-        }
+        })
     }
 
     fn into_parts(self) -> (ImageSpaces, PeBankLayout) {
@@ -1144,20 +1141,20 @@ where
 
 struct PeImageSegments<'a> {
     segments: std::slice::Iter<'a, PeImageSegment>,
-    mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
+    mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
 }
 
 impl<'a> PeImageSegments<'a> {
     fn new(
         segments: &'a [PeImageSegment],
-        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
+        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
     ) -> Self {
         Self {
             segments: segments.iter(),
-            mapping_hints,
             image_symbols,
+            mapping_hints,
         }
     }
 
@@ -1275,8 +1272,8 @@ impl Loadable for Pe<'_> {
 
         Box::new(PeImageSegments::new(
             &state.segments,
-            &state.mapping_hints,
             &state.symbols,
+            &state.mapping_hints,
         )) as ImageSegmentIterator<'b>
     }
 
@@ -1313,22 +1310,52 @@ impl Loadable for Pe<'_> {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
     use std::convert::TryInto;
+    use std::ops::Range;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use fallible_iterator::FallibleIterator;
     use object::endian::LittleEndian as LE;
     use object::pe::{IMAGE_REL_BASED_DIR64, ImageNtHeaders64};
     use object::read::pe::{Import, PeFile64};
-    use object::{Object, ObjectSection};
+    use object::{Object, ObjectSection, ReadRef};
 
-    use super::{ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, Pe};
+    use super::{
+        ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, Pe, PeImageSegmentContents,
+        PeLoaderProperties, PeRegionBankMap, PeSegmentWalk,
+    };
     use crate::attributes;
-    use crate::ir::{Address, RawAddress};
+    use crate::ir::{Address, Endian, ExternFunctionTemplate, ExternSegment, RawAddress};
     use crate::loader::{
-        ImageAddress, ImageBacking, ImageBankHandle, ImageSegmentContents, Loadable, LoaderError,
+        ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageSegmentContents, Loadable,
+        LoaderError,
     };
     use crate::types::BytesOrMapping;
     use crate::types::attributes::ATTRIBUTE_IMAGE_BASE;
+
+    #[derive(Clone, Copy)]
+    struct HeaderReadFailure<'a> {
+        data: &'a [u8],
+        fail: &'a AtomicBool,
+    }
+
+    impl<'a> ReadRef<'a> for HeaderReadFailure<'a> {
+        fn len(self) -> Result<u64, ()> {
+            u64::try_from(<[u8]>::len(self.data)).map_err(|_| ())
+        }
+
+        fn read_bytes_at(self, offset: u64, size: u64) -> Result<&'a [u8], ()> {
+            if self.fail.load(Ordering::SeqCst) && offset == 0 {
+                return Err(());
+            }
+            self.data.read_bytes_at(offset, size)
+        }
+
+        fn read_bytes_at_until(self, range: Range<u64>, delimiter: u8) -> Result<&'a [u8], ()> {
+            self.data.read_bytes_at_until(range, delimiter)
+        }
+    }
 
     struct LoadedSegment {
         address: ImageAddress,
@@ -1539,6 +1566,49 @@ mod test {
         }
 
         assert!(saw_contents, "expected PE Headers contents");
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_header_read_failures_propagate() -> Result<(), Box<dyn std::error::Error>> {
+        let data = BytesOrMapping::from_file("tests/hello-pe.exe")?;
+        let fail = AtomicBool::new(false);
+        let pe = PeFile64::parse(HeaderReadFailure {
+            data: data.as_ref(),
+            fail: &fail,
+        })?;
+        let imports = BTreeMap::new();
+        let externs = ExternSegment::new(0u64, 1, ExternFunctionTemplate::new([0u8]));
+        let region_bank = PeRegionBankMap::new();
+        let config = PeLoaderProperties::LOAD_HEADERS;
+
+        fail.store(true, Ordering::SeqCst);
+        let mut contents = PeImageSegmentContents::new(
+            &pe,
+            Endian::Little,
+            RawAddress::zero(),
+            RawAddress::zero(),
+            &imports,
+            &externs,
+            &region_bank,
+            config,
+        );
+        assert!(contents.next().is_err());
+
+        let last = RawAddress::from(<[u8]>::len(data.as_ref()).saturating_sub(1));
+        let bank = ImageBank::new_in_default(RawAddress::zero()..=last);
+        assert!(
+            PeSegmentWalk::new(
+                &pe,
+                RawAddress::zero(),
+                RawAddress::zero(),
+                bank,
+                &externs,
+                config,
+            )
+            .is_err()
+        );
+
         Ok(())
     }
 

@@ -74,12 +74,12 @@ impl EntityStorageProvider for DummyEntityStorage {
         Err(DummyEntityStorageError("iter_prefix").into())
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         _prefix: &[u8],
         _start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        Err(DummyEntityStorageError("scan_range").into())
+        Err(DummyEntityStorageError("iter_range").into())
     }
 
     fn iter_prefix_as<'a, F, T>(

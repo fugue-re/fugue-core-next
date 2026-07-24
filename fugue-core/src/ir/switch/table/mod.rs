@@ -1,22 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error as StdError;
+use std::fmt::{Debug as FmtDebug, Display};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId};
+use crate::ir::{Address, FunctionId, IdAllocation, IdAllocator};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
+use crate::types::common::cursor_bound;
 
 mod persistent;
 mod transient;
 
-pub use persistent::SwitchTable as PersistentSwitchTable;
-pub use transient::SwitchTable as TransientSwitchTable;
+use persistent::SwitchTable as PersistentSwitchTable;
+use transient::SwitchTable as TransientSwitchTable;
 
 pub type SwitchRef<'a> = EntityRef<'a, Switch>;
 pub type SwitchMut<'a> = EntityMut<'a, Switch>;
@@ -33,24 +37,40 @@ impl Entity for SwitchTableHeader {
 }
 
 struct SwitchIndex {
+    allocator: IdAllocator<Switch>,
     branches: BTreeMap<Address, SwitchId>,
     by_function: BTreeMap<FunctionId, BTreeSet<Address>>,
-    free_ids: Vec<SwitchId>,
-    next_index: usize,
 }
 
 impl SwitchIndex {
     fn new() -> Self {
         Self {
+            allocator: IdAllocator::new(),
             branches: BTreeMap::new(),
             by_function: BTreeMap::new(),
-            free_ids: Vec::new(),
-            next_index: 0,
         }
     }
 
     fn link(&mut self, function: FunctionId, branch: Address) {
         self.by_function.entry(function).or_default().insert(branch);
+    }
+
+    fn insert(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        self.branches.insert(branch, id);
+        self.link(function, branch);
+    }
+
+    fn remove(&mut self, function: FunctionId, branch: Address) {
+        self.branches.remove(&branch);
+        self.unlink(function, branch);
+    }
+
+    fn id_by_branch(&self, branch: Address) -> Option<SwitchId> {
+        self.branches.get(&branch).copied()
+    }
+
+    fn contains(&self, branch: Address) -> bool {
+        self.branches.contains_key(&branch)
     }
 
     fn unlink(&mut self, function: FunctionId, branch: Address) {
@@ -69,24 +89,31 @@ impl SwitchIndex {
             .flatten()
             .copied()
     }
-}
 
-pub(crate) struct SwitchTableAllocation {
-    free_ids_len: usize,
-    free_ids_tail: Vec<SwitchId>,
-    next_index: usize,
-}
+    fn branches(&self) -> impl Iterator<Item = Address> + '_ {
+        self.branches.keys().copied()
+    }
 
-impl SwitchTableAllocation {
-    fn new(free_ids: &[SwitchId], next_index: usize, max_pops: usize) -> Self {
-        let tail_start = free_ids.len().saturating_sub(max_pops);
-        Self {
-            free_ids_len: free_ids.len(),
-            free_ids_tail: free_ids[tail_start..].to_vec(),
-            next_index,
-        }
+    fn entries_after(
+        &self,
+        after: Option<Address>,
+    ) -> impl Iterator<Item = (Address, SwitchId)> + '_ {
+        let start = cursor_bound(after);
+        self.branches
+            .range((start, Bound::Unbounded))
+            .map(|(&address, &id)| (address, id))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.branches.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.branches.len()
     }
 }
+
+pub(crate) type SwitchTableAllocation = IdAllocation<Switch>;
 
 pub(crate) struct SwitchTableRevert {
     branch: Address,
@@ -95,20 +122,26 @@ pub(crate) struct SwitchTableRevert {
 }
 
 impl SwitchTableRevert {
-    pub(crate) fn capture(table: &SwitchTable, branch: Address) -> Self {
+    pub(crate) fn capture(
+        table: &SwitchTable,
+        branch: Address,
+    ) -> Result<Self, EntityStorageError> {
         let previous_switch = table
-            .get_by_branch(branch)
+            .try_get_by_branch(branch)?
             .map(|switch| switch.as_ref().clone());
 
-        Self {
+        Ok(Self {
             branch,
             allocation: table.allocation_checkpoint(1),
             previous_switch,
-        }
+        })
     }
 
     pub(crate) fn restore(self, table: &mut SwitchTable) -> Result<(), EntityStorageError> {
-        if let Some(id) = table.get_by_branch(self.branch).map(|switch| switch.id()) {
+        if let Some(id) = table
+            .try_get_by_branch(self.branch)?
+            .map(|switch| switch.id())
+        {
             table.clear_entry(id)?;
         }
 
@@ -131,7 +164,25 @@ pub enum SwitchTableError {
     #[error("switch to insert has a different branch address than that used for insertion")]
     AddressMismatch,
     #[error(transparent)]
+    Other(anyhow::Error),
+    #[error(transparent)]
     Storage(#[from] EntityStorageError),
+}
+
+impl SwitchTableError {
+    pub fn other<E>(error: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self::Other(anyhow::Error::new(error))
+    }
+
+    pub fn other_with<M>(msg: M) -> Self
+    where
+        M: FmtDebug + Display + Send + Sync + 'static,
+    {
+        Self::Other(anyhow::Error::msg(msg))
+    }
 }
 
 impl SwitchTable {
@@ -142,12 +193,12 @@ impl SwitchTable {
         )?))
     }
 
-    pub fn new_with(
+    pub fn with_worker(
         entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentSwitchTable::new_with(
+        Ok(Self::Persistent(PersistentSwitchTable::with_worker(
             entities,
             worker,
             cache_bytes,
@@ -198,7 +249,7 @@ impl SwitchTable {
 
     pub fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
     where
-        F: FnOnce(SwitchId, Address) -> Switch,
+        F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
     {
         match self {
             Self::Persistent(p) => p.insert(branch, f),
@@ -221,9 +272,17 @@ impl SwitchTable {
     }
 
     pub fn get_by_branch(&self, branch: Address) -> Option<SwitchRef<'_>> {
+        self.try_get_by_branch(branch)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_branch(
+        &self,
+        branch: Address,
+    ) -> Result<Option<SwitchRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.get_by_branch(branch).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_branch(branch).map(EntityRef::borrowed),
+            Self::Persistent(p) => Ok(p.try_get_by_branch(branch)?.map(EntityRef::cached)),
+            Self::Transient(t) => Ok(t.get_by_branch(branch).map(EntityRef::borrowed)),
         }
     }
 
@@ -245,9 +304,17 @@ impl SwitchTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: SwitchId) -> Option<SwitchMut<'_>> {
+        self.try_get_by_id_mut(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id_mut(
+        &mut self,
+        id: SwitchId,
+    ) -> Result<Option<SwitchMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.get_by_id_mut(id).map(EntityMut::cached),
-            Self::Transient(t) => t.get_by_id_mut(id).map(EntityMut::borrowed),
+            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(EntityMut::borrowed)),
         }
     }
 
@@ -274,9 +341,18 @@ impl SwitchTable {
         branch: Address,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Option<R> {
+        self.try_modify_by_branch(branch, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_branch<R>(
+        &mut self,
+        branch: Address,
+        f: impl FnOnce(&mut Switch) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.modify_by_branch(branch, f),
-            Self::Transient(t) => t.modify_by_branch(branch, f),
+            Self::Persistent(p) => p.try_modify_by_branch(branch, f),
+            Self::Transient(t) => Ok(t.modify_by_branch(branch, f)),
         }
     }
 
@@ -295,9 +371,14 @@ impl SwitchTable {
     }
 
     pub fn remove_by_branch(&mut self, branch: Address) -> bool {
+        self.try_remove_by_branch(branch)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_branch(&mut self, branch: Address) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.remove_by_branch(branch),
-            Self::Transient(t) => t.remove_by_branch(branch),
+            Self::Persistent(p) => p.try_remove_by_branch(branch),
+            Self::Transient(t) => Ok(t.remove_by_branch(branch)),
         }
     }
 
@@ -308,10 +389,13 @@ impl SwitchTable {
         }
     }
 
-    pub fn branches_after(&self, after: Option<Address>) -> Box<dyn Iterator<Item = Address> + '_> {
+    pub fn entries_after(
+        &self,
+        after: Option<Address>,
+    ) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.branches_after(after)),
-            Self::Transient(t) => Box::new(t.branches_after(after)),
+            Self::Persistent(p) => Box::new(p.entries_after(after).map(EntityRef::cached)),
+            Self::Transient(t) => Box::new(t.entries_after(after).map(EntityRef::borrowed)),
         }
     }
 
@@ -362,14 +446,22 @@ impl PersistableProjectEntity for SwitchTable {
 mod test {
     use super::*;
     use crate::ir::SwitchModel;
+    use crate::storage::entities::InMemoryEntityStorage;
 
     fn function(index: usize) -> FunctionId {
         FunctionId::from_index(index)
     }
 
+    fn tables() -> [SwitchTable; 2] {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        [
+            SwitchTable::new_transient(),
+            SwitchTable::new(storage, 64 * 1024).unwrap(),
+        ]
+    }
+
     #[test]
     fn indexes_switches_by_owning_function() {
-        let mut table = SwitchTable::new_transient();
         let owner = function(0);
         let other = function(1);
         let placements = [
@@ -378,29 +470,95 @@ mod test {
             (Address::from(0x3000u64), other),
         ];
 
-        for (branch, owning) in placements {
-            table
-                .insert(branch, |id, branch| {
-                    Switch::new(id, branch, SwitchModel::Explicit).with_function(owning)
-                })
-                .unwrap();
+        for mut table in tables() {
+            for (branch, owning) in placements {
+                table
+                    .insert(branch, |id, branch| {
+                        Ok(Switch::new(id, branch, SwitchModel::Explicit).with_function(owning))
+                    })
+                    .unwrap();
+            }
+
+            let mut owned = table.branches_of_function(owner).collect::<Vec<_>>();
+            owned.sort();
+            assert_eq!(
+                owned,
+                vec![Address::from(0x1000u64), Address::from(0x2000u64)]
+            );
+            assert_eq!(
+                table.branches_of_function(other).collect::<Vec<_>>(),
+                vec![Address::from(0x3000u64)]
+            );
+
+            table.remove_by_branch(Address::from(0x1000u64));
+            assert_eq!(
+                table.branches_of_function(owner).collect::<Vec<_>>(),
+                vec![Address::from(0x2000u64)]
+            );
+
+            table.modify_by_branch(Address::from(0x2000u64), |switch| {
+                switch.set_function(other);
+            });
+            assert!(table.branches_of_function(owner).next().is_none());
+            assert_eq!(
+                table.branches_of_function(other).collect::<Vec<_>>(),
+                vec![Address::from(0x2000u64), Address::from(0x3000u64)]
+            );
         }
+    }
 
-        let mut owned = table.branches_of_function(owner).collect::<Vec<_>>();
-        owned.sort();
-        assert_eq!(
-            owned,
-            vec![Address::from(0x1000u64), Address::from(0x2000u64)]
-        );
-        assert_eq!(
-            table.branches_of_function(other).collect::<Vec<_>>(),
-            vec![Address::from(0x3000u64)]
-        );
+    #[test]
+    fn entry_iteration_resumes_after_branch() {
+        let branches = [
+            Address::from(0x1000u64),
+            Address::from(0x2000u64),
+            Address::from(0x3000u64),
+        ];
 
-        table.remove_by_branch(Address::from(0x1000u64));
+        for mut table in tables() {
+            for branch in branches {
+                table
+                    .insert(branch, |id, branch| {
+                        Ok(Switch::new(id, branch, SwitchModel::Explicit))
+                    })
+                    .unwrap();
+            }
+
+            assert_eq!(
+                table
+                    .entries_after(Some(branches[0]))
+                    .map(|switch| switch.branch())
+                    .collect::<Vec<_>>(),
+                branches[1..]
+            );
+        }
+    }
+
+    #[test]
+    fn stale_id_does_not_remove_reused_slot() {
+        let mut table = SwitchTable::new_transient();
+        let first_branch = Address::from(0x1000u64);
+        let second_branch = Address::from(0x2000u64);
+        let first = table
+            .insert(first_branch, |id, branch| {
+                Ok(Switch::new(id, branch, SwitchModel::Explicit))
+            })
+            .unwrap();
+
+        assert!(table.remove_by_id(first));
+
+        let second = table
+            .insert(second_branch, |id, branch| {
+                Ok(Switch::new(id, branch, SwitchModel::Explicit))
+            })
+            .unwrap();
+
+        assert_eq!(first.index(), second.index());
+        assert_ne!(first, second);
+        assert!(!table.remove_by_id(first));
         assert_eq!(
-            table.branches_of_function(owner).collect::<Vec<_>>(),
-            vec![Address::from(0x2000u64)]
+            table.get_by_id(second).map(|switch| switch.branch()),
+            Some(second_branch)
         );
     }
 }

@@ -1,6 +1,6 @@
 use fugue_core::ir::{
-    Address, AddressTable, AddressWithContext, Switch, SwitchCase, SwitchCaseLabel, SwitchEvidence,
-    SwitchModel, SwitchTable,
+    Address, AddressTable, AddressWithContext, Switch, SwitchCase, SwitchCaseLabel, SwitchModel,
+    SwitchProperties, SwitchTable,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::storage::EntityStorage;
@@ -19,7 +19,11 @@ fn table_insert_get_modify_remove() {
 
     let id = table
         .insert(branch, |id, branch| {
-            Switch::new(id, branch, SwitchModel::Absolute(table_of(4, 0)))
+            Ok(Switch::new(
+                id,
+                branch,
+                SwitchModel::Absolute(table_of(4, 0)),
+            ))
         })
         .unwrap();
     assert_eq!(table.len(), 1);
@@ -45,14 +49,14 @@ fn removed_id_slot_reuse_invalidates_old_id() {
     let mut table = SwitchTable::new_transient();
     let first = table
         .insert(Address::from(0x1000u64), |id, branch| {
-            Switch::new(id, branch, SwitchModel::Explicit)
+            Ok(Switch::new(id, branch, SwitchModel::Explicit))
         })
         .unwrap();
     assert!(table.remove_by_id(first));
 
     let second = table
         .insert(Address::from(0x2000u64), |id, branch| {
-            Switch::new(id, branch, SwitchModel::Explicit)
+            Ok(Switch::new(id, branch, SwitchModel::Explicit))
         })
         .unwrap();
     assert!(table.get_by_id(first).is_none());
@@ -80,9 +84,9 @@ fn switch_survives_rkyv_roundtrip() {
             ));
             case.add_label(SwitchCaseLabel::new(7));
             switch.add_case(case);
-            switch.set_evidence(SwitchEvidence::GUARD_FOUND);
+            switch.set_properties(SwitchProperties::GUARD_FOUND);
             switch.mark_truncated();
-            switch
+            Ok(switch)
         })
         .unwrap();
 
@@ -114,7 +118,7 @@ fn persistent_table_survives_reopen() {
                     Address::from(0x401100u64),
                     ContextSet::default(),
                 )));
-                switch
+                Ok(switch)
             })
             .unwrap();
         table.flush().unwrap();

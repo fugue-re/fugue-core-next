@@ -512,6 +512,10 @@ impl Language {
             .map(|idx| self.registers[idx].1)
     }
 
+    pub fn registers(&self) -> impl ExactSizeIterator<Item = (&'static str, Varnode)> + '_ {
+        self.registers.iter().copied()
+    }
+
     pub fn register_name(&self, vnd: &Varnode) -> Option<&'static str> {
         if vnd.space() != self.register_space {
             return None;

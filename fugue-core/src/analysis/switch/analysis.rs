@@ -1,14 +1,15 @@
 use crate::analysis::control::Cancelled;
 use crate::analysis::function::recovery::{FunctionRecoveryState, InsnResolver};
 use crate::analysis::switch::SwitchRecoveryConfig;
-use crate::analysis::switch::slice::SwitchSliceEvaluator;
-use crate::analysis::switch::syntactic::SwitchSyntacticRecoveryContext;
+use crate::analysis::switch::idiom::SwitchIdiomRecovery;
+use crate::analysis::switch::interval::SwitchIntervalContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::il::common::IlError;
 use crate::il::ecode::ssa::ECodeToSsa;
 use crate::il::pcode::PCodeError;
-use crate::ir::{FlowKind, FunctionId, SwitchEvidence, SwitchId};
+use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
 use crate::project::Project;
+use crate::types::common::Revision;
 
 #[derive(Default)]
 pub struct SwitchRecovery {
@@ -37,15 +38,19 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
     ) -> Result<(), AnalysisError> {
         let mut resolved = Vec::new();
         {
-            let arch = project.arch();
-            let segments = project.segments();
-            let mut resolver = InsnResolver::new(project);
-            let mut syntactic = SwitchSyntacticRecoveryContext::new(self.config, arch, segments);
             let function = state.function();
-            let mut branches = function.indirect_branches().peekable();
+            let mut branches = function
+                .indirect_branches()
+                .filter(|(_, branch)| !function.has_pending_switch(*branch))
+                .peekable();
             if branches.peek().is_none() {
                 return Ok(());
             }
+
+            let arch = project.arch();
+            let segments = project.segments();
+            let mut resolver = InsnResolver::new(project);
+            let mut idiom_recovery = SwitchIdiomRecovery::new(self.config, arch, segments);
             let mut unresolved = Vec::new();
             let mut retry = Vec::new();
 
@@ -63,7 +68,8 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                     .map(Some)
                     .chain(predecessors.is_empty().then_some(None));
                 for source in sources {
-                    let Some(candidate) = syntactic.recover(function, source, block_id, site)
+                    let Some(candidate) =
+                        idiom_recovery.recover(&mut resolver, function, source, block_id, site)
                     else {
                         continue;
                     };
@@ -90,19 +96,19 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                         if !recovered.is_guarded() {
                             retry.push((block_id, site));
                         }
-                        resolved.push((site, recovered));
+                        resolved.push((block_id, site, recovered));
                     }
                     _ => unresolved.push((block_id, site)),
                 }
             }
 
             if !unresolved.is_empty() || !retry.is_empty() {
-                let ssa = ECodeToSsa
+                let ssa = ECodeToSsa::default()
                     .build_incomplete_function(
-                        project.language(),
+                        arch,
                         function,
                         project.segments(),
-                        0,
+                        Revision::default(),
                         state.cancellation(),
                     )
                     .map_err(|error| match error {
@@ -111,11 +117,13 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                         }
                         error => AnalysisError::pass_failed("switch-recovery", error),
                     })?;
-                let evaluator = SwitchSliceEvaluator::new(&ssa, arch, segments, self.config);
+                let interval_context =
+                    SwitchIntervalContext::new(&ssa, arch, segments, self.config);
 
                 for (block_id, site) in unresolved {
                     let block = function.block(block_id).expect("switch block must exist");
-                    if let Some(recovered) = evaluator.recover(site, block.context(), &mut resolver)
+                    if let Some(recovered) =
+                        interval_context.recover(site, block.context(), &mut resolver)
                     {
                         tracing::debug!(
                             "recovered switch at {} with {} cases (confidence {})",
@@ -123,18 +131,20 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                             recovered.cases().len(),
                             recovered.confidence(),
                         );
-                        resolved.push((site, recovered));
+                        resolved.push((block_id, site, recovered));
                     }
                 }
 
                 for (block_id, site) in retry {
                     let block = function.block(block_id).expect("switch block must exist");
-                    let Some(recovered) = evaluator.recover(site, block.context(), &mut resolver)
+                    let Some(recovered) =
+                        interval_context.recover(site, block.context(), &mut resolver)
                     else {
                         continue;
                     };
-                    if let Some((_, existing)) =
-                        resolved.iter_mut().find(|(existing, _)| *existing == site)
+                    if let Some((_, _, existing)) = resolved
+                        .iter_mut()
+                        .find(|(_, existing, _)| *existing == site)
                         && existing.should_replace_with(&recovered)
                     {
                         *existing = recovered;
@@ -143,16 +153,18 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
             }
         }
 
-        for (site, recovered) in resolved {
+        for (block, site, recovered) in resolved {
             if let Some(existing) = project.switches().get_by_branch(site)
                 && (existing.is_override()
-                    || existing.is_assisted()
-                    || (existing.evidence().contains(SwitchEvidence::GUARD_FOUND)
+                    || (existing
+                        .properties()
+                        .contains(SwitchProperties::GUARD_FOUND)
                         && !recovered.is_guarded()))
             {
                 continue;
             }
 
+            let recovered = recovered.infer_default_from_incoming(state.function(), block);
             for case in recovered.cases() {
                 state.context_mut().add_local_target_with_context(
                     site,
@@ -161,7 +173,7 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                 );
             }
 
-            let switch = recovered.into_switch(SwitchId::default(), FunctionId::INVALID, site);
+            let switch = recovered.into_switch(SwitchId::INVALID, FunctionId::INVALID, site);
             state.function_mut().add_pending_switch(switch);
         }
 

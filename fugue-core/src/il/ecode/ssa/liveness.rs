@@ -1,88 +1,49 @@
-use crate::il::common::{IlAnalysis, IlBlockId, IlValueId};
+use fixedbitset::FixedBitSet;
+
+use crate::il::common::{IlAnalysis, IlBlockId, IlCsr, IlValueId};
 use crate::il::ecode::ssa::ECodeSsaIr;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ECodeSsaLiveness {
-    live_in: PackedLivenessSets,
-    live_out: PackedLivenessSets,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PackedLivenessSets {
-    offsets: Vec<u32>,
-    values: Vec<IlValueId>,
-}
-
-impl PackedLivenessSets {
-    fn from_matrix(matrix: &LivenessMatrix) -> Self {
-        let mut offsets = Vec::with_capacity(matrix.row_count() + 1);
-        let mut values = Vec::new();
-        offsets.push(0);
-
-        for row in 0..matrix.row_count() {
-            for (word, &bits) in matrix.row(row).iter().enumerate() {
-                let mut bits = bits;
-                while bits != 0 {
-                    let value = word * 64 + bits.trailing_zeros() as usize;
-                    values.push(
-                        IlValueId::try_from_index(value)
-                            .expect("value count fits the value id space"),
-                    );
-                    bits &= bits - 1;
-                }
-            }
-            offsets.push(values.len() as u32);
-        }
-
-        Self { offsets, values }
-    }
-
-    fn get(&self, block: IlBlockId) -> &[IlValueId] {
-        let index = block.index();
-        let Some(start) = self.offsets.get(index).copied() else {
-            return &[];
-        };
-        let end = self.offsets.get(index + 1).copied().unwrap_or(start);
-        &self.values[start as usize..end as usize]
-    }
+    live_in: IlCsr<IlValueId>,
+    live_out: IlCsr<IlValueId>,
 }
 
 struct LivenessMatrix {
-    rows: Vec<u64>,
-    row_count: usize,
-    words: usize,
+    rows: Vec<FixedBitSet>,
 }
 
 impl LivenessMatrix {
     fn new(row_count: usize, value_count: usize) -> Self {
-        let words = value_count.div_ceil(64).max(1);
         Self {
-            rows: vec![0; row_count * words],
-            row_count,
-            words,
+            rows: std::iter::repeat_with(|| FixedBitSet::with_capacity(value_count))
+                .take(row_count)
+                .collect(),
         }
     }
 
     fn contains(&self, row: usize, value: usize) -> bool {
-        (self.rows[row * self.words + value / 64] >> (value % 64)) & 1 == 1
+        self.rows[row].contains(value)
     }
 
     fn insert(&mut self, row: usize, value: usize) {
-        self.rows[row * self.words + value / 64] |= 1u64 << (value % 64);
+        self.rows[row].insert(value);
     }
 
-    fn row(&self, row: usize) -> &[u64] {
-        let start = row * self.words;
-        &self.rows[start..start + self.words]
+    fn into_sparse(self) -> IlCsr<IlValueId> {
+        IlCsr::from_rows(self.rows.iter().map(|row| {
+            row.ones().map(|value| {
+                IlValueId::try_from_index(value).expect("value count fits the value id space")
+            })
+        }))
     }
 
-    fn row_count(&self) -> usize {
-        self.row_count
+    fn row(&self, row: usize) -> &FixedBitSet {
+        &self.rows[row]
     }
 
-    fn row_mut(&mut self, row: usize) -> &mut [u64] {
-        let start = row * self.words;
-        &mut self.rows[start..start + self.words]
+    fn row_mut(&mut self, row: usize) -> &mut FixedBitSet {
+        &mut self.rows[row]
     }
 }
 
@@ -118,46 +79,41 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
         let value_count = self.body.values().len();
         let mut live_in = LivenessMatrix::new(block_count, value_count);
         let mut live_out = LivenessMatrix::new(block_count, value_count);
-        let mut next_live_out = vec![0u64; live_in.words];
-        let mut next_live_in = vec![0u64; live_in.words];
+        let mut next_live_out = FixedBitSet::with_capacity(value_count);
+        let mut next_live_in = FixedBitSet::with_capacity(value_count);
         let mut changed = true;
 
         while changed {
             changed = false;
 
             for (block_index, block) in self.body.graph().blocks().iter().enumerate().rev() {
-                next_live_out.copy_from_slice(self.edge_uses.row(block_index));
+                next_live_out.clear();
+                next_live_out.union_with(self.edge_uses.row(block_index));
 
                 for successor in block.successors().slice(self.body.graph().successors()) {
-                    for (next, successor) in
-                        next_live_out.iter_mut().zip(live_in.row(successor.index()))
-                    {
-                        *next |= successor;
-                    }
+                    next_live_out.union_with(live_in.row(successor.index()));
                 }
 
-                for (word, next) in next_live_in.iter_mut().enumerate() {
-                    *next = self.block_uses.row(block_index)[word]
-                        | (next_live_out[word] & !self.block_definitions.row(block_index)[word]);
-                }
+                next_live_in.clear();
+                next_live_in.union_with(&next_live_out);
+                next_live_in.difference_with(self.block_definitions.row(block_index));
+                next_live_in.union_with(self.block_uses.row(block_index));
 
-                if live_out.row(block_index) != next_live_out {
-                    live_out
-                        .row_mut(block_index)
-                        .copy_from_slice(&next_live_out);
+                if live_out.row(block_index) != &next_live_out {
+                    live_out.row_mut(block_index).clone_from(&next_live_out);
                     changed = true;
                 }
 
-                if live_in.row(block_index) != next_live_in {
-                    live_in.row_mut(block_index).copy_from_slice(&next_live_in);
+                if live_in.row(block_index) != &next_live_in {
+                    live_in.row_mut(block_index).clone_from(&next_live_in);
                     changed = true;
                 }
             }
         }
 
         ECodeSsaLiveness {
-            live_in: PackedLivenessSets::from_matrix(&live_in),
-            live_out: PackedLivenessSets::from_matrix(&live_out),
+            live_in: live_in.into_sparse(),
+            live_out: live_out.into_sparse(),
         }
     }
 
@@ -182,7 +138,7 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
     fn collect_operation_uses(&mut self) {
         for (block_index, block) in self.body.graph().blocks().iter().enumerate() {
             for operation in block.operations().slice(self.body.operations()) {
-                for operand in operation.operands().slice(self.body.value_operands()) {
+                for operand in self.body.operation_operands(operation) {
                     if !self
                         .block_definitions
                         .contains(block_index, operand.index())
@@ -207,11 +163,11 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaLiveness {
 
 impl ECodeSsaLiveness {
     pub fn live_in(&self, block: IlBlockId) -> &[IlValueId] {
-        self.live_in.get(block)
+        self.live_in.row(block.index())
     }
 
     pub fn live_out(&self, block: IlBlockId) -> &[IlValueId] {
-        self.live_out.get(block)
+        self.live_out.row(block.index())
     }
 }
 
@@ -220,7 +176,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlArtefact, IlBlock, IlBlockProperties, IlGraph, IlHeader, IlIndexRange,
+        IlArtefact, IlBlock, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata,
     };
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
@@ -231,7 +187,7 @@ mod test {
     fn liveness_tracks_value_across_linear_edge() {
         let block0 = IlBlockId::try_from_index(0).unwrap();
         let block1 = IlBlockId::try_from_index(1).unwrap();
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
         let graph = IlGraph::new(
             vec![
                 IlBlock::new(
@@ -247,7 +203,7 @@ mod test {
             ],
             vec![block1],
         );
-        let mut builder = ECodeSsaBuilder::new(header, graph);
+        let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let (value, results) = builder.push_result_value(64).unwrap();
 
         builder
@@ -282,7 +238,7 @@ mod test {
     #[test]
     fn liveness_ignores_value_defined_before_same_block_use() {
         let block = IlBlockId::try_from_index(0).unwrap();
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
         let graph = IlGraph::new(
             vec![IlBlock::new(
                 IlIndexRange::new(0, 2).unwrap(),
@@ -291,7 +247,7 @@ mod test {
             )],
             Vec::new(),
         );
-        let mut builder = ECodeSsaBuilder::new(header, graph);
+        let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let (value, results) = builder.push_result_value(32).unwrap();
 
         builder
@@ -324,7 +280,7 @@ mod test {
     #[test]
     fn liveness_treats_block_argument_as_entry_definition() {
         let block = IlBlockId::try_from_index(0).unwrap();
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
         let graph = IlGraph::new(
             vec![IlBlock::new(
                 IlIndexRange::new(0, 1).unwrap(),
@@ -333,7 +289,7 @@ mod test {
             )],
             Vec::new(),
         );
-        let mut builder = ECodeSsaBuilder::new(header, graph);
+        let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let argument = builder.push_block_argument_value(block, 32).unwrap();
         let operands = builder.push_value_operands([argument]).unwrap();
 
@@ -357,7 +313,7 @@ mod test {
     fn liveness_tracks_value_used_only_as_edge_argument() {
         let block0 = IlBlockId::try_from_index(0).unwrap();
         let block1 = IlBlockId::try_from_index(1).unwrap();
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
         let graph = IlGraph::new(
             vec![
                 IlBlock::new(
@@ -373,7 +329,7 @@ mod test {
             ],
             vec![block1],
         );
-        let mut builder = ECodeSsaBuilder::new(header, graph);
+        let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
         let (value, results) = builder.push_result_value(64).unwrap();
         builder

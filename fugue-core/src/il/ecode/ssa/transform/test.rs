@@ -1,5 +1,5 @@
 use super::*;
-use crate::il::common::{IlBlock, IlBlockId, IlBlockProperties, IlGraph};
+use crate::il::common::{IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlParentSpan};
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::il::ecode::{
     ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode,
@@ -9,22 +9,22 @@ use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn empty_ecode_constructs_empty_ssa() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let source = ECodeBuilder::new(source_header, IlGraph::default())
         .build(&CancellationToken::default())
         .unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
 
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
-    assert_eq!(ssa.header().input_revision(), 11);
+    assert_eq!(ssa.metadata().input_revision().value(), 11);
     assert!(ssa.operations().is_empty());
 }
 
 #[test]
 fn register_read_after_write_uses_current_value() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
     let value = builder
         .push_expression(ECodeExpr::new(
@@ -69,10 +69,14 @@ fn register_read_after_write_uses_current_value() {
             None,
         ))
         .unwrap();
+    builder.replace_parent_spans(vec![IlParentSpan::new(
+        IlIndexRange::new(0, 2).unwrap(),
+        IlIndexRange::new(4, 6).unwrap(),
+    )]);
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
@@ -82,11 +86,18 @@ fn register_read_after_write_uses_current_value() {
         ssa.value_operands()[0],
         IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap()
     );
+    assert_eq!(
+        ssa.parent_spans(),
+        &[IlParentSpan::new(
+            IlIndexRange::new(0, 2).unwrap(),
+            IlIndexRange::new(4, 6).unwrap(),
+        )]
+    );
 }
 
 #[test]
 fn register_read_without_write_becomes_undefined() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
     let read = builder
         .push_expression(ECodeExpr::new(
@@ -111,7 +122,7 @@ fn register_read_without_write_becomes_undefined() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Undefined);
@@ -122,7 +133,7 @@ fn register_read_without_write_becomes_undefined() {
 
 #[test]
 fn load_preserves_fugue_address_space() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
     let offset = builder
         .push_expression(ECodeExpr::new(
@@ -158,7 +169,7 @@ fn load_preserves_fugue_address_space() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     let load_index = ssa
@@ -171,15 +182,17 @@ fn load_preserves_fugue_address_space() {
     assert_eq!(ssa.memory_domains().len(), 1);
     assert_eq!(ssa.memory_domains()[0].space(), space);
 
-    let operands = ssa.operation_operands(&ssa.operations()[load_index]);
-    let memory = ssa.values()[operands.last().unwrap().index()];
+    let memory = ssa.values()[ssa
+        .memory_operand(&ssa.operations()[load_index])
+        .unwrap()
+        .index()];
 
     assert_eq!(memory.width(), 0);
 }
 
 #[test]
 fn load_after_store_uses_store_memory_result() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
     let space = AddressSpaceId::new(3);
     let store_address = builder
@@ -247,7 +260,7 @@ fn load_after_store_uses_store_memory_result() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
     let store_index = ssa
         .operations()
@@ -270,8 +283,54 @@ fn load_after_store_uses_store_memory_result() {
 }
 
 #[test]
+fn store_without_load_registers_memory_domain() {
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let space = AddressSpaceId::new(3);
+    let address = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            0x1000,
+            None,
+        ))
+        .unwrap();
+    let value = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            32,
+            IlIndexRange::EMPTY,
+            0x2a,
+            None,
+        ))
+        .unwrap();
+    let operands = builder.push_statement_operands([address, value]).unwrap();
+
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Store,
+            operands,
+            None,
+            None,
+            Some(space),
+        ))
+        .unwrap();
+
+    let source = builder.build(&CancellationToken::default()).unwrap();
+    let mut transform = ECodeToSsa::default();
+    let ssa = transform
+        .transform(&source, &CancellationToken::default())
+        .unwrap();
+
+    assert_eq!(ssa.memory_domains().len(), 1);
+    assert_eq!(ssa.memory_domains()[0].space(), space);
+    ssa.verify().unwrap();
+}
+
+#[test]
 fn direct_branch_preserves_fugue_address() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
     let condition = builder
         .push_expression(ECodeExpr::new(
@@ -308,7 +367,7 @@ fn direct_branch_preserves_fugue_address() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(
@@ -320,7 +379,7 @@ fn direct_branch_preserves_fugue_address() {
 
 #[test]
 fn deep_dominance_chain_constructs_iteratively() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let block_count = 128usize;
     let mut successors = Vec::new();
     let mut blocks = Vec::new();
@@ -378,7 +437,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.graph().blocks().len(), block_count);
@@ -389,7 +448,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
 #[test]
 fn merge_block_register_read_becomes_block_argument() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
         IlBlockId::try_from_index(2).unwrap(),
@@ -487,7 +546,7 @@ fn merge_block_register_read_becomes_block_argument() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.block_arguments().len(), 1);
@@ -507,7 +566,7 @@ fn merge_block_register_read_becomes_block_argument() {
 
 #[test]
 fn merge_block_load_uses_memory_block_argument() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let join = IlBlockId::try_from_index(3).unwrap();
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
@@ -607,7 +666,7 @@ fn merge_block_load_uses_memory_block_argument() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
     let load_index = ssa
         .operations()
@@ -636,7 +695,7 @@ fn merge_block_load_uses_memory_block_argument() {
 
 #[test]
 fn loop_carried_register_uses_header_block_argument() {
-    let source_header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let loop_header = IlBlockId::try_from_index(1).unwrap();
     let loop_body = IlBlockId::try_from_index(2).unwrap();
     let exit = IlBlockId::try_from_index(3).unwrap();
@@ -710,7 +769,7 @@ fn loop_carried_register_uses_header_block_argument() {
 
     let source = builder.build(&CancellationToken::default()).unwrap();
     let cancellation = CancellationToken::default();
-    let mut transform = ECodeToSsa;
+    let mut transform = ECodeToSsa::default();
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.block_arguments().len(), 1);

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::{Entry, OccupiedEntry, VacantEntry};
 use std::error::Error as StdError;
 use std::mem;
+use std::num::NonZeroUsize;
 
 use thiserror::Error;
 
@@ -19,6 +20,8 @@ pub enum IncompleteFunctionError {
     FunctionCreation(anyhow::Error),
     #[error("invalid block id: {0:?}")]
     InvalidBlockId(IncompleteCodeBlockId),
+    #[error("invalid zero-length block: {address}")]
+    InvalidBlockLength { address: Address },
     #[error("invalid instruction id: {0:?}")]
     InvalidInstructionId(InsnId),
 }
@@ -40,6 +43,10 @@ impl IncompleteFunctionError {
 
     fn invalid_block_id(id: IncompleteCodeBlockId) -> Self {
         Self::InvalidBlockId(id)
+    }
+
+    fn invalid_block_length(address: Address) -> Self {
+        Self::InvalidBlockLength { address }
     }
 
     fn invalid_instruction_id(id: InsnId) -> Self {
@@ -144,6 +151,12 @@ impl IncompleteFunction {
         } else {
             self.pending_switches.push(switch);
         }
+    }
+
+    pub(crate) fn has_pending_switch(&self, branch: Address) -> bool {
+        self.pending_switches
+            .iter()
+            .any(|pending| pending.branch() == branch)
     }
 
     pub fn take_pending_switches(&mut self) -> Vec<Switch> {
@@ -367,37 +380,59 @@ impl IncompleteFunction {
     }
 
     pub(crate) fn commit(
-        self,
+        mut self,
         function_table: &mut FunctionTable,
         block_table: &mut CodeBlockTable,
     ) -> Result<FunctionId, IncompleteFunctionError> {
+        let mut insn_uses = vec![0usize; self.insns.len()];
         for block in &self.blocks {
+            if block.is_empty() {
+                return Err(IncompleteFunctionError::invalid_block_length(
+                    block.address(),
+                ));
+            }
             for &insn in block.insns() {
                 if self.insn(insn).is_none() {
                     return Err(IncompleteFunctionError::invalid_instruction_id(insn));
                 }
+                insn_uses[insn.index()] += 1;
             }
         }
 
+        let mut insns = mem::take(&mut self.insns)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
         let mut block_ids = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
+            let len = NonZeroUsize::new(block.len())
+                .ok_or_else(|| IncompleteFunctionError::invalid_block_length(block.address()))?;
+            let mut instructions = Vec::with_capacity(block.insns().len());
+            for &insn_id in block.insns() {
+                let remaining = &mut insn_uses[insn_id.index()];
+                *remaining -= 1;
+                let insn = if *remaining == 0 {
+                    insns[insn_id.index()]
+                        .take()
+                        .expect("instruction ownership was validated before block construction")
+                } else {
+                    insns[insn_id.index()]
+                        .as_ref()
+                        .expect("instruction ownership was validated before block construction")
+                        .clone()
+                };
+                instructions.push(insn);
+            }
+            let instructions = InsnList::from_iter(instructions);
             let block_id = block_table
-                .insert(block.address(), |id, address| {
-                    let insns = InsnList::from_iter(
-                        block
-                            .insns()
-                            .iter()
-                            .map(|&insn_id| self.insns[insn_id.index()].clone()),
-                    );
-
-                    let mut stored = CodeBlock::try_new_with(
+                .insert(block.address(), move |id, address| {
+                    let mut stored = CodeBlock::new_with(
                         id,
                         address,
-                        block.len(),
-                        insns,
+                        len,
+                        instructions,
                         block.context().clone(),
-                    )
-                    .expect("code block has non-zero length");
+                    );
                     if block.properties().contains(CodeBlockProperties::ENTRY) {
                         stored.mark_entry();
                     }

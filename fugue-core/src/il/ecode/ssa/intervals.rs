@@ -1,5 +1,5 @@
 use crate::analysis::value::StridedInterval;
-use crate::il::common::{IlAnalysis, IlArtefact, IlValueId};
+use crate::il::common::{IlAnalysis, IlArtefact, IlCsr, IlValueId};
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
 };
@@ -20,19 +20,21 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
                 .collect(),
         };
 
-        let mut dependents = vec![Vec::new(); body.values().len()];
-        for (argument, inputs) in block_argument_inputs.iter() {
-            for input in inputs {
-                dependents[input.index()].push(argument.index());
-            }
-        }
+        let dependents = IlCsr::from_entries(
+            body.values().len(),
+            block_argument_inputs.iter().flat_map(|(argument, inputs)| {
+                inputs
+                    .iter()
+                    .map(move |input| (input.index(), argument.index()))
+            }),
+        );
 
         let uses = body.analyse::<ECodeSsaUses>();
         let mut worklist = (0..body.values().len()).rev().collect::<Vec<_>>();
 
         while let Some(index) = worklist.pop() {
             let value = IlValueId::try_from_index(index).expect("value id is representable");
-            let next = match block_argument_inputs.get(value) {
+            let next = match block_argument_inputs.inputs_for(value) {
                 Some([]) => StridedInterval::full(body.value_width(value).unwrap_or(0)),
                 Some(inputs) => {
                     let joined = inputs.iter().fold(
@@ -51,11 +53,9 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
 
             for use_site in uses.uses_for(value) {
                 let user = &body.operations()[use_site.user().index()];
-                if user.results().len() == 1 {
-                    worklist.push(user.results().start());
-                }
+                worklist.extend(user.results().start()..user.results().end());
             }
-            worklist.extend(&dependents[index]);
+            worklist.extend(dependents.row(index));
         }
 
         this
@@ -126,7 +126,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange,
+        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata,
     };
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
@@ -134,8 +134,8 @@ mod test {
     use crate::ir::FunctionId;
 
     fn builder() -> ECodeSsaBuilder {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        ECodeSsaBuilder::new(header, IlGraph::default())
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        ECodeSsaBuilder::new(metadata, IlGraph::default())
     }
 
     #[test]

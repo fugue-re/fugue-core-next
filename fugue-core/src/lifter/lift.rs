@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::disassembler::DisassemblerError;
 use crate::lifter::traits::Disassembler;
-use crate::lifter::{PCodeOp, resolve_language};
+use crate::lifter::{RawPCodeOp, resolve_language};
 
 #[derive(Debug, Error)]
 pub enum LifterError {
@@ -204,7 +204,7 @@ impl Lifter {
         &mut self,
         address: impl Into<Address>,
         bytes: &[u8],
-        output: &mut Vec<PCodeOp>,
+        output: &mut Vec<RawPCodeOp>,
     ) -> Result<usize, LifterError> {
         let address = address.into();
         let Some(length) = self.0.lift(address.offset(), bytes, output) else {

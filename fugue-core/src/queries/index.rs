@@ -237,13 +237,40 @@ impl ChangeIndex {
         }
         self.global.restore(revision);
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn max_run_count(&self) -> usize {
-        self.groups
-            .iter()
-            .map(RegionGroup::run_count)
-            .max()
-            .unwrap_or(0)
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::engine::change::ChangeRecord;
+    use crate::ir::RawAddress;
+
+    #[test]
+    fn census_bounds_run_count() {
+        let space = AddressSpaceId::from(0u8);
+        let mut index = ChangeIndex::new(Revision::new(0));
+
+        for step in 1..(MAX_CHANGE_RUNS as u64 * 4) {
+            let range = AddressRange::new(
+                space,
+                RawAddress::from(step * 0x400),
+                RawAddress::from(step * 0x400 + 0x3f),
+            );
+            index.apply(&ChangeSet::with_records(
+                Revision::new(step),
+                [ChangeRecord::BytesWritten { range }],
+            ));
+
+            let max_run_count = index
+                .groups
+                .iter()
+                .map(RegionGroup::run_count)
+                .max()
+                .unwrap_or(0);
+            assert!(
+                max_run_count <= MAX_CHANGE_RUNS + CENSUS_INTERVAL,
+                "amortised census let a group exceed the run bound by more than one interval"
+            );
+        }
     }
 }

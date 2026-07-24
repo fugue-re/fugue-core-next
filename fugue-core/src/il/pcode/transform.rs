@@ -1,30 +1,27 @@
-use std::collections::BTreeMap;
-
-use fugue_lifter::runtime::language::Language;
-use fugue_lifter::{Op, PCodeOp as RawPCodeOp};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlHeader, IlIndexRange, IlLevel,
+    IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlLevel, IlMetadata,
     IlOpId, IlSourceSpan,
 };
 use crate::il::pcode::{
     AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
-    PCodeBuilder, PCodeError, PCodeIr,
+    PCodeBuilder, PCodeError, PCodeIr, PCodeOpcode,
 };
 use crate::ir::{
     Address, CodeBlockId, CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction, Insn,
     InsnTarget, Location,
 };
-use crate::lifter::{ContextSet, Lifter};
-use crate::storage::SegmentStorageError;
+use crate::lifter::{ContextSet, Language, Lifter, RawPCodeOp};
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
+use crate::types::common::Revision;
 
 #[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
     code_block_ids: Vec<CodeBlockId>,
-    block_id_by_code_block: BTreeMap<CodeBlockId, IlBlockId>,
+    block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
 }
 
 struct PCodeFunctionBuilder<'a> {
@@ -36,7 +33,7 @@ struct PCodeFunctionBuilder<'a> {
     successors: Vec<IlBlockId>,
     block_sources: Vec<Address>,
     source_spans: Vec<IlSourceSpan>,
-    annotations: Vec<AddressAnnotation<'static>>,
+    annotations: Vec<AddressAnnotation>,
     operations: Vec<RawPCodeOp>,
 }
 
@@ -49,7 +46,7 @@ impl PCodeCanonicaliser {
         blocks: &CodeBlockTable,
         segments: &SegmentStorage,
         function: FunctionId,
-        input_revision: u64,
+        input_revision: Revision,
         cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
         let Some(function_body) = functions.get_by_id(function) else {
@@ -65,8 +62,8 @@ impl PCodeCanonicaliser {
             self.code_block_ids.push(code_block);
         }
 
-        let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeFunctionBuilder::new(language, header, segments);
+        let metadata = IlMetadata::new(function, PCODE_SCHEMA_VERSION, input_revision);
+        let mut builder = PCodeFunctionBuilder::new(language, metadata, segments);
         let mut successors = Vec::new();
 
         for index in 0..self.code_block_ids.len() {
@@ -103,11 +100,11 @@ impl PCodeCanonicaliser {
         language: &'static Language,
         function: &IncompleteFunction,
         segments: &SegmentStorage,
-        input_revision: u64,
+        input_revision: Revision,
         cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
-        let header = IlHeader::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeFunctionBuilder::new(language, header, segments);
+        let metadata = IlMetadata::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
+        let mut builder = PCodeFunctionBuilder::new(language, metadata, segments);
         let mut successors = Vec::new();
 
         for block in function.blocks() {
@@ -134,10 +131,14 @@ impl PCodeCanonicaliser {
 }
 
 impl<'a> PCodeFunctionBuilder<'a> {
-    fn new(language: &'static Language, header: IlHeader, segments: &'a SegmentStorage) -> Self {
+    fn new(
+        language: &'static Language,
+        metadata: IlMetadata,
+        segments: &'a SegmentStorage,
+    ) -> Self {
         Self {
             language,
-            builder: PCodeBuilder::new(language, header, IlGraph::default()),
+            builder: PCodeBuilder::new(language, metadata, IlGraph::default()),
             mapping_cache: SegmentMappingCache::new(segments),
             lifter: Lifter::new(language),
             blocks: Vec::new(),
@@ -189,15 +190,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
         for insn in instructions {
             self.operations.clear();
 
-            let Some(view) = self.mapping_cache.view_containing(insn.address()) else {
-                return Err(SegmentStorageError::InvalidAddress.into());
-            };
-            let Some(window) = view.bytes_from(insn.address()) else {
-                return Err(SegmentStorageError::InvalidAddress.into());
-            };
-            let Some(bytes) = window.as_contiguous() else {
-                return Err(SegmentStorageError::InvalidAddress.into());
-            };
+            let bytes = self.mapping_cache.contiguous_bytes_from(insn.address())?;
 
             let lifted_len = self
                 .lifter
@@ -234,7 +227,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
         length: usize,
         operations: &[RawPCodeOp],
         starting_ordinal: usize,
-        annotations: &mut Vec<AddressAnnotation<'static>>,
+        annotations: &mut Vec<AddressAnnotation>,
     ) -> Result<usize, PCodeError> {
         let mut targets = SmallVec::<[(u16, InsnTarget); 2]>::new();
         Insn::push_targets_for_operations(language, address, length, operations, &mut targets);
@@ -249,40 +242,40 @@ impl<'a> PCodeFunctionBuilder<'a> {
                 return Err(PCodeError::misplaced_arg(ordinal.value()));
             }
 
-            match operation.op() {
-                Op::Branch | Op::CBranch | Op::Call => {
-                    if let Some(target) = targets
-                        .iter()
-                        .find(|(target_index, _)| usize::from(*target_index) == index)
-                        .and_then(|(_, target)| match target {
-                            InsnTarget::IntraIns(location, _)
-                            | InsnTarget::IntraBlk(location, _) => Some(*location),
-                            InsnTarget::InterBlk(address)
-                            | InsnTarget::InterSub(Some(address))
-                            | InsnTarget::InterRet(Some(address), _) => Some((*address).into()),
-                            InsnTarget::InterSub(None)
-                            | InsnTarget::InterRet(None, _)
-                            | InsnTarget::Intrinsic
-                            | InsnTarget::Unresolved => None,
-                        })
-                    {
-                        let target = Self::remap_target_position(operations, address, target)
-                            .ok_or_else(|| {
-                                PCodeError::invalid_local_target(ordinal.value(), target.position())
-                            })?;
-                        annotations.push(AddressAnnotation::new(
-                            ordinal,
-                            AddressAnnotationValue::DirectTarget(target),
-                        ));
-                    }
-                }
-                Op::Load(_) | Op::Store(_) | Op::IBranch | Op::ICall | Op::Return => {
+            let opcode = PCodeOpcode::from_op(operation.op())
+                .ok_or_else(|| PCodeError::invalid_opcode(ordinal.value()))?;
+
+            if opcode.requires_target() {
+                if let Some(target) = targets
+                    .iter()
+                    .find(|(target_index, _)| usize::from(*target_index) == index)
+                    .and_then(|(_, target)| match target {
+                        InsnTarget::IntraIns(location, _) | InsnTarget::IntraBlk(location, _) => {
+                            Some(*location)
+                        }
+                        InsnTarget::InterBlk(address)
+                        | InsnTarget::InterSub(Some(address))
+                        | InsnTarget::InterRet(Some(address), _) => Some((*address).into()),
+                        InsnTarget::InterSub(None)
+                        | InsnTarget::InterRet(None, _)
+                        | InsnTarget::Intrinsic
+                        | InsnTarget::Unresolved => None,
+                    })
+                {
+                    let target = Self::remap_target_position(operations, address, target)
+                        .ok_or_else(|| {
+                            PCodeError::invalid_local_target(ordinal.value(), target.position())
+                        })?;
                     annotations.push(AddressAnnotation::new(
                         ordinal,
-                        AddressAnnotationValue::ComputedSpace(address.space()),
+                        AddressAnnotationValue::DirectTarget(target),
                     ));
                 }
-                _ => {}
+            } else if opcode.requires_effect_space() {
+                annotations.push(AddressAnnotation::new(
+                    ordinal,
+                    AddressAnnotationValue::ComputedSpace(address.space()),
+                ));
             }
 
             semantic_count += 1;
@@ -334,16 +327,16 @@ mod test {
 
     #[test]
     fn canonicaliser_builds_empty_stream() {
-        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 3);
+        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 3);
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let mut context = PCodeAddressContext::new(source, &[]);
         let language = resolve_language("x86:LE:64").expect("test language should resolve");
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
 
         builder.push_lifted_operations(&[], &mut context).unwrap();
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert!(ir.operations().is_empty());
-        assert_eq!(ir.header().input_revision(), 3);
+        assert_eq!(ir.metadata().input_revision().value(), 3);
     }
 }

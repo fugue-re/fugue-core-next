@@ -1,7 +1,3 @@
-use std::num::NonZeroU32;
-
-use crate::il::common::IlError;
-
 macro_rules! il_id {
     ($name:ident, $kind:literal) => {
         #[derive(
@@ -19,15 +15,15 @@ macro_rules! il_id {
         )]
         #[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
         #[repr(transparent)]
-        pub struct $name(NonZeroU32);
+        pub struct $name(std::num::NonZeroU32);
 
         impl $name {
-            pub fn try_from_index(index: usize) -> Result<Self, IlError> {
+            pub fn try_from_index(index: usize) -> Result<Self, $crate::il::common::IlError> {
                 let value = index
                     .checked_add(1)
                     .and_then(|value| u32::try_from(value).ok())
-                    .and_then(NonZeroU32::new)
-                    .ok_or(IlError::id_exhausted($kind))?;
+                    .and_then(std::num::NonZeroU32::new)
+                    .ok_or($crate::il::common::IlError::id_exhausted($kind))?;
 
                 Ok(Self(value))
             }
@@ -42,6 +38,8 @@ macro_rules! il_id {
         }
     };
 }
+
+pub(crate) use il_id;
 
 il_id!(IlBlockId, "block");
 il_id!(IlOpId, "operation");

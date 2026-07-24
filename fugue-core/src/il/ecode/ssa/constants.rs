@@ -1,7 +1,7 @@
 use fugue_bv::BitVec;
 use rustc_hash::FxHashMap;
 
-use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
+use crate::il::ecode::ssa::ECodeSsaOp;
 
 pub(crate) struct ECodeSsaConstantInterner<'a> {
     storage: &'a mut Vec<u8>,
@@ -20,17 +20,12 @@ impl<'a> ECodeSsaConstantInterner<'a> {
 
     pub(crate) fn seed(&mut self, operations: &[ECodeSsaOp]) {
         for operation in operations {
-            if !matches!(operation.opcode(), ECodeSsaOpcode::Constant) || operation.width() <= 64 {
+            let Some(bytes) = operation.constant_bytes(self.storage) else {
                 continue;
-            }
-            if let Some(value) = operation.constant(self.storage) {
-                self.write_bytes(&value);
-                if !self.offsets.contains_key(self.scratch.as_slice()) {
-                    self.offsets.insert(
-                        self.scratch.clone().into_boxed_slice(),
-                        operation.immediate(),
-                    );
-                }
+            };
+            if !self.offsets.contains_key(bytes) {
+                self.offsets
+                    .insert(Box::<[u8]>::from(bytes), operation.immediate());
             }
         }
     }

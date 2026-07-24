@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::mem::size_of;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -8,20 +7,16 @@ use bytes::{Buf, BufMut, BytesMut};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::cfg::FlowKind;
-use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, RawAddress};
+use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
-    ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID,
-    ENTITY_REFERENCE_INDEX_HEADER_ID, ENTITY_REFERENCE_RECORD_ID,
+    ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
 };
 use crate::storage::entities::{
     Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, ProjectEntity,
     WriteBackWorker,
 };
-use crate::storage::segments::space::AddressSpaceId;
-
-const ADDRESS_KEY_SIZE: usize = size_of::<AddressSpaceId>() + size_of::<RawAddress>();
+use crate::types::common::{archived_bitflags, cursor_bound, cursor_bound_or_minimum};
 
 #[derive(
     Debug,
@@ -97,45 +92,7 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct ArchivedReferenceProperties(u16);
-
-unsafe impl rkyv::Portable for ArchivedReferenceProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedReferenceProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedReferenceProperties
-where
-    u16: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { u16::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for ReferenceProperties {
-    type Archived = ArchivedReferenceProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedReferenceProperties(self.bits()));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for ReferenceProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ReferenceProperties, D>
-    for ArchivedReferenceProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<ReferenceProperties, D::Error> {
-        Ok(ReferenceProperties::from_bits_retain(self.0))
-    }
-}
+archived_bitflags!(ReferenceProperties, ArchivedReferenceProperties, u16);
 
 impl ReferenceProperties {
     pub fn from_flow(kind: FlowKind) -> Self {
@@ -162,7 +119,7 @@ pub enum ReferenceTarget {
 
 impl ReferenceTarget {
     const TAG_ADDRESS: u8 = 0;
-    const ADDRESS_BODY_SIZE: usize = ADDRESS_KEY_SIZE;
+    const ADDRESS_BODY_SIZE: usize = Address::ENCODED_SIZE;
 
     pub fn address(&self) -> Option<Address> {
         match self {
@@ -171,7 +128,7 @@ impl ReferenceTarget {
     }
 
     fn minimum() -> Self {
-        Self::Address(Address::zero(AddressSpaceId::from(0u16)))
+        Self::Address(Address::MINIMUM)
     }
 
     fn tag(&self) -> u8 {
@@ -389,11 +346,11 @@ impl EntityKey for ReferenceKey {
     const ID: EntityKeyId = ENTITY_KEY_REFERENCE_FORWARD_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < ADDRESS_KEY_SIZE {
+        if buf.len() < Address::ENCODED_SIZE {
             return None;
         }
-        let from = Address::decode(&buf[..ADDRESS_KEY_SIZE])?;
-        let mut rest = &buf[ADDRESS_KEY_SIZE..];
+        let from = Address::decode(&buf[..Address::ENCODED_SIZE])?;
+        let mut rest = &buf[Address::ENCODED_SIZE..];
         let target = ReferenceTarget::decode(&mut rest)?;
         if !rest.is_empty() {
             return None;
@@ -419,7 +376,7 @@ impl InverseReferenceKey {
     }
 
     fn minimum_for(target: ReferenceTarget) -> Self {
-        Self::new(target, Address::zero(AddressSpaceId::from(0u16)))
+        Self::new(target, Address::MINIMUM)
     }
 }
 
@@ -429,7 +386,7 @@ impl EntityKey for InverseReferenceKey {
     fn decode(buf: &[u8]) -> Option<Self> {
         let mut rest = buf;
         let target = ReferenceTarget::decode(&mut rest)?;
-        if rest.len() != ADDRESS_KEY_SIZE {
+        if rest.len() != Address::ENCODED_SIZE {
             return None;
         }
         let from = Address::decode(rest)?;
@@ -475,25 +432,6 @@ impl Entity for ReferenceRecord {
     const ID: EntityId = ENTITY_REFERENCE_RECORD_ID;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct ReferenceIndexHeader {
-    revision: u64,
-}
-
-impl ReferenceIndexHeader {
-    fn new(revision: u64) -> Self {
-        Self { revision }
-    }
-
-    fn revision(&self) -> u64 {
-        self.revision
-    }
-}
-
-impl Entity for ReferenceIndexHeader {
-    const ID: EntityId = ENTITY_REFERENCE_INDEX_HEADER_ID;
-}
-
 #[derive(Clone)]
 pub struct ReferenceIndex {
     forward: EntityCache<ReferenceKey, ReferenceRecord>,
@@ -503,28 +441,20 @@ pub struct ReferenceIndex {
 
 impl ReferenceIndex {
     const CACHE_BYTES: usize = 16 * 1024 * 1024;
-    const CLEAR_BATCH_LEN: usize = 256;
 
-    pub(crate) fn new(storage: EntityStorage) -> Result<Self, EntityStorageError> {
-        let forward = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
-        let inverse = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
+    pub(crate) fn new(
+        storage: EntityStorage,
+        worker: Option<Arc<WriteBackWorker>>,
+    ) -> Result<Self, EntityStorageError> {
+        let forward =
+            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
+        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
 
         Ok(Self {
             forward,
             inverse,
             storage,
         })
-    }
-
-    pub(crate) fn new_with(storage: EntityStorage, worker: Arc<WriteBackWorker>) -> Self {
-        let forward = EntityCache::with_worker(storage.clone(), worker.clone(), Self::CACHE_BYTES);
-        let inverse = EntityCache::with_worker(storage.clone(), worker, Self::CACHE_BYTES);
-
-        Self {
-            forward,
-            inverse,
-            storage,
-        }
     }
 
     pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
@@ -573,21 +503,12 @@ impl ReferenceIndex {
         after: Option<&Reference>,
     ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
     {
-        let start_key;
-        let start = match after {
-            Some(after) => {
-                start_key = ReferenceKey::new(after.from(), after.target());
-                Bound::Excluded(&start_key)
-            }
-            None => {
-                start_key = ReferenceKey::minimum_for(from);
-                Bound::Included(&start_key)
-            }
-        };
+        let after = after.map(|after| ReferenceKey::new(after.from(), after.target()));
+        let start = cursor_bound_or_minimum(after, ReferenceKey::minimum_for(from));
 
         Ok(self
             .forward
-            .try_scan_range(start)?
+            .try_iter_range(start.as_ref())?
             .take_while(move |result| result.as_ref().map_or(true, |(key, _)| key.from() == from))
             .map(move |result| {
                 result.map(|(key, cached)| {
@@ -602,21 +523,12 @@ impl ReferenceIndex {
         after: Option<&Reference>,
     ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
     {
-        let start_key;
-        let start = match after {
-            Some(after) => {
-                start_key = InverseReferenceKey::new(after.target(), after.from());
-                Bound::Excluded(&start_key)
-            }
-            None => {
-                start_key = InverseReferenceKey::minimum_for(target);
-                Bound::Included(&start_key)
-            }
-        };
+        let after = after.map(|after| InverseReferenceKey::new(after.target(), after.from()));
+        let start = cursor_bound_or_minimum(after, InverseReferenceKey::minimum_for(target));
 
         Ok(self
             .inverse
-            .try_scan_range(start)?
+            .try_iter_range(start.as_ref())?
             .take_while(move |result| {
                 result
                     .as_ref()
@@ -637,7 +549,7 @@ impl ReferenceIndex {
     ) -> Result<(), EntityStorageError> {
         let header = self
             .storage
-            .get::<ProjectEntity, ReferenceIndexHeader>(&ProjectEntity::ReferenceIndex)?;
+            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::ReferenceIndex)?;
 
         if header.is_some_and(|header| header.revision() == revision) {
             return Ok(());
@@ -650,10 +562,8 @@ impl ReferenceIndex {
     }
 
     pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
-        self.storage.insert(
-            &ProjectEntity::ReferenceIndex,
-            &ReferenceIndexHeader::new(revision),
-        )
+        self.storage
+            .insert(&ProjectEntity::ReferenceIndex, &IndexHeader::new(revision))
     }
 
     fn rebuild<'a>(
@@ -664,7 +574,7 @@ impl ReferenceIndex {
         let asserted = self.clear_derived()?;
 
         for function in functions {
-            for reference in blocks.flow_references(function.blocks().map(|(_, id)| id)) {
+            for reference in function.flow_references(blocks) {
                 let key = ReferenceKey::new(reference.from(), reference.target());
                 if !asserted.contains(&key) {
                     self.insert(&reference)?;
@@ -680,13 +590,13 @@ impl ReferenceIndex {
         let mut cursor = None;
 
         loop {
-            let start = cursor.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
+            let start = cursor_bound(cursor.as_ref());
             let batch = self
                 .forward
-                .try_scan_range(start)?
-                .take(Self::CLEAR_BATCH_LEN)
-                .map(|result| result.map(|(key, cached)| (key, cached.origin())))
-                .collect::<Result<Vec<_>, _>>()?;
+                .try_iter_batch(start)?
+                .into_iter()
+                .map(|(key, cached)| (key, cached.origin()))
+                .collect::<Vec<_>>();
 
             let Some((last, _)) = batch.last() else {
                 break;
@@ -782,7 +692,7 @@ impl ReferenceIndex {
     ) -> Result<(), EntityStorageError> {
         let end = range.end_address();
         let start = ReferenceKey::minimum_for(range.start_address());
-        for result in self.forward.try_scan_range(Bound::Included(&start))? {
+        for result in self.forward.try_iter_range(Bound::Included(&start))? {
             let (key, cached) = result?;
             if key.from() > end {
                 break;
@@ -877,26 +787,25 @@ impl ReferenceRevert {
 #[cfg(test)]
 mod test {
     use fugue_lifter::runtime::pcode::Inputs;
-    use fugue_lifter::{Op, PCodeOp, Varnode};
 
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange, IlOpId, IlSourceSpan};
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
     use crate::il::pcode::{
         AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
         PCodeBuilder,
     };
-    use crate::ir::block::table::CodeBlockTableError;
-    use crate::ir::{CodeBlock, Function, FunctionId, FunctionTable, Insn};
-    use crate::lifter::{Language, resolve_language};
+    use crate::ir::{CodeBlock, CodeBlockTableError, Function, FunctionId, FunctionTable, Insn};
+    use crate::lifter::{Language, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
+    use crate::storage::segments::space::AddressSpaceId;
 
     fn address(space: u16, offset: u64) -> Address {
         Address::new(AddressSpaceId::from(space), offset)
     }
 
     fn index() -> Result<ReferenceIndex, EntityStorageError> {
-        ReferenceIndex::new(EntityStorage::new(InMemoryEntityStorage::new()))
+        ReferenceIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), None)
     }
 
     fn flow_reference(from: Address, to: Address) -> Reference {
@@ -908,7 +817,7 @@ mod test {
     }
 
     #[test]
-    fn test_derived_kind_matches_ignores_kind_and_shadowing() {
+    fn derived_kind_matches_ignores_kind_and_shadowing() {
         let from = address(0, 0x1000);
         let data_target = address(0, 0x2000);
         let flow_target = address(0, 0x3000);
@@ -951,7 +860,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_properties_compose_and_predicate() {
+    fn reference_properties_compose_and_predicate() {
         let reference = Reference::flow(
             address(0, 0x1000),
             address(0, 0x2000),
@@ -968,7 +877,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_merges_data_access() {
+    fn reference_merges_data_access() {
         let merged = Reference::data(
             address(0, 0x1000),
             address(0, 0x2000),
@@ -981,7 +890,7 @@ mod test {
     }
 
     #[test]
-    fn test_flow_kind_conversion_preserves_semantics() {
+    fn flow_kind_conversion_preserves_semantics() {
         let from = address(0, 0x1000);
         let to = address(0, 0x2000);
         assert!(Reference::from_flow(from, to, FlowKind::Call).is_call());
@@ -993,7 +902,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_record_round_trips_kind_and_origin() {
+    fn reference_record_round_trips_kind_and_origin() {
         for (kind, properties) in [
             (
                 ReferenceKind::Flow,
@@ -1022,7 +931,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_target_encoding_preserves_order() {
+    fn reference_target_encoding_preserves_order() {
         let low = ReferenceTarget::from(address(0, 0x10));
         let mid = ReferenceTarget::from(address(0, 0x20));
         let high = ReferenceTarget::from(address(1, 0x00));
@@ -1043,7 +952,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_identity_ignores_properties() {
+    fn reference_identity_ignores_properties() {
         let base = Reference::flow(
             address(0, 0x1000),
             address(0, 0x2000),
@@ -1068,7 +977,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_serves_both_directions() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_index_serves_both_directions() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
@@ -1097,8 +1006,7 @@ mod test {
     }
 
     #[test]
-    fn test_cross_space_references_scan_from_both_sides() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn cross_space_references_scan_from_both_sides() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let base_from = address(0, 0x1000);
         let overlay_to = address(1, 0x2000);
@@ -1120,7 +1028,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_get_reads_record() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_index_get_reads_record() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
@@ -1143,7 +1051,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_remove_clears_both_sides() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_index_remove_clears_both_sides() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
@@ -1167,7 +1075,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_pages_from_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_index_pages_from_cursor() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let from = address(0, 0x1000);
         for offset in 0..8u64 {
@@ -1198,15 +1106,15 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_reads_persisted_rows() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_index_reads_persisted_rows() -> Result<(), Box<dyn std::error::Error>> {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
-        let writer = ReferenceIndex::new(storage.clone())?;
+        let writer = ReferenceIndex::new(storage.clone(), None)?;
         writer.insert(&flow_reference(a, b))?;
 
-        let reader = ReferenceIndex::new(storage.clone())?;
+        let reader = ReferenceIndex::new(storage.clone(), None)?;
         let from_a = reader
             .references_from(a, None)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1216,7 +1124,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_index_ensure_current_derives_flow_references()
+    fn reference_index_ensure_current_derives_flow_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let index = index()?;
@@ -1240,7 +1148,7 @@ mod test {
     }
 
     #[test]
-    fn test_replace_derived_preserves_asserted() -> Result<(), Box<dyn std::error::Error>> {
+    fn replace_derived_preserves_asserted() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let from = address(0, 0x1000);
         let old_target = address(0, 0x2000);
@@ -1281,7 +1189,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_revert_restores_prior_state() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_revert_restores_prior_state() -> Result<(), Box<dyn std::error::Error>> {
         let index = index()?;
         let from = address(0, 0x1000);
         let original = address(0, 0x2000);
@@ -1309,24 +1217,24 @@ mod test {
     }
 
     #[test]
-    fn test_data_references_from_constant_pointer() -> Result<(), Box<dyn std::error::Error>> {
+    fn data_references_from_constant_pointer() -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
         let insn_address = address(0, 0x1000);
         let data_space = insn_address.space();
         let data_address = 0x4000u64;
         let register_value = Varnode::new(language.register_space(), 0, 8);
-        let load_operation = PCodeOp {
+        let load_operation = RawPCodeOp {
             op: Op::Load(default_space),
             inputs: Inputs::one(Varnode::constant(data_address, 8)),
             output: register_value,
         };
-        let store_operation = PCodeOp {
+        let store_operation = RawPCodeOp {
             op: Op::Store(default_space),
             inputs: Inputs([Varnode::constant(data_address, 8), register_value]),
             output: Varnode::INVALID,
         };
-        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
         let annotations = [
             AddressAnnotation::new(
                 IlOpId::try_from_index(0).unwrap(),
@@ -1364,14 +1272,14 @@ mod test {
             Some(Address::new(data_space, data_address))
         );
 
-        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
         let annotations = [AddressAnnotation::new(
             IlOpId::try_from_index(0).unwrap(),
             AddressAnnotationValue::ComputedSpace(data_space),
         )];
         let mut context = PCodeAddressContext::new(insn_address, &annotations);
         let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
-        let register_relative = PCodeOp {
+        let register_relative = RawPCodeOp {
             op: Op::Load(default_space),
             inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
             output: Varnode::new(language.register_space(), 0, 8),
@@ -1390,7 +1298,7 @@ mod test {
     }
 
     #[test]
-    fn test_block_reference_derivation_excludes_instruction_data_references()
+    fn block_reference_derivation_excludes_instruction_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let default_space = language.default_space();
@@ -1398,12 +1306,12 @@ mod test {
         let data = 0x4000u64;
 
         let operations = [
-            PCodeOp {
+            RawPCodeOp {
                 op: Op::Load(default_space),
                 inputs: Inputs::one(Varnode::constant(data, 8)),
                 output: Varnode::new(language.register_space(), 0, 8),
             },
-            PCodeOp {
+            RawPCodeOp {
                 op: Op::Store(default_space),
                 inputs: Inputs([
                     Varnode::constant(data, 8),
@@ -1420,7 +1328,9 @@ mod test {
                 .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
         })?;
 
-        let derived = blocks.flow_references([block_id]);
+        let function = Function::new(FunctionId::default(), insn_address)
+            .with_blocks([(insn_address, block_id)]);
+        let derived = function.flow_references(&blocks);
 
         assert!(derived.iter().all(|reference| !reference.is_data()));
 
@@ -1428,7 +1338,7 @@ mod test {
     }
 
     #[test]
-    fn test_rebuild_preserves_asserted_references() -> Result<(), Box<dyn std::error::Error>> {
+    fn rebuild_preserves_asserted_references() -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let index = index()?;
         let mut functions = FunctionTable::new_transient();
@@ -1470,7 +1380,7 @@ mod test {
             .iter()
             .enumerate()
             .map(|(offset, target)| {
-                let operations = [PCodeOp {
+                let operations = [RawPCodeOp {
                     op: Op::Call,
                     inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
                     output: Varnode::INVALID,

@@ -14,6 +14,7 @@ use crate::ir::{
 use crate::lifter::ContextSet;
 use crate::project::ProjectTransaction;
 use crate::storage::SegmentStorage;
+use crate::storage::segments::SegmentMappingCache;
 
 pub struct FunctionRecoveryState {
     cancellation: CancellationToken,
@@ -44,13 +45,9 @@ pub struct FunctionBuilderContext {
 }
 
 pub struct FunctionBuilder {
-    // The configuration for the function recovery process.
     config: FunctionRecoveryConfig,
-    // The context of the function being built.
     context: FunctionBuilderContext,
-    // These passes run once per function prior to instruction resolution.
     initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
-    // These passes run after the function's control flow has been structured on each iteration.
     post_structuring_passes: AnalysisGroup<FunctionRecoveryState>,
 }
 
@@ -251,16 +248,11 @@ impl FunctionBuilderContext {
         token: &CancellationToken,
         use_mapping_hints: bool,
     ) -> Result<(), Cancelled> {
-        // NOTE: as opposed to reading bytes from the storage, for all existing backends we can
-        // create a "cheap" view over the containing segment and use that to avoid lookups for each
-        // address read from.
-
-        // We assume that most (all?) of a function's blocks will be in the same segment.
-        let mut view = segments
+        let mut mapping_cache = SegmentMappingCache::new(segments);
+        mapping_cache
             .view_containing(self.entry())
             .expect("function entry is valid");
 
-        // This is the stage where we build blocks by collecting instructions and marking them.
         'outer: while let Some(candidate) = self.candidates.pop_front() {
             token.check()?;
 
@@ -277,18 +269,10 @@ impl FunctionBuilderContext {
             };
             let block = Address::new(block_space, block);
 
-            if !view.contains(block) {
-                if let Ok(next_view) = segments.view_containing(block) {
-                    tracing::debug!(
-                        "switching segment for {block} to segment {}",
-                        next_view.name()
-                    );
-                    view = next_view;
-                } else {
-                    tracing::trace!("skipping {block}: not mapped in any segment");
-                    continue 'outer;
-                }
-            }
+            let Some(view) = mapping_cache.view_containing(block).cloned() else {
+                tracing::trace!("skipping {block}: not mapped in any segment");
+                continue 'outer;
+            };
 
             if use_mapping_hints && let Some(hint) = view.mapping_hint_at(block) {
                 if hint.is_data() {
@@ -359,9 +343,7 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                let Some(window) = view.bytes_from(address) else {
-                    // NOTE: we should not reach this point if we're following a local flow, since
-                    // we check segment membership when adding local targets.
+                let Ok(bytes) = mapping_cache.contiguous_bytes_from(address) else {
                     tracing::trace!("skipping {address}: not mapped in segment");
                     continue 'outer;
                 };
@@ -370,11 +352,6 @@ impl FunctionBuilderContext {
                     tracing::trace!("skipping {address}: in avoidance set");
                     continue 'outer;
                 }
-
-                let Some(bytes) = window.as_contiguous() else {
-                    tracing::trace!("skipping {address}: not contiguously mapped");
-                    continue 'outer;
-                };
 
                 let size = bytes.len();
 
@@ -587,8 +564,6 @@ impl FunctionBuilderContext {
             }
 
             if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
-                // No new candidates were added, and no new local targets were discovered.
-                // We can stop here.
                 tracing::debug!("no new candidates or local targets; stopping");
                 break;
             }

@@ -6,6 +6,7 @@ use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::FunctionId;
 use crate::storage::entities::{EntityStorage, EntityStorageError};
+use crate::types::common::Revision;
 
 #[derive(Debug, Error)]
 pub(crate) enum IlStorageError {
@@ -24,11 +25,11 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
             return Ok(None);
         };
 
-        if artefact.header().schema() != Self::SCHEMA {
+        if artefact.metadata().schema() != Self::SCHEMA {
             return Err(IlError::schema_mismatch(
                 Self::LEVEL,
                 Self::SCHEMA.value(),
-                artefact.header().schema().value(),
+                artefact.metadata().schema().value(),
             )
             .into());
         }
@@ -39,17 +40,17 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
     fn load_current(
         entities: &EntityStorage,
         function: FunctionId,
-        input_revision: u64,
+        input_revision: Revision,
     ) -> Result<Option<Self>, IlStorageError> {
         let Some(artefact) = Self::load(entities, function)? else {
             return Ok(None);
         };
 
-        if artefact.header().input_revision() != input_revision {
+        if artefact.metadata().input_revision() != input_revision {
             return Err(IlError::stale_artefact(
                 Self::LEVEL,
-                input_revision,
-                artefact.header().input_revision(),
+                input_revision.value(),
+                artefact.metadata().input_revision().value(),
             )
             .into());
         }
@@ -61,7 +62,7 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
     where
         IlRevert: From<(FunctionId, Option<Self>)>,
     {
-        let function = self.header().function();
+        let function = self.metadata().function();
         let previous = entities.get::<FunctionId, Self>(&function)?;
 
         entities.insert(&function, self)?;
@@ -72,9 +73,8 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
     fn remove(
         entities: &EntityStorage,
         function: FunctionId,
-    ) -> Result<Option<(Self, IlRevert)>, EntityStorageError>
+    ) -> Result<Option<IlRevert>, EntityStorageError>
     where
-        Self: Clone,
         IlRevert: From<(FunctionId, Option<Self>)>,
     {
         let Some(previous) = entities.get::<FunctionId, Self>(&function)? else {
@@ -83,10 +83,7 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
 
         entities.remove::<FunctionId, Self>(&function)?;
 
-        Ok(Some((
-            previous.clone(),
-            IlRevert::from((function, Some(previous))),
-        )))
+        Ok(Some(IlRevert::from((function, Some(previous)))))
     }
 }
 
@@ -117,6 +114,13 @@ impl From<(FunctionId, Option<ECodeSsaIr>)> for IlRevert {
 }
 
 impl IlRevert {
+    pub(crate) fn previous_pcode(&self) -> Option<&PCodeIr> {
+        match self {
+            Self::PCode(_, previous) => previous.as_ref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn restore(self, entities: &EntityStorage) -> Result<(), EntityStorageError> {
         fn restore_one<T>(
             entities: &EntityStorage,

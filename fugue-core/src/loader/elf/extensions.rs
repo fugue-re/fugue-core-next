@@ -114,8 +114,8 @@ type ArchResolveFn =
     fn(&ImageContext<'_>, &LanguageSource<'_>) -> Result<Option<Arch>, LoaderError>;
 
 pub struct ArchResolver {
-    pub name: &'static str,
-    pub resolve_architecture: ArchResolveFn,
+    name: &'static str,
+    resolve_architecture: ArchResolveFn,
 }
 
 impl ArchResolver {
@@ -233,8 +233,8 @@ type FunctionRecoveryHandlerFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
 pub struct FunctionRecoveryHandler {
-    pub name: &'static str,
-    pub apply: FunctionRecoveryHandlerFn,
+    name: &'static str,
+    apply: FunctionRecoveryHandlerFn,
 }
 
 impl FunctionRecoveryHandler {
@@ -354,8 +354,8 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
 type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
 
 pub struct RelocationHandler {
-    pub name: &'static str,
-    pub apply_relocation: RelocationApplyFn,
+    name: &'static str,
+    apply_relocation: RelocationApplyFn,
 }
 
 impl RelocationHandler {

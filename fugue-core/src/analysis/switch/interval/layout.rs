@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use fugue_bv::BitVec;
 use rustc_hash::FxHashSet;
 
-use super::SwitchSliceEvaluator;
+use super::SwitchIntervalContext;
 use crate::il::common::IlValueId;
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::ir::RawAddress;
@@ -18,6 +18,34 @@ pub(crate) struct SwitchInlineTableLayout {
     address: RawAddress,
     stride: u32,
     index: IlValueId,
+}
+
+struct BaseScaleIndex {
+    base: RawAddress,
+    scale: Option<u64>,
+    index: IlValueId,
+}
+
+impl BaseScaleIndex {
+    fn new(base: RawAddress, scale: Option<u64>, index: IlValueId) -> Self {
+        Self { base, scale, index }
+    }
+
+    fn base(&self) -> RawAddress {
+        self.base
+    }
+
+    fn index(&self) -> IlValueId {
+        self.index
+    }
+
+    fn scale(&self) -> Option<u64> {
+        self.scale
+    }
+
+    fn stride(&self) -> u64 {
+        self.scale.unwrap_or(1)
+    }
 }
 
 impl SwitchTableLayout {
@@ -48,7 +76,7 @@ impl SwitchInlineTableLayout {
     }
 }
 
-impl SwitchSliceEvaluator<'_> {
+impl SwitchIntervalContext<'_> {
     pub(crate) fn table_layout(&self, target: IlValueId) -> Option<SwitchTableLayout> {
         let mut queue = VecDeque::from([target]);
         let mut visited = FxHashSet::default();
@@ -68,7 +96,7 @@ impl SwitchSliceEvaluator<'_> {
             let operands = self.ssa.operation_operands(operation);
             match operation.opcode() {
                 ECodeSsaOpcode::Load => {
-                    if let Some(&pointer) = operands.first() {
+                    if let Some(pointer) = self.ssa.pointer_operand(operation) {
                         let element_size = operation.width().div_ceil(8);
                         if let Some((address, index)) = self.table_pointer(pointer, element_size) {
                             return Some(SwitchTableLayout {
@@ -102,38 +130,8 @@ impl SwitchSliceEvaluator<'_> {
         pointer: IlValueId,
         element_size: u32,
     ) -> Option<(RawAddress, IlValueId)> {
-        let pointer = self.canonical_value(pointer);
-        let operation = self.ssa.defining_operation(pointer)?;
-        if operation.opcode() != ECodeSsaOpcode::Add {
-            return None;
-        }
-        let operands = self.ssa.operation_operands(operation);
-        let (&a, &b) = (operands.first()?, operands.get(1)?);
-        let (address, scaled) = self.constant_and_value(a, b)?;
-        let address = RawAddress::from(address.to_u64()?);
-        let scaled = self.canonical_value(scaled);
-        let Some(operation) = self.ssa.defining_operation(scaled) else {
-            return (element_size == 1).then_some((address, scaled));
-        };
-        if !matches!(
-            operation.opcode(),
-            ECodeSsaOpcode::Mul | ECodeSsaOpcode::LeftShift
-        ) {
-            return (element_size == 1).then_some((address, scaled));
-        }
-        let operands = self.ssa.operation_operands(operation);
-        let (&a, &b) = (operands.first()?, operands.get(1)?);
-        let (scale, index) = self.constant_and_value(a, b)?;
-        let scale = scale.to_u64()?;
-        let stride = match operation.opcode() {
-            ECodeSsaOpcode::Mul => scale,
-            ECodeSsaOpcode::LeftShift => 1u64.checked_shl(u32::try_from(scale).ok()?)?,
-            _ => unreachable!(),
-        };
-        if stride != u64::from(element_size) {
-            return None;
-        }
-        Some((address, self.canonical_value(index)))
+        let indexed = self.base_scale_index(pointer)?;
+        (indexed.stride() == u64::from(element_size)).then_some((indexed.base(), indexed.index()))
     }
 
     pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
@@ -152,35 +150,53 @@ impl SwitchSliceEvaluator<'_> {
             target = self.canonical_value(unmasked);
         }
 
-        let operation = self.ssa.defining_operation(target)?;
-        if operation.opcode() != ECodeSsaOpcode::Add {
-            return None;
-        }
-        let operands = self.ssa.operation_operands(operation);
-        let (&a, &b) = (operands.first()?, operands.get(1)?);
-        let (address, scaled) = self.constant_and_value(a, b)?;
-        let address = RawAddress::from(address.to_u64()?);
-        let scaled = self.canonical_value(scaled);
-        let operation = self.ssa.defining_operation(scaled)?;
-        let operands = self.ssa.operation_operands(operation);
-        let (&a, &b) = (operands.first()?, operands.get(1)?);
-        let (scale, index) = self.constant_and_value(a, b)?;
-        let scale = scale.to_u64()?;
-        let stride = match operation.opcode() {
-            ECodeSsaOpcode::Mul => scale,
-            ECodeSsaOpcode::LeftShift => 1u64.checked_shl(u32::try_from(scale).ok()?)?,
-            _ => return None,
-        };
-        let stride = u32::try_from(stride).ok()?;
+        let indexed = self.base_scale_index(target)?;
+        let stride = u32::try_from(indexed.scale()?).ok()?;
         if stride == 0 || stride > self.config.max_element_size() {
             return None;
         }
 
         Some(SwitchInlineTableLayout {
-            address,
+            address: indexed.base(),
             stride,
-            index: self.canonical_value(index),
+            index: indexed.index(),
         })
+    }
+
+    fn base_scale_index(&self, value: IlValueId) -> Option<BaseScaleIndex> {
+        let value = self.canonical_value(value);
+        let operation = self.ssa.defining_operation(value)?;
+        if operation.opcode() != ECodeSsaOpcode::Add {
+            return None;
+        }
+        let operands = self.ssa.operation_operands(operation);
+        let (&a, &b) = (operands.first()?, operands.get(1)?);
+        let (base, scaled) = self.constant_and_value(a, b)?;
+        let base = RawAddress::from(base.to_u64()?);
+        let scaled = self.canonical_value(scaled);
+        let Some(operation) = self.ssa.defining_operation(scaled) else {
+            return Some(BaseScaleIndex::new(base, None, scaled));
+        };
+        if !matches!(
+            operation.opcode(),
+            ECodeSsaOpcode::Mul | ECodeSsaOpcode::LeftShift
+        ) {
+            return Some(BaseScaleIndex::new(base, None, scaled));
+        }
+        let operands = self.ssa.operation_operands(operation);
+        let (&a, &b) = (operands.first()?, operands.get(1)?);
+        let (scale, index) = self.constant_and_value(a, b)?;
+        let scale = scale.to_u64()?;
+        let scale = match operation.opcode() {
+            ECodeSsaOpcode::Mul => scale,
+            ECodeSsaOpcode::LeftShift => 1u64.checked_shl(u32::try_from(scale).ok()?)?,
+            _ => unreachable!(),
+        };
+        Some(BaseScaleIndex::new(
+            base,
+            Some(scale),
+            self.canonical_value(index),
+        ))
     }
 
     fn constant_and_value(&self, a: IlValueId, b: IlValueId) -> Option<(BitVec, IlValueId)> {

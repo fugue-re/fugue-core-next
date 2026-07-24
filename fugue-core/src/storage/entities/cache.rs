@@ -15,6 +15,7 @@ use crate::types::BytesOrSlice;
 
 const ENTITY_CACHE_ENTRY_OVERHEAD: u32 = 64;
 const ENTITY_CACHE_ESTIMATED_ENTRY_SIZE: usize = 256;
+const ENTITY_CACHE_MAINTENANCE_BATCH_COUNT: usize = 256;
 
 type EntityLru<K, E> = Cache<K, Cached<E>, ByteWeighter>;
 type PendingRange<'a, K, E> = Vec<(K, Option<CachedRef<'a, E>>)>;
@@ -272,6 +273,17 @@ where
         Self::build(storage, WriteSink::Worker(worker), capacity)
     }
 
+    pub fn from_storage(
+        storage: EntityStorage,
+        worker: Option<Arc<WriteBackWorker>>,
+        capacity: usize,
+    ) -> Result<Self, EntityStorageError> {
+        match worker {
+            Some(worker) => Ok(Self::with_worker(storage, worker, capacity)),
+            None => Self::new(storage, capacity),
+        }
+    }
+
     fn build(storage: EntityStorage, sink: WriteSink, capacity: usize) -> Self {
         let weight_capacity = capacity.max(1) as u64;
         let estimated_items = (capacity / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
@@ -374,7 +386,7 @@ where
         Ok(Box::new(iter))
     }
 
-    pub fn try_scan_range(
+    pub fn try_iter_range(
         &self,
         start: Bound<&K>,
     ) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError>
@@ -382,16 +394,43 @@ where
         K: Ord,
     {
         match &self.sink {
-            WriteSink::WriteThrough => self.scan_backing_range(start),
+            WriteSink::WriteThrough => self.iter_backing_range(start),
             WriteSink::Worker(worker) => {
                 let prefix = schema::make_prefix::<K, E>();
                 let start_key = Self::range_start_key(start);
                 let pending_start = start_key.as_ref().map(|key| key.as_ref());
                 let pending = worker.pending_range(&prefix, pending_start)?;
                 let pending = self.decode_pending_range(pending)?;
-                let backing = self.storage.scan_range::<K, E>(start)?;
+                let backing = self.storage.iter_range::<K, E>(start)?;
 
                 Ok(Box::new(self.merge_pending_range(backing, pending)))
+            }
+        }
+    }
+
+    pub fn try_iter_batch(
+        &self,
+        start: Bound<&K>,
+    ) -> Result<Vec<(K, CachedRef<'_, E>)>, EntityStorageError>
+    where
+        K: Ord,
+    {
+        self.try_iter_range(start)?
+            .take(ENTITY_CACHE_MAINTENANCE_BATCH_COUNT)
+            .collect()
+    }
+
+    pub fn try_clear(&self) -> Result<(), EntityStorageError>
+    where
+        K: Ord,
+    {
+        loop {
+            let entries = self.try_iter_batch(Bound::Unbounded)?;
+            if entries.is_empty() {
+                return Ok(());
+            }
+            for (key, _) in entries {
+                self.try_remove(&key)?;
             }
         }
     }
@@ -417,12 +456,12 @@ where
         })
     }
 
-    fn scan_backing_range(
+    fn iter_backing_range(
         &self,
         start: Bound<&K>,
     ) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError> {
         let entities = self.entities.clone();
-        let iter = self.storage.scan_range::<K, E>(start)?.map(move |result| {
+        let iter = self.storage.iter_range::<K, E>(start)?.map(move |result| {
             result.map(|(key, value)| {
                 let value = match entities.get(&key) {
                     Some(cached) => CachedRef::from_arc(cached.value),
@@ -701,12 +740,12 @@ mod test {
             self.0.iter_prefix(prefix)
         }
 
-        fn scan_range(
+        fn iter_range(
             &self,
             prefix: &[u8],
             start: Bound<&[u8]>,
         ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-            self.0.scan_range(prefix, start)
+            self.0.iter_range(prefix, start)
         }
 
         fn iter_prefix_as<'a, F, T>(
@@ -766,7 +805,7 @@ mod test {
     }
 
     #[test]
-    fn cache_scan_range_starts_at_cursor() {
+    fn cache_iter_range_starts_at_cursor() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let cache = EntityCache::<Address, CacheEntity>::new(storage, 128).unwrap();
 
@@ -775,7 +814,7 @@ mod test {
         }
 
         let values = cache
-            .try_scan_range(Bound::Excluded(&Address::from(2u64)))
+            .try_iter_range(Bound::Excluded(&Address::from(2u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.id))
             .collect::<Result<Vec<_>, _>>()
@@ -889,7 +928,7 @@ mod test {
     }
 
     #[test]
-    fn write_back_scan_range_reflects_pending_writes() {
+    fn write_back_iter_range_reflects_pending_writes() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker =
             WriteBackWorker::with_options(storage.clone(), 16, 1024, Duration::from_secs(3600))
@@ -903,7 +942,7 @@ mod test {
         cache.try_remove(&Address::from(2u64)).unwrap();
 
         let values = cache
-            .try_scan_range(Bound::Included(&Address::from(1u64)))
+            .try_iter_range(Bound::Included(&Address::from(1u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.id))
             .collect::<Result<Vec<_>, _>>()

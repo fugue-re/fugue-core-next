@@ -3,10 +3,9 @@ use resolver::SwitchTargetResolver;
 
 mod analysis;
 mod idiom;
+mod interval;
 mod recovered;
 mod resolver;
-mod slice;
-mod syntactic;
 
 pub use analysis::SwitchRecovery;
 

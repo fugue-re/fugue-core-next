@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{SwitchIndex, SwitchTableAllocation, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, Id};
+use crate::ir::{Address, FunctionId};
 use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
 use crate::storage::{EntityStorage, EntityStorageError};
 
@@ -23,7 +23,7 @@ impl SwitchTable {
         Self::from_entries(EntityCache::new(entities, cache_bytes)?)
     }
 
-    pub(crate) fn new_with(
+    pub(crate) fn with_worker(
         entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
@@ -34,11 +34,10 @@ impl SwitchTable {
     fn from_entries(entries: EntityCache<SwitchId, Switch>) -> Result<Self, EntityStorageError> {
         let mut index = SwitchIndex::new();
 
-        for entry in entries.try_scan_range(Bound::Unbounded)? {
+        for entry in entries.try_iter_range(Bound::Unbounded)? {
             let (id, switch) = entry?;
-            index.branches.insert(switch.branch(), id);
-            index.link(switch.function(), switch.branch());
-            index.next_index = index.next_index.max(id.index() + 1);
+            index.insert(id, switch.function(), switch.branch());
+            index.allocator.mark_allocated(id);
         }
 
         Ok(Self { index, entries })
@@ -56,25 +55,23 @@ impl SwitchTable {
     }
 
     pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
-        SwitchTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+        self.index.allocator.checkpoint(max_pops)
     }
 
     pub(crate) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
-        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
-        self.index.free_ids.truncate(tail_start);
-        self.index.free_ids.extend(allocation.free_ids_tail);
-        self.index.next_index = allocation.next_index;
+        self.index.allocator.restore(allocation);
     }
 
     pub(crate) fn restore_entry(&mut self, switch: Switch) -> Result<(), EntityStorageError> {
         let id = switch.id();
-        self.index.branches.insert(switch.branch(), id);
-        self.index.link(switch.function(), switch.branch());
-        self.index.next_index = self.index.next_index.max(id.index() + 1);
-        self.index
-            .free_ids
-            .retain(|free_id| free_id.index() != id.index());
-        self.entries.try_put(id, switch).map(|_| ())
+        self.clear_entry(id)?;
+
+        let function = switch.function();
+        let branch = switch.branch();
+        self.entries.try_put(id, switch)?;
+        self.index.insert(id, function, branch);
+        self.index.allocator.mark_allocated(id);
+        Ok(())
     }
 
     pub(crate) fn clear_entry(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
@@ -85,48 +82,45 @@ impl SwitchTable {
         let function = switch.function();
         drop(switch);
 
-        self.index.branches.remove(&branch);
-        self.index.unlink(function, branch);
         self.entries.try_remove(&id)?;
+        self.index.remove(function, branch);
         Ok(true)
     }
 
     pub(crate) fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
     where
-        F: FnOnce(SwitchId, Address) -> Switch,
+        F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
     {
-        if let Some(&existing) = self.index.branches.get(&branch) {
-            let switch = f(existing, branch);
+        if let Some(existing) = self.index.id_by_branch(branch) {
+            let switch = f(existing, branch)?;
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
             }
-            if let Some(previous) = self.entries.try_get(&existing)? {
-                let previous_function = previous.function();
-                drop(previous);
-                self.index.unlink(previous_function, branch);
+            let previous_function = self
+                .entries
+                .try_get(&existing)?
+                .map(|previous| previous.function());
+            let function = switch.function();
+            self.entries.try_put(existing, switch)?;
+            if let Some(previous_function) = previous_function {
+                self.index.remove(previous_function, branch);
             }
-            self.index.link(switch.function(), branch);
-            self.entries.put(existing, switch);
+            self.index.insert(existing, function, branch);
             return Ok(existing);
         }
 
-        let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
+        let entries = &self.entries;
+        let (id, function) = self.index.allocator.try_allocate(|id| {
+            let switch = f(id, branch)?;
+            if switch.branch() != branch {
+                return Err(SwitchTableError::AddressMismatch);
+            }
+            let function = switch.function();
+            entries.try_put(id, switch)?;
+            Ok(function)
+        })?;
 
-        let switch = f(id, branch);
-        if switch.branch() != branch {
-            return Err(SwitchTableError::AddressMismatch);
-        }
-
-        self.index.branches.insert(branch, id);
-        self.index.link(switch.function(), branch);
-        if reuse_id.is_some() {
-            self.index.free_ids.pop();
-        } else {
-            self.index.next_index += 1;
-        }
-
-        self.entries.put(id, switch);
+        self.index.insert(id, function, branch);
 
         Ok(id)
     }
@@ -142,17 +136,25 @@ impl SwitchTable {
         self.entries.try_get(&id)
     }
 
-    pub(crate) fn get_by_branch(&self, branch: Address) -> Option<Ref<'_>> {
-        let id = *self.index.branches.get(&branch)?;
-        self.get_by_id(id)
+    pub(crate) fn try_get_by_branch(
+        &self,
+        branch: Address,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        let Some(id) = self.index.id_by_branch(branch) else {
+            return Ok(None);
+        };
+        self.try_get_by_id(id)
     }
 
     pub(crate) fn contains(&self, branch: Address) -> bool {
-        self.index.branches.contains_key(&branch)
+        self.index.contains(branch)
     }
 
-    pub(crate) fn get_by_id_mut(&mut self, id: SwitchId) -> Option<RefMut<'_>> {
-        self.entries.get_mut(&id)
+    pub(crate) fn try_get_by_id_mut(
+        &mut self,
+        id: SwitchId,
+    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
+        self.entries.try_get_mut(&id)
     }
 
     pub(crate) fn modify_by_id<R>(
@@ -169,16 +171,32 @@ impl SwitchTable {
         id: SwitchId,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
-        self.entries.try_modify(&id, f)
+        let Some(previous) = self.entries.try_get(&id)? else {
+            return Ok(None);
+        };
+        let previous_function = previous.function();
+        let branch = previous.branch();
+        let mut switch = previous.as_ref().clone();
+        drop(previous);
+        let result = f(&mut switch);
+        let function = switch.function();
+
+        self.entries.try_put(id, switch)?;
+        self.index.remove(previous_function, branch);
+        self.index.insert(id, function, branch);
+
+        Ok(Some(result))
     }
 
-    pub(crate) fn modify_by_branch<R>(
+    pub(crate) fn try_modify_by_branch<R>(
         &mut self,
         branch: Address,
         f: impl FnOnce(&mut Switch) -> R,
-    ) -> Option<R> {
-        let id = *self.index.branches.get(&branch)?;
-        self.modify_by_id(id, f)
+    ) -> Result<Option<R>, EntityStorageError> {
+        let Some(id) = self.index.id_by_branch(branch) else {
+            return Ok(None);
+        };
+        self.try_modify_by_id(id, f)
     }
 
     pub(crate) fn remove_by_id(&mut self, id: SwitchId) -> bool {
@@ -191,46 +209,34 @@ impl SwitchTable {
             None => return Ok(false),
         };
 
-        self.index.branches.remove(&branch);
-        self.index.unlink(function, branch);
-        self.index.free_ids.push(id.next_generation());
         self.entries.try_remove(&id)?;
+        self.index.remove(function, branch);
+        self.index.allocator.release(id);
 
         Ok(true)
     }
 
-    pub(crate) fn remove_by_branch(&mut self, branch: Address) -> bool {
-        let Some(id) = self.index.branches.remove(&branch) else {
-            return false;
+    pub(crate) fn try_remove_by_branch(
+        &mut self,
+        branch: Address,
+    ) -> Result<bool, EntityStorageError> {
+        let Some(id) = self.index.id_by_branch(branch) else {
+            return Ok(false);
         };
-        if let Some(function) = self
-            .entries
-            .try_get(&id)
-            .unwrap_or_else(|e| e.into_fatal())
-            .map(|switch| switch.function())
-        {
-            self.index.unlink(function, branch);
-        }
-        self.index.free_ids.push(id.next_generation());
-        self.entries
-            .try_remove(&id)
-            .unwrap_or_else(|e| e.into_fatal());
-        true
+        self.try_remove_by_id(id)
     }
 
     pub(crate) fn branches(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches.keys().copied()
+        self.index.branches()
     }
 
-    pub(crate) fn branches_after(
+    pub(crate) fn entries_after(
         &self,
         after: Option<Address>,
-    ) -> impl Iterator<Item = Address> + '_ {
-        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+    ) -> impl Iterator<Item = Ref<'_>> + '_ {
         self.index
-            .branches
-            .range((start, Bound::Unbounded))
-            .map(|(address, _)| *address)
+            .entries_after(after)
+            .filter_map(|(_, id)| self.entries.get(&id))
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
@@ -245,10 +251,10 @@ impl SwitchTable {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.index.branches.is_empty()
+        self.index.is_empty()
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.index.branches.len()
+        self.index.len()
     }
 }

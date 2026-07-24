@@ -84,24 +84,23 @@ impl ECodeSsaOp {
         if self.width <= 64 {
             return Some(BitVec::from_u64(self.immediate, self.width));
         }
+        let slice = self.constant_bytes(constants)?;
+        Some(BitVec::from_le_bytes(slice).cast(self.width))
+    }
+
+    pub(crate) fn constant_bytes<'a>(&self, constants: &'a [u8]) -> Option<&'a [u8]> {
+        if !matches!(self.opcode, ECodeSsaOpcode::Constant) || self.width <= 64 {
+            return None;
+        }
         let bytes = self.width.div_ceil(8) as usize;
         let start = self.immediate as usize;
-        let slice = constants.get(start..start + bytes)?;
-        Some(BitVec::from_le_bytes(slice).cast(self.width))
+        constants.get(start..start + bytes)
     }
 
     pub(crate) fn replace_with_constant(&mut self, immediate: u64) {
         self.opcode = ECodeSsaOpcode::Constant;
         self.operands = IlIndexRange::EMPTY;
         self.immediate = immediate;
-        self.address = None;
-        self.address_space = None;
-    }
-
-    pub(crate) fn make_undefined(&mut self) {
-        self.opcode = ECodeSsaOpcode::Undefined;
-        self.operands = IlIndexRange::EMPTY;
-        self.immediate = 0;
         self.address = None;
         self.address_space = None;
     }

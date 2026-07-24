@@ -1,11 +1,13 @@
-pub mod builder;
-pub mod error;
-pub mod format;
-pub mod operation;
-pub mod transform;
+mod builder;
+mod error;
+mod format;
+mod operation;
+mod register;
+mod transform;
+mod verify;
 
+pub(crate) use builder::PCodeBuilder;
 pub use builder::{PCODE_SCHEMA_VERSION, PCodeIr};
-pub(crate) use builder::{PCodeBuilder, verify};
 pub use error::PCodeError;
 pub use format::{
     PCodeIrDisplay, PCodeLocationDisplay, PCodeOpDisplay, PCodeOpcodeDisplay, PCodeSourceDisplay,
@@ -15,4 +17,5 @@ pub use operation::{
     PCodeAddressContext, PCodeLocation, PCodeLocationId, PCodeLocationProperties, PCodeOp,
     PCodeOpcode,
 };
+pub(crate) use register::{FlagId, RegisterBank, RegisterId, RegisterSlice};
 pub use transform::PCodeCanonicaliser;

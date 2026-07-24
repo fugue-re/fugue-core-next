@@ -13,10 +13,10 @@ use super::{
 };
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::engine::{Analyser, AnalyserProvider, AnalysisCx, Priority, Trigger};
+use crate::engine::{Analyser, AnalyserProvider, AnalysisContext, Priority, Trigger};
 use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable,
-    IncompleteFunction, RawAddress, RawAddressRangeSet, SwitchCase,
+    IncompleteFunction, RawAddress, RawAddressRangeSet,
 };
 use crate::project::{Project, ProjectTransaction};
 use crate::registry::{self, Registration, submit};
@@ -608,108 +608,22 @@ impl FunctionRecovery {
 
         let switches = function.take_pending_switches();
 
-        let function_id = match transaction.add_function(function) {
-            Ok(id) => id,
+        match transaction.add_function(function) {
+            Ok(_) => {}
             Err(e) => {
                 tracing::debug!("failed to commit function at {address}: {e}");
                 return Err(AnalysisError::pass_failed("function-recovery", e));
             }
-        };
+        }
 
-        let mut branches = Vec::with_capacity(switches.len());
         for switch in switches {
             let branch = switch.branch();
             transaction
-                .add_switch(branch, move |id, _| {
-                    switch.with_id(id).with_function(function_id)
-                })
-                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
-            branches.push(branch);
-        }
-
-        Self::assign_switch_defaults(transaction, &branches);
-        Self::emit_switch_references(transaction, &branches)?;
-
-        Ok(())
-    }
-
-    fn emit_switch_references(
-        transaction: &mut ProjectTransaction<'_>,
-        branches: &[Address],
-    ) -> Result<(), AnalysisError> {
-        for &branch in branches {
-            let references = transaction
-                .project()
-                .switches()
-                .get_by_branch(branch)
-                .map(|switch| switch.derived_references().collect::<Vec<_>>())
-                .unwrap_or_default();
-            transaction
-                .replace_switch_references(branch, references)
+                .add_switch(branch, move |id, _| switch.with_id(id))
                 .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
         }
+
         Ok(())
-    }
-
-    fn assign_switch_defaults(transaction: &mut ProjectTransaction<'_>, branches: &[Address]) {
-        let mut defaults = Vec::new();
-        let mut predecessors = Vec::new();
-
-        for &branch in branches {
-            {
-                let switches = transaction.project().switches();
-                let Some(switch) = switches.get_by_branch(branch) else {
-                    continue;
-                };
-                if switch.is_override() || switch.is_assisted() || switch.has_default() {
-                    continue;
-                }
-            }
-
-            let blocks = transaction.project().blocks();
-            let Some(branch_block) = blocks.overlaps(branch).next() else {
-                continue;
-            };
-            let branch_block_id = branch_block.id();
-            predecessors.clear();
-            predecessors.extend(branch_block.predecessors().iter());
-            drop(branch_block);
-
-            for &predecessor in &predecessors {
-                let Some(guard) = blocks.get_by_id(predecessor) else {
-                    continue;
-                };
-                let pair = {
-                    let mut successors = guard.successors().iter();
-                    (successors.next(), successors.next(), successors.next())
-                };
-                drop(guard);
-                let (Some(first), Some(second), None) = pair else {
-                    continue;
-                };
-                let default = if first == branch_block_id && second != branch_block_id {
-                    second
-                } else if second == branch_block_id && first != branch_block_id {
-                    first
-                } else {
-                    continue;
-                };
-                let Some(block) = blocks.get_by_id(default) else {
-                    continue;
-                };
-                defaults.push((
-                    branch,
-                    AddressWithContext::new(block.address(), block.context().clone()),
-                ));
-                break;
-            }
-        }
-
-        for (branch, default) in defaults {
-            transaction.modify_switch(branch, |switch| {
-                switch.set_default_case(SwitchCase::new(default));
-            });
-        }
     }
 
     fn commit_pending_functions(
@@ -779,7 +693,7 @@ impl FunctionRecovery {
                 if !transaction
                     .project()
                     .segments()
-                    .space_contains_segment(address.space(), address)
+                    .contains_segment_in_space(address.space(), address)
                 {
                     tracing::trace!("skipping {address}: not mapped");
                     if Self::chunk_limit_reached(
@@ -1141,7 +1055,7 @@ impl Analyser for FunctionRecovery {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         self.set_cancellation_token(cx.cancellation().clone());
         self.progress = cx.progress().clone();

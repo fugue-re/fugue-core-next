@@ -59,10 +59,6 @@ impl ECodeStmtOpcode {
             Self::Store | Self::BranchIndirect | Self::CallIndirect
         )
     }
-
-    pub const fn requires_immediate(&self) -> bool {
-        matches!(self, Self::WriteRegister | Self::WriteFlag)
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

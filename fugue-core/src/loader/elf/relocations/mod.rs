@@ -4,7 +4,7 @@ use object::{
 };
 
 use crate::arch::Arch;
-use crate::ir::{Address, RawAddress, SymbolEntry, SymbolIndex, TransientSymbolTable};
+use crate::ir::{RawAddress, SymbolEntry, SymbolIndex, TransientSymbolTable};
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::RelocationContext;
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
@@ -55,23 +55,20 @@ where
 
     pub fn apply(
         &self,
-        origin: impl Into<Address>,
+        origin: RawAddress,
         bytes: &mut ImageSegmentContents<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        let origin = origin.into();
-        self.apply_relocations(origin, bytes, sect)?;
+        self.apply_relocations(bytes, sect)?;
         self.apply_dynamic_relocations(origin, bytes)?;
         Ok(())
     }
 
     pub fn apply_relocations(
         &self,
-        _origin: impl Into<Address>,
         bytes: &mut ImageSegmentContents<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        let _origin = _origin.into();
         for (off, rel) in sect.relocations() {
             tracing::trace!(
                 "applying relocation {}+{off:#x} {:?} {rel:?}",
@@ -87,7 +84,7 @@ where
 
     pub fn apply_dynamic_relocations(
         &self,
-        origin: impl Into<Address>,
+        origin: RawAddress,
         bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
         let Some(drels) = self.elf.dynamic_relocations() else {
@@ -103,7 +100,6 @@ where
                 .unwrap_or_default()
         );
 
-        let origin = origin.into();
         let Some(origin_offset) = origin.offset().checked_sub(self.base.offset()) else {
             tracing::warn!(
                 "dynamic relocation origin {origin} is below image base {}",
@@ -111,7 +107,7 @@ where
             );
             return Ok(());
         };
-        let Some(origin_last_offset) = origin_offset.checked_add(bytes.len().saturating_sub(1))
+        let Some(origin_last_offset) = origin_offset.checked_add(bytes.size().saturating_sub(1))
         else {
             return Err(LoaderError::address_overflow(origin));
         };
@@ -119,9 +115,8 @@ where
         for (off, rel) in
             drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
         {
-            tracing::trace!("applying dynamic relocation at {}", Address::from(off));
+            tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
 
-            // Compute offset in the segment
             let off = off - origin_offset;
 
             self.apply_relocation(bytes, off, &rel, true)?;
@@ -255,24 +250,6 @@ where
             }
             _ => bytes.add_function_hint(value),
         }
-
-        /*
-        if self.externs.as_ref().map_or(false, |externs| {
-            externs.update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION)
-        }) {
-            return;
-        }
-
-        let image_address = ImageAddress::in_default_space(address.offset());
-        let Some(entries) = self.symbols.get_by_address(image_address) else {
-            tracing::warn!("attempting to mark non-existing symbol {address} as function");
-            return;
-        };
-
-        entries.for_each(|(_, entry)| {
-            entry.mark_as_function();
-        });
-        */
     }
 
     pub(crate) fn mark_data_symbol(

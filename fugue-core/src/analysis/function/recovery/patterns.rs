@@ -98,20 +98,22 @@ impl FunctionRecoveryPatternMatcher {
 
         while current_start <= gap_end {
             let current_meta = Address::new(space_id, current_start);
-            let Some(view) = mapping_cache.view_containing(current_meta) else {
+            let Some(view) = mapping_cache.view_containing(current_meta).cloned() else {
                 break;
             };
 
-            let match_end = calculate_end(view);
+            let match_end = calculate_end(&view);
             let range = current_start..=match_end;
             current_start = match_end + 1usize;
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(window) = view.bytes_at(Address::new(space_id, *range.start()), size) else {
-                break;
-            };
-            let Some(bytes) = window.as_contiguous() else {
+            let Ok(bytes) =
+                mapping_cache.contiguous_bytes_from(Address::new(space_id, *range.start()))
+            else {
                 continue;
+            };
+            let Some(bytes) = bytes.get(..size) else {
+                break;
             };
 
             f(range, bytes);

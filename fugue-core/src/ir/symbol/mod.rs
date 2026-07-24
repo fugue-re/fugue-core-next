@@ -9,11 +9,12 @@ pub use ustr::{
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_ID;
 use crate::storage::entities::{Entity, EntityId};
+use crate::types::common::archived_bitflags;
 
 mod table;
 
 pub(crate) use table::SymbolTableRevert;
-pub use table::{PersistentSymbolTable, SymbolRef, SymbolTable, TransientSymbolTable};
+pub use table::{SymbolInsertion, SymbolRef, SymbolTable, TransientSymbolTable};
 
 pub type SymbolId = Id<Symbol>;
 pub type LazySymbol = LazyLock<Symbol>;
@@ -242,44 +243,7 @@ impl Default for SymbolProperties {
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedSymbolProperties(u8);
-
-unsafe impl rkyv::Portable for ArchivedSymbolProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedSymbolProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedSymbolProperties
-where
-    u8: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { u8::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for SymbolProperties {
-    type Archived = ArchivedSymbolProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedSymbolProperties(self.bits()));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for SymbolProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SymbolProperties, D>
-    for ArchivedSymbolProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<SymbolProperties, D::Error> {
-        Ok(SymbolProperties::from_bits_truncate(self.0))
-    }
-}
+archived_bitflags!(SymbolProperties, ArchivedSymbolProperties, u8);
 
 impl Display for SymbolProperties {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {

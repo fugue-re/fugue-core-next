@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{SsaConstruction, SsaDomain, SsaDomains};
 use crate::il::common::{IlBlockId, IlDominance, IlError, IlLevel};
 use crate::il::ecode::{ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
+use crate::il::pcode::{FlagId, RegisterId};
 
 impl SsaConstruction<'_, '_> {
     pub(crate) fn discover_domains(&self) -> Result<SsaDomains, IlError> {
@@ -17,7 +18,7 @@ impl SsaConstruction<'_, '_> {
                 match statement.opcode() {
                     ECodeStmtOpcode::WriteRegister => {
                         let width = self.statement_value_width(statement)?;
-                        let domain = SsaDomain::Register(statement.immediate());
+                        let domain = SsaDomain::Register(RegisterId::new(statement.immediate()));
 
                         Self::record_domain_width(&mut domains.widths, domain, width)?;
                         domains
@@ -28,7 +29,7 @@ impl SsaConstruction<'_, '_> {
                     }
                     ECodeStmtOpcode::WriteFlag => {
                         let width = self.statement_value_width(statement)?;
-                        let domain = SsaDomain::Flag(statement.immediate());
+                        let domain = SsaDomain::Flag(FlagId::new(statement.immediate()));
 
                         Self::record_domain_width(&mut domains.widths, domain, width)?;
                         domains
@@ -58,12 +59,12 @@ impl SsaConstruction<'_, '_> {
         for expression in self.source.expressions() {
             match expression.opcode() {
                 ECodeExprOpcode::ReadRegister => {
-                    let domain = SsaDomain::Register(expression.immediate());
+                    let domain = SsaDomain::Register(RegisterId::new(expression.immediate()));
                     Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
                     domains.reads.insert(domain);
                 }
                 ECodeExprOpcode::ReadFlag => {
-                    let domain = SsaDomain::Flag(expression.immediate());
+                    let domain = SsaDomain::Flag(FlagId::new(expression.immediate()));
                     Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
                     domains.reads.insert(domain);
                 }

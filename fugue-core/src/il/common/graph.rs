@@ -1,5 +1,7 @@
-use crate::il::common::{IlBlockId, IlIndexRange};
+use crate::il::common::verify::StructureError;
+use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexRange};
 use crate::ir::Address;
+use crate::types::common::archived_bitflags;
 
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
@@ -9,45 +11,7 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct ArchivedIlBlockProperties(u16);
-
-unsafe impl rkyv::Portable for ArchivedIlBlockProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedIlBlockProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedIlBlockProperties
-where
-    u16: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { u16::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for IlBlockProperties {
-    type Archived = ArchivedIlBlockProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedIlBlockProperties(self.bits()));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for IlBlockProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<IlBlockProperties, D>
-    for ArchivedIlBlockProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<IlBlockProperties, D::Error> {
-        Ok(IlBlockProperties::from_bits_retain(self.0))
-    }
-}
+archived_bitflags!(IlBlockProperties, ArchivedIlBlockProperties, u16);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -141,6 +105,13 @@ impl IlGraph {
         &self.successors
     }
 
+    pub fn successors_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successors)
+    }
+
     pub fn block_sources(&self) -> &[Address] {
         &self.block_sources
     }
@@ -168,70 +139,103 @@ impl IlGraph {
         self.successors.shrink_to_fit();
         self.block_sources.shrink_to_fit();
     }
+
+    pub(crate) fn verify(&self) -> Result<(), StructureError> {
+        let mut operation_ranges = Vec::new();
+
+        for (index, block) in self.blocks.iter().enumerate() {
+            let block_id = IlBlockId::try_from_index(index)?;
+            block.operations().verify_bounds(usize::MAX)?;
+            self.verify_successors(block, block_id)?;
+
+            if !block.operations().is_empty() {
+                operation_ranges.push((block.operations(), block_id));
+            }
+
+            for successor in block.successors().checked_slice(&self.successors)? {
+                if successor.index() >= self.blocks.len() {
+                    return Err(
+                        IlError::range_out_of_bounds(successor.value(), self.blocks.len()).into(),
+                    );
+                }
+            }
+        }
+
+        operation_ranges.sort_unstable_by_key(|(range, _)| range.start());
+        let mut previous_operation_end = 0usize;
+        for (operations, block_id) in operation_ranges {
+            if operations.start() < previous_operation_end {
+                return Err(StructureError::OverlappingBlockOperations {
+                    block: block_id.value(),
+                    operation: operations.start() as u32,
+                });
+            }
+            previous_operation_end = operations.end();
+        }
+
+        if !self.block_sources.is_empty() && self.block_sources.len() != self.blocks.len() {
+            return Err(StructureError::BlockSourceCount {
+                expected: self.blocks.len(),
+                found: self.block_sources.len(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn verify_node_bounds(&self, node_count: usize) -> Result<(), StructureError> {
+        for block in &self.blocks {
+            block.operations().verify_bounds(node_count)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify_successors(
+        &self,
+        block: &IlBlock,
+        block_id: IlBlockId,
+    ) -> Result<(), StructureError> {
+        let successors = block.successors().checked_slice(&self.successors)?;
+
+        for (index, successor) in successors.iter().enumerate() {
+            if successors[..index].contains(successor) {
+                return Err(StructureError::DuplicateSuccessor {
+                    block: block_id.index(),
+                    successor: successor.index(),
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlBlockPredecessors {
-    offsets: Vec<u32>,
-    predecessors: Vec<IlBlockId>,
+    predecessors: IlCsr<IlBlockId>,
 }
 
 impl IlBlockPredecessors {
     pub(crate) fn build(blocks: &[IlBlock], successors: &[IlBlockId]) -> Self {
-        let mut offsets = vec![0u32; blocks.len() + 1];
-
-        for block in blocks {
-            for successor in block.successors().slice(successors) {
-                offsets[successor.index() + 1] += 1;
-            }
-        }
-
-        for index in 1..offsets.len() {
-            offsets[index] += offsets[index - 1];
-        }
-
-        let mut cursor = offsets.clone();
-        let fill = IlBlockId::try_from_index(0).expect("block id zero is representable");
-        let mut predecessors = vec![fill; *offsets.last().unwrap_or(&0) as usize];
-
-        for (block_index, block) in blocks.iter().enumerate() {
+        let entries = blocks.iter().enumerate().flat_map(|(block_index, block)| {
             let block_id = IlBlockId::try_from_index(block_index)
                 .expect("block count fits the block id space");
 
-            for successor in block.successors().slice(successors) {
-                let cursor_index = successor.index();
-                let index = cursor[cursor_index] as usize;
-
-                predecessors[index] = block_id;
-                cursor[cursor_index] += 1;
-            }
-        }
+            block
+                .successors()
+                .slice(successors)
+                .iter()
+                .map(move |successor| (successor.index(), block_id))
+        });
 
         Self {
-            offsets,
-            predecessors,
+            predecessors: IlCsr::from_entries(blocks.len(), entries),
         }
     }
 
-    pub fn predecessors(&self, block: IlBlockId) -> &[IlBlockId] {
-        let Some(start) = self.offsets.get(block.index()).copied() else {
-            return &[];
-        };
-        let end = self
-            .offsets
-            .get(block.index() + 1)
-            .copied()
-            .unwrap_or(start);
-
-        &self.predecessors[start as usize..end as usize]
-    }
-
-    pub fn offsets(&self) -> &[u32] {
-        &self.offsets
-    }
-
-    pub fn values(&self) -> &[IlBlockId] {
-        &self.predecessors
+    pub fn predecessors_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        self.predecessors.row(block.index())
     }
 }
 
@@ -297,8 +301,85 @@ mod test {
         let successors = vec![block1, block2, block2];
         let index = IlBlockPredecessors::build(&blocks, &successors);
 
-        assert_eq!(index.predecessors(block0), &[]);
-        assert_eq!(index.predecessors(block1), &[block0]);
-        assert_eq!(index.predecessors(block2), &[block0, block1]);
+        assert_eq!(index.predecessors_for(block0), &[]);
+        assert_eq!(index.predecessors_for(block1), &[block0]);
+        assert_eq!(index.predecessors_for(block2), &[block0, block1]);
+    }
+
+    #[test]
+    fn structural_verifier_rejects_duplicate_successor() {
+        let block = IlBlockId::try_from_index(0).unwrap();
+        let graph = IlGraph::new(
+            vec![IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::new(0, 2).unwrap(),
+                IlBlockProperties::empty(),
+            )],
+            vec![block, block],
+        );
+
+        assert!(matches!(
+            graph.verify(),
+            Err(StructureError::DuplicateSuccessor { .. })
+        ));
+    }
+
+    #[test]
+    fn structural_verifier_rejects_out_of_range_block_operations() {
+        let graph = IlGraph::new(
+            vec![IlBlock::new(
+                IlIndexRange::new(0, 2).unwrap(),
+                IlIndexRange::EMPTY,
+                IlBlockProperties::empty(),
+            )],
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            graph.verify_node_bounds(1),
+            Err(StructureError::Il(IlError::RangeOutOfBounds { .. }))
+        ));
+    }
+
+    #[test]
+    fn structural_verifier_rejects_out_of_range_successor() {
+        let graph = IlGraph {
+            blocks: vec![IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::new(0, 1).unwrap(),
+                IlBlockProperties::empty(),
+            )],
+            successors: vec![IlBlockId::try_from_index(1).unwrap()],
+            block_sources: Vec::new(),
+        };
+
+        assert!(matches!(
+            graph.verify(),
+            Err(StructureError::Il(IlError::RangeOutOfBounds { .. }))
+        ));
+    }
+
+    #[test]
+    fn structural_verifier_rejects_overlapping_block_operations() {
+        let graph = IlGraph::new(
+            vec![
+                IlBlock::new(
+                    IlIndexRange::new(0, 2).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::empty(),
+                ),
+                IlBlock::new(
+                    IlIndexRange::new(1, 3).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::empty(),
+                ),
+            ],
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            graph.verify(),
+            Err(StructureError::OverlappingBlockOperations { .. })
+        ));
     }
 }

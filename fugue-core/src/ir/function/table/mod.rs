@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::ir::block::table::CodeBlockTableAllocation;
+use crate::ir::block::CodeBlockTableAllocation;
 use crate::ir::{
-    Address, AddressRange, CallGraphIndex, CodeBlock, CodeBlockTable, Function, Id, RawAddress,
+    Address, AddressRange, CodeBlock, CodeBlockTable, Function, FunctionId, Id, IdAllocation,
+    IdAllocator, RawAddress,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
@@ -17,12 +18,13 @@ use crate::storage::entities::{
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
+use crate::types::common::cursor_bound;
 
 mod persistent;
 mod transient;
 
-pub use persistent::FunctionTable as PersistentFunctionTable;
-pub use transient::FunctionTable as TransientFunctionTable;
+use persistent::FunctionTable as PersistentFunctionTable;
+use transient::FunctionTable as TransientFunctionTable;
 
 pub type FunctionRef<'a> = EntityRef<'a, Function>;
 pub type FunctionMut<'a> = EntityMut<'a, Function>;
@@ -39,27 +41,11 @@ impl Entity for FunctionTableHeader {
 }
 
 struct FunctionIndex {
+    allocator: IdAllocator<Function>,
     addresses: BTreeMap<Address, Id<Function>>,
-    free_ids: Vec<Id<Function>>,
-    next_index: usize,
 }
 
-struct FunctionTableAllocation {
-    free_ids_len: usize,
-    free_ids_tail: Vec<Id<Function>>,
-    next_index: usize,
-}
-
-impl FunctionTableAllocation {
-    fn new(free_ids: &[Id<Function>], next_index: usize, max_pops: usize) -> Self {
-        let tail_start = free_ids.len().saturating_sub(max_pops);
-        Self {
-            free_ids_len: free_ids.len(),
-            free_ids_tail: free_ids[tail_start..].to_vec(),
-            next_index,
-        }
-    }
-}
+type FunctionTableAllocation = IdAllocation<Function>;
 
 pub enum FunctionTable {
     Persistent(PersistentFunctionTable),
@@ -129,11 +115,14 @@ impl FunctionTableRevert {
         }
     }
 
+    pub(crate) fn entry(&self) -> Address {
+        self.entry
+    }
+
     pub(crate) fn restore(
         self,
         functions: &mut FunctionTable,
         blocks: &mut CodeBlockTable,
-        call_graph: &mut CallGraphIndex,
     ) -> Result<(), EntityStorageError> {
         let current_blocks = functions
             .get_by_address(self.entry)
@@ -142,8 +131,6 @@ impl FunctionTableRevert {
         let current_function = functions
             .get_by_address(self.entry)
             .map(|function| function.id());
-
-        call_graph.remove_function_edges(self.entry)?;
 
         if let Some(id) = current_function {
             functions.clear_entry(id)?;
@@ -158,9 +145,7 @@ impl FunctionTableRevert {
         }
 
         if let Some(function) = self.previous_function {
-            let targets = CallGraphIndex::function_call_targets(&function, blocks);
             functions.restore_entry(function)?;
-            call_graph.set_function_edges(self.entry, targets)?;
         }
 
         functions.restore_allocation(self.function_allocation);
@@ -178,12 +163,12 @@ impl FunctionTable {
         )?))
     }
 
-    pub fn new_with(
+    pub fn with_worker(
         entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentFunctionTable::new_with(
+        Ok(Self::Persistent(PersistentFunctionTable::with_worker(
             entities,
             worker,
             cache_bytes,
@@ -408,7 +393,7 @@ impl FunctionTable {
         space: AddressSpaceId,
         after: Option<RawAddress>,
     ) -> Box<dyn Iterator<Item = Address> + '_> {
-        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let start = cursor_bound(after);
         self.addresses_in_range(space, (start, Bound::Unbounded))
     }
 
@@ -424,6 +409,21 @@ impl FunctionTable {
                         .get_by_id(block)
                         .is_some_and(|block| block.address_range().intersects(range))
                 })
+            })
+            .map(|function| function.id())
+    }
+
+    pub(crate) fn function_containing(
+        &self,
+        blocks: &CodeBlockTable,
+        address: Address,
+    ) -> Option<FunctionId> {
+        let block = blocks.block_containing(address)?;
+        self.iter()
+            .find(|function| {
+                function
+                    .blocks()
+                    .any(|(_, block_id)| block_id == block.id())
             })
             .map(|function| function.id())
     }
@@ -585,7 +585,7 @@ mod test {
 
         {
             let worker = WriteBackWorker::new(storage.clone()).unwrap();
-            let mut table = FunctionTable::new_with(storage.clone(), worker, 64 * 1024).unwrap();
+            let mut table = FunctionTable::with_worker(storage.clone(), worker, 64 * 1024).unwrap();
             table
                 .insert(Address::from(0x1000), |id, entry| {
                     Ok(Function::new(id, entry))
@@ -600,7 +600,7 @@ mod test {
         }
 
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+        let table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
         assert_eq!(table.len(), 2);
         assert!(table.get_by_address(Address::from(0x1000)).is_some());
         assert!(table.get_by_address(Address::from(0x2000)).is_some());
@@ -615,7 +615,7 @@ mod test {
             let storage =
                 EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
             let worker = WriteBackWorker::new(storage.clone()).unwrap();
-            let mut table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+            let mut table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
 
             for base in 1..=5u64 {
                 table
@@ -634,7 +634,7 @@ mod test {
         let storage =
             EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let mut table = FunctionTable::new_with(storage, worker, 64 * 1024).unwrap();
+        let mut table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
 
         assert_eq!(table.len(), 3);
 

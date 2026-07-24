@@ -43,7 +43,7 @@ fn query_reader_exposes_switches() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first.entries().len(), 1);
     assert_eq!(first.entries()[0].branch(), branch_a);
     let cursor = first.next_cursor().cloned();
-    assert!(cursor.is_some());
+    assert_eq!(cursor, Some(branch_a));
 
     let second = reader.switch_page(cursor, 1)?;
     assert_eq!(second.entries().len(), 1);

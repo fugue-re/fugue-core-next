@@ -3,8 +3,13 @@ use std::fmt;
 use crate::il::common::IlExprId;
 use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
 
+fn write_operand(f: &mut fmt::Formatter<'_>, operand: IlExprId) -> fmt::Result {
+    let index = operand.index();
+    write!(f, "%e{index}")
+}
+
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeExprOpcodeDisplay(pub ECodeExprOpcode);
+struct ECodeExprOpcodeDisplay(ECodeExprOpcode);
 
 impl fmt::Display for ECodeExprOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -14,7 +19,7 @@ impl fmt::Display for ECodeExprOpcodeDisplay {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeStmtOpcodeDisplay(pub ECodeStmtOpcode);
+struct ECodeStmtOpcodeDisplay(ECodeStmtOpcode);
 
 impl fmt::Display for ECodeStmtOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -55,7 +60,7 @@ impl fmt::Display for ECodeIrDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeExprDisplay<'a> {
+struct ECodeExprDisplay<'a> {
     body: &'a ECodeIr,
     index: usize,
     expression: &'a ECodeExpr,
@@ -70,11 +75,6 @@ impl<'a> ECodeExprDisplay<'a> {
         }
     }
 
-    fn write_operand(&self, f: &mut fmt::Formatter<'_>, operand: IlExprId) -> fmt::Result {
-        let index = operand.index();
-        write!(f, "%e{index}")
-    }
-
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let operands = self.body.expression_operands_for(self.expression);
 
@@ -85,7 +85,7 @@ impl<'a> ECodeExprDisplay<'a> {
                 write!(f, ", ")?;
             }
 
-            self.write_operand(f, *operand)?;
+            write_operand(f, *operand)?;
         }
 
         Ok(())
@@ -142,7 +142,7 @@ impl fmt::Display for ECodeExprDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeStmtDisplay<'a> {
+struct ECodeStmtDisplay<'a> {
     body: &'a ECodeIr,
     index: usize,
     statement: &'a ECodeStmt,
@@ -157,11 +157,6 @@ impl<'a> ECodeStmtDisplay<'a> {
         }
     }
 
-    fn write_operand(&self, f: &mut fmt::Formatter<'_>, operand: IlExprId) -> fmt::Result {
-        let index = operand.index();
-        write!(f, "%e{index}")
-    }
-
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let operands = self.body.statement_operands_for(self.statement);
 
@@ -172,7 +167,7 @@ impl<'a> ECodeStmtDisplay<'a> {
                 write!(f, ", ")?;
             }
 
-            self.write_operand(f, *operand)?;
+            write_operand(f, *operand)?;
         }
 
         Ok(())
@@ -218,7 +213,7 @@ impl fmt::Display for ECodeStmtDisplay<'_> {
 
         if let Some(value) = self.statement.value() {
             write!(f, " value=")?;
-            self.write_operand(f, value)?;
+            write_operand(f, value)?;
         }
 
         self.write_operands(f)
@@ -229,15 +224,15 @@ impl fmt::Display for ECodeStmtDisplay<'_> {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange};
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata};
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
     use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
 
     #[test]
     fn ecode_body_display_is_deterministic() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
-        let mut builder = ECodeBuilder::new(header, IlGraph::default());
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let value = builder
             .push_expression(ECodeExpr::new(
                 ECodeExprOpcode::Constant,

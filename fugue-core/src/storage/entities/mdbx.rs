@@ -212,7 +212,7 @@ impl EntityStorageProvider for MdbxEntityStorage {
         MdbxEntityBytesIterator::new(self, prefix)
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -625,7 +625,7 @@ mod test {
     }
 
     #[test]
-    fn mdbx_scan_range_respects_inclusive_and_exclusive_bounds()
+    fn mdbx_iter_range_respects_inclusive_and_exclusive_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let database = libmdbx::Database::open(directory.path())?;
@@ -641,19 +641,19 @@ mod test {
         }
 
         let included = storage
-            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(excluded, vec![3, 4]);
 
         let unbounded = storage
-            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .iter_range::<Address, TestEntity>(Bound::Unbounded)?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(unbounded, vec![1, 2, 3, 4]);

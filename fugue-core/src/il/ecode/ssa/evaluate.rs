@@ -1,14 +1,18 @@
+use std::borrow::Borrow;
+
 use fugue_bv::BitVec;
 
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 
 #[cfg(test)]
-#[path = "evaluate/test.rs"]
 mod test;
 
 impl ECodeSsaOpcode {
-    pub(crate) fn evaluate(self, width: u32, operands: &[BitVec]) -> Option<BitVec> {
-        let arg = |index: usize| operands.get(index).cloned();
+    pub(crate) fn evaluate<T>(self, width: u32, operands: &[T]) -> Option<BitVec>
+    where
+        T: Borrow<BitVec>,
+    {
+        let arg = |index: usize| operands.get(index).map(|operand| operand.borrow().clone());
         match self {
             Self::Copy => Some(arg(0)?.cast(width)),
             Self::Not => Some(!arg(0)?.cast(width)),

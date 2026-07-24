@@ -84,7 +84,7 @@ impl<'a> PCodeLocationDisplay<'a> {
 impl fmt::Display for PCodeLocationDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.id.index();
-        let width = self.location.width();
+        let width = self.location.size();
         let lifter_space = self.location.lifter_space().value();
         let offset = self.location.offset();
         let kind = if self.location.is_constant() {
@@ -165,10 +165,7 @@ impl<'a> PCodeOpDisplay<'a> {
     }
 
     fn write_target(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if matches!(
-            self.operation.opcode(),
-            PCodeOpcode::Branch | PCodeOpcode::CBranch | PCodeOpcode::Call
-        ) {
+        if self.operation.opcode().requires_target() {
             let target = self
                 .body
                 .target(self.operation.immediate())
@@ -208,7 +205,7 @@ impl fmt::Display for PCodeOpDisplay<'_> {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange, IlSourceSpan};
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
     use crate::il::pcode::{
         LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocationProperties,
     };
@@ -222,8 +219,8 @@ mod test {
 
     #[test]
     fn pcode_ir_display_is_deterministic() {
-        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
-        let mut builder = PCodeBuilder::new(language(), header, IlGraph::default());
+        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -275,8 +272,8 @@ mod test {
     fn pcode_source_display_selects_source_instruction_operations() {
         let first = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let second = Address::new(AddressSpaceId::new(1), 0x1004u64);
-        let header = IlHeader::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
-        let mut builder = PCodeBuilder::new(language(), header, IlGraph::default());
+        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
 
         builder.replace_source_spans(vec![
             IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), first, 0, 1),

@@ -1,9 +1,9 @@
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use super::{SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector};
+use super::{SymbolEntry, SymbolId, SymbolIndex, SymbolProperties, SymbolTableSelector};
+use crate::ir::Address;
 use crate::ir::symbol::Symbol;
-use crate::ir::{Address, Id};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;
@@ -12,10 +12,30 @@ use crate::storage::{EntityStorage, EntityStorageError};
 mod persistent;
 mod transient;
 
-pub use persistent::SymbolTable as PersistentSymbolTable;
+use persistent::SymbolTable as PersistentSymbolTable;
 pub use transient::SymbolTable as TransientSymbolTable;
 
 pub type SymbolRef<'a> = EntityRef<'a, SymbolEntry>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolInsertion {
+    id: SymbolId,
+    is_new: bool,
+}
+
+impl SymbolInsertion {
+    const fn new(id: SymbolId, is_new: bool) -> Self {
+        Self { id, is_new }
+    }
+
+    pub const fn id(&self) -> SymbolId {
+        self.id
+    }
+
+    pub const fn is_new(&self) -> bool {
+        self.is_new
+    }
+}
 
 const SYMBOL_TABLE_VERSION: u32 = 1;
 
@@ -40,16 +60,16 @@ enum SymbolTableAllocation {
 
 pub(crate) struct SymbolTableRevert {
     allocation: SymbolTableAllocation,
-    entries: Vec<(Id<Symbol>, SymbolEntry)>,
-    touched: Vec<Id<Symbol>>,
+    entries: Vec<(SymbolId, SymbolEntry)>,
+    touched: Vec<SymbolId>,
 }
 
 impl SymbolTableRevert {
     fn new(
         table: &SymbolTable,
-        ids: impl IntoIterator<Item = Id<Symbol>>,
+        ids: impl IntoIterator<Item = SymbolId>,
         max_pops: usize,
-    ) -> Self {
+    ) -> Result<Self, EntityStorageError> {
         let mut touched = Vec::new();
         let mut entries = Vec::new();
 
@@ -58,20 +78,20 @@ impl SymbolTableRevert {
                 continue;
             }
 
-            if let Some(entry) = table.get_by_id(id) {
+            if let Some(entry) = table.try_get_by_id(id)? {
                 entries.push((id, entry.clone()));
             }
             touched.push(id);
         }
 
-        Self {
+        Ok(Self {
             allocation: table.allocation_checkpoint(max_pops),
             entries,
             touched,
-        }
+        })
     }
 
-    pub(crate) fn touch(&mut self, id: Id<Symbol>) {
+    pub(crate) fn touch(&mut self, id: SymbolId) {
         if !self.touched.contains(&id) {
             self.touched.push(id);
         }
@@ -82,11 +102,11 @@ impl SymbolTableRevert {
             table.clear_entry(id)?;
         }
 
-        table.restore_allocation(self.allocation);
-
         for (id, entry) in self.entries {
             table.restore_entry(id, entry)?;
         }
+
+        table.restore_allocation(self.allocation);
 
         Ok(())
     }
@@ -100,12 +120,12 @@ impl SymbolTable {
         )?))
     }
 
-    pub fn new_with(
+    pub fn with_worker(
         entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentSymbolTable::new_with(
+        Ok(Self::Persistent(PersistentSymbolTable::with_worker(
             entities,
             worker,
             cache_bytes,
@@ -152,7 +172,7 @@ impl SymbolTable {
 
     fn restore_entry(
         &mut self,
-        id: Id<Symbol>,
+        id: SymbolId,
         entry: SymbolEntry,
     ) -> Result<(), EntityStorageError> {
         match self {
@@ -164,7 +184,7 @@ impl SymbolTable {
         }
     }
 
-    fn clear_entry(&mut self, id: Id<Symbol>) -> Result<bool, EntityStorageError> {
+    fn clear_entry(&mut self, id: SymbolId) -> Result<bool, EntityStorageError> {
         match self {
             Self::Persistent(p) => p.clear_entry(id),
             Self::Transient(t) => Ok(t.clear_entry(id)),
@@ -175,17 +195,18 @@ impl SymbolTable {
         &self,
         index: SymbolIndex,
         entry: &SymbolEntry,
-    ) -> SymbolTableRevert {
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
         let touched = match self {
-            Self::Persistent(p) => p
-                .touched_by_insert(index, entry)
-                .unwrap_or_else(|error| error.into_fatal()),
+            Self::Persistent(p) => p.touched_by_insert(index, entry)?,
             Self::Transient(t) => t.touched_by_insert(index, entry),
         };
         SymbolTableRevert::new(self, touched, 1)
     }
 
-    pub(crate) fn remove_symbol_revert(&self, symbol: impl AsRef<str>) -> SymbolTableRevert {
+    pub(crate) fn remove_symbol_revert(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
         let ids = match self {
             Self::Persistent(p) => p.ids_by_symbol(symbol),
             Self::Transient(t) => t.ids_by_symbol(symbol),
@@ -193,7 +214,10 @@ impl SymbolTable {
         SymbolTableRevert::new(self, ids, 0)
     }
 
-    pub(crate) fn remove_address_revert(&self, address: Address) -> SymbolTableRevert {
+    pub(crate) fn remove_address_revert(
+        &self,
+        address: Address,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
         let ids = match self {
             Self::Persistent(p) => p.ids_by_address(address),
             Self::Transient(t) => t.ids_by_address(address),
@@ -201,11 +225,17 @@ impl SymbolTable {
         SymbolTableRevert::new(self, ids, 0)
     }
 
-    pub(crate) fn remove_id_revert(&self, id: Id<Symbol>) -> SymbolTableRevert {
+    pub(crate) fn remove_id_revert(
+        &self,
+        id: SymbolId,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
         SymbolTableRevert::new(self, [id], 0)
     }
 
-    pub(crate) fn remove_index_revert(&self, index: SymbolIndex) -> SymbolTableRevert {
+    pub(crate) fn remove_index_revert(
+        &self,
+        index: SymbolIndex,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
         let id = match self {
             Self::Persistent(p) => p.id_by_index(index),
             Self::Transient(t) => t.id_by_index(index),
@@ -219,21 +249,19 @@ impl SymbolTable {
         address: impl Into<Address>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
-    ) -> (bool, Id<Symbol>) {
+    ) -> Result<SymbolInsertion, EntityStorageError> {
         let address = address.into();
         let symbol = symbol.into();
         match self {
-            Self::Persistent(p) => p
-                .insert(index, address, symbol, properties)
-                .unwrap_or_else(|error| error.into_fatal()),
-            Self::Transient(t) => t.insert(index, address, symbol, properties),
+            Self::Persistent(p) => p.insert(index, address, symbol, properties),
+            Self::Transient(t) => Ok(t.insert(index, address, symbol, properties)),
         }
     }
 
     pub fn get(
         &self,
         symbol: impl AsRef<str>,
-    ) -> Option<Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_>> {
+    ) -> Option<Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_>> {
         match self {
             Self::Persistent(p) => p.get(symbol).map(|iter| {
                 Box::new(iter.map(|(id, entry)| (id, EntityRef::cached(entry))))
@@ -246,32 +274,60 @@ impl SymbolTable {
         }
     }
 
-    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(Id<Symbol>, SymbolRef<'_>)> {
-        self.get(symbol).and_then(|mut iter| iter.next())
+    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(SymbolId, SymbolRef<'_>)> {
+        self.try_get_first(symbol)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn get_by_id(&self, id: Id<Symbol>) -> Option<SymbolRef<'_>> {
+    pub fn try_get_first(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
+            Self::Persistent(p) => Ok(p
+                .try_get_first(symbol)?
+                .map(|(id, entry)| (id, EntityRef::cached(entry)))),
+            Self::Transient(t) => Ok(t
+                .get_first(symbol)
+                .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
         }
     }
 
-    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(Id<Symbol>, SymbolRef<'_>)> {
+    pub fn get_by_id(&self, id: SymbolId) -> Option<SymbolRef<'_>> {
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id(&self, id: SymbolId) -> Result<Option<SymbolRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p
+            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(SymbolId, SymbolRef<'_>)> {
+        self.try_get_by_index(index)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_index(
+        &self,
+        index: SymbolIndex,
+    ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
+        match self {
+            Self::Persistent(p) => Ok(p
+                .try_get_by_index(index)?
+                .map(|(id, entry)| (id, EntityRef::cached(entry)))),
+            Self::Transient(t) => Ok(t
                 .get_by_index(index)
-                .map(|(id, entry)| (id, EntityRef::cached(entry))),
-            Self::Transient(t) => t
-                .get_by_index(index)
-                .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
+                .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
         }
     }
 
     pub fn get_by_address(
         &self,
         address: impl Into<Address>,
-    ) -> Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_> {
+    ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         let address = address.into();
         match self {
             Self::Persistent(p) => Box::new(
@@ -288,8 +344,24 @@ impl SymbolTable {
     pub fn get_first_by_address(
         &self,
         address: impl Into<Address>,
-    ) -> Option<(Id<Symbol>, SymbolRef<'_>)> {
-        self.get_by_address(address).next()
+    ) -> Option<(SymbolId, SymbolRef<'_>)> {
+        self.try_get_first_by_address(address)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_first_by_address(
+        &self,
+        address: impl Into<Address>,
+    ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
+        let address = address.into();
+        match self {
+            Self::Persistent(p) => Ok(p
+                .try_get_first_by_address(address)?
+                .map(|(id, entry)| (id, EntityRef::cached(entry)))),
+            Self::Transient(t) => Ok(t
+                .get_first_by_address(address)
+                .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
+        }
     }
 
     pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
@@ -314,7 +386,7 @@ impl SymbolTable {
         }
     }
 
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_> {
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
             Self::Persistent(p) => {
                 Box::new(p.iter().map(|(id, entry)| (id, EntityRef::cached(entry))))
@@ -328,7 +400,7 @@ impl SymbolTable {
     pub fn iter_by_selector(
         &self,
         selector: SymbolTableSelector,
-    ) -> Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_> {
+    ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
             Self::Persistent(p) => Box::new(
                 p.iter_by_selector(selector)
@@ -341,7 +413,7 @@ impl SymbolTable {
         }
     }
 
-    pub fn iter_by_address(&self) -> Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_> {
+    pub fn iter_by_address(&self) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
             Self::Persistent(p) => Box::new(
                 p.iter_by_address()
@@ -357,7 +429,7 @@ impl SymbolTable {
     pub fn range_by_address<R>(
         &self,
         range: R,
-    ) -> Box<dyn Iterator<Item = (Id<Symbol>, SymbolRef<'_>)> + '_>
+    ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_>
     where
         R: RangeBounds<Address>,
     {
@@ -375,7 +447,7 @@ impl SymbolTable {
 
     pub fn iter_by_index(
         &self,
-    ) -> Box<dyn Iterator<Item = (SymbolIndex, Id<Symbol>, SymbolRef<'_>)> + '_> {
+    ) -> Box<dyn Iterator<Item = (SymbolIndex, SymbolId, SymbolRef<'_>)> + '_> {
         match self {
             Self::Persistent(p) => Box::new(
                 p.iter_by_index()
@@ -403,37 +475,54 @@ impl SymbolTable {
     }
 
     pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {
+        self.try_remove(symbol)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove(&mut self, symbol: impl AsRef<str>) -> Result<usize, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.remove(symbol).unwrap_or_else(|error| error.into_fatal()),
-            Self::Transient(t) => t.remove(symbol),
+            Self::Persistent(p) => p.remove(symbol),
+            Self::Transient(t) => Ok(t.remove(symbol)),
         }
     }
 
     pub fn remove_by_address(&mut self, address: impl Into<Address>) -> usize {
+        self.try_remove_by_address(address)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_address(
+        &mut self,
+        address: impl Into<Address>,
+    ) -> Result<usize, EntityStorageError> {
         let address = address.into();
         match self {
-            Self::Persistent(p) => p
-                .remove_by_address(address)
-                .unwrap_or_else(|error| error.into_fatal()),
-            Self::Transient(t) => t.remove_by_address(address),
+            Self::Persistent(p) => p.remove_by_address(address),
+            Self::Transient(t) => Ok(t.remove_by_address(address)),
         }
     }
 
-    pub fn remove_by_id(&mut self, id: Id<Symbol>) -> bool {
+    pub fn remove_by_id(&mut self, id: SymbolId) -> bool {
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_id(&mut self, id: SymbolId) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p
-                .remove_by_id(id)
-                .unwrap_or_else(|error| error.into_fatal()),
-            Self::Transient(t) => t.remove_by_id(id),
+            Self::Persistent(p) => p.remove_by_id(id),
+            Self::Transient(t) => Ok(t.remove_by_id(id)),
         }
     }
 
     pub fn remove_by_index(&mut self, index: SymbolIndex) -> bool {
+        self.try_remove_by_index(index)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_index(&mut self, index: SymbolIndex) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p
-                .remove_by_index(index)
-                .unwrap_or_else(|error| error.into_fatal()),
-            Self::Transient(t) => t.remove_by_index(index),
+            Self::Persistent(p) => p.remove_by_index(index),
+            Self::Transient(t) => Ok(t.remove_by_index(index)),
         }
     }
 }
@@ -475,56 +564,69 @@ mod test {
         let mut table = persistent_table();
         let sel = SymbolTableSelector::new(0);
 
-        let (inserted1, id1) = table.insert(
-            SymbolIndex::new(sel, 1),
-            Address::from(0x1000u32),
-            "symbol1",
-            SymbolProperties::LOCAL,
-        );
-        assert!(inserted1);
+        let insertion = table
+            .insert(
+                SymbolIndex::new(sel, 1),
+                Address::from(0x1000u32),
+                "symbol1",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap();
+        assert!(insertion.is_new());
+        let id1 = insertion.id();
 
-        let (inserted2, _) = table.insert(
-            SymbolIndex::new(sel, 2),
-            Address::from(0x2000u32),
-            "symbol2",
-            SymbolProperties::LOCAL,
-        );
-        assert!(inserted2);
+        let insertion = table
+            .insert(
+                SymbolIndex::new(sel, 2),
+                Address::from(0x2000u32),
+                "symbol2",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap();
+        assert!(insertion.is_new());
         assert_eq!(table.len(), 2);
 
         assert!(table.remove_by_id(id1));
         assert_eq!(table.len(), 1);
 
-        let (inserted3, id3) = table.insert(
-            SymbolIndex::new(sel, 3),
-            Address::from(0x3000u32),
-            "symbol3",
-            SymbolProperties::LOCAL,
-        );
-        assert!(inserted3);
+        let insertion = table
+            .insert(
+                SymbolIndex::new(sel, 3),
+                Address::from(0x3000u32),
+                "symbol3",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap();
+        assert!(insertion.is_new());
+        let id3 = insertion.id();
         assert_eq!(table.len(), 2);
         assert_eq!(id1.index(), id3.index());
         assert_eq!(id1.generation() + 1, id3.generation());
         assert!(table.get_by_id(id1).is_none());
         assert!(!table.remove_by_id(id1));
 
-        let (inserted4, id4) = table.insert(
-            SymbolIndex::new(sel, 4),
-            Address::from(0x3000u32),
-            "symbol3",
-            SymbolProperties::LOCAL,
-        );
-        assert!(!inserted4);
+        let insertion = table
+            .insert(
+                SymbolIndex::new(sel, 4),
+                Address::from(0x3000u32),
+                "symbol3",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap();
+        assert!(!insertion.is_new());
+        let id4 = insertion.id();
         assert_eq!(id3, id4);
         assert_eq!(table.len(), 2);
 
-        let (inserted5, _) = table.insert(
-            SymbolIndex::new(sel, 5),
-            Address::from(0x3000u32),
-            "symbol4",
-            SymbolProperties::LOCAL,
-        );
-        assert!(inserted5);
+        let insertion = table
+            .insert(
+                SymbolIndex::new(sel, 5),
+                Address::from(0x3000u32),
+                "symbol4",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap();
+        assert!(insertion.is_new());
         assert_eq!(table.len(), 3);
 
         assert_eq!(table.remove("symbol3"), 1);
@@ -545,24 +647,31 @@ mod test {
                 EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
             let mut table = SymbolTable::new(storage.clone(), 64 * 1024).unwrap();
 
-            let (_, hole) = table.insert(
-                SymbolIndex::new(sel, 1),
-                Address::from(0x1000u32),
-                "alpha",
-                SymbolProperties::LOCAL,
-            );
-            table.insert(
-                SymbolIndex::new(sel, 2),
-                Address::from(0x2000u32),
-                "beta",
-                SymbolProperties::LOCAL,
-            );
-            table.insert(
-                SymbolIndex::new(sel, 3),
-                Address::from(0x3000u32),
-                "gamma",
-                SymbolProperties::LOCAL,
-            );
+            let hole = table
+                .insert(
+                    SymbolIndex::new(sel, 1),
+                    Address::from(0x1000u32),
+                    "alpha",
+                    SymbolProperties::LOCAL,
+                )
+                .unwrap()
+                .id();
+            table
+                .insert(
+                    SymbolIndex::new(sel, 2),
+                    Address::from(0x2000u32),
+                    "beta",
+                    SymbolProperties::LOCAL,
+                )
+                .unwrap();
+            table
+                .insert(
+                    SymbolIndex::new(sel, 3),
+                    Address::from(0x3000u32),
+                    "gamma",
+                    SymbolProperties::LOCAL,
+                )
+                .unwrap();
             assert!(table.remove_by_id(hole));
 
             table.persist(&storage).unwrap();
@@ -585,14 +694,17 @@ mod test {
         let mut table = persistent_table();
         let sel = SymbolTableSelector::new(0);
 
-        let (_, id) = table.insert(
-            SymbolIndex::new(sel, 1),
-            Address::from(0x1000u32),
-            "alpha",
-            SymbolProperties::LOCAL,
-        );
+        let id = table
+            .insert(
+                SymbolIndex::new(sel, 1),
+                Address::from(0x1000u32),
+                "alpha",
+                SymbolProperties::LOCAL,
+            )
+            .unwrap()
+            .id();
 
-        let revert = table.remove_id_revert(id);
+        let revert = table.remove_id_revert(id).unwrap();
         assert!(table.remove_by_id(id));
         assert_eq!(table.len(), 0);
 

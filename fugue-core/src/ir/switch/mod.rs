@@ -1,9 +1,3 @@
-use fugue_specs::Confidence;
-use rkyv::bytecheck::CheckBytes;
-use rkyv::primitive::ArchivedU32;
-use rkyv::rancor::Fallible;
-use rkyv::traits::{NoUndef, Portable};
-use rkyv::{Archive, Deserialize, Place, Serialize};
 use smallvec::SmallVec;
 
 use crate::ir::{
@@ -12,10 +6,12 @@ use crate::ir::{
 };
 use crate::storage::entities::schema::ENTITY_SWITCH_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::types::Confidence;
+use crate::types::common::archived_bitflags;
 
-pub mod table;
+mod table;
 pub(crate) use table::SwitchTableRevert;
-pub use table::{SwitchTable, SwitchTableError};
+pub use table::{SwitchMut, SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;
 
@@ -29,7 +25,6 @@ pub struct Switch {
     model: SwitchModel,
     cases: Vec<SwitchCase>,
     default: Option<SwitchCase>,
-    evidence: SwitchEvidence,
     properties: SwitchProperties,
 }
 
@@ -66,8 +61,7 @@ impl Switch {
             model,
             cases: Vec::new(),
             default: None,
-            evidence: SwitchEvidence::default(),
-            properties: SwitchProperties::NONE,
+            properties: SwitchProperties::empty(),
         }
     }
 
@@ -121,29 +115,21 @@ impl Switch {
         self.default = Some(case);
     }
 
-    pub fn evidence(&self) -> SwitchEvidence {
-        self.evidence
-    }
-
-    pub fn set_evidence(&mut self, evidence: SwitchEvidence) {
-        self.evidence = evidence;
-    }
-
-    pub fn with_evidence(mut self, evidence: SwitchEvidence) -> Self {
-        self.set_evidence(evidence);
-        self
-    }
-
     pub fn confidence(&self) -> Confidence {
-        self.evidence.confidence(self.properties)
+        self.properties.confidence()
     }
 
     pub fn properties(&self) -> SwitchProperties {
         self.properties
     }
 
-    pub fn mark_partial(&mut self) {
-        self.properties.insert(SwitchProperties::PARTIAL);
+    pub fn set_properties(&mut self, properties: SwitchProperties) {
+        self.properties = properties;
+    }
+
+    pub fn with_properties(mut self, properties: SwitchProperties) -> Self {
+        self.set_properties(properties);
+        self
     }
 
     pub fn mark_truncated(&mut self) {
@@ -154,20 +140,8 @@ impl Switch {
         self.properties.insert(SwitchProperties::OVERRIDE);
     }
 
-    pub fn mark_assisted(&mut self) {
-        self.properties.insert(SwitchProperties::ASSISTED);
-    }
-
     pub fn is_override(&self) -> bool {
         self.properties.contains(SwitchProperties::OVERRIDE)
-    }
-
-    pub fn is_assisted(&self) -> bool {
-        self.properties.contains(SwitchProperties::ASSISTED)
-    }
-
-    pub fn is_partial(&self) -> bool {
-        self.properties.contains(SwitchProperties::PARTIAL)
     }
 
     pub fn is_truncated(&self) -> bool {
@@ -317,33 +291,26 @@ impl SwitchCase {
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SwitchProperties: u32 {
-        const NONE        = 0x0000_0000;
-        const PARTIAL     = 0x0000_0001;
-        const TRUNCATED   = 0x0000_0002;
-        const ASSISTED    = 0x0000_0008;
-        const OVERRIDE    = 0x0000_0010;
+        const CONTIGUOUS_ENTRIES    = 0x0000_0001;
+        const GUARD_FOUND           = 0x0000_0002;
+        const OVERRIDE              = 0x0000_0004;
+        const TABLE_IN_READ_ONLY    = 0x0000_0008;
+        const TARGETS_ALIGNED       = 0x0000_0010;
+        const TARGETS_IN_EXECUTABLE = 0x0000_0020;
+        const TRUNCATED             = 0x0000_0040;
     }
 }
 
 impl SwitchProperties {
-    pub(crate) fn from_recovery(truncated: bool) -> Self {
-        let mut properties = Self::NONE;
+    pub(crate) fn from_recovery(guarded: bool, truncated: bool) -> Self {
+        let mut properties = Self::TARGETS_IN_EXECUTABLE;
+        properties.set(Self::GUARD_FOUND, guarded);
         properties.set(Self::TRUNCATED, truncated);
         properties
     }
-}
 
-impl SwitchEvidence {
-    pub(crate) fn from_recovery(guarded: bool) -> Self {
-        let mut evidence = Self::TARGETS_IN_EXECUTABLE;
-        if guarded {
-            evidence |= Self::GUARD_FOUND;
-        }
-        evidence
-    }
-
-    pub(crate) fn confidence(self, properties: SwitchProperties) -> Confidence {
-        if self.contains(Self::GUARD_FOUND) && !properties.contains(SwitchProperties::TRUNCATED) {
+    pub(crate) fn confidence(self) -> Confidence {
+        if self.contains(Self::GUARD_FOUND) && !self.contains(Self::TRUNCATED) {
             Confidence::somewhat_certain()
         } else {
             Confidence::uncertain()
@@ -351,93 +318,7 @@ impl SwitchEvidence {
     }
 }
 
-bitflags::bitflags! {
-    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct SwitchEvidence: u32 {
-        const NONE                 = 0x0000_0000;
-        const GUARD_FOUND          = 0x0000_0001;
-        const TABLE_IN_READ_ONLY   = 0x0000_0002;
-        const TARGETS_ALIGNED      = 0x0000_0004;
-        const TARGETS_IN_EXECUTABLE = 0x0000_0008;
-        const CONTIGUOUS_ENTRIES   = 0x0000_0010;
-    }
-}
-
-#[repr(transparent)]
-pub struct ArchivedSwitchProperties(ArchivedU32);
-
-unsafe impl Portable for ArchivedSwitchProperties {}
-unsafe impl NoUndef for ArchivedSwitchProperties {}
-
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedSwitchProperties
-where
-    ArchivedU32: CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { ArchivedU32::check_bytes(value.cast(), context) }
-    }
-}
-
-impl Archive for SwitchProperties {
-    type Archived = ArchivedSwitchProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedSwitchProperties(ArchivedU32::from_native(
-            self.bits(),
-        )));
-    }
-}
-
-impl<S: Fallible + ?Sized> Serialize<S> for SwitchProperties {
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: Fallible + ?Sized> Deserialize<SwitchProperties, D> for ArchivedSwitchProperties {
-    fn deserialize(&self, _: &mut D) -> Result<SwitchProperties, D::Error> {
-        Ok(SwitchProperties::from_bits_truncate(self.0.to_native()))
-    }
-}
-
-#[repr(transparent)]
-pub struct ArchivedSwitchEvidence(ArchivedU32);
-
-unsafe impl Portable for ArchivedSwitchEvidence {}
-unsafe impl NoUndef for ArchivedSwitchEvidence {}
-
-unsafe impl<C: Fallible + ?Sized> CheckBytes<C> for ArchivedSwitchEvidence
-where
-    ArchivedU32: CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { ArchivedU32::check_bytes(value.cast(), context) }
-    }
-}
-
-impl Archive for SwitchEvidence {
-    type Archived = ArchivedSwitchEvidence;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedSwitchEvidence(ArchivedU32::from_native(
-            self.bits(),
-        )));
-    }
-}
-
-impl<S: Fallible + ?Sized> Serialize<S> for SwitchEvidence {
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: Fallible + ?Sized> Deserialize<SwitchEvidence, D> for ArchivedSwitchEvidence {
-    fn deserialize(&self, _: &mut D) -> Result<SwitchEvidence, D::Error> {
-        Ok(SwitchEvidence::from_bits_truncate(self.0.to_native()))
-    }
-}
+archived_bitflags!(SwitchProperties, ArchivedSwitchProperties, u32);
 
 #[cfg(test)]
 mod test {
@@ -445,7 +326,7 @@ mod test {
 
     #[test]
     fn switch_properties_deserialise_ignore_unknown_bits() {
-        let known = SwitchProperties::OVERRIDE | SwitchProperties::ASSISTED;
+        let known = SwitchProperties::GUARD_FOUND | SwitchProperties::OVERRIDE;
         let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&known)
             .expect("switch properties serialise")
             .to_vec();
@@ -484,18 +365,5 @@ mod test {
                 Address::new(space, 0x5000u64),
             ]
         );
-    }
-
-    #[test]
-    fn switch_evidence_deserialise_ignore_unknown_bits() {
-        let known = SwitchEvidence::GUARD_FOUND | SwitchEvidence::TARGETS_IN_EXECUTABLE;
-        let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&known)
-            .expect("switch evidence serialise")
-            .to_vec();
-        *bytes.last_mut().expect("archived u32 has bytes") |= 0x80;
-
-        let decoded = rkyv::from_bytes::<SwitchEvidence, rkyv::rancor::Error>(&bytes)
-            .expect("switch evidence deserialise");
-        assert_eq!(decoded, known);
     }
 }

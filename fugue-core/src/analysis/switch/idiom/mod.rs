@@ -2,7 +2,10 @@ use fugue_bv::BitVec;
 use rustc_hash::FxHashMap;
 
 use crate::ir::RawAddress;
-use crate::lifter::{Op, PCodeOp, Varnode};
+use crate::lifter::{Op, RawPCodeOp, Varnode};
+
+mod recovery;
+pub(crate) use recovery::SwitchIdiomRecovery;
 
 fn constant_and_value(a: Varnode, b: Varnode) -> Option<(u64, Varnode)> {
     if a.is_constant() && !b.is_constant() {
@@ -85,14 +88,14 @@ impl SwitchIdiomMatch {
 }
 
 pub(crate) struct SwitchIdiomMatcher<'a> {
-    operations: &'a [PCodeOp],
+    operations: &'a [RawPCodeOp],
     definitions: FxHashMap<Varnode, Vec<usize>>,
     branch: usize,
     max_trace_depth: u32,
 }
 
 impl<'a> SwitchIdiomMatcher<'a> {
-    pub(crate) fn new(operations: &'a [PCodeOp], max_trace_depth: u32) -> Option<Self> {
+    pub(crate) fn new(operations: &'a [RawPCodeOp], max_trace_depth: u32) -> Option<Self> {
         let branch = operations
             .iter()
             .rposition(|operation| matches!(operation.op(), Op::IBranch))?;
@@ -117,12 +120,12 @@ impl<'a> SwitchIdiomMatcher<'a> {
             base: table.base,
             element_size: table.element_size,
             shift: table.shift,
-            bound: self.guard_bound(table.index),
+            bound: self.guard_for_index(table.index),
             label_offset: self.label_offset(table.index, table.index_before),
         })
     }
 
-    fn defining_operation(&self, varnode: &Varnode, before: usize) -> Option<(usize, &PCodeOp)> {
+    fn defining_operation(&self, varnode: &Varnode, before: usize) -> Option<(usize, &RawPCodeOp)> {
         let index = *self
             .definitions
             .get(varnode)?
@@ -321,8 +324,17 @@ impl<'a> SwitchIdiomMatcher<'a> {
         None
     }
 
-    fn guard_bound(&self, index: Varnode) -> Option<BitVec> {
-        for operation in self.operations {
+    fn guard_for_index(&self, index: Varnode) -> Option<BitVec> {
+        for (branch_index, branch) in self.operations[..self.branch].iter().enumerate().rev() {
+            if branch.op() != Op::CBranch {
+                continue;
+            }
+            let Some(condition) = branch.inputs().get(1) else {
+                continue;
+            };
+            let Some((_, operation)) = self.defining_operation(condition, branch_index) else {
+                continue;
+            };
             let inclusive = match operation.op() {
                 Op::IntLess | Op::IntSignedLess => false,
                 Op::IntLessEq | Op::IntSignedLessEq => true,
@@ -358,12 +370,11 @@ impl<'a> SwitchIdiomMatcher<'a> {
         ) else {
             return 0;
         };
-        let Some((constant, _)) = constant_and_value(a, b) else {
-            return 0;
-        };
         match operation.op() {
-            Op::IntSub => constant as i64,
-            Op::IntAdd => (constant as i64).wrapping_neg(),
+            Op::IntSub if !a.is_constant() && b.is_constant() => b.offset() as i64,
+            Op::IntAdd => constant_and_value(a, b)
+                .map(|(constant, _)| (constant as i64).wrapping_neg())
+                .unwrap_or(0),
             _ => 0,
         }
     }

@@ -1,14 +1,12 @@
-use fugue_specs::Confidence;
-
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchEvidence,
-    SwitchId, SwitchModel, SwitchProperties,
+    Address, AddressTable, AddressWithContext, FunctionId, IncompleteCodeBlockId,
+    IncompleteFunction, Switch, SwitchCase, SwitchId, SwitchModel, SwitchProperties,
 };
+use crate::types::Confidence;
 
 pub(crate) struct RecoveredSwitch {
     model: SwitchModel,
     cases: Vec<SwitchCase>,
-    evidence: SwitchEvidence,
     properties: SwitchProperties,
     default: Option<AddressWithContext>,
 }
@@ -17,13 +15,11 @@ impl RecoveredSwitch {
     pub(crate) fn new(
         model: SwitchModel,
         cases: Vec<SwitchCase>,
-        evidence: SwitchEvidence,
         properties: SwitchProperties,
     ) -> Self {
         Self {
             model,
             cases,
-            evidence,
             properties,
             default: None,
         }
@@ -34,16 +30,56 @@ impl RecoveredSwitch {
         self
     }
 
+    pub(crate) fn infer_default_from_incoming(
+        mut self,
+        function: &IncompleteFunction,
+        branch_block: IncompleteCodeBlockId,
+    ) -> Self {
+        if self.default.is_some() {
+            return self;
+        }
+        let Some(branch) = function.block(branch_block) else {
+            return self;
+        };
+        for predecessor in branch.predecessors().iter() {
+            let Some(guard) = function.block(predecessor) else {
+                continue;
+            };
+            let mut successors = guard.successors().iter();
+            let (Some(first), Some(second), None) =
+                (successors.next(), successors.next(), successors.next())
+            else {
+                continue;
+            };
+            let default = if first == branch_block && second != branch_block {
+                second
+            } else if second == branch_block && first != branch_block {
+                first
+            } else {
+                continue;
+            };
+            let Some(block) = function.block(default) else {
+                continue;
+            };
+            self.default = Some(AddressWithContext::new(
+                block.address(),
+                block.context().clone(),
+            ));
+            break;
+        }
+        self
+    }
+
     pub(crate) fn cases(&self) -> &[SwitchCase] {
         &self.cases
     }
 
     pub(crate) fn confidence(&self) -> Confidence {
-        self.evidence.confidence(self.properties)
+        self.properties.confidence()
     }
 
     pub(crate) fn is_guarded(&self) -> bool {
-        self.evidence.contains(SwitchEvidence::GUARD_FOUND)
+        self.properties.contains(SwitchProperties::GUARD_FOUND)
     }
 
     pub(crate) fn reconcile(self, candidate: Self) -> Option<Self> {
@@ -69,21 +105,14 @@ impl RecoveredSwitch {
     }
 
     pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
-        let truncated = self.properties.contains(SwitchProperties::TRUNCATED);
-        let partial = truncated && !self.evidence.contains(SwitchEvidence::GUARD_FOUND);
-        let mut switch = Switch::new(id, branch, self.model).with_function(function);
+        let mut switch = Switch::new(id, branch, self.model)
+            .with_function(function)
+            .with_properties(self.properties);
         for case in self.cases {
             switch.add_case(case);
         }
-        switch.set_evidence(self.evidence);
         if let Some(default) = self.default {
             switch.set_default_case(SwitchCase::new(default));
-        }
-        if truncated {
-            switch.mark_truncated();
-        }
-        if partial {
-            switch.mark_partial();
         }
         switch
     }
@@ -124,5 +153,50 @@ impl RecoveredSwitch {
             (SwitchModel::Explicit, SwitchModel::Explicit) => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ir::IncompleteCodeBlock;
+    use crate::lifter::ContextSet;
+
+    #[test]
+    fn recovered_switch_infers_cfg_default_before_persistence() {
+        let guard = Address::from(0x1000u64);
+        let branch = Address::from(0x1010u64);
+        let default = Address::from(0x1020u64);
+        let mut function = IncompleteFunction::new(guard);
+        let guard_block = function.push_block(IncompleteCodeBlock::new(
+            guard,
+            1,
+            Vec::new(),
+            ContextSet::default(),
+        ));
+        let branch_block = function.push_block(IncompleteCodeBlock::new(
+            branch,
+            1,
+            Vec::new(),
+            ContextSet::default(),
+        ));
+        let default_block = function.push_block(IncompleteCodeBlock::new(
+            default,
+            1,
+            Vec::new(),
+            ContextSet::default(),
+        ));
+        function.add_block_edge(guard_block, branch_block).unwrap();
+        function.add_block_edge(guard_block, default_block).unwrap();
+
+        let recovered =
+            RecoveredSwitch::new(SwitchModel::Explicit, Vec::new(), SwitchProperties::empty())
+                .infer_default_from_incoming(&function, branch_block)
+                .into_switch(SwitchId::INVALID, FunctionId::INVALID, branch);
+
+        assert_eq!(
+            recovered.default_case().map(|case| case.target().address()),
+            Some(default)
+        );
     }
 }

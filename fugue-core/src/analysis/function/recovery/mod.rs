@@ -40,13 +40,23 @@ pub enum FunctionRecoveryError {
     #[error("invalid block length at {address}: {length} bytes exceeds u16 capacity")]
     InvalidBlockLength { address: Address, length: usize },
     #[error(
-        "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
+        "invalid block size at {address}; number of instructions ({instructions}) must be non-zero and less than {maximum}"
     )]
-    InvalidBlockSize(Address, usize, usize),
+    InvalidBlockSize {
+        address: Address,
+        instructions: usize,
+        maximum: usize,
+    },
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
-    #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
-    InvalidFunctionSize(Address, usize, usize),
+    #[error(
+        "invalid function at {address}; number of blocks ({blocks}) must be less than {maximum}"
+    )]
+    InvalidFunctionSize {
+        address: Address,
+        blocks: usize,
+        maximum: usize,
+    },
     #[error("invalid instruction id: {0:?}")]
     InvalidInstructionId(InsnId),
     #[error(transparent)]
@@ -67,11 +77,19 @@ impl FunctionRecoveryError {
     }
 
     pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
-        FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
+        FunctionRecoveryError::InvalidBlockSize {
+            address: addr,
+            instructions: num_insns,
+            maximum: max_insns,
+        }
     }
 
     pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
-        FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
+        FunctionRecoveryError::InvalidFunctionSize {
+            address: addr,
+            blocks: num_blocks,
+            maximum: max_blocks,
+        }
     }
 
     pub fn invalid_instruction_id(id: InsnId) -> Self {

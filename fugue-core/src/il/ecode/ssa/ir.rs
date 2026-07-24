@@ -1,64 +1,89 @@
 use fugue_bv::BitVec;
 
 use crate::il::common::{
-    IlArtefact, IlGraph, IlHeader, IlIndexRange, IlLevel, IlParentSpan, IlSchemaVersion,
-    IlSourceSpan, IlValueId,
+    IlArtefact, IlBlockId, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId, IlParentSpan,
+    IlSchemaVersion, IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaValue, ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
+    ECodeSsaValueKind,
 };
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_SSA_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 
-pub const ECODE_SSA_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
+pub const ECODE_SSA_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ECodeSsaIr {
-    pub(crate) header: IlHeader,
-    pub(crate) graph: IlGraph,
-    pub(crate) source_spans: Vec<IlSourceSpan>,
-    pub(crate) parent_spans: Vec<IlParentSpan>,
-    pub(crate) values: Vec<ECodeSsaValue>,
-    pub(crate) block_arguments: Vec<ECodeSsaBlockArg>,
-    pub(crate) edge_arguments: Vec<IlIndexRange>,
-    pub(crate) edge_argument_values: Vec<IlValueId>,
-    pub(crate) operations: Vec<ECodeSsaOp>,
-    pub(crate) value_operands: Vec<IlValueId>,
-    pub(crate) memory_domains: Vec<ECodeSsaMemoryDomain>,
-    pub(crate) constants: Vec<u8>,
+    metadata: IlMetadata,
+    graph: IlGraph,
+    source_spans: Vec<IlSourceSpan>,
+    parent_spans: Vec<IlParentSpan>,
+    values: Vec<ECodeSsaValue>,
+    block_arguments: Vec<ECodeSsaBlockArg>,
+    edge_arguments: Vec<IlIndexRange>,
+    edge_argument_values: Vec<IlValueId>,
+    operations: Vec<ECodeSsaOp>,
+    value_operands: Vec<IlValueId>,
+    memory_domains: Vec<ECodeSsaMemoryDomain>,
+    constant_storage: Vec<u8>,
 }
 
 impl ECodeSsaIr {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        header: IlHeader,
-        graph: IlGraph,
-        source_spans: Vec<IlSourceSpan>,
-        parent_spans: Vec<IlParentSpan>,
-        values: Vec<ECodeSsaValue>,
-        block_arguments: Vec<ECodeSsaBlockArg>,
-        operations: Vec<ECodeSsaOp>,
-        value_operands: Vec<IlValueId>,
-        memory_domains: Vec<ECodeSsaMemoryDomain>,
-    ) -> Self {
+    pub(crate) fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
         let edge_arguments = vec![IlIndexRange::EMPTY; graph.successors().len()];
 
         Self {
-            header,
+            metadata,
             graph,
-            source_spans,
-            parent_spans,
-            values,
-            block_arguments,
+            source_spans: Vec::new(),
+            parent_spans: Vec::new(),
+            values: Vec::new(),
+            block_arguments: Vec::new(),
             edge_arguments,
             edge_argument_values: Vec::new(),
-            operations,
-            value_operands,
-            memory_domains,
-            constants: Vec::new(),
+            operations: Vec::new(),
+            value_operands: Vec::new(),
+            memory_domains: Vec::new(),
+            constant_storage: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_spans(
+        mut self,
+        source_spans: Vec<IlSourceSpan>,
+        parent_spans: Vec<IlParentSpan>,
+    ) -> Self {
+        self.source_spans = source_spans;
+        self.parent_spans = parent_spans;
+        self
+    }
+
+    pub(crate) fn with_values(
+        mut self,
+        values: Vec<ECodeSsaValue>,
+        block_arguments: Vec<ECodeSsaBlockArg>,
+    ) -> Self {
+        self.values = values;
+        self.block_arguments = block_arguments;
+        self
+    }
+
+    pub(crate) fn with_operations(
+        mut self,
+        operations: Vec<ECodeSsaOp>,
+        value_operands: Vec<IlValueId>,
+    ) -> Self {
+        self.operations = operations;
+        self.value_operands = value_operands;
+        self
+    }
+
+    pub(crate) fn with_memory_domains(mut self, memory_domains: Vec<ECodeSsaMemoryDomain>) -> Self {
+        self.memory_domains = memory_domains;
+        self
     }
 
     pub(crate) fn with_edge_argument_storage(
@@ -71,13 +96,13 @@ impl ECodeSsaIr {
         self
     }
 
-    pub(crate) fn with_constants(mut self, constants: Vec<u8>) -> Self {
-        self.constants = constants;
+    pub(crate) fn with_constant_storage(mut self, constant_storage: Vec<u8>) -> Self {
+        self.constant_storage = constant_storage;
         self
     }
 
-    pub const fn header(&self) -> &IlHeader {
-        &self.header
+    pub const fn metadata(&self) -> &IlMetadata {
+        &self.metadata
     }
 
     pub const fn graph(&self) -> &IlGraph {
@@ -92,11 +117,11 @@ impl ECodeSsaIr {
         &self.parent_spans
     }
 
-    pub fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+    pub fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
         IlSourceSpan::find(&self.source_spans, node)
     }
 
-    pub fn parent_span_for(&self, node: u32) -> Option<IlParentSpan> {
+    pub fn parent_span_for(&self, node: usize) -> Option<IlParentSpan> {
         IlParentSpan::find(&self.parent_spans, node)
     }
 
@@ -129,7 +154,7 @@ impl ECodeSsaIr {
     }
 
     pub(crate) fn constant_storage(&self) -> &[u8] {
-        &self.constants
+        &self.constant_storage
     }
 
     pub fn memory_domain(&self, space: AddressSpaceId) -> Option<&ECodeSsaMemoryDomain> {
@@ -142,8 +167,131 @@ impl ECodeSsaIr {
         operation.operands().slice(&self.value_operands)
     }
 
+    pub(crate) fn operations_and_constants_mut(&mut self) -> (&mut [ECodeSsaOp], &mut Vec<u8>) {
+        (&mut self.operations, &mut self.constant_storage)
+    }
+
+    pub(crate) fn replace_graph(&mut self, graph: IlGraph) {
+        self.graph = graph;
+    }
+
+    pub(crate) fn replace_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
+        self.source_spans = source_spans;
+    }
+
+    pub(crate) fn replace_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
+        self.parent_spans = parent_spans;
+    }
+
+    pub(crate) fn replace_values(
+        &mut self,
+        values: Vec<ECodeSsaValue>,
+        block_arguments: Vec<ECodeSsaBlockArg>,
+    ) {
+        self.values = values;
+        self.block_arguments = block_arguments;
+    }
+
+    pub(crate) fn replace_operation_storage(
+        &mut self,
+        operations: Vec<ECodeSsaOp>,
+        value_operands: Vec<IlValueId>,
+    ) {
+        self.operations = operations;
+        self.value_operands = value_operands;
+    }
+
+    pub(crate) fn replace_edge_argument_storage(
+        &mut self,
+        edge_arguments: Vec<IlIndexRange>,
+        edge_argument_values: Vec<IlValueId>,
+    ) {
+        self.edge_arguments = edge_arguments;
+        self.edge_argument_values = edge_argument_values;
+    }
+
+    pub(crate) fn replace_constant_storage(&mut self, constant_storage: Vec<u8>) {
+        self.constant_storage = constant_storage;
+    }
+
+    pub(crate) fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
+        self.graph
+            .blocks()
+            .iter()
+            .position(|block| block.operations().contains_index(operation.index()))
+            .and_then(|index| IlBlockId::try_from_index(index).ok())
+    }
+
+    pub(crate) fn block_address(&self, block: IlBlockId) -> Option<Address> {
+        if let Some(address) = self.graph.block_source(block) {
+            return Some(address);
+        }
+        let range = self.graph.blocks().get(block.index())?.operations();
+        self.source_span_for(range.start())
+            .map(|span| span.address())
+    }
+
     pub(crate) fn defining_operation(&self, value: IlValueId) -> Option<&ECodeSsaOp> {
         self.operations.get(self.defining_operation_index(value)?)
+    }
+
+    pub(crate) fn memory_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
+        if !operation.opcode().requires_memory_domain() {
+            return None;
+        }
+
+        self.operation_operands(operation).last().copied()
+    }
+
+    pub(crate) fn pointer_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
+        if !matches!(
+            operation.opcode(),
+            ECodeSsaOpcode::Load | ECodeSsaOpcode::Store
+        ) {
+            return None;
+        }
+
+        self.operation_operands(operation).first().copied()
+    }
+
+    pub(crate) fn underlying_value(&self, value: IlValueId) -> IlValueId {
+        let mut current = value;
+        for _ in 0..self.values.len() {
+            let Some(operation) = self.defining_operation(current) else {
+                return current;
+            };
+            match operation.opcode() {
+                ECodeSsaOpcode::Copy
+                | ECodeSsaOpcode::SignExtend
+                | ECodeSsaOpcode::Truncate
+                | ECodeSsaOpcode::ZeroExtend => {
+                    let Some(inner) = self.operation_operands(operation).first().copied() else {
+                        return current;
+                    };
+                    current = inner;
+                }
+                _ => return current,
+            }
+        }
+        current
+    }
+
+    pub(crate) fn inserted_value_for_exact_extract(&self, value: IlValueId) -> Option<IlValueId> {
+        let extract = self.defining_operation(value)?;
+        if extract.opcode() != ECodeSsaOpcode::Extract {
+            return None;
+        }
+        let extract_operands = self.operation_operands(extract);
+        let (&source, &extract_offset) = (extract_operands.first()?, extract_operands.get(1)?);
+        let extract_offset = self.constant_value(extract_offset)?.to_u64()?;
+
+        let insert = self.defining_operation(source)?;
+        if insert.opcode() != ECodeSsaOpcode::Insert || insert.immediate() != extract_offset {
+            return None;
+        }
+
+        let inserted = *self.operation_operands(insert).get(1)?;
+        (self.value_width(inserted)? == extract.width()).then_some(inserted)
     }
 
     pub(crate) fn value_width(&self, value: IlValueId) -> Option<u32> {
@@ -151,7 +299,8 @@ impl ECodeSsaIr {
     }
 
     pub(crate) fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
-        self.defining_operation(value)?.constant(&self.constants)
+        self.defining_operation(value)?
+            .constant(&self.constant_storage)
     }
 
     fn defining_operation_index(&self, value: IlValueId) -> Option<usize> {
@@ -195,7 +344,7 @@ impl ECodeSsaIr {
         self.operations.shrink_to_fit();
         self.value_operands.shrink_to_fit();
         self.memory_domains.shrink_to_fit();
-        self.constants.shrink_to_fit();
+        self.constant_storage.shrink_to_fit();
     }
 }
 
@@ -207,7 +356,7 @@ impl MutableEntity for ECodeSsaIr {
     type Key = FunctionId;
 
     fn entity_key(&self) -> FunctionId {
-        self.header.function()
+        self.metadata.function()
     }
 }
 
@@ -215,12 +364,12 @@ impl IlArtefact for ECodeSsaIr {
     const LEVEL: IlLevel = IlLevel::ECodeSsa;
     const SCHEMA: IlSchemaVersion = ECODE_SSA_SCHEMA_VERSION;
 
-    fn header(&self) -> &IlHeader {
-        &self.header
+    fn metadata(&self) -> &IlMetadata {
+        &self.metadata
     }
 
-    fn header_mut(&mut self) -> &mut IlHeader {
-        &mut self.header
+    fn metadata_mut(&mut self) -> &mut IlMetadata {
+        &mut self.metadata
     }
 
     fn graph(&self) -> &IlGraph {

@@ -2,7 +2,7 @@ use fugue_bv::BitVec;
 
 use crate::analysis::function::recovery::InsnResolver;
 use crate::arch::Arch;
-use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchEvidence};
+use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchProperties};
 use crate::lifter::{ContextSet, LiftingContext};
 use crate::storage::SegmentStorage;
 use crate::storage::segments::SegmentMappingCache;
@@ -34,6 +34,10 @@ impl<'a> SwitchTargetResolver<'a> {
         self.resolve_canonical_address(canonical, context)
     }
 
+    pub(crate) fn set_space(&mut self, space: AddressSpaceId) {
+        self.space = space;
+    }
+
     pub(crate) fn resolve_address(
         &mut self,
         value: RawAddress,
@@ -50,9 +54,7 @@ impl<'a> SwitchTargetResolver<'a> {
         context: &ContextSet,
         resolver: &mut InsnResolver,
     ) -> Option<AddressWithContext> {
-        let view = self.mapping_cache.view_containing(address)?;
-        let window = view.bytes_from(address)?;
-        let bytes = window.as_contiguous()?;
+        let bytes = self.mapping_cache.contiguous_bytes_from(address).ok()?;
         context.apply(address, resolver.context_mut());
         let instruction = resolver.resolve(address, bytes).ok()?;
         if expected_length.is_some_and(|length| instruction.len() != length)
@@ -72,32 +74,32 @@ impl<'a> SwitchTargetResolver<'a> {
         self.resolve_address(target.raw_address(), resolver.context())
     }
 
-    pub(crate) fn evidence_for_table(
+    pub(crate) fn properties_for_table(
         &mut self,
         table: Address,
         cases: &[SwitchCase],
-    ) -> SwitchEvidence {
-        let mut evidence = self.evidence_for_targets(cases);
+    ) -> SwitchProperties {
+        let mut properties = self.properties_for_targets(cases);
         if self
             .mapping_cache
-            .properties_at(table)
+            .segment_properties(table)
             .is_some_and(|properties| properties.is_readable() && !properties.is_writable())
         {
-            evidence |= SwitchEvidence::TABLE_IN_READ_ONLY;
+            properties |= SwitchProperties::TABLE_IN_READ_ONLY;
         }
-        evidence
+        properties
     }
 
-    pub(crate) fn evidence_for_targets(&self, cases: &[SwitchCase]) -> SwitchEvidence {
+    pub(crate) fn properties_for_targets(&self, cases: &[SwitchCase]) -> SwitchProperties {
         let alignment = self.arch.language().address_alignment() as u64;
         if alignment <= 1
             || cases
                 .iter()
                 .all(|case| case.target().address().offset() % alignment == 0)
         {
-            SwitchEvidence::TARGETS_ALIGNED
+            SwitchProperties::TARGETS_ALIGNED
         } else {
-            SwitchEvidence::empty()
+            SwitchProperties::empty()
         }
     }
 
@@ -109,7 +111,7 @@ impl<'a> SwitchTargetResolver<'a> {
         let address = Address::new(self.space, canonical);
         let executable = self
             .mapping_cache
-            .properties_at(address)
+            .segment_properties(address)
             .is_some_and(|properties| properties.is_executable());
         executable.then(|| AddressWithContext::new(address, context))
     }

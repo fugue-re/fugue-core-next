@@ -7,7 +7,7 @@ use fugue_core::il::common::{
     IlArtefact as CoreIlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
     IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlGraph as CoreIlGraph,
-    IlHeader as CoreIlHeader, IlLevel as CoreIlLevel, IlParentSpan as CoreIlParentSpan,
+    IlLevel as CoreIlLevel, IlMetadata as CoreIlHeader, IlParentSpan as CoreIlParentSpan,
     IlSourceSpan as CoreIlSourceSpan, IlValueId as CoreIlValueId,
 };
 use fugue_core::il::ecode::ssa::{
@@ -335,18 +335,18 @@ impl Function {
 
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub(crate) struct IlHeader {
+pub(crate) struct IlMetadata {
     inner: CoreIlHeader,
 }
 
-impl IlHeader {
+impl IlMetadata {
     fn from_core(header: CoreIlHeader) -> Self {
         Self { inner: header }
     }
 }
 
 #[pymethods]
-impl IlHeader {
+impl IlMetadata {
     #[getter]
     fn function(&self) -> String {
         let function = self.inner.function();
@@ -360,13 +360,13 @@ impl IlHeader {
 
     #[getter]
     fn input_revision(&self) -> u64 {
-        self.inner.input_revision()
+        self.inner.input_revision().value()
     }
 
     fn __repr__(&self) -> String {
         let function = self.function();
         let schema = self.schema();
-        format!("IlHeader(function={function:?}, schema={schema})")
+        format!("IlMetadata(function={function:?}, schema={schema})")
     }
 }
 
@@ -413,7 +413,7 @@ impl IlGraph {
                 let block = CoreIlBlockId::try_from_index(index)?;
                 Ok(IlBlockPredecessors::from_core(
                     index,
-                    predecessors.predecessors(block),
+                    predecessors.predecessors_for(block),
                 ))
             })
             .collect::<Result<Vec<_>, CoreIlError>>()
@@ -439,8 +439,8 @@ impl PCodeIr {
         CoreIlLevel::PCode.name()
     }
 
-    fn header(&self) -> IlHeader {
-        IlHeader::from_core(*self.inner.header())
+    fn header(&self) -> IlMetadata {
+        IlMetadata::from_core(*self.inner.metadata())
     }
 
     fn graph(&self) -> IlGraph {
@@ -456,7 +456,7 @@ impl PCodeIr {
             .collect()
     }
 
-    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+    fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
         self.inner
             .source_span_for(node)
             .map(IlSourceSpan::from_core)
@@ -502,7 +502,7 @@ impl PCodeIr {
     }
 
     fn __repr__(&self) -> String {
-        let function = self.header().function();
+        let function = self.inner.metadata().function();
         format!("PCodeIr(function={function:?})")
     }
 }
@@ -525,8 +525,8 @@ impl ECodeIr {
         CoreIlLevel::ECode.name()
     }
 
-    fn header(&self) -> IlHeader {
-        IlHeader::from_core(*self.inner.header())
+    fn header(&self) -> IlMetadata {
+        IlMetadata::from_core(*self.inner.metadata())
     }
 
     fn graph(&self) -> IlGraph {
@@ -551,13 +551,13 @@ impl ECodeIr {
             .collect()
     }
 
-    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+    fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
         self.inner
             .source_span_for(node)
             .map(IlSourceSpan::from_core)
     }
 
-    fn parent_span_for(&self, node: u32) -> Option<IlParentSpan> {
+    fn parent_span_for(&self, node: usize) -> Option<IlParentSpan> {
         self.inner
             .parent_span_for(node)
             .map(IlParentSpan::from_core)
@@ -592,7 +592,7 @@ impl ECodeIr {
     }
 
     fn __repr__(&self) -> String {
-        let function = self.header().function();
+        let function = self.inner.metadata().function();
         format!("ECodeIr(function={function:?})")
     }
 }
@@ -615,8 +615,8 @@ impl ECodeSsaIr {
         CoreIlLevel::ECodeSsa.name()
     }
 
-    fn header(&self) -> IlHeader {
-        IlHeader::from_core(*self.inner.header())
+    fn header(&self) -> IlMetadata {
+        IlMetadata::from_core(*self.inner.metadata())
     }
 
     fn graph(&self) -> IlGraph {
@@ -641,13 +641,13 @@ impl ECodeSsaIr {
             .collect()
     }
 
-    fn source_span_for(&self, node: u32) -> Option<IlSourceSpan> {
+    fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
         self.inner
             .source_span_for(node)
             .map(IlSourceSpan::from_core)
     }
 
-    fn parent_span_for(&self, node: u32) -> Option<IlParentSpan> {
+    fn parent_span_for(&self, node: usize) -> Option<IlParentSpan> {
         self.inner
             .parent_span_for(node)
             .map(IlParentSpan::from_core)
@@ -810,7 +810,7 @@ impl ECodeSsaIr {
     }
 
     fn __repr__(&self) -> String {
-        let function = self.header().function();
+        let function = self.inner.metadata().function();
         format!("ECodeSsaIr(function={function:?})")
     }
 }
@@ -1029,7 +1029,7 @@ pub(crate) struct PCodeLocation {
     index: usize,
     lifter_space: u8,
     offset: u64,
-    width: u16,
+    size: u16,
     constant: bool,
     register: bool,
     unique: bool,
@@ -1041,7 +1041,7 @@ impl PCodeLocation {
             index,
             lifter_space: location.lifter_space().value(),
             offset: location.offset(),
-            width: location.width(),
+            size: location.size(),
             constant: location.is_constant(),
             register: location.is_register(),
             unique: location.is_unique(),
@@ -1067,8 +1067,8 @@ impl PCodeLocation {
     }
 
     #[getter]
-    fn width(&self) -> u16 {
-        self.width
+    fn size(&self) -> u16 {
+        self.size
     }
 
     #[getter]
@@ -1729,7 +1729,7 @@ impl ECodeSsaOp {
 pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Project>()?;
     module.add_class::<Function>()?;
-    module.add_class::<IlHeader>()?;
+    module.add_class::<IlMetadata>()?;
     module.add_class::<IlGraph>()?;
     module.add_class::<PCodeIr>()?;
     module.add_class::<ECodeIr>()?;

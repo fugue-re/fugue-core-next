@@ -1,22 +1,20 @@
 use fugue_bv::BitVec;
-use fugue_bytes::Endian;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
-use super::SwitchSliceEvaluator;
+use super::SwitchIntervalContext;
 use crate::il::common::IlValueId;
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, RawAddress};
 use crate::storage::segments::SegmentMappingCache;
 use crate::storage::segments::space::AddressSpaceId;
 
-pub(crate) struct SwitchTargetEvaluatorContext<'context, 'analysis> {
-    analysis: &'context SwitchSliceEvaluator<'analysis>,
+pub(crate) struct SwitchTargetEvaluator<'context, 'analysis> {
+    context: &'context SwitchIntervalContext<'analysis>,
     space: AddressSpaceId,
     mapping_cache: SegmentMappingCache<'analysis>,
     memo: FxHashMap<IlValueId, BitVec>,
     stack: Vec<EvaluationStep>,
-    operands: Vec<BitVec>,
-    buffer: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -40,19 +38,17 @@ impl EvaluationStep {
     }
 }
 
-impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
+impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
     pub(crate) fn new(
-        analysis: &'context SwitchSliceEvaluator<'analysis>,
+        context: &'context SwitchIntervalContext<'analysis>,
         space: AddressSpaceId,
     ) -> Self {
         Self {
-            analysis,
+            context,
             space,
-            mapping_cache: SegmentMappingCache::new(analysis.segments),
+            mapping_cache: SegmentMappingCache::new(context.segments),
             memo: FxHashMap::default(),
             stack: Vec::new(),
-            operands: Vec::new(),
-            buffer: Vec::new(),
         }
     }
 
@@ -70,7 +66,7 @@ impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
 
         while let Some(step) = self.stack.pop() {
             steps += 1;
-            if steps > self.analysis.config.max_trace_steps() {
+            if steps > self.context.config.max_trace_steps() {
                 return None;
             }
 
@@ -80,8 +76,8 @@ impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
                         continue;
                     }
 
-                    let Some(operation) = self.analysis.ssa.defining_operation(value) else {
-                        if let Some(input) = self.analysis.common_block_argument_input(value) {
+                    let Some(operation) = self.context.ssa.defining_operation(value) else {
+                        if let Some(input) = self.context.common_block_argument_input(value) {
                             self.stack.push(EvaluationStep::forward(value, input));
                             if !self.memo.contains_key(&input) {
                                 self.stack.push(EvaluationStep::evaluate(input));
@@ -91,19 +87,21 @@ impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
                     };
 
                     self.stack.push(EvaluationStep::apply(value));
-                    let operands = self.analysis.ssa.operation_operands(operation);
-                    let inputs = match operation.opcode() {
-                        ECodeSsaOpcode::Load => &operands[..operands.len().min(1)],
-                        _ => operands,
-                    };
-                    for &operand in inputs {
+                    if operation.opcode() == ECodeSsaOpcode::Load {
+                        let pointer = self.context.ssa.pointer_operand(operation)?;
+                        if !self.memo.contains_key(&pointer) {
+                            self.stack.push(EvaluationStep::evaluate(pointer));
+                        }
+                        continue;
+                    }
+                    for &operand in self.context.ssa.operation_operands(operation) {
                         if !self.memo.contains_key(&operand) {
                             self.stack.push(EvaluationStep::evaluate(operand));
                         }
                     }
                 }
                 EvaluationStep::Apply(value) => {
-                    let operation = self.analysis.ssa.defining_operation(value)?;
+                    let operation = self.context.ssa.defining_operation(value)?;
                     let result = self.apply(value, operation)?;
                     self.memo.insert(value, result);
                 }
@@ -119,22 +117,21 @@ impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
 
     fn apply(&mut self, value: IlValueId, operation: &ECodeSsaOp) -> Option<BitVec> {
         match operation.opcode() {
-            ECodeSsaOpcode::Constant => self.analysis.ssa.constant_value(value),
+            ECodeSsaOpcode::Constant => self.context.ssa.constant_value(value),
             ECodeSsaOpcode::Load => {
                 let pointer = self
-                    .analysis
+                    .context
                     .ssa
-                    .operation_operands(operation)
-                    .first()
-                    .and_then(|value| self.memo.get(value).cloned())?;
+                    .pointer_operand(operation)
+                    .and_then(|pointer| self.memo.get(&pointer).cloned())?;
                 self.load(operation, &pointer)
             }
             opcode => {
-                self.operands.clear();
-                for value in self.analysis.ssa.operation_operands(operation) {
-                    self.operands.push(self.memo.get(value)?.clone());
+                let mut operands = SmallVec::<[&BitVec; 4]>::new();
+                for value in self.context.ssa.operation_operands(operation) {
+                    operands.push(self.memo.get(value)?);
                 }
-                opcode.evaluate(operation.width(), &self.operands)
+                opcode.evaluate(operation.width(), &operands)
             }
         }
     }
@@ -146,16 +143,10 @@ impl<'context, 'analysis> SwitchTargetEvaluatorContext<'context, 'analysis> {
         }
         let space = operation.address_space().unwrap_or(self.space);
         let address = Address::new(space, RawAddress::from(pointer.to_u64()?));
-        self.buffer.clear();
-        self.buffer.resize(bytes, 0);
-        self.mapping_cache
-            .read_bytes_exact(address, &mut self.buffer)
+        let value = self
+            .mapping_cache
+            .read_bitvec(address, bytes, self.context.arch.endian())
             .ok()?;
-
-        let value = match self.analysis.arch.endian() {
-            Endian::Big => BitVec::from_be_bytes(&self.buffer),
-            Endian::Little => BitVec::from_le_bytes(&self.buffer),
-        };
         Some(value.cast(operation.width()))
     }
 }

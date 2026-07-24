@@ -1,6 +1,7 @@
 use fugue_bv::BitVec;
+use smallvec::SmallVec;
 
-use crate::il::common::{IlArtefact, IlRewrite, IlValueId};
+use crate::il::common::{IlArtefact, IlCsr, IlRewrite, IlValueId};
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArgumentInputs, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
 };
@@ -11,22 +12,23 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
     fn rewrite(&mut self, ir: &mut ECodeSsaIr) {
         let uses = ir.analyse::<ECodeSsaUses>();
         let inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
-        let mut dependent_arguments = vec![Vec::<IlValueId>::new(); ir.values.len()];
-        for (argument, argument_inputs) in inputs.iter() {
-            for input in argument_inputs {
-                dependent_arguments[input.index()].push(argument);
-            }
-        }
+        let dependent_arguments = IlCsr::from_entries(
+            ir.values().len(),
+            inputs.iter().flat_map(|(argument, argument_inputs)| {
+                argument_inputs
+                    .iter()
+                    .map(move |input| (input.index(), argument))
+            }),
+        );
 
-        let mut folded = vec![None::<BitVec>; ir.values.len()];
+        let mut folded = vec![None::<BitVec>; ir.values().len()];
         let mut worklist = Vec::new();
-        let mut operands = Vec::new();
 
-        for op in &ir.operations {
+        for op in ir.operations() {
             if op.results().len() != 1 || !matches!(op.opcode(), ECodeSsaOpcode::Constant) {
                 continue;
             }
-            if let Some(value) = op.constant(&ir.constants) {
+            if let Some(value) = op.constant(ir.constant_storage()) {
                 let result = op.results().start();
                 folded[result] = Some(value);
                 worklist.push(result);
@@ -38,7 +40,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
                 IlValueId::try_from_index(value_index).expect("value id is representable");
 
             for used in uses.uses_for(defined) {
-                let op = &ir.operations[used.user().index()];
+                let op = &ir.operations()[used.user().index()];
                 if op.results().len() != 1 || matches!(op.opcode(), ECodeSsaOpcode::Constant) {
                     continue;
                 }
@@ -46,29 +48,36 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
                 if folded[result].is_some() {
                     continue;
                 }
-                operands.clear();
-                if op.operands().slice(&ir.value_operands).iter().all(|value| {
-                    match &folded[value.index()] {
+                let value = {
+                    let mut operands = SmallVec::<[&BitVec; 4]>::new();
+                    let all_constant = ir.operation_operands(op).iter().all(|value| match &folded
+                        [value.index()]
+                    {
                         Some(constant) => {
-                            operands.push(constant.clone());
+                            operands.push(constant);
                             true
                         }
                         None => false,
+                    });
+                    if all_constant {
+                        op.opcode().evaluate(op.width(), &operands)
+                    } else {
+                        None
                     }
-                }) && let Some(value) = op.opcode().evaluate(op.width(), &operands)
-                {
+                };
+                if let Some(value) = value {
                     folded[result] = Some(value);
                     worklist.push(result);
                 }
             }
 
-            for &argument in &dependent_arguments[value_index] {
+            for &argument in dependent_arguments.row(value_index) {
                 let result = argument.index();
                 if folded[result].is_some() {
                     continue;
                 }
                 let argument_inputs = inputs
-                    .get(argument)
+                    .inputs_for(argument)
                     .expect("dependent argument has recorded inputs");
                 let Some(first) = argument_inputs.first() else {
                     continue;
@@ -86,10 +95,11 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
             }
         }
 
-        let mut constants = ECodeSsaConstantInterner::new(&mut ir.constants);
-        constants.seed(&ir.operations);
-        for op_index in 0..ir.operations.len() {
-            let op = &ir.operations[op_index];
+        let (operations, constant_storage) = ir.operations_and_constants_mut();
+        let mut constants = ECodeSsaConstantInterner::new(constant_storage);
+        constants.seed(operations);
+        for operation in operations {
+            let op = &*operation;
             if matches!(op.opcode(), ECodeSsaOpcode::Constant) || op.results().len() != 1 {
                 continue;
             }
@@ -98,7 +108,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
                 continue;
             };
             let immediate = constants.intern(&value);
-            ir.operations[op_index].replace_with_constant(immediate);
+            operation.replace_with_constant(immediate);
         }
     }
 }

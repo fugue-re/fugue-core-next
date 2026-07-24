@@ -1,8 +1,6 @@
-use std::ops::Bound;
-
 use super::{SwitchIndex, SwitchTableAllocation, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, Id};
+use crate::ir::{Address, FunctionId};
 use crate::storage::EntityStorageError;
 
 pub struct SwitchTable {
@@ -33,24 +31,19 @@ impl SwitchTable {
     }
 
     pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
-        SwitchTableAllocation::new(&self.index.free_ids, self.index.next_index, max_pops)
+        self.index.allocator.checkpoint(max_pops)
     }
 
     pub(crate) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
-        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
-        self.index.free_ids.truncate(tail_start);
-        self.index.free_ids.extend(allocation.free_ids_tail);
-        self.index.next_index = allocation.next_index;
+        self.index.allocator.restore(allocation);
     }
 
     pub(crate) fn restore_entry(&mut self, switch: Switch) {
         let id = switch.id();
-        self.index.branches.insert(switch.branch(), id);
-        self.index.link(switch.function(), switch.branch());
-        self.index.next_index = self.index.next_index.max(id.index() + 1);
-        self.index
-            .free_ids
-            .retain(|free_id| free_id.index() != id.index());
+        self.clear_entry(id);
+
+        self.index.insert(id, switch.function(), switch.branch());
+        self.index.allocator.mark_allocated(id);
 
         let slot = id.index();
         if slot >= self.entries.len() {
@@ -60,47 +53,43 @@ impl SwitchTable {
     }
 
     pub(crate) fn clear_entry(&mut self, id: SwitchId) -> bool {
-        let Some(switch) = self.entries.get_mut(id.index()).and_then(Option::take) else {
+        let Some(switch) = self
+            .entries
+            .get_mut(id.index())
+            .and_then(|entry| entry.take_if(|switch| switch.id() == id))
+        else {
             return false;
         };
-        self.index.unlink(switch.function(), switch.branch());
-        self.index.branches.remove(&switch.branch());
+        self.index.remove(switch.function(), switch.branch());
         true
     }
 
     pub fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
     where
-        F: FnOnce(SwitchId, Address) -> Switch,
+        F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
     {
-        if let Some(&existing) = self.index.branches.get(&branch) {
-            let switch = f(existing, branch);
+        if let Some(existing) = self.index.id_by_branch(branch) {
+            let switch = f(existing, branch)?;
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
             }
             if let Some(previous) = self.entries[existing.index()].as_ref() {
-                let previous_function = previous.function();
-                self.index.unlink(previous_function, branch);
+                self.index.remove(previous.function(), branch);
             }
-            self.index.link(switch.function(), branch);
+            self.index.insert(existing, switch.function(), branch);
             self.entries[existing.index()] = Some(switch);
             return Ok(existing);
         }
 
-        let reuse_id = self.index.free_ids.last().copied();
-        let id = reuse_id.unwrap_or_else(|| Id::from_index(self.index.next_index));
+        let (id, switch) = self.index.allocator.try_allocate(|id| {
+            let switch = f(id, branch)?;
+            if switch.branch() != branch {
+                return Err(SwitchTableError::AddressMismatch);
+            }
+            Ok(switch)
+        })?;
 
-        let switch = f(id, branch);
-        if switch.branch() != branch {
-            return Err(SwitchTableError::AddressMismatch);
-        }
-
-        self.index.branches.insert(branch, id);
-        self.index.link(switch.function(), branch);
-        if reuse_id.is_some() {
-            self.index.free_ids.pop();
-        } else {
-            self.index.next_index += 1;
-        }
+        self.index.insert(id, switch.function(), branch);
 
         let slot = id.index();
         if slot >= self.entries.len() {
@@ -119,12 +108,12 @@ impl SwitchTable {
     }
 
     pub fn get_by_branch(&self, branch: Address) -> Option<&Switch> {
-        let id = *self.index.branches.get(&branch)?;
+        let id = self.index.id_by_branch(branch)?;
         self.get_by_id(id)
     }
 
     pub fn contains(&self, branch: Address) -> bool {
-        self.index.branches.contains_key(&branch)
+        self.index.contains(branch)
     }
 
     pub fn get_by_id_mut(&mut self, id: SwitchId) -> Option<&mut Switch> {
@@ -135,7 +124,22 @@ impl SwitchTable {
     }
 
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
-        self.get_by_id_mut(id).map(f)
+        let switch = self
+            .entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|switch| switch.id() == id)?;
+        let previous_function = switch.function();
+        let branch = switch.branch();
+        let result = f(switch);
+        let function = switch.function();
+
+        if function != previous_function {
+            self.index.remove(previous_function, branch);
+            self.index.insert(id, function, branch);
+        }
+
+        Some(result)
     }
 
     pub fn modify_by_branch<R>(
@@ -143,41 +147,38 @@ impl SwitchTable {
         branch: Address,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Option<R> {
-        let id = *self.index.branches.get(&branch)?;
+        let id = self.index.id_by_branch(branch)?;
         self.modify_by_id(id, f)
     }
 
     pub fn remove_by_id(&mut self, id: SwitchId) -> bool {
-        let Some(switch) = self.entries.get_mut(id.index()).and_then(Option::take) else {
+        let Some(switch) = self
+            .entries
+            .get_mut(id.index())
+            .and_then(|entry| entry.take_if(|switch| switch.id() == id))
+        else {
             return false;
         };
-        self.index.unlink(switch.function(), switch.branch());
-        self.index.branches.remove(&switch.branch());
-        self.index.free_ids.push(id.next_generation());
+        self.index.remove(switch.function(), switch.branch());
+        self.index.allocator.release(id);
         true
     }
 
     pub fn remove_by_branch(&mut self, branch: Address) -> bool {
-        let Some(id) = self.index.branches.remove(&branch) else {
+        let Some(id) = self.index.id_by_branch(branch) else {
             return false;
         };
-        if let Some(switch) = self.entries.get_mut(id.index()).and_then(Option::take) {
-            self.index.unlink(switch.function(), branch);
-        }
-        self.index.free_ids.push(id.next_generation());
-        true
+        self.remove_by_id(id)
     }
 
     pub fn branches(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches.keys().copied()
+        self.index.branches()
     }
 
-    pub fn branches_after(&self, after: Option<Address>) -> impl Iterator<Item = Address> + '_ {
-        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+    pub fn entries_after(&self, after: Option<Address>) -> impl Iterator<Item = &Switch> + '_ {
         self.index
-            .branches
-            .range((start, Bound::Unbounded))
-            .map(|(address, _)| *address)
+            .entries_after(after)
+            .filter_map(|(_, id)| self.get_by_id(id))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Switch> + '_ {
@@ -189,10 +190,10 @@ impl SwitchTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.branches.is_empty()
+        self.index.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.index.branches.len()
+        self.index.len()
     }
 }

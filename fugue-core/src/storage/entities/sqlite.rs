@@ -11,16 +11,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
-use super::schema::{
-    ENTITY_ARCHITECTURE_ID, ENTITY_ATTRIBUTES_ID, ENTITY_CALL_GRAPH_FORWARD_EDGE_ID,
-    ENTITY_CALL_GRAPH_INDEX_HEADER_ID, ENTITY_CALL_GRAPH_INVERSE_EDGE_ID, ENTITY_CODE_BLOCK_ID,
-    ENTITY_CODE_BLOCK_TABLE_ID, ENTITY_FUNCTION_ID, ENTITY_FUNCTION_TABLE_ID, ENTITY_IL_ECODE_ID,
-    ENTITY_IL_ECODE_SSA_ID, ENTITY_IL_PCODE_ID, ENTITY_KEY_CALL_GRAPH_EDGE_ID,
-    ENTITY_KEY_CODE_BLOCK_ENTITY_ID, ENTITY_KEY_FUNCTION_ENTITY_ID, ENTITY_KEY_PROJECT_ENTITY_ID,
-    ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_KEY_SYMBOL_ENTITY_ID,
-    ENTITY_PREFIX_SIZE, ENTITY_PROJECT_REVISION_ID, ENTITY_REFERENCE_INDEX_HEADER_ID,
-    ENTITY_REFERENCE_RECORD_ID, ENTITY_SYMBOL_ID, ENTITY_SYMBOL_TABLE_ID,
-};
+use super::schema::{ENTITY_PREFIX_SIZE, STORED_ENTITY_PREFIXES};
 use super::{
     EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
     EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
@@ -36,27 +27,6 @@ use crate::types::{AttributeMap, BytesOrSlice};
 const PROJECT_SQLITE_DATA: &str = "entities.db";
 const BATCH_SIZE: usize = 1024;
 const DEFAULT_POOL_SIZE: u32 = 16;
-
-const STORED_TABLE_PREFIXES: &[EntityKeyPrefix] = &[
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_ARCHITECTURE_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_ATTRIBUTES_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_SYMBOL_TABLE_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_FUNCTION_TABLE_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_CODE_BLOCK_TABLE_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_CALL_GRAPH_INDEX_HEADER_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_PROJECT_REVISION_ID),
-    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_REFERENCE_INDEX_HEADER_ID),
-    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_FUNCTION_ID),
-    ENTITY_KEY_CODE_BLOCK_ENTITY_ID.prefix(ENTITY_CODE_BLOCK_ID),
-    ENTITY_KEY_SYMBOL_ENTITY_ID.prefix(ENTITY_SYMBOL_ID),
-    ENTITY_KEY_CALL_GRAPH_EDGE_ID.prefix(ENTITY_CALL_GRAPH_FORWARD_EDGE_ID),
-    ENTITY_KEY_CALL_GRAPH_EDGE_ID.prefix(ENTITY_CALL_GRAPH_INVERSE_EDGE_ID),
-    ENTITY_KEY_REFERENCE_FORWARD_ID.prefix(ENTITY_REFERENCE_RECORD_ID),
-    ENTITY_KEY_REFERENCE_INVERSE_ID.prefix(ENTITY_REFERENCE_RECORD_ID),
-    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_PCODE_ID),
-    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_ECODE_ID),
-    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_ECODE_SSA_ID),
-];
 
 #[derive(Debug, Error)]
 pub enum SqliteEntityStorageError {
@@ -185,7 +155,7 @@ fn init_database(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
          PRAGMA cache_size = -64000;",
     )?;
 
-    for prefix in STORED_TABLE_PREFIXES {
+    for prefix in STORED_ENTITY_PREFIXES {
         create_table(conn, prefix)?;
     }
 
@@ -409,7 +379,7 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         SqliteEntityBytesIterator::new(&self.pool, prefix)
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -922,7 +892,7 @@ mod test {
     use std::ops::Bound;
 
     use super::{SqliteEntityStorage, create_table};
-    use crate::ir::Address;
+    use crate::ir::{Address, Switch, SwitchModel, SwitchTable};
     use crate::storage::TRANSIENT;
     use crate::storage::entities::schema::{EntityId, make_prefix};
     use crate::storage::entities::{Entity, EntityStorage};
@@ -943,7 +913,7 @@ mod test {
     }
 
     #[test]
-    fn sqlite_scan_range_respects_inclusive_and_exclusive_bounds()
+    fn sqlite_iter_range_respects_inclusive_and_exclusive_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let sqlite = SqliteEntityStorage::<TRANSIENT>::new()?;
         let conn = sqlite.pool.get()?;
@@ -956,22 +926,43 @@ mod test {
         }
 
         let included = storage
-            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(excluded, vec![3, 4]);
 
         let unbounded = storage
-            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .iter_range::<Address, TestEntity>(Bound::Unbounded)?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(unbounded, vec![1, 2, 3, 4]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_initialises_switch_tables() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?);
+        let branch = Address::from(0x401000u64);
+        let mut switches = SwitchTable::new(storage.clone(), 64 * 1024)?;
+        let id = switches.insert(branch, |id, branch| {
+            Ok(Switch::new(id, branch, SwitchModel::Explicit))
+        })?;
+
+        switches.flush()?;
+        drop(switches);
+
+        let switches = SwitchTable::new(storage, 64 * 1024)?;
+        assert_eq!(
+            switches.get_by_id(id).map(|switch| switch.branch()),
+            Some(branch)
+        );
 
         Ok(())
     }

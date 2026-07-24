@@ -1,6 +1,7 @@
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 use std::hint::black_box;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
@@ -16,7 +17,7 @@ use fugue_core::ir::{
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::queries::{Cached, Dependency, QueryError, QueryReader};
+use fugue_core::queries::{Cached, Dependency, QueryReader};
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
 #[cfg(feature = "sqlite")]
@@ -26,14 +27,10 @@ use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
-use rustc_hash::FxHasher;
-
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
-const STAMP_BUCKETS: usize = 256;
-const RANGE_STAMP_BUCKET_BITS: u32 = 12;
-const RANGE_STAMP_BUCKETS: usize = 512;
 const PAGE_LIMIT: usize = 64;
+const QUERY_REPETITIONS: usize = 128;
 
 struct BenchResult {
     name: &'static str,
@@ -133,6 +130,20 @@ where
     Ok((BenchResult::new(name, start.elapsed(), items), value))
 }
 
+fn measure_repeated<T, F>(name: &'static str, mut f: F) -> Result<(BenchResult, T), Box<dyn Error>>
+where
+    F: FnMut() -> Result<(T, usize), Box<dyn Error>>,
+{
+    let start = Instant::now();
+    let (mut value, mut items) = f()?;
+    for _ in 1..QUERY_REPETITIONS {
+        let (next, next_items) = f()?;
+        value = next;
+        items += next_items;
+    }
+    Ok((BenchResult::new(name, start.elapsed(), items), value))
+}
+
 fn current_rss_kib() -> Option<u64> {
     let pid = std::process::id().to_string();
     let output = Command::new("ps")
@@ -151,57 +162,6 @@ fn current_rss_kib() -> Option<u64> {
         .ok()
 }
 
-fn run_query<T>(query: impl FnOnce() -> Result<T, QueryError>) -> Result<T, Box<dyn Error>> {
-    Ok(query()?)
-}
-
-fn stamp_bucket(address: Address) -> usize {
-    let mut hasher = FxHasher::default();
-    (address.space().index(), address.offset()).hash(&mut hasher);
-    (hasher.finish() as usize) % STAMP_BUCKETS
-}
-
-fn range_slot(address: Address) -> usize {
-    let mut hasher = FxHasher::default();
-    (
-        address.space().index(),
-        address.offset() >> RANGE_STAMP_BUCKET_BITS,
-    )
-        .hash(&mut hasher);
-    (hasher.finish() as usize) % RANGE_STAMP_BUCKETS
-}
-
-fn find_bucket_peer(entry: Address, same_bucket: bool) -> Result<Address, Box<dyn Error>> {
-    if same_bucket {
-        let window = 1u64 << RANGE_STAMP_BUCKET_BITS;
-        let delta = if entry.offset() % window < window / 2 {
-            0x10u64
-        } else {
-            return Ok(Address::new(entry.space(), entry.offset() - 0x10));
-        };
-        return entry
-            .checked_add(delta)
-            .ok_or_else(|| std::io::Error::other("bucket peer address overflow").into());
-    }
-
-    let entry_slot = range_slot(entry);
-    let entry_bucket = stamp_bucket(entry);
-    let base = entry
-        .checked_add(0x30_000u64)
-        .ok_or_else(|| std::io::Error::other("bucket peer base address overflow"))?;
-
-    for step in 0..(RANGE_STAMP_BUCKETS * 128) {
-        let candidate = base
-            .checked_add((step as u64) << RANGE_STAMP_BUCKET_BITS)
-            .ok_or_else(|| std::io::Error::other("bucket peer address overflow"))?;
-        if range_slot(candidate) != entry_slot && stamp_bucket(candidate) != entry_bucket {
-            return Ok(candidate);
-        }
-    }
-
-    Err(std::io::Error::other("bucket peer not found").into())
-}
-
 fn add_symbols(
     engine: &AnalysisEngine,
     entry: Address,
@@ -212,7 +172,7 @@ fn add_symbols(
             .checked_add(index as u64)
             .ok_or_else(|| std::io::Error::other("synthetic symbol address overflow"))?;
         let symbol = format!("bench_symbol_{index}");
-        engine.insert_symbol(
+        engine.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(240), index),
             SymbolEntry::new(address, symbol, SymbolProperties::LOCAL),
         )?;
@@ -239,7 +199,7 @@ fn page_symbols(reader: &QueryReader) -> Result<usize, Box<dyn Error>> {
     let mut count = 0usize;
 
     loop {
-        let page = run_query(|| reader.symbol_page(cursor, PAGE_LIMIT))?;
+        let page = reader.symbol_page(cursor, PAGE_LIMIT)?;
         count += page.entries().len();
 
         let Some(next) = page.next_cursor().copied() else {
@@ -255,7 +215,7 @@ fn page_mappings(reader: &QueryReader) -> Result<usize, Box<dyn Error>> {
     let mut count = 0usize;
 
     loop {
-        let page = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, cursor, PAGE_LIMIT))?;
+        let page = reader.mapping_page(DEFAULT_SPACE_ID, cursor, PAGE_LIMIT)?;
         count += page.entries().len();
 
         let Some(next) = page.next_cursor().copied() else {
@@ -271,7 +231,7 @@ fn page_call_edges(reader: &QueryReader) -> Result<usize, Box<dyn Error>> {
     let mut count = 0usize;
 
     loop {
-        let page = run_query(|| reader.call_edges(cursor, PAGE_LIMIT))?;
+        let page = reader.call_edge_page(cursor, PAGE_LIMIT)?;
         count += page.entries().len();
 
         let Some(next) = page.next_cursor().copied() else {
@@ -291,55 +251,54 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     })?;
 
     let reader = engine.query_reader()?;
-    black_box(run_query(|| reader.revision())?);
+    black_box(reader.revision()?);
     results.push(result);
     Ok(())
 }
 
-fn bench_repeated_flow_graph(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
-    let same_bucket = find_bucket_peer(entry, true)?;
-    let different_bucket = find_bucket_peer(entry, false)?;
+    let disjoint_entry = entry
+        .checked_add(0x30_000u64)
+        .ok_or_else(|| std::io::Error::other("disjoint function address overflow"))?;
 
-    black_box(run_query(|| reader.flow_graph(entry))?);
-    let (hit, _) = measure("repeated_flow_graph_query_hit", || {
-        black_box(run_query(|| reader.flow_graph(entry))?);
+    black_box(reader.flow_targets(entry)?);
+    let (hit, _) = measure_repeated("repeated_flow_targets_query_hit", || {
+        black_box(reader.flow_targets(entry)?);
         Ok(((), 1))
     })?;
     results.push(hit);
 
-    add_empty_function(&engine, same_bucket)?;
+    add_empty_function(&engine, entry)?;
     engine.wait_until_idle()?;
-    let (after_same_bucket, _) =
-        measure("repeated_flow_graph_query_after_same_bucket_edit", || {
-            black_box(run_query(|| reader.flow_graph(entry))?);
+    let (after_same_entry, _) = measure("flow_targets_after_same_entry_edit", || {
+        black_box(reader.flow_targets(entry)?);
+        Ok(((), 1))
+    })?;
+    results.push(after_same_entry);
+
+    add_empty_function(&engine, disjoint_entry)?;
+    engine.wait_until_idle()?;
+    let (after_disjoint_range, _) =
+        measure_repeated("flow_targets_after_disjoint_range_edit", || {
+            black_box(reader.flow_targets(entry)?);
             Ok(((), 1))
         })?;
-    results.push(after_same_bucket);
+    results.push(after_disjoint_range);
 
-    add_empty_function(&engine, different_bucket)?;
-    engine.wait_until_idle()?;
-    let (after_different_bucket, _) = measure(
-        "repeated_flow_graph_query_after_different_bucket_edit",
-        || {
-            black_box(run_query(|| reader.flow_graph(entry))?);
-            Ok(((), 1))
-        },
-    )?;
-    results.push(after_different_bucket);
-
-    engine.insert_symbol(
+    engine.add_symbol(
         SymbolIndex::new(SymbolTableSelector::new(241), 0),
         SymbolEntry::new(entry, "bench_unrelated_symbol", SymbolProperties::LOCAL),
     )?;
     engine.wait_until_idle()?;
 
-    let (after_edit, _) = measure("repeated_flow_graph_query_after_unrelated_edit", || {
-        black_box(run_query(|| reader.flow_graph(entry))?);
-        Ok(((), 1))
-    })?;
-    results.push(after_edit);
+    let (after_unrelated_kind, _) =
+        measure_repeated("flow_targets_after_unrelated_kind_edit", || {
+            black_box(reader.flow_targets(entry)?);
+            Ok(((), 1))
+        })?;
+    results.push(after_unrelated_kind);
     Ok(())
 }
 
@@ -348,13 +307,13 @@ fn bench_page_scans(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>
     add_symbols(&engine, entry, SYNTHETIC_SYMBOLS)?;
     let reader = engine.query_reader()?;
 
-    let (symbols, _) = measure("symbol_page_scan", || {
+    let (symbols, _) = measure_repeated("symbol_page_scan", || {
         let count = page_symbols(&reader)?;
         Ok(((), count))
     })?;
     results.push(symbols);
 
-    let (mappings, _) = measure("mapping_page_scan", || {
+    let (mappings, _) = measure_repeated("mapping_page_scan", || {
         let count = page_mappings(&reader)?;
         Ok(((), count))
     })?;
@@ -366,26 +325,27 @@ fn bench_call_graph_pages(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
 
-    let (edges, edge_count) = measure("call_graph_page_scan", || {
+    let (edges, edge_count) = measure_repeated("call_graph_page_scan", || {
         let count = page_call_edges(&reader)?;
         Ok((count, count))
     })?;
     results.push(edges);
 
-    let (callees, _) = measure("call_graph_callees_page", || {
-        let page = run_query(|| reader.callees_of(entry, None, PAGE_LIMIT))?;
+    let (callees, _) = measure_repeated("call_graph_callees_page", || {
+        let page = reader.callees_of(entry, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(callees);
 
     if edge_count > 0 {
-        let first = run_query(|| reader.call_edges(None, 1))?
+        let first = reader
+            .call_edge_page(None, 1)?
             .entries()
             .first()
             .copied()
             .ok_or_else(|| std::io::Error::other("call edge disappeared"))?;
-        let (callers, _) = measure("call_graph_callers_page", || {
-            let page = run_query(|| reader.callers_of(first.callee(), None, PAGE_LIMIT))?;
+        let (callers, _) = measure_repeated("call_graph_callers_page", || {
+            let page = reader.callers_of(first.target(), None, PAGE_LIMIT)?;
             Ok(((), page.entries().len()))
         })?;
         results.push(callers);
@@ -409,13 +369,13 @@ fn bench_single_function_edit(results: &mut Vec<BenchResult>) -> Result<(), Box<
     results.push(edit);
 
     let (related, _) = measure("single_function_edit_related_query", || {
-        black_box(run_query(|| reader.flow_graph(new_entry))?);
+        black_box(reader.flow_targets(new_entry)?);
         Ok(((), 1))
     })?;
     results.push(related);
 
-    let (unrelated, _) = measure("single_function_edit_unrelated_query", || {
-        black_box(run_query(|| reader.symbol_page(None, PAGE_LIMIT))?);
+    let (unrelated, _) = measure_repeated("single_function_edit_unrelated_query", || {
+        black_box(reader.symbol_page(None, PAGE_LIMIT)?);
         Ok(((), PAGE_LIMIT))
     })?;
     results.push(unrelated);
@@ -426,7 +386,7 @@ fn writable_region(reader: &QueryReader) -> Result<(Address, u64), Box<dyn Error
     let mut cursor = None;
 
     loop {
-        let page = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, cursor, PAGE_LIMIT))?;
+        let page = reader.mapping_page(DEFAULT_SPACE_ID, cursor, PAGE_LIMIT)?;
         if let Some(record) = page
             .entries()
             .iter()
@@ -476,10 +436,8 @@ fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Err
         address.raw_address() + 0xfffu64,
     ));
 
-    let (small, _) = measure("latest_change_small_region", || {
-        black_box(run_query(|| {
-            reader.latest_change(ChangeKinds::all(), &region)
-        })?);
+    let (small, _) = measure_repeated("latest_change_small_region", || {
+        black_box(reader.latest_change(ChangeKinds::all(), &region)?);
         Ok(((), 1))
     })?;
     results.push(small);
@@ -493,10 +451,8 @@ fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Err
     }
     engine.wait_until_idle()?;
 
-    let (scattered, _) = measure("latest_change_after_many_scattered_writes", || {
-        black_box(run_query(|| {
-            reader.latest_change(ChangeKinds::all(), &region)
-        })?);
+    let (scattered, _) = measure_repeated("latest_change_after_many_scattered_writes", || {
+        black_box(reader.latest_change(ChangeKinds::all(), &region)?);
         Ok(((), 1))
     })?;
     results.push(scattered);
@@ -515,7 +471,7 @@ fn bench_reader_latency(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
                 let address = entry
                     .checked_add(index as u64)
                     .ok_or_else(|| std::io::Error::other("latency symbol address overflow"))?;
-                engine.insert_symbol(
+                engine.add_symbol(
                     SymbolIndex::new(SymbolTableSelector::new(242), index),
                     SymbolEntry::new(address, "bench_latency_symbol", SymbolProperties::LOCAL),
                 )?;
@@ -525,7 +481,7 @@ fn bench_reader_latency(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
 
         for _ in 0..128usize {
             let query_start = Instant::now();
-            black_box(run_query(|| reader.symbol_page(None, PAGE_LIMIT))?);
+            black_box(reader.symbol_page(None, PAGE_LIMIT)?);
             samples.push(query_start.elapsed());
         }
 
@@ -585,7 +541,7 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
     let mut cached = Cached::new(Dependency::on(ChangeKinds::FUNCTIONS).within(region));
     black_box(cached.get(&reader, compute)?);
 
-    let (hit, _) = measure("cached_derived_hit", || {
+    let (hit, _) = measure_repeated("cached_derived_hit", || {
         black_box(cached.get(&reader, compute)?);
         Ok(((), 1))
     })?;
@@ -607,7 +563,7 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
 fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
-    black_box(run_query(|| reader.flow_graph(entry))?);
+    black_box(reader.flow_targets(entry)?);
 
     let mut region = AddressRangeSet::new();
     region.insert_range(AddressRange::new(
@@ -619,7 +575,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
     let client_count = 8usize;
     let queries_per_client = 512usize;
 
-    let (result, _) = measure("multi_client_flow_graph_and_latest_change", || {
+    let (result, _) = measure("multi_client_flow_targets_and_latest_change", || {
         thread::scope(|scope| -> Result<(), Box<dyn Error>> {
             let mut clients = Vec::new();
             for _ in 0..client_count {
@@ -630,7 +586,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
                         for _ in 0..queries_per_client {
                             black_box(
                                 reader
-                                    .flow_graph(entry)
+                                    .flow_targets(entry)
                                     .map_err(|error| std::io::Error::other(error.to_string()))?,
                             );
                             black_box(
@@ -680,13 +636,13 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
 
     let reader = engine.query_reader()?;
 
-    let (first_page, _) = measure("reference_hot_target_first_page", || {
-        let page = run_query(|| reader.references_to(hot_target, None, PAGE_LIMIT))?;
+    let (first_page, _) = measure_repeated("reference_hot_target_first_page", || {
+        let page = reader.incoming_reference_page(hot_target, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(first_page);
 
-    let (full_walk, _) = measure("reference_hot_target_full_walk", || {
+    let (full_walk, _) = measure_repeated("reference_hot_target_full_walk", || {
         let mut count = 0usize;
         for result in reader.incoming_references(hot_target) {
             black_box(result?);
@@ -703,11 +659,11 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
 const SCALE_REFERENCES: usize = 1_048_576;
 #[cfg(feature = "sqlite")]
 const SCALE_HOT_REFERENCES: usize = 65_536;
+#[cfg(feature = "sqlite")]
+const SCALE_REFERENCE_BATCH: usize = 8192;
 
 #[cfg(feature = "sqlite")]
-fn load_persistent_engine(
-    project_path: &std::path::Path,
-) -> Result<(AnalysisEngine, Address), Box<dyn Error>> {
+fn load_persistent_project(project_path: &Path) -> Result<(Project, Address), Box<dyn Error>> {
     let project_path = project_path
         .to_str()
         .ok_or_else(|| std::io::Error::other("project path is not valid UTF-8"))?;
@@ -720,47 +676,54 @@ fn load_persistent_engine(
     let entry = project
         .entry()
         .ok_or_else(|| std::io::Error::other("fixture entry missing"))?;
-    let engine = AnalysisEngine::new(project)?;
-    engine.wait_until_idle()?;
-    Ok((engine, entry))
+    Ok((project, entry))
 }
 
 #[cfg(feature = "sqlite")]
 fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let dir = tempfile::tempdir()?;
-    let (engine, entry) = load_persistent_engine(&dir.path().join("scale.fdbz"))?;
+    let (mut project, entry) = load_persistent_project(&dir.path().join("scale.fdbz"))?;
     let hot_target = entry
         .checked_add(0x10_0000u64)
         .ok_or_else(|| std::io::Error::other("hot target address overflow"))?;
 
     let (insert, _) = measure("reference_scale_bulk_assert", || {
-        for index in 0..SCALE_REFERENCES {
-            let from = entry
-                .checked_add(0x100_0000 + index as u64 * 0x10)
-                .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
-            let target = if index < SCALE_HOT_REFERENCES {
-                hot_target
-            } else {
-                entry
-                    .checked_add(0x2000_0000 + index as u64 * 0x10)
-                    .ok_or_else(|| std::io::Error::other("reference target address overflow"))?
-            };
-            engine.add_reference(Reference::data(from, target, ReferenceProperties::READ))?;
+        for start in (0..SCALE_REFERENCES).step_by(SCALE_REFERENCE_BATCH) {
+            let mut transaction = project.transaction("benchmark reference batch");
+            for index in start..(start + SCALE_REFERENCE_BATCH).min(SCALE_REFERENCES) {
+                let from = entry
+                    .checked_add(0x100_0000 + index as u64 * 0x10)
+                    .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
+                let target = if index < SCALE_HOT_REFERENCES {
+                    hot_target
+                } else {
+                    entry
+                        .checked_add(0x2000_0000 + index as u64 * 0x10)
+                        .ok_or_else(|| std::io::Error::other("reference target address overflow"))?
+                };
+                transaction.add_reference(Reference::data(
+                    from,
+                    target,
+                    ReferenceProperties::READ,
+                ))?;
+            }
+            transaction.commit()?;
         }
-        engine.wait_until_idle()?;
         Ok(((), SCALE_REFERENCES))
     })?;
     results.push(insert);
 
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
 
-    let (first_page, _) = measure("reference_scale_hot_first_page", || {
-        let page = run_query(|| reader.references_to(hot_target, None, PAGE_LIMIT))?;
+    let (first_page, _) = measure_repeated("reference_scale_hot_first_page", || {
+        let page = reader.incoming_reference_page(hot_target, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(first_page);
 
-    let (full_walk, _) = measure("reference_scale_hot_full_walk", || {
+    let (full_walk, _) = measure_repeated("reference_scale_hot_full_walk", || {
         let mut count = 0usize;
         for result in reader.incoming_references(hot_target) {
             black_box(result?);
@@ -773,8 +736,8 @@ fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), B
     let spread_target = entry
         .checked_add(0x2000_0000 + (SCALE_REFERENCES as u64 - 1) * 0x10)
         .ok_or_else(|| std::io::Error::other("spread target address overflow"))?;
-    let (spread_page, _) = measure("reference_scale_spread_first_page", || {
-        let page = run_query(|| reader.references_to(spread_target, None, PAGE_LIMIT))?;
+    let (spread_page, _) = measure_repeated("reference_scale_spread_first_page", || {
+        let page = reader.incoming_reference_page(spread_target, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(spread_page);
@@ -782,8 +745,8 @@ fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), B
     let spread_from = entry
         .checked_add(0x100_0000 + (SCALE_REFERENCES as u64 - 1) * 0x10)
         .ok_or_else(|| std::io::Error::other("spread source address overflow"))?;
-    let (outgoing_page, _) = measure("reference_scale_outgoing_page", || {
-        let page = run_query(|| reader.references_from(spread_from, None, PAGE_LIMIT))?;
+    let (outgoing_page, _) = measure_repeated("reference_scale_outgoing_page", || {
+        let page = reader.outgoing_reference_page(spread_from, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(outgoing_page);
@@ -795,7 +758,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
 
     bench_initial_analysis(&mut results)?;
-    bench_repeated_flow_graph(&mut results)?;
+    bench_repeated_flow_targets(&mut results)?;
     bench_page_scans(&mut results)?;
     bench_call_graph_pages(&mut results)?;
     bench_single_function_edit(&mut results)?;

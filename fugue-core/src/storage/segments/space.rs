@@ -426,17 +426,15 @@ impl AddressSpace {
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
 
-            // preserve the portion before the rebuild range
             if view.start() < range_start
                 && let Some(left) = view.with_end(range_start)
             {
                 self.submaps.insert(left.range(), left);
             }
-            if view.last() > range_last {
-                // preserve the portion after the rebuild range
-                if let Some(right) = view.with_start(range_end) {
-                    self.submaps.insert(right.range(), right);
-                }
+            if view.last() > range_last
+                && let Some(right) = view.with_start(range_end)
+            {
+                self.submaps.insert(right.range(), right);
             }
         }
 

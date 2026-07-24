@@ -1147,16 +1147,10 @@ impl ElfSymbolData {
         preferred_base: RawAddress,
         config: ElfLoaderProperties,
     ) -> Result<Self, LoaderError> {
-        // TODO:
-        // - base address should be configurable.
-        // - determine if GNU and hence IFUNC and UNIQUE are supported.
-
         let is_object = elf.kind() == ObjectKind::Relocatable;
         let addr_size = arch.language().address_size();
         let address_upper_bound = RawAddress::from(arch.language().address_upper_bound());
 
-        // NOTE: this is to force a larger alignment on ARM, since the sinc uses 2 byte alignment,
-        // which is only applicable for Thumb.
         let addr_align = arch.language().address_alignment().max(addr_size);
 
         let mut sections = ElfSectionMap::new();
@@ -1300,8 +1294,6 @@ impl ElfSymbolData {
             arch.external_thunk_template(),
         );
 
-        // TODO: refactor the inner logic so we avoid duplication between the two loops.
-
         for (index, sym, properties) in syms.enumerate().filter_map(|(index, sym)| {
             let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
                 return None;
@@ -1422,8 +1414,6 @@ impl ElfSymbolData {
         Ok(base)
     }
 
-    // Preserves non-zero relocatable section addresses while packing the remaining
-    // allocatable sections after the pinned range.
     fn place_object_sections_preserving_addresses<'a>(
         elf: &'a impl Object<'a>,
         base_addr: RawAddress,
@@ -1629,7 +1619,6 @@ where
 {
     // reference to the ELF
     pub(crate) elf: &'file ElfFile<'data, Elf, R>,
-    // architecture for canonicalisation
     pub(crate) arch: &'file Arch,
     // segments iterator
     pub(crate) segms: ElfSegmentIterator<'data, 'file, Elf, R>,
@@ -1648,9 +1637,7 @@ where
     pub(crate) sections: &'file ElfSectionMap,
     // virtual segment containing externals
     pub(crate) extern_segm: Option<&'file ExternSegment>,
-    // bank overrides for regions displaced into overlay banks
     region_bank: &'file ElfRegionBankMap,
-    // running segment ordinal, matched with the walk's ordering
     segment_ordinal: usize,
     // loader config
     config: ElfLoaderProperties,
@@ -2207,11 +2194,14 @@ mod test {
         Ok(loaded)
     }
 
-    type ImageWrite = (RawAddress, Vec<u8>);
+    struct CapturedImageWrite {
+        offset: RawAddress,
+        bytes: Vec<u8>,
+    }
 
     fn image_writes(
         loadable: &impl Loadable,
-    ) -> Result<Vec<ImageWrite>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<CapturedImageWrite>, Box<dyn std::error::Error>> {
         let bank = ImageBankHandle::default();
         let bank_base = loadable
             .image_layout()
@@ -2225,7 +2215,10 @@ mod test {
         let mut writes = Vec::new();
         while let Some(segment) = contents.next()? {
             for write in segment.into_writes(bank_base)? {
-                writes.push((write.offset(), write.bytes().to_owned()));
+                writes.push(CapturedImageWrite {
+                    offset: write.offset(),
+                    bytes: write.bytes().to_owned(),
+                });
             }
         }
         Ok(writes)
@@ -2735,7 +2728,7 @@ mod test {
         for space in storage.spaces() {
             let mut buf = [0u8; 1];
             if storage
-                .read_bytes_from_space(space.id(), overlap, &mut buf)
+                .read_bytes_in_space(space.id(), overlap, &mut buf)
                 .unwrap_or(0)
                 != 1
             {
@@ -2767,7 +2760,11 @@ mod test {
         let mut covered = RawAddressRangeSet::new();
         let mut count = 0usize;
 
-        for (start, bytes) in image_writes(&elf)? {
+        for CapturedImageWrite {
+            offset: start,
+            bytes,
+        } in image_writes(&elf)?
+        {
             let len = bytes.len();
             if len == 0 {
                 continue;
@@ -2812,7 +2809,7 @@ mod test {
 
         let materialised = image_writes(&elf)?
             .iter()
-            .map(|(_, bytes)| bytes.len())
+            .map(|write| write.bytes.len())
             .sum::<usize>();
 
         assert!(

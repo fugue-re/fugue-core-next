@@ -1,24 +1,19 @@
 use std::collections::BTreeSet;
-use std::mem::size_of;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use thiserror::Error;
 
-use crate::ir::block::table::CodeBlockRef;
-use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, CodeBlockTable, FlowTarget, Function, InsnTargetKind, RawAddress};
+use crate::ir::{Address, CodeBlockTable, Function, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
-    ENTITY_CALL_GRAPH_FORWARD_EDGE_ID, ENTITY_CALL_GRAPH_INDEX_HEADER_ID,
-    ENTITY_CALL_GRAPH_INVERSE_EDGE_ID, ENTITY_KEY_CALL_GRAPH_EDGE_ID,
+    ENTITY_CALL_GRAPH_EDGE_ID, ENTITY_KEY_CALL_GRAPH_FORWARD_ID, ENTITY_KEY_CALL_GRAPH_INVERSE_ID,
 };
 use crate::storage::entities::{
     CachedRef, Entity, EntityCache, EntityId, EntityIterator, EntityKey, EntityKeyId,
     EntityStorageError, ProjectEntity, WriteBackWorker,
 };
-use crate::storage::segments::space::AddressSpaceId;
+use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallGraphEdgeKey {
@@ -27,8 +22,7 @@ pub struct CallGraphEdgeKey {
 }
 
 impl CallGraphEdgeKey {
-    const ADDRESS_KEY_SIZE: usize = size_of::<AddressSpaceId>() + size_of::<RawAddress>();
-    const KEY_SIZE: usize = Self::ADDRESS_KEY_SIZE * 2;
+    const KEY_SIZE: usize = Address::ENCODED_SIZE * 2;
 
     pub fn new(source: Address, target: Address) -> Self {
         Self { source, target }
@@ -43,20 +37,20 @@ impl CallGraphEdgeKey {
     }
 
     fn minimum_for(source: Address) -> Self {
-        Self::new(source, Address::zero(source.space()))
+        Self::new(source, Address::MINIMUM)
     }
 }
 
 impl EntityKey for CallGraphEdgeKey {
-    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_EDGE_ID;
+    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_FORWARD_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         if buf.len() != Self::KEY_SIZE {
             return None;
         }
 
-        let source = Address::decode(&buf[..Self::ADDRESS_KEY_SIZE])?;
-        let target = Address::decode(&buf[Self::ADDRESS_KEY_SIZE..])?;
+        let source = Address::decode(&buf[..Address::ENCODED_SIZE])?;
+        let target = Address::decode(&buf[Address::ENCODED_SIZE..])?;
 
         Some(Self::new(source, target))
     }
@@ -67,89 +61,80 @@ impl EntityKey for CallGraphEdgeKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct CallGraphForwardEdge;
-
-impl Entity for CallGraphForwardEdge {
-    const ID: EntityId = ENTITY_CALL_GRAPH_FORWARD_EDGE_ID;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct InverseCallGraphEdgeKey {
+    callee: Address,
+    caller: Address,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct CallGraphInverseEdge;
-
-impl Entity for CallGraphInverseEdge {
-    const ID: EntityId = ENTITY_CALL_GRAPH_INVERSE_EDGE_ID;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct CallGraphIndexHeader {
-    revision: u64,
-}
-
-impl CallGraphIndexHeader {
-    fn new(revision: u64) -> Self {
-        Self { revision }
+impl InverseCallGraphEdgeKey {
+    fn new(callee: Address, caller: Address) -> Self {
+        Self { callee, caller }
     }
 
-    fn revision(&self) -> u64 {
-        self.revision
+    fn callee(&self) -> Address {
+        self.callee
+    }
+
+    fn caller(&self) -> Address {
+        self.caller
+    }
+
+    fn minimum_for(callee: Address) -> Self {
+        Self::new(callee, Address::MINIMUM)
     }
 }
 
-impl Entity for CallGraphIndexHeader {
-    const ID: EntityId = ENTITY_CALL_GRAPH_INDEX_HEADER_ID;
+impl EntityKey for InverseCallGraphEdgeKey {
+    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_INVERSE_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() != CallGraphEdgeKey::KEY_SIZE {
+            return None;
+        }
+
+        let callee = Address::decode(&buf[..Address::ENCODED_SIZE])?;
+        let caller = Address::decode(&buf[Address::ENCODED_SIZE..])?;
+
+        Some(Self::new(callee, caller))
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        self.callee.encode(buf);
+        self.caller.encode(buf);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CallGraphEdgeRecord;
+
+impl Entity for CallGraphEdgeRecord {
+    const ID: EntityId = ENTITY_CALL_GRAPH_EDGE_ID;
 }
 
 #[derive(Clone)]
 pub struct CallGraphIndex {
-    forward: EntityCache<CallGraphEdgeKey, CallGraphForwardEdge>,
-    inverse: EntityCache<CallGraphEdgeKey, CallGraphInverseEdge>,
+    forward: EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
+    inverse: EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
     storage: EntityStorage,
-}
-
-#[derive(Debug, Error)]
-pub enum CallGraphVerificationError {
-    #[error(
-        "call graph does not match the function table: {} missing, {} extra, {} inverse missing, {} inverse extra",
-        missing.len(),
-        extra.len(),
-        inverse_missing.len(),
-        inverse_extra.len()
-    )]
-    Mismatch {
-        missing: Vec<CallGraphEdgeKey>,
-        extra: Vec<CallGraphEdgeKey>,
-        inverse_missing: Vec<CallGraphEdgeKey>,
-        inverse_extra: Vec<CallGraphEdgeKey>,
-    },
-    #[error("call graph storage error: {0}")]
-    Storage(#[from] EntityStorageError),
 }
 
 impl CallGraphIndex {
     const CACHE_BYTES: usize = 4 * 1024 * 1024;
-    const CLEAR_BATCH_LEN: usize = 256;
 
-    pub(crate) fn new(storage: EntityStorage) -> Result<Self, EntityStorageError> {
-        let forward = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
-        let inverse = EntityCache::new(storage.clone(), Self::CACHE_BYTES)?;
+    pub(crate) fn new(
+        storage: EntityStorage,
+        worker: Option<Arc<WriteBackWorker>>,
+    ) -> Result<Self, EntityStorageError> {
+        let forward =
+            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
+        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
 
         Ok(Self {
             forward,
             inverse,
             storage,
         })
-    }
-
-    pub(crate) fn new_with(storage: EntityStorage, worker: Arc<WriteBackWorker>) -> Self {
-        let forward = EntityCache::with_worker(storage.clone(), worker.clone(), Self::CACHE_BYTES);
-        let inverse = EntityCache::with_worker(storage.clone(), worker, Self::CACHE_BYTES);
-
-        Self {
-            forward,
-            inverse,
-            storage,
-        }
     }
 
     pub(crate) fn set_function_edges(
@@ -189,7 +174,7 @@ impl CallGraphIndex {
     ) -> Result<(), EntityStorageError> {
         let header = self
             .storage
-            .get::<ProjectEntity, CallGraphIndexHeader>(&ProjectEntity::CallGraphIndex)?;
+            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::CallGraphIndex)?;
 
         if header.is_some_and(|header| header.revision() == revision) {
             return Ok(());
@@ -202,43 +187,8 @@ impl CallGraphIndex {
     }
 
     pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
-        self.storage.insert(
-            &ProjectEntity::CallGraphIndex,
-            &CallGraphIndexHeader::new(revision),
-        )
-    }
-
-    pub fn verify<'a>(
-        &self,
-        functions: impl IntoIterator<Item = FunctionRef<'a>>,
-        blocks: &CodeBlockTable,
-    ) -> Result<(), CallGraphVerificationError> {
-        let expected = Self::expected_edges(functions, blocks);
-        let forward = self.edges(None)?.collect::<Result<BTreeSet<_>, _>>()?;
-        let inverse = self
-            .inverse_range(Bound::Unbounded)?
-            .map(|result| result.map(|(key, _)| CallGraphEdgeKey::new(key.target(), key.source())))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-
-        let missing = expected.difference(&forward).copied().collect::<Vec<_>>();
-        let extra = forward.difference(&expected).copied().collect::<Vec<_>>();
-        let inverse_missing = expected.difference(&inverse).copied().collect::<Vec<_>>();
-        let inverse_extra = inverse.difference(&expected).copied().collect::<Vec<_>>();
-
-        if missing.is_empty()
-            && extra.is_empty()
-            && inverse_missing.is_empty()
-            && inverse_extra.is_empty()
-        {
-            return Ok(());
-        }
-
-        Err(CallGraphVerificationError::Mismatch {
-            missing,
-            extra,
-            inverse_missing,
-            inverse_extra,
-        })
+        self.storage
+            .insert(&ProjectEntity::CallGraphIndex, &IndexHeader::new(revision))
     }
 
     pub(crate) fn callees(
@@ -247,20 +197,11 @@ impl CallGraphIndex {
         after: Option<Address>,
     ) -> Result<impl Iterator<Item = Result<Address, EntityStorageError>> + '_, EntityStorageError>
     {
-        let start_key;
-        let start = match after {
-            Some(after) => {
-                start_key = CallGraphEdgeKey::new(caller, after);
-                Bound::Excluded(&start_key)
-            }
-            None => {
-                start_key = CallGraphEdgeKey::minimum_for(caller);
-                Bound::Included(&start_key)
-            }
-        };
+        let after = after.map(|after| CallGraphEdgeKey::new(caller, after));
+        let start = cursor_bound_or_minimum(after, CallGraphEdgeKey::minimum_for(caller));
 
         Ok(self
-            .forward_range(start)?
+            .forward_range(start.as_ref())?
             .take_while(move |result| {
                 result
                     .as_ref()
@@ -275,26 +216,17 @@ impl CallGraphIndex {
         after: Option<Address>,
     ) -> Result<impl Iterator<Item = Result<Address, EntityStorageError>> + '_, EntityStorageError>
     {
-        let start_key;
-        let start = match after {
-            Some(after) => {
-                start_key = CallGraphEdgeKey::new(callee, after);
-                Bound::Excluded(&start_key)
-            }
-            None => {
-                start_key = CallGraphEdgeKey::minimum_for(callee);
-                Bound::Included(&start_key)
-            }
-        };
+        let after = after.map(|after| InverseCallGraphEdgeKey::new(callee, after));
+        let start = cursor_bound_or_minimum(after, InverseCallGraphEdgeKey::minimum_for(callee));
 
         Ok(self
-            .inverse_range(start)?
+            .inverse_range(start.as_ref())?
             .take_while(move |result| {
                 result
                     .as_ref()
-                    .map_or(true, |(key, _)| key.source() == callee)
+                    .map_or(true, |(key, _)| key.callee() == callee)
             })
-            .map(|result| result.map(|(key, _)| key.target())))
+            .map(|result| result.map(|(key, _)| key.caller())))
     }
 
     pub(crate) fn edges(
@@ -304,10 +236,10 @@ impl CallGraphIndex {
         impl Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_,
         EntityStorageError,
     > {
-        let start = after.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
+        let start = cursor_bound(after);
 
         Ok(self
-            .forward_range(start)?
+            .forward_range(start.as_ref())?
             .map(|result| result.map(|(key, _)| key)))
     }
 
@@ -315,42 +247,10 @@ impl CallGraphIndex {
         function: &Function,
         blocks: &CodeBlockTable,
     ) -> BTreeSet<Address> {
-        Self::block_call_targets(function.blocks().filter_map(|(_, id)| blocks.get_by_id(id)))
-    }
-
-    fn block_call_targets<'a>(
-        blocks: impl IntoIterator<Item = CodeBlockRef<'a>>,
-    ) -> BTreeSet<Address> {
-        let mut targets = BTreeSet::new();
-
-        for block in blocks {
-            for insn in block.instructions().iter() {
-                for (target, kind, to) in insn.iter_targets() {
-                    let is_call = kind == InsnTargetKind::Global
-                        && FlowTarget::from_insn_target(insn, target, to)
-                            .is_some_and(|flow_target| flow_target.kind().is_call());
-
-                    if is_call {
-                        targets.insert(to);
-                    }
-                }
-            }
-        }
-
-        targets
-    }
-
-    fn expected_edges<'a>(
-        functions: impl IntoIterator<Item = FunctionRef<'a>>,
-        blocks: &CodeBlockTable,
-    ) -> BTreeSet<CallGraphEdgeKey> {
-        functions
-            .into_iter()
-            .flat_map(|function| {
-                Self::function_call_targets(&function, blocks)
-                    .into_iter()
-                    .map(move |target| CallGraphEdgeKey::new(function.entry(), target))
-            })
+        function
+            .flow_targets(blocks)
+            .filter(|target| target.kind().is_call())
+            .map(|target| target.to())
             .collect()
     }
 
@@ -376,50 +276,17 @@ impl CallGraphIndex {
     }
 
     fn clear(&self) -> Result<(), EntityStorageError> {
-        self.clear_forward_edges()?;
-        self.clear_inverse_edges()
-    }
-
-    fn clear_forward_edges(&self) -> Result<(), EntityStorageError> {
-        loop {
-            let edges = self
-                .edges(None)?
-                .take(Self::CLEAR_BATCH_LEN)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if edges.is_empty() {
-                return Ok(());
-            }
-
-            for edge in edges {
-                self.forward.try_remove(&edge)?;
-            }
-        }
-    }
-
-    fn clear_inverse_edges(&self) -> Result<(), EntityStorageError> {
-        loop {
-            let edges = self
-                .inverse_range(Bound::Unbounded)?
-                .map(|result| result.map(|(key, _)| key))
-                .take(Self::CLEAR_BATCH_LEN)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            if edges.is_empty() {
-                return Ok(());
-            }
-
-            for edge in edges {
-                self.inverse.try_remove(&edge)?;
-            }
-        }
+        self.forward.try_clear()?;
+        self.inverse.try_clear()
     }
 
     fn insert_edge(&self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
         self.forward
-            .try_put(CallGraphEdgeKey::new(caller, callee), CallGraphForwardEdge)?;
-        self.inverse
-            .try_put(CallGraphEdgeKey::new(callee, caller), CallGraphInverseEdge)?;
+            .try_put(CallGraphEdgeKey::new(caller, callee), CallGraphEdgeRecord)?;
+        self.inverse.try_put(
+            InverseCallGraphEdgeKey::new(callee, caller),
+            CallGraphEdgeRecord,
+        )?;
 
         Ok(())
     }
@@ -428,43 +295,94 @@ impl CallGraphIndex {
         self.forward
             .try_remove(&CallGraphEdgeKey::new(caller, callee))?;
         self.inverse
-            .try_remove(&CallGraphEdgeKey::new(callee, caller))
+            .try_remove(&InverseCallGraphEdgeKey::new(callee, caller))
     }
 
     fn forward_range(
         &self,
         start: Bound<&CallGraphEdgeKey>,
     ) -> Result<
-        EntityIterator<'_, CallGraphEdgeKey, CachedRef<'_, CallGraphForwardEdge>>,
+        EntityIterator<'_, CallGraphEdgeKey, CachedRef<'_, CallGraphEdgeRecord>>,
         EntityStorageError,
     > {
-        self.forward.try_scan_range(start)
+        self.forward.try_iter_range(start)
     }
 
     fn inverse_range(
         &self,
-        start: Bound<&CallGraphEdgeKey>,
+        start: Bound<&InverseCallGraphEdgeKey>,
     ) -> Result<
-        EntityIterator<'_, CallGraphEdgeKey, CachedRef<'_, CallGraphInverseEdge>>,
+        EntityIterator<'_, InverseCallGraphEdgeKey, CachedRef<'_, CallGraphEdgeRecord>>,
         EntityStorageError,
     > {
-        self.inverse.try_scan_range(start)
+        self.inverse.try_iter_range(start)
     }
 }
 
 #[cfg(test)]
 mod test {
     use fugue_lifter::runtime::pcode::Inputs;
-    use fugue_lifter::{Op, PCodeOp, Varnode};
 
     use super::*;
-    use crate::ir::block::table::CodeBlockTableError;
-    use crate::ir::{CodeBlock, FunctionId, FunctionTable, Insn};
-    use crate::lifter::{Language, resolve_language};
+    use crate::ir::{CodeBlock, CodeBlockTableError, FunctionId, FunctionTable, Insn};
+    use crate::lifter::{Language, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
+    use crate::storage::segments::space::AddressSpaceId;
 
     fn graph() -> Result<CallGraphIndex, EntityStorageError> {
-        CallGraphIndex::new(EntityStorage::new(InMemoryEntityStorage::new()))
+        CallGraphIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), None)
+    }
+
+    struct CallGraphMismatch {
+        missing: Vec<CallGraphEdgeKey>,
+        extra: Vec<CallGraphEdgeKey>,
+        inverse_missing: Vec<CallGraphEdgeKey>,
+        inverse_extra: Vec<CallGraphEdgeKey>,
+    }
+
+    fn mismatch<'a>(
+        graph: &CallGraphIndex,
+        functions: impl IntoIterator<Item = FunctionRef<'a>>,
+        blocks: &CodeBlockTable,
+    ) -> Result<Option<CallGraphMismatch>, EntityStorageError> {
+        let expected = functions
+            .into_iter()
+            .flat_map(|function| {
+                CallGraphIndex::function_call_targets(&function, blocks)
+                    .into_iter()
+                    .map(move |target| CallGraphEdgeKey::new(function.entry(), target))
+            })
+            .collect::<BTreeSet<_>>();
+        let forward = graph.edges(None)?.collect::<Result<BTreeSet<_>, _>>()?;
+        let inverse = graph
+            .inverse_range(Bound::Unbounded)?
+            .map(|result| result.map(|(key, _)| CallGraphEdgeKey::new(key.caller(), key.callee())))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+
+        let mismatch = CallGraphMismatch {
+            missing: expected.difference(&forward).copied().collect(),
+            extra: forward.difference(&expected).copied().collect(),
+            inverse_missing: expected.difference(&inverse).copied().collect(),
+            inverse_extra: inverse.difference(&expected).copied().collect(),
+        };
+        if mismatch.missing.is_empty()
+            && mismatch.extra.is_empty()
+            && mismatch.inverse_missing.is_empty()
+            && mismatch.inverse_extra.is_empty()
+        {
+            Ok(None)
+        } else {
+            Ok(Some(mismatch))
+        }
+    }
+
+    fn assert_consistent<'a>(
+        graph: &CallGraphIndex,
+        functions: impl IntoIterator<Item = FunctionRef<'a>>,
+        blocks: &CodeBlockTable,
+    ) -> Result<(), EntityStorageError> {
+        assert!(mismatch(graph, functions, blocks)?.is_none());
+        Ok(())
     }
 
     fn call_insn(
@@ -472,7 +390,7 @@ mod test {
         address: Address,
         target: Address,
     ) -> Result<Insn, Box<dyn std::error::Error>> {
-        let operations = [PCodeOp {
+        let operations = [RawPCodeOp {
             op: Op::Call,
             inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
             output: Varnode::INVALID,
@@ -588,25 +506,25 @@ mod test {
         let overlay_caller = Address::new(AddressSpaceId::from(1u16), 0x2000u64);
         let overlay_callee = Address::new(AddressSpaceId::from(1u16), 0x2100u64);
 
-        graph.set_function_edges(overlay_caller, [overlay_callee])?;
-        graph.set_function_edges(base_caller, [base_callee])?;
+        graph.set_function_edges(overlay_caller, [base_callee])?;
+        graph.set_function_edges(base_caller, [overlay_callee])?;
 
         let overlay_callees = graph
             .callees(overlay_caller, None)?
             .collect::<Result<Vec<_>, _>>()?;
         let overlay_callers = graph
-            .callers(overlay_callee, None)?
+            .callers(base_callee, None)?
             .collect::<Result<Vec<_>, _>>()?;
         let base_callees = graph
             .callees(base_caller, None)?
             .collect::<Result<Vec<_>, _>>()?;
         let base_callers = graph
-            .callers(base_callee, None)?
+            .callers(overlay_callee, None)?
             .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(overlay_callees, vec![overlay_callee]);
+        assert_eq!(overlay_callees, vec![base_callee]);
         assert_eq!(overlay_callers, vec![overlay_caller]);
-        assert_eq!(base_callees, vec![base_callee]);
+        assert_eq!(base_callees, vec![overlay_callee]);
         assert_eq!(base_callers, vec![base_caller]);
 
         graph.set_function_edges(overlay_caller, [])?;
@@ -619,7 +537,7 @@ mod test {
         );
         assert!(
             graph
-                .callers(overlay_callee, None)?
+                .callers(base_callee, None)?
                 .collect::<Result<Vec<_>, _>>()?
                 .is_empty()
         );
@@ -646,31 +564,25 @@ mod test {
         )?;
         graph.set_function_edges(caller, [extra_callee])?;
 
-        let error = graph.verify(functions.iter(), &blocks).unwrap_err();
+        let error =
+            mismatch(&graph, functions.iter(), &blocks)?.expect("call graph should mismatch");
 
-        match error {
-            CallGraphVerificationError::Mismatch {
-                missing,
-                extra,
-                inverse_missing,
-                inverse_extra,
-            } => {
-                assert_eq!(
-                    missing,
-                    vec![CallGraphEdgeKey::new(caller, expected_callee)]
-                );
-                assert_eq!(extra, vec![CallGraphEdgeKey::new(caller, extra_callee)]);
-                assert_eq!(
-                    inverse_missing,
-                    vec![CallGraphEdgeKey::new(caller, expected_callee)]
-                );
-                assert_eq!(
-                    inverse_extra,
-                    vec![CallGraphEdgeKey::new(caller, extra_callee)]
-                );
-            }
-            CallGraphVerificationError::Storage(error) => return Err(error.into()),
-        }
+        assert_eq!(
+            error.missing,
+            vec![CallGraphEdgeKey::new(caller, expected_callee)]
+        );
+        assert_eq!(
+            error.extra,
+            vec![CallGraphEdgeKey::new(caller, extra_callee)]
+        );
+        assert_eq!(
+            error.inverse_missing,
+            vec![CallGraphEdgeKey::new(caller, expected_callee)]
+        );
+        assert_eq!(
+            error.inverse_extra,
+            vec![CallGraphEdgeKey::new(caller, extra_callee)]
+        );
 
         Ok(())
     }
@@ -697,7 +609,7 @@ mod test {
 
         graph.ensure_current(functions.iter(), &blocks, 7)?;
 
-        graph.verify(functions.iter(), &blocks)?;
+        assert_consistent(&graph, functions.iter(), &blocks)?;
         assert_eq!(
             graph
                 .callees(caller, None)?
@@ -737,10 +649,7 @@ mod test {
                 .collect::<Result<Vec<_>, _>>()?,
             vec![indexed_callee]
         );
-        assert!(matches!(
-            graph.verify(functions.iter(), &blocks),
-            Err(CallGraphVerificationError::Mismatch { .. })
-        ));
+        assert!(mismatch(&graph, functions.iter(), &blocks)?.is_some());
 
         Ok(())
     }
@@ -797,7 +706,7 @@ mod test {
                 update_graph_for_function(&graph, &functions, &blocks, function_id)?;
             }
 
-            graph.verify(functions.iter(), &blocks)?;
+            assert_consistent(&graph, functions.iter(), &blocks)?;
         }
 
         Ok(())

@@ -1,4 +1,4 @@
-use crate::il::common::{IlExprId, IlIndexRange};
+use crate::il::common::IlIndexRange;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -27,45 +27,45 @@ pub enum ECodeExprOpcode {
     Or = 19,
     Xor = 20,
     Not = 21,
-    BoolAnd = 57,
-    BoolOr = 58,
-    BoolXor = 59,
-    BoolNot = 60,
-    IntEqual = 22,
-    IntNotEqual = 23,
-    IntLess = 24,
-    IntSignedLess = 25,
-    IntLessEqual = 26,
-    IntSignedLessEqual = 27,
-    Carry = 28,
-    SignedCarry = 29,
-    SignedBorrow = 30,
-    CountOnes = 31,
-    CountLeadingZeros = 32,
-    ZeroExtend = 33,
-    SignExtend = 34,
-    Truncate = 35,
-    Extract = 36,
-    Insert = 37,
-    FloatAdd = 38,
-    FloatSub = 39,
-    FloatMul = 40,
-    FloatDiv = 41,
-    FloatNegate = 42,
-    FloatAbs = 43,
-    FloatSqrt = 44,
-    FloatCeiling = 45,
-    FloatFloor = 46,
-    FloatRound = 47,
-    FloatIsNan = 48,
-    FloatEqual = 49,
-    FloatNotEqual = 50,
-    FloatLess = 51,
-    FloatLessEqual = 52,
-    FloatToInt = 53,
-    FloatToFloat = 54,
-    IntToFloat = 55,
-    IntrinsicResult = 56,
+    BoolAnd = 22,
+    BoolOr = 23,
+    BoolXor = 24,
+    BoolNot = 25,
+    IntEqual = 26,
+    IntNotEqual = 27,
+    IntLess = 28,
+    IntSignedLess = 29,
+    IntLessEqual = 30,
+    IntSignedLessEqual = 31,
+    Carry = 32,
+    SignedCarry = 33,
+    SignedBorrow = 34,
+    CountOnes = 35,
+    CountLeadingZeros = 36,
+    ZeroExtend = 37,
+    SignExtend = 38,
+    Truncate = 39,
+    Extract = 40,
+    Insert = 41,
+    FloatAdd = 42,
+    FloatSub = 43,
+    FloatMul = 44,
+    FloatDiv = 45,
+    FloatNegate = 46,
+    FloatAbs = 47,
+    FloatSqrt = 48,
+    FloatCeiling = 49,
+    FloatFloor = 50,
+    FloatRound = 51,
+    FloatIsNan = 52,
+    FloatEqual = 53,
+    FloatNotEqual = 54,
+    FloatLess = 55,
+    FloatLessEqual = 56,
+    FloatToInt = 57,
+    FloatToFloat = 58,
+    IntToFloat = 59,
+    IntrinsicResult = 60,
 }
 
 impl ECodeExprOpcode {
@@ -253,18 +253,17 @@ impl ECodeExpr {
     }
 }
 
-pub type ExpressionOperand = IlExprId;
-
 #[cfg(test)]
 mod test {
     use std::mem::size_of;
 
     use super::*;
+    use crate::il::common::IlExprId;
 
     #[test]
     fn expression_records_stay_compact() {
-        assert_eq!(size_of::<ExpressionOperand>(), 4);
-        assert_eq!(size_of::<Option<ExpressionOperand>>(), 4);
+        assert_eq!(size_of::<IlExprId>(), 4);
+        assert_eq!(size_of::<Option<IlExprId>>(), 4);
         assert!(size_of::<ECodeExpr>() <= 32);
     }
 }

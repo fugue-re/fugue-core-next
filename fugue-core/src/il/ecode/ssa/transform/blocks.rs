@@ -8,19 +8,19 @@ use crate::il::common::{
 };
 
 impl SsaConstruction<'_, '_> {
-    pub(crate) fn construct(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
+    pub(crate) fn build(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
         match self.source.graph().entry_block() {
-            Some(entry) => self.construct_blocks(entry, cancellation),
-            None => self.construct_linear(cancellation),
+            Some(entry) => self.build_blocks(entry, cancellation),
+            None => self.build_linear(cancellation),
         }
     }
 
-    fn construct_linear(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
+    fn build_linear(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
         let mut current = BTreeMap::new();
 
         for index in 0..self.source.statements().len() {
             cancellation.check()?;
-            self.construct_statement_at(index, &mut current)?;
+            self.build_statement_at(index, &mut current)?;
         }
 
         let graph = IlGraph::new(
@@ -41,7 +41,7 @@ impl SsaConstruction<'_, '_> {
         Ok(())
     }
 
-    fn construct_blocks(
+    fn build_blocks(
         &mut self,
         entry: IlBlockId,
         cancellation: &CancellationToken,
@@ -62,13 +62,13 @@ impl SsaConstruction<'_, '_> {
         self.domain_widths = domains.widths;
         self.blocks = vec![None; source_graph.blocks().len()];
         self.edge_arguments = vec![Vec::new(); source_graph.successors().len()];
-        self.construct_block_tree(entry, &dominance, BTreeMap::new(), cancellation)?;
+        self.build_block_tree(entry, &dominance, BTreeMap::new(), cancellation)?;
 
         for block_index in 0..source_graph.blocks().len() {
             let block_id = IlBlockId::try_from_index(block_index)?;
 
             if self.blocks[block_index].is_none() {
-                self.construct_block(block_id, BTreeMap::new(), cancellation)?;
+                self.build_block(block_id, BTreeMap::new(), cancellation)?;
             }
         }
 
@@ -97,7 +97,7 @@ impl SsaConstruction<'_, '_> {
         Ok(())
     }
 
-    fn construct_block_tree(
+    fn build_block_tree(
         &mut self,
         block: IlBlockId,
         dominance: &IlDominance,
@@ -108,17 +108,29 @@ impl SsaConstruction<'_, '_> {
         stack.push((block, current));
 
         while let Some((block, current)) = stack.pop() {
-            let current = self.construct_block(block, current, cancellation)?;
+            let current = self.build_block(block, current, cancellation)?;
+            let children = dominance.children(block);
+            let mut current = Some(current);
 
-            for child in dominance.children(block).iter().rev() {
-                stack.push((*child, current.clone()));
+            for child_index in (0..children.len()).rev() {
+                let child_current = if child_index == 0 {
+                    current
+                        .take()
+                        .expect("renaming state is moved into exactly one child")
+                } else {
+                    current
+                        .as_ref()
+                        .expect("renaming state exists until the final child")
+                        .clone()
+                };
+                stack.push((children[child_index], child_current));
             }
         }
 
         Ok(())
     }
 
-    fn construct_block(
+    fn build_block(
         &mut self,
         block: IlBlockId,
         mut current: BTreeMap<SsaDomain, IlValueId>,
@@ -141,7 +153,7 @@ impl SsaConstruction<'_, '_> {
 
         for statement_index in source_block.operations().start()..source_block.operations().end() {
             cancellation.check()?;
-            self.construct_statement_at(statement_index, &mut current)?;
+            self.build_statement_at(statement_index, &mut current)?;
         }
 
         self.fill_successor_edges(block, &mut current, source_block)?;
@@ -170,9 +182,10 @@ impl SsaConstruction<'_, '_> {
         {
             let edge = source_block.successors().start() + successor_offset;
             let mut arguments = Vec::new();
-            let block_arguments = self.block_arguments[successor.index()].clone();
+            let argument_count = self.block_arguments[successor.index()].len();
 
-            for (domain, _) in block_arguments {
+            for argument_index in 0..argument_count {
+                let domain = self.block_arguments[successor.index()][argument_index].0;
                 let value = match current.get(&domain).copied() {
                     Some(value) => value,
                     None => {

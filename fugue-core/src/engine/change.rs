@@ -7,6 +7,7 @@ use crate::ir::{
 };
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
+pub use crate::types::common::Revision;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChangeCategory {
@@ -83,14 +84,14 @@ impl ChangeSourceFilter {
         Self::default()
     }
 
-    pub fn category(mut self, category: ChangeCategory) -> Self {
+    pub fn with_category(mut self, category: ChangeCategory) -> Self {
         if !self.categories.contains(&category) {
             self.categories.push(category);
         }
         self
     }
 
-    pub fn label(mut self, label: impl Into<SmolStr>) -> Self {
+    pub fn with_label(mut self, label: impl Into<SmolStr>) -> Self {
         let label = label.into();
         if !self.labels.contains(&label) {
             self.labels.push(label);
@@ -163,37 +164,6 @@ impl ChangeProvenance {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[repr(transparent)]
-pub struct Revision(u64);
-
-impl Revision {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn value(&self) -> u64 {
-        self.0
-    }
-
-    pub const fn next(&self) -> Self {
-        Self(self.0 + 1)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionChangeKind {
     Body,
@@ -257,6 +227,27 @@ pub enum ChangeRecord {
         entry: Address,
         coverage: AddressRangeSet,
     },
+    LiftedMaterialised {
+        function: FunctionId,
+        level: IlLevel,
+    },
+    LiftedRemoved {
+        function: FunctionId,
+        level: IlLevel,
+    },
+    ReferenceAdded {
+        from: Address,
+        target: ReferenceTarget,
+        kind: ReferenceKind,
+    },
+    ReferenceRemoved {
+        from: Address,
+        target: ReferenceTarget,
+        kind: ReferenceKind,
+    },
+    ReferencesChanged {
+        coverage: AddressRangeSet,
+    },
     Restored {
         to: Revision,
     },
@@ -277,6 +268,12 @@ pub enum ChangeRecord {
     SpaceCreated {
         space: AddressSpaceId,
     },
+    SwitchAdded {
+        branch: Address,
+    },
+    SwitchRemoved {
+        branch: Address,
+    },
     SymbolAdded {
         address: Address,
         symbol: Symbol,
@@ -284,33 +281,6 @@ pub enum ChangeRecord {
     SymbolRemoved {
         address: Address,
         symbol: Symbol,
-    },
-    ReferenceAdded {
-        from: Address,
-        target: ReferenceTarget,
-        kind: ReferenceKind,
-    },
-    ReferenceRemoved {
-        from: Address,
-        target: ReferenceTarget,
-        kind: ReferenceKind,
-    },
-    ReferencesChanged {
-        coverage: AddressRangeSet,
-    },
-    SwitchAdded {
-        branch: Address,
-    },
-    SwitchRemoved {
-        branch: Address,
-    },
-    LiftedMaterialised {
-        function: FunctionId,
-        level: IlLevel,
-    },
-    LiftedRemoved {
-        function: FunctionId,
-        level: IlLevel,
     },
 }
 
@@ -321,21 +291,21 @@ impl ChangeRecord {
             Self::FunctionAdded { .. } => ChangeKinds::FUNCTION_ADDED,
             Self::FunctionChanged { .. } => ChangeKinds::FUNCTION_CHANGED,
             Self::FunctionRemoved { .. } => ChangeKinds::FUNCTION_REMOVED,
+            Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
+            Self::LiftedRemoved { .. } => ChangeKinds::LIFTED_REMOVED,
+            Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
+            Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
+            Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
             Self::Restored { .. } => ChangeKinds::RESTORED,
             Self::SegmentMapped { .. } => ChangeKinds::SEGMENT_MAPPED,
             Self::SegmentMappingChanged { .. } => ChangeKinds::SEGMENT_MAPPING_CHANGED,
             Self::SegmentMappingCreated { .. } => ChangeKinds::SEGMENT_MAPPING_CREATED,
             Self::SegmentUnmapped { .. } => ChangeKinds::SEGMENT_UNMAPPED,
             Self::SpaceCreated { .. } => ChangeKinds::SPACE_CREATED,
-            Self::SymbolAdded { .. } => ChangeKinds::SYMBOL_ADDED,
-            Self::SymbolRemoved { .. } => ChangeKinds::SYMBOL_REMOVED,
-            Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
-            Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
-            Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
             Self::SwitchAdded { .. } => ChangeKinds::SWITCH_ADDED,
             Self::SwitchRemoved { .. } => ChangeKinds::SWITCH_REMOVED,
-            Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
-            Self::LiftedRemoved { .. } => ChangeKinds::LIFTED_REMOVED,
+            Self::SymbolAdded { .. } => ChangeKinds::SYMBOL_ADDED,
+            Self::SymbolRemoved { .. } => ChangeKinds::SYMBOL_REMOVED,
         }
     }
 
@@ -444,17 +414,6 @@ impl ChangeSet {
         self.kinds.intersects(kinds)
     }
 
-    pub fn records_matching(&self, kinds: ChangeKinds) -> impl Iterator<Item = &ChangeRecord> + '_ {
-        let selected = self.contains(kinds);
-        self.records
-            .iter()
-            .filter(move |record| selected && kinds.intersects(record.kind()))
-    }
-
-    pub fn into_records(self) -> Vec<ChangeRecord> {
-        self.records
-    }
-
     pub fn push(&mut self, record: ChangeRecord) {
         self.kinds |= record.kind();
         self.records.push(record);
@@ -534,12 +493,12 @@ impl ChangeFilter {
     }
 
     pub fn with_category(mut self, category: ChangeCategory) -> Self {
-        self.sources = self.sources.category(category);
+        self.sources = self.sources.with_category(category);
         self
     }
 
     pub fn with_source_label(mut self, label: impl Into<SmolStr>) -> Self {
-        self.sources = self.sources.label(label);
+        self.sources = self.sources.with_label(label);
         self
     }
 
@@ -718,36 +677,6 @@ mod test {
         let mut newer = ChangeSet::with_records(Revision::new(9), [function_record(0x4000)]);
         newer.merge(&merged);
         assert_eq!(newer.revision(), Revision::new(9));
-    }
-
-    #[test]
-    fn test_change_set_records_matching_equals_manual_scan() {
-        let changes = ChangeSet::with_records(
-            Revision::new(1),
-            [
-                function_record(0x1000),
-                bytes_record(0x2000, 0x2fff),
-                function_record(0x3000),
-            ],
-        );
-
-        let matched = changes
-            .records_matching(ChangeKinds::FUNCTIONS)
-            .collect::<Vec<_>>();
-        let manual = changes
-            .records()
-            .iter()
-            .filter(|record| ChangeKinds::FUNCTIONS.intersects(record.kind()))
-            .collect::<Vec<_>>();
-
-        assert_eq!(matched, manual);
-        assert_eq!(matched.len(), 2);
-        assert!(
-            changes
-                .records_matching(ChangeKinds::SYMBOLS)
-                .next()
-                .is_none()
-        );
     }
 
     #[test]

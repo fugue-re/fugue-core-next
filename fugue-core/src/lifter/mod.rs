@@ -6,7 +6,7 @@ use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::runtime::operand;
 pub use fugue_lifter::{
-    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp, Varnode,
+    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp as RawPCodeOp, Varnode,
 };
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
 use thiserror::Error;
@@ -22,8 +22,8 @@ pub use dynamic::{
     resolve_language_with,
 };
 
-mod core;
-pub use core::{Lifter, LifterError};
+mod lift;
+pub use lift::{Lifter, LifterError};
 
 pub mod traits;
 

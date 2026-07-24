@@ -61,7 +61,10 @@ impl OverlayTree {
             .collect::<SmallVec<[_; 4]>>();
 
         for start in overlapping {
-            let mut chunk = self.chunks.remove(&start).unwrap();
+            let mut chunk = self
+                .chunks
+                .remove(&start)
+                .expect("overlapping overlay chunk exists");
             let chunk_end = start + chunk.len();
 
             if chunk_end > write_end {
@@ -90,8 +93,14 @@ impl OverlayTree {
             .next()
             && next_start == chunk_end
         {
-            let next = self.chunks.remove(&next_start).unwrap();
-            let current = self.chunks.get_mut(&addr).unwrap();
+            let next = self
+                .chunks
+                .remove(&next_start)
+                .expect("adjacent overlay chunk exists");
+            let current = self
+                .chunks
+                .get_mut(&addr)
+                .expect("current overlay chunk exists");
             current.data.extend_from_slice(&next.data);
         }
 
@@ -102,8 +111,14 @@ impl OverlayTree {
             .and_then(|(&start, chunk)| (start + chunk.len() == addr).then_some(start));
 
         if let Some(prev_start) = prev_start {
-            let current = self.chunks.remove(&addr).unwrap();
-            let prev = self.chunks.get_mut(&prev_start).unwrap();
+            let current = self
+                .chunks
+                .remove(&addr)
+                .expect("current overlay chunk exists");
+            let prev = self
+                .chunks
+                .get_mut(&prev_start)
+                .expect("adjacent overlay chunk exists");
             prev.data.extend_from_slice(&current.data);
         }
     }

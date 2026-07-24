@@ -1,5 +1,5 @@
 use crate::analysis::AnalysisError;
-use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
+use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::loader::pe::extensions::AnalysisContext;
 use crate::loader::{Loadable, LoadableAnalysers, Pe};
 

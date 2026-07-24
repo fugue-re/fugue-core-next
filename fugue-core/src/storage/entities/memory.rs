@@ -166,7 +166,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         })))
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -385,7 +385,7 @@ mod test {
     }
 
     #[test]
-    fn scan_range_respects_inclusive_and_exclusive_bounds() {
+    fn iter_range_respects_inclusive_and_exclusive_bounds() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         for value in 1..=4 {
@@ -395,7 +395,7 @@ mod test {
         }
 
         let included = storage
-            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()
@@ -403,7 +403,7 @@ mod test {
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()

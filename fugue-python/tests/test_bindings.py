@@ -88,16 +88,16 @@ def test_project_recovers_functions_from_binary():
     assert isinstance(after[0].entry, fugue.Address)
 
 
-def test_project_ensure_ir_error_rolls_back_transaction():
+def test_project_ensure_lifted_error_rolls_back_transaction():
     project = fugue.Project.from_file(LS_ELF)
     project.recover_functions()
 
     for function in project.functions():
         try:
-            project.ensure_ir(function, "pcode")
+            project.ensure_lifted(function, "pcode")
         except fugue.ProjectError:
             assert project.functions()
-            assert not project.has_ir(function, "pcode")
+            assert not project.has_lifted(function, "pcode")
             return
 
     pytest.skip("fixture did not contain a PCode build failure")
@@ -109,21 +109,17 @@ def test_project_ensures_pcode_for_recovered_function():
 
     for function in project.functions():
         try:
-            published = project.ensure_ir(function, "pcode")
+            published = project.ensure_lifted(function, "pcode")
         except fugue.ProjectError:
             continue
 
         assert published
-        assert project.has_ir(function, "pcode")
-        artefact = project.ir_artefact(function, "pcode")
-        assert artefact is not None
-        assert artefact.level == "pcode"
-        assert artefact.retained_bytes > 0
-        assert any(item.level == "pcode" for item in project.ir_artefacts(function))
-        assert project.ir_text(function, "pcode")
-        assert not project.ensure_ir(function, "pcode")
-        reread = project.ir_artefact(function, "pcode")
-        assert reread.content_digest.hex == artefact.content_digest.hex
+        assert project.has_lifted(function, "pcode")
+        assert project.pcode(function) is not None
+        display = project.lifted_display(function, "pcode")
+        assert display
+        assert not project.ensure_lifted(function, "pcode")
+        assert project.lifted_display(function, "pcode") == display
         return
 
     pytest.skip("fixture did not contain a PCode-buildable recovered function")
@@ -135,10 +131,10 @@ def test_project_rejects_unsupported_mlil_levels():
     function = project.functions()[0]
 
     for level in ("mapped_mlil", "mlil"):
-        with pytest.raises(fugue.ProjectError, match="MLIL project build scheduling"):
-            project.ensure_ir(function, level)
-        with pytest.raises(fugue.ProjectError, match="MLIL project build scheduling"):
-            project.ir_text(function, level)
+        with pytest.raises(ValueError, match="invalid IR level"):
+            project.ensure_lifted(function, level)
+        with pytest.raises(ValueError, match="invalid IR level"):
+            project.lifted_display(function, level)
 
 
 def test_attributes_must_be_dicts():

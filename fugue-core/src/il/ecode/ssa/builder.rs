@@ -1,6 +1,6 @@
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlBlockId, IlError, IlGraph, IlHeader, IlIndexRange, IlOpId, IlParentSpan, IlPool,
+    IlBlockId, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlPool,
     IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
@@ -10,7 +10,7 @@ use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug)]
 pub(crate) struct ECodeSsaBuilder {
-    header: IlHeader,
+    metadata: IlMetadata,
     graph: IlGraph,
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
@@ -21,13 +21,13 @@ pub(crate) struct ECodeSsaBuilder {
     operations: Vec<ECodeSsaOp>,
     value_operands: IlPool<IlValueId>,
     memory_domains: Vec<ECodeSsaMemoryDomain>,
-    constants: Vec<u8>,
+    constant_storage: Vec<u8>,
 }
 
 impl ECodeSsaBuilder {
-    pub(crate) fn new(header: IlHeader, graph: IlGraph) -> Self {
+    pub(crate) fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
         Self {
-            header,
+            metadata,
             graph,
             source_spans: Vec::new(),
             parent_spans: Vec::new(),
@@ -38,7 +38,7 @@ impl ECodeSsaBuilder {
             operations: Vec::new(),
             value_operands: IlPool::new(),
             memory_domains: Vec::new(),
-            constants: Vec::new(),
+            constant_storage: Vec::new(),
         }
     }
 
@@ -123,7 +123,7 @@ impl ECodeSsaBuilder {
 
     pub(crate) fn clear_edge_arguments(&mut self) {
         self.edge_arguments.clear();
-        self.edge_argument_values.clear();
+        self.edge_argument_values = IlPool::new();
     }
 
     pub(crate) fn ensure_memory_domain(&mut self, space: AddressSpaceId) -> usize {
@@ -146,19 +146,16 @@ impl ECodeSsaBuilder {
             self.edge_arguments = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }
 
-        let mut body = ECodeSsaIr::new(
-            self.header,
-            self.graph,
-            self.source_spans,
-            self.parent_spans,
-            self.values,
-            self.block_arguments,
-            self.operations,
-            self.value_operands.into_values(),
-            self.memory_domains,
-        )
-        .with_edge_argument_storage(self.edge_arguments, self.edge_argument_values.into_values())
-        .with_constants(self.constants);
+        let mut body = ECodeSsaIr::new(self.metadata, self.graph)
+            .with_spans(self.source_spans, self.parent_spans)
+            .with_values(self.values, self.block_arguments)
+            .with_operations(self.operations, self.value_operands.into_values())
+            .with_memory_domains(self.memory_domains)
+            .with_edge_argument_storage(
+                self.edge_arguments,
+                self.edge_argument_values.into_values(),
+            )
+            .with_constant_storage(self.constant_storage);
 
         body.shrink_to_fit();
 

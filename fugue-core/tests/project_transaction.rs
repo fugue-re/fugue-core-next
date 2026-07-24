@@ -10,27 +10,19 @@ use fugue_core::ir::{
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{Project, ProjectError};
+use fugue_core::storage::TransientStorageProvider;
 use fugue_core::storage::segments::DEFAULT_SPACE_ID;
 use fugue_core::types::AttributeMap;
 use fugue_core::types::attributes::ATTRIBUTE_LOADER_FORMAT;
 
-struct Fixtures;
+mod common;
 
-impl Fixtures {
-    fn binary(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join(name)
-    }
-}
+use common::{one_block_function, writable_address};
 
-fn writable_address(project: &Project) -> Result<Address, Box<dyn std::error::Error>> {
-    project
-        .segments()
-        .iter_views(DEFAULT_SPACE_ID)?
-        .find(|view| view.properties().is_writable())
-        .map(|view| view.start())
-        .ok_or_else(|| io::Error::other("fixture writable segment missing").into())
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
 }
 
 fn cancelled_token() -> CancellationToken {
@@ -39,23 +31,16 @@ fn cancelled_token() -> CancellationToken {
     cancellation
 }
 
-fn incomplete_function(entry: Address, len: usize) -> IncompleteFunction {
-    let mut function = IncompleteFunction::new(entry);
-    function.push_block(
-        IncompleteCodeBlock::try_new(entry, len, Vec::new(), ContextSet::default())
-            .expect("test block length must fit"),
-    );
-
-    function
-}
-
 #[test]
 fn test_loadable_fallback_preserves_caller_attributes() -> Result<(), Box<dyn std::error::Error>> {
     let mut attributes = AttributeMap::new();
     attributes.set_attr("caller.custom", "preserved");
     attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "caller-format");
 
-    let project = Project::from_file_transient_with(Fixtures::binary("ls.elf"), attributes)?;
+    let project = Project::from_file_with_provider_and_attributes::<TransientStorageProvider>(
+        fixture_path("ls.elf"),
+        attributes,
+    )?;
 
     assert_eq!(
         project
@@ -77,11 +62,11 @@ fn test_loadable_fallback_preserves_caller_attributes() -> Result<(), Box<dyn st
 
 #[test]
 fn test_ensure_lifted_rebuilds_deterministic_content() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
-    let entry = writable_address(&project)?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let entry = writable_address(&project, 1)?;
     let function = {
         let mut transaction = project.transaction("test");
-        let function = transaction.add_function(incomplete_function(entry, 1))?;
+        let function = transaction.add_function(one_block_function(entry, 1))?;
         transaction.commit()?;
         function
     };
@@ -121,7 +106,7 @@ fn test_ensure_lifted_rebuilds_deterministic_content() -> Result<(), Box<dyn std
 
 #[test]
 fn test_ensure_lifted_reports_missing_parent_artefact() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let function = FunctionId::default();
 
     let mut transaction = project.transaction("test");
@@ -139,9 +124,9 @@ fn test_ensure_lifted_reports_missing_parent_artefact() -> Result<(), Box<dyn st
 
 #[test]
 fn test_ensure_lifted_cancelled_materialises_nothing() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let function = FunctionId::default();
-    let revision = project.semantic_revision();
+    let revision = project.revision();
 
     for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
         let mut transaction = project.transaction("test");
@@ -152,7 +137,7 @@ fn test_ensure_lifted_cancelled_materialises_nothing() -> Result<(), Box<dyn std
         transaction.rollback()?;
     }
 
-    assert_eq!(project.semantic_revision(), revision);
+    assert_eq!(project.revision(), revision);
     assert!(project.pcode(function)?.is_none());
     assert!(project.ecode(function)?.is_none());
     assert!(project.ecode_ssa(function)?.is_none());
@@ -162,7 +147,7 @@ fn test_ensure_lifted_cancelled_materialises_nothing() -> Result<(), Box<dyn std
 
 #[test]
 fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
         .spaces()
@@ -193,7 +178,7 @@ fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
         .spaces()
@@ -240,7 +225,7 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
 
 #[test]
 fn test_removing_mapping_rollback_restores_placement() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
         .spaces()
@@ -274,7 +259,7 @@ fn test_removing_mapping_rollback_restores_placement() -> Result<(), Box<dyn std
 
 #[test]
 fn test_remapping_mapping_rollback_restores_old_range() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
         .spaces()
@@ -314,7 +299,7 @@ fn test_remapping_mapping_rollback_restores_old_range() -> Result<(), Box<dyn st
 
 #[test]
 fn test_create_space_rollback_removes_space() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
 
     let mut transaction = project.transaction("test");
     let space = transaction.create_space()?;
@@ -333,8 +318,8 @@ fn test_create_space_rollback_removes_space() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn test_write_bytes_rollback_restores_old_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
-    let address = writable_address(&project)?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let address = writable_address(&project, 1)?;
     let mut old = [0u8; 1];
     project.segments().read_bytes_exact(address, &mut old)?;
     let patch = [old[0] ^ 0xff];
@@ -360,7 +345,7 @@ fn test_write_bytes_rollback_restores_old_bytes() -> Result<(), Box<dyn std::err
 
 #[test]
 fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let address = project
         .segments()
         .iter_views(DEFAULT_SPACE_ID)?
@@ -390,7 +375,7 @@ fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::e
 
 #[test]
 fn test_adding_function_preserves_incomplete_metadata() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
     let mut function = IncompleteFunction::new_with(Some("named".into()), entry);
     function.mark_non_returning();
@@ -426,7 +411,7 @@ fn test_adding_function_preserves_incomplete_metadata() -> Result<(), Box<dyn st
 
 #[test]
 fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
     let mut first = IncompleteFunction::new(entry);
@@ -491,7 +476,7 @@ fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error
 
 #[test]
 fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
     let mut first = IncompleteFunction::new(entry);
@@ -538,7 +523,7 @@ fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
     let mut function = IncompleteFunction::new(entry);
@@ -561,7 +546,7 @@ fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
     let mut first = IncompleteFunction::new(entry);
@@ -607,21 +592,21 @@ fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_symbol_rollback_removes_new_symbol() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let selector = SymbolTableSelector::new(253);
     let index = SymbolIndex::new(selector, 0);
     let entry = Address::from(0x4010u64);
     let symbol = SymbolEntry::new(entry, "rollback_new_symbol", SymbolProperties::FUNCTION);
 
     let mut transaction = project.transaction("test");
-    let rolled_back_id = transaction.insert_symbol(index, symbol.clone());
+    let rolled_back_id = transaction.add_symbol(index, symbol.clone())?;
     transaction.rollback()?;
 
     assert!(project.symbols().get_by_index(index).is_none());
     assert!(project.symbols().get_by_address(entry).next().is_none());
 
     let mut transaction = project.transaction("test");
-    let committed_id = transaction.insert_symbol(index, symbol);
+    let committed_id = transaction.add_symbol(index, symbol)?;
     transaction.commit()?;
 
     assert_eq!(committed_id, rolled_back_id);
@@ -631,23 +616,23 @@ fn test_symbol_rollback_removes_new_symbol() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn test_symbol_rollback_restores_replaced_index() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let index = SymbolIndex::new(SymbolTableSelector::new(253), 1);
     let old_entry = Address::from(0x4020u64);
     let new_entry = Address::from(0x4030u64);
 
     let mut transaction = project.transaction("test");
-    let old_id = transaction.insert_symbol(
+    let old_id = transaction.add_symbol(
         index,
         SymbolEntry::new(old_entry, "rollback_old_symbol", SymbolProperties::FUNCTION),
-    );
+    )?;
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
-    transaction.insert_symbol(
+    transaction.add_symbol(
         index,
         SymbolEntry::new(new_entry, "rollback_new_symbol", SymbolProperties::DATA),
-    );
+    )?;
     transaction.rollback()?;
 
     let (restored_id, restored) = project
@@ -664,19 +649,19 @@ fn test_symbol_rollback_restores_replaced_index() -> Result<(), Box<dyn std::err
 
 #[test]
 fn test_symbol_rollback_restores_removed_symbol() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(Fixtures::binary("ls.elf"))?;
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let index = SymbolIndex::new(SymbolTableSelector::new(253), 2);
     let entry = Address::from(0x4040u64);
 
     let mut transaction = project.transaction("test");
-    let id = transaction.insert_symbol(
+    let id = transaction.add_symbol(
         index,
         SymbolEntry::new(entry, "rollback_removed_symbol", SymbolProperties::FUNCTION),
-    );
+    )?;
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
-    assert!(transaction.remove_symbol_by_index(index));
+    assert!(transaction.remove_symbol_by_index(index)?);
     transaction.rollback()?;
 
     let (restored_id, restored) = project

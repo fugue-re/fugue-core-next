@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io;
 use std::mem::ManuallyDrop;
@@ -6,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
+use bytes::Bytes;
 use thiserror::Error;
 
 use crate::loader::Loadable;
@@ -70,14 +72,14 @@ pub enum EntityStorageError {
     InvalidKeyFormat,
     #[error("invalid key size")]
     InvalidKeySize,
-    #[error("write-back worker poisoned: {0}")]
-    WriteBackPoisoned(String),
-    #[error("failed to load project data from `{0}`: {1}")]
-    ProjectData(PathBuf, io::ErrorKind),
     #[error("no project path specified")]
     NoProjectPath,
+    #[error("failed to load project data from `{0}`: {1}")]
+    ProjectData(PathBuf, io::ErrorKind),
     #[error(transparent)]
     Unsupported(anyhow::Error),
+    #[error("write-back worker poisoned: {0}")]
+    WriteBackPoisoned(String),
 }
 
 impl EntityStorageError {
@@ -445,7 +447,7 @@ pub trait EntityStorageProvider: Send + Sync {
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -469,6 +471,79 @@ pub trait EntityStorageProvider: Send + Sync {
     }
 }
 
+enum BufferedEntityWrite {
+    Insert(Bytes, Bytes),
+    Remove(Bytes),
+}
+
+pub struct BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    storage: &'a S,
+    writes: RefCell<Vec<BufferedEntityWrite>>,
+}
+
+impl<'a, S> BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    pub fn new(storage: &'a S) -> Self {
+        Self {
+            storage,
+            writes: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<'a, S> EntityStorageTransactionalReader<'a> for BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.storage.get(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.storage.contains(key)
+    }
+}
+
+impl<'a, S> EntityStorageTransactionalWriter<'a> for BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.writes.borrow_mut().push(BufferedEntityWrite::Insert(
+            Bytes::copy_from_slice(key),
+            value.into_bytes(),
+        ));
+        Ok(())
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.writes
+            .borrow_mut()
+            .push(BufferedEntityWrite::Remove(Bytes::copy_from_slice(key)));
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
+        for write in self.writes.into_inner() {
+            match write {
+                BufferedEntityWrite::Insert(key, value) => {
+                    self.storage
+                        .insert(key.as_ref(), BytesOrSlice::from(value))?;
+                }
+                BufferedEntityWrite::Remove(key) => {
+                    self.storage.remove(key.as_ref())?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub trait ErasedEntityStorageProvider: Send + Sync {
     fn erased_get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn erased_get_as<'a>(
@@ -488,7 +563,7 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         &self,
         prefix: &[u8],
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-    fn erased_scan_range(
+    fn erased_iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -551,12 +626,12 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         self.erased_iter_prefix(prefix)
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        self.erased_scan_range(prefix, start)
+        self.erased_iter_range(prefix, start)
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -633,12 +708,12 @@ where
         self.iter_prefix(prefix)
     }
 
-    fn erased_scan_range(
+    fn erased_iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        self.scan_range(prefix, start)
+        self.iter_range(prefix, start)
     }
 
     fn erased_iter_prefix_as<'a>(
@@ -796,7 +871,7 @@ impl EntityStorage {
         })
     }
 
-    pub fn scan_range<K: EntityKey, E: Entity>(
+    pub fn iter_range<K: EntityKey, E: Entity>(
         &self,
         start: Bound<&K>,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
@@ -812,7 +887,7 @@ impl EntityStorage {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.backing.scan_range(&pfx, start).map(|iter| {
+        self.backing.iter_range(&pfx, start).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
                     let key = schema::extract_key::<K, E>(key)

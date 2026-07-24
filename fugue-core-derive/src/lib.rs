@@ -1,9 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{
-    DeriveInput, Ident, ImplItem, ItemImpl, LitBool, LitStr, Token, Type, parse_macro_input,
-};
+use syn::{DeriveInput, ImplItem, ItemImpl, LitBool, LitStr, Token, Type, parse_macro_input};
 
 struct ProviderAttr {
     concrete: Option<Type>,
@@ -74,10 +72,10 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
         ::inventory::submit! {
             ::fugue_core::storage::segments::provider::SegmentStorageProviderEntry::new_with::<#ty>(
                 #tag,
-                |range: ::std::ops::RangeInclusive<::fugue_core::ir::Address>, attributes: &mut ::fugue_core::types::AttributeMap| ->
+                |id: ::fugue_core::storage::segments::provider::SegmentStorageProviderId, range: ::std::ops::RangeInclusive<::fugue_core::ir::Address>, attributes: &mut ::fugue_core::types::AttributeMap| ->
                     ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
 
-                    let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromSegmentRange>::from_segment_range(range, attributes)?;
+                    let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromSegmentRange>::from_segment_range(id, range, attributes)?;
                     Ok(::std::boxed::Box::new(provider))
                 },
                 #from_storage_fn,
@@ -195,16 +193,11 @@ pub fn derive_segment_storage_provider(input: TokenStream) -> TokenStream {
 
 /// Attribute macro for declaring an extension point registration ergonomically.
 ///
-/// Applied to an `impl` block of an extension descriptor type, it maps each
-/// associated `const` and `fn` to a field of the descriptor and emits the
-/// `registry::submit!` registration automatically — replacing the boilerplate of
-/// free functions plus a positional constructor call.
+/// Applied to an `impl` block of an extension descriptor type, it passes each
+/// associated `const` and `fn` to the descriptor constructor and emits the
+/// `registry::submit!` registration automatically.
 ///
-/// - A `const` (e.g. `const NAME: &str = "...";`) maps to the field whose name is
-///   the const ident **lowercased** (`NAME` -> `name`); its value is used directly.
-/// - A `fn` maps to the field whose name is the fn ident; the function pointer is
-///   used as the value. Use `#[provides(field_name)]` on the fn to map it to a
-///   differently named field.
+/// Constants and functions are passed to `new` in declaration order.
 ///
 /// # Example
 ///
@@ -231,25 +224,24 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = &item_impl.self_ty;
 
     let mut free_fns = Vec::new();
-    let mut field_idents = Vec::new();
-    let mut field_values = Vec::new();
+    let mut constructor_values = Vec::new();
 
     for item in &item_impl.items {
         match item {
             ImplItem::Const(c) => {
-                let field = Ident::new(&c.ident.to_string().to_lowercase(), c.ident.span());
                 let value = &c.expr;
-                field_idents.push(field);
-                field_values.push(quote! { #value });
+                constructor_values.push(quote! { #value });
             }
             ImplItem::Fn(f) => {
-                let mut field = f.sig.ident.clone();
                 let mut func = f.clone();
 
                 let mut kept_attrs = Vec::with_capacity(func.attrs.len());
                 for attr in func.attrs.drain(..) {
                     if attr.path().is_ident("provides") {
-                        field = attr.parse_args::<Ident>()?;
+                        return Err(syn::Error::new_spanned(
+                            attr,
+                            "`#[provides]` is not supported by constructor-based extensions",
+                        ));
                     } else {
                         kept_attrs.push(attr);
                     }
@@ -257,8 +249,7 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
                 func.attrs = kept_attrs;
 
                 let fn_ident = &func.sig.ident;
-                field_idents.push(field);
-                field_values.push(quote! { #fn_ident });
+                constructor_values.push(quote! { #fn_ident });
                 free_fns.push(func);
             }
             other => {
@@ -275,9 +266,7 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
             #(#free_fns)*
 
             ::fugue_core::registry::submit! {
-                #self_ty {
-                    #(#field_idents: #field_values),*
-                }
+                #self_ty::new(#(#constructor_values),*)
             }
         };
     })
