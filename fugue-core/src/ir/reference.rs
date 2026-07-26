@@ -7,14 +7,14 @@ use bytes::{Buf, BufMut, BytesMut};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::cfg::FlowKind;
-use crate::ir::revisioned_index::RevisionedTwoWayIndex;
-use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef};
+use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityId, EntityKey, EntityKeyId, EntityStorageError, ProjectEntity, WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, ProjectEntity,
+    WriteBackWorker,
 };
 use crate::types::common::{archived_bitflags, cursor_bound, cursor_bound_or_minimum};
 
@@ -442,7 +442,9 @@ impl Entity for ReferenceRecord {
 
 #[derive(Clone)]
 pub struct ReferenceIndex {
-    index: RevisionedTwoWayIndex<ReferenceKey, InverseReferenceKey, ReferenceRecord>,
+    forward: EntityCache<ReferenceKey, ReferenceRecord>,
+    inverse: EntityCache<InverseReferenceKey, ReferenceRecord>,
+    storage: EntityStorage,
 }
 
 impl ReferenceIndex {
@@ -452,23 +454,24 @@ impl ReferenceIndex {
         storage: EntityStorage,
         worker: Option<Arc<WriteBackWorker>>,
     ) -> Result<Self, EntityStorageError> {
+        let forward =
+            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
+        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
+
         Ok(Self {
-            index: RevisionedTwoWayIndex::new(
-                storage,
-                worker,
-                Self::CACHE_BYTES,
-                ProjectEntity::ReferenceIndex,
-            )?,
+            forward,
+            inverse,
+            storage,
         })
     }
 
     pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
         let record = ReferenceRecord::of(reference);
-        self.index.forward().try_put(
+        self.forward.try_put(
             ReferenceKey::new(reference.from(), reference.target()),
             record,
         )?;
-        self.index.inverse().try_put(
+        self.inverse.try_put(
             InverseReferenceKey::new(reference.target(), reference.from()),
             record,
         )?;
@@ -481,11 +484,8 @@ impl ReferenceIndex {
         from: Address,
         target: ReferenceTarget,
     ) -> Result<(), EntityStorageError> {
-        self.index
-            .forward()
-            .try_remove(&ReferenceKey::new(from, target))?;
-        self.index
-            .inverse()
+        self.forward.try_remove(&ReferenceKey::new(from, target))?;
+        self.inverse
             .try_remove(&InverseReferenceKey::new(target, from))
     }
 
@@ -495,7 +495,7 @@ impl ReferenceIndex {
         target: ReferenceTarget,
     ) -> Result<Option<Reference>, EntityStorageError> {
         let key = ReferenceKey::new(from, target);
-        let Some(cached) = self.index.forward().try_get(&key)? else {
+        let Some(cached) = self.forward.try_get(&key)? else {
             return Ok(None);
         };
         Ok(Some(Self::reference_from_record(
@@ -515,8 +515,7 @@ impl ReferenceIndex {
         let start = cursor_bound_or_minimum(after, ReferenceKey::minimum_for(from));
 
         Ok(self
-            .index
-            .forward()
+            .forward
             .try_iter_range(start.as_ref())?
             .take_while(move |result| result.as_ref().map_or(true, |(key, _)| key.from() == from))
             .map(move |result| {
@@ -536,8 +535,7 @@ impl ReferenceIndex {
         let start = cursor_bound_or_minimum(after, InverseReferenceKey::minimum_for(target));
 
         Ok(self
-            .index
-            .inverse()
+            .inverse
             .try_iter_range(start.as_ref())?
             .take_while(move |result| {
                 result
@@ -557,12 +555,22 @@ impl ReferenceIndex {
         blocks: &CodeBlockTable,
         revision: u64,
     ) -> Result<(), EntityStorageError> {
-        self.index
-            .ensure_current(revision, || self.rebuild(functions, blocks))
+        let header = self
+            .storage
+            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::ReferenceIndex)?;
+        if header.is_some_and(|header| header.revision() == revision) {
+            return Ok(());
+        }
+
+        self.rebuild(functions, blocks)?;
+        self.forward.flush()?;
+        self.inverse.flush()?;
+        self.mark_current(revision)
     }
 
     pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
-        self.index.mark_current(revision)
+        self.storage
+            .insert(&ProjectEntity::ReferenceIndex, &IndexHeader::new(revision))
     }
 
     fn rebuild<'a>(
@@ -591,8 +599,7 @@ impl ReferenceIndex {
         loop {
             let start = cursor_bound(cursor.as_ref());
             let batch = self
-                .index
-                .forward()
+                .forward
                 .try_iter_batch(start)?
                 .into_iter()
                 .map(|(key, cached)| (key, cached.origin()))
@@ -692,11 +699,7 @@ impl ReferenceIndex {
     ) -> Result<(), EntityStorageError> {
         let end = range.end_address();
         let start = ReferenceKey::minimum_for(range.start_address());
-        for result in self
-            .index
-            .forward()
-            .try_iter_range(Bound::Included(&start))?
-        {
+        for result in self.forward.try_iter_range(Bound::Included(&start))? {
             let (key, cached) = result?;
             if key.from() > end {
                 break;

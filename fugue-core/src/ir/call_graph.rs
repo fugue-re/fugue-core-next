@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 
-use crate::ir::revisioned_index::RevisionedTwoWayIndex;
-use crate::ir::{Address, CodeBlockTable, Function, FunctionRef};
+use crate::ir::{Address, CodeBlockTable, Function, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_CALL_GRAPH_EDGE_ID, ENTITY_KEY_CALL_GRAPH_FORWARD_ID, ENTITY_KEY_CALL_GRAPH_INVERSE_ID,
 };
 use crate::storage::entities::{
-    CachedRef, Entity, EntityId, EntityIterator, EntityKey, EntityKeyId, EntityStorageError,
-    ProjectEntity, WriteBackWorker,
+    CachedRef, Entity, EntityCache, EntityId, EntityIterator, EntityKey, EntityKeyId,
+    EntityStorageError, ProjectEntity, WriteBackWorker,
 };
 use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
 
@@ -115,7 +114,9 @@ impl Entity for CallGraphEdgeRecord {
 
 #[derive(Clone)]
 pub struct CallGraphIndex {
-    index: RevisionedTwoWayIndex<CallGraphEdgeKey, InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
+    forward: EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
+    inverse: EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
+    storage: EntityStorage,
 }
 
 impl CallGraphIndex {
@@ -125,13 +126,14 @@ impl CallGraphIndex {
         storage: EntityStorage,
         worker: Option<Arc<WriteBackWorker>>,
     ) -> Result<Self, EntityStorageError> {
+        let forward =
+            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
+        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
+
         Ok(Self {
-            index: RevisionedTwoWayIndex::new(
-                storage,
-                worker,
-                Self::CACHE_BYTES,
-                ProjectEntity::CallGraphIndex,
-            )?,
+            forward,
+            inverse,
+            storage,
         })
     }
 
@@ -170,12 +172,22 @@ impl CallGraphIndex {
         blocks: &CodeBlockTable,
         revision: u64,
     ) -> Result<(), EntityStorageError> {
-        self.index
-            .ensure_current(revision, || self.rebuild(functions, blocks))
+        let header = self
+            .storage
+            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::CallGraphIndex)?;
+        if header.is_some_and(|header| header.revision() == revision) {
+            return Ok(());
+        }
+
+        self.rebuild(functions, blocks)?;
+        self.forward.flush()?;
+        self.inverse.flush()?;
+        self.mark_current(revision)
     }
 
     pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
-        self.index.mark_current(revision)
+        self.storage
+            .insert(&ProjectEntity::CallGraphIndex, &IndexHeader::new(revision))
     }
 
     pub(crate) fn callees(
@@ -263,15 +275,14 @@ impl CallGraphIndex {
     }
 
     fn clear(&self) -> Result<(), EntityStorageError> {
-        self.index.forward().try_clear()?;
-        self.index.inverse().try_clear()
+        self.forward.try_clear()?;
+        self.inverse.try_clear()
     }
 
     fn insert_edge(&self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
-        self.index
-            .forward()
+        self.forward
             .try_put(CallGraphEdgeKey::new(caller, callee), CallGraphEdgeRecord)?;
-        self.index.inverse().try_put(
+        self.inverse.try_put(
             InverseCallGraphEdgeKey::new(callee, caller),
             CallGraphEdgeRecord,
         )?;
@@ -280,11 +291,9 @@ impl CallGraphIndex {
     }
 
     fn remove_edge(&self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
-        self.index
-            .forward()
+        self.forward
             .try_remove(&CallGraphEdgeKey::new(caller, callee))?;
-        self.index
-            .inverse()
+        self.inverse
             .try_remove(&InverseCallGraphEdgeKey::new(callee, caller))
     }
 
@@ -295,7 +304,7 @@ impl CallGraphIndex {
         EntityIterator<'_, CallGraphEdgeKey, CachedRef<'_, CallGraphEdgeRecord>>,
         EntityStorageError,
     > {
-        self.index.forward().try_iter_range(start)
+        self.forward.try_iter_range(start)
     }
 
     fn inverse_range(
@@ -305,7 +314,7 @@ impl CallGraphIndex {
         EntityIterator<'_, InverseCallGraphEdgeKey, CachedRef<'_, CallGraphEdgeRecord>>,
         EntityStorageError,
     > {
-        self.index.inverse().try_iter_range(start)
+        self.inverse.try_iter_range(start)
     }
 }
 

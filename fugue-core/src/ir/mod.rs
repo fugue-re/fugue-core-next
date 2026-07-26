@@ -48,7 +48,6 @@ pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
 };
-mod revisioned_index;
 
 pub(crate) mod segment;
 pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
