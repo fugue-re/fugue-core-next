@@ -46,8 +46,25 @@ impl IlIndexRange {
         self.start() <= index && index < self.end()
     }
 
+    pub(crate) fn checked_slice<'a, T>(&self, values: &'a [T]) -> Result<&'a [T], IlError> {
+        self.verify_bounds(values.len())?;
+        Ok(self.slice(values))
+    }
+
     pub fn slice<'a, T>(&self, values: &'a [T]) -> &'a [T] {
         &values[self.start()..self.end()]
+    }
+
+    pub(crate) fn verify_bounds(&self, len: usize) -> Result<(), IlError> {
+        if self.start() > self.end() {
+            return Err(IlError::reversed_range(self.start, self.end));
+        }
+
+        if self.end() > len {
+            return Err(IlError::range_out_of_bounds(self.end, len));
+        }
+
+        Ok(())
     }
 }
 
@@ -75,9 +92,90 @@ impl<T> IlPool<T> {
     pub(crate) fn into_values(self) -> Vec<T> {
         self.values
     }
+}
 
-    pub(crate) fn clear(&mut self) {
-        self.values.clear();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IlCsr<T> {
+    offsets: Vec<u32>,
+    values: Vec<T>,
+}
+
+impl<T> Default for IlCsr<T> {
+    fn default() -> Self {
+        Self {
+            offsets: vec![0],
+            values: Vec::new(),
+        }
+    }
+}
+
+impl<T> IlCsr<T> {
+    pub(crate) fn from_rows<R, I>(rows: R) -> Self
+    where
+        R: IntoIterator<Item = I>,
+        I: IntoIterator<Item = T>,
+    {
+        let mut offsets = vec![0];
+        let mut values = Vec::new();
+
+        for row in rows {
+            values.extend(row);
+            offsets.push(u32::try_from(values.len()).expect("CSR entry count fits u32"));
+        }
+
+        Self { offsets, values }
+    }
+
+    pub(crate) fn row(&self, index: usize) -> &[T] {
+        let Some(start) = self.offsets.get(index).copied() else {
+            return &[];
+        };
+        let end = self.offsets.get(index + 1).copied().unwrap_or(start);
+
+        &self.values[start as usize..end as usize]
+    }
+}
+
+impl<T: Copy> IlCsr<T> {
+    pub(crate) fn from_entries<I>(row_count: usize, entries: I) -> Self
+    where
+        I: Clone + Iterator<Item = (usize, T)>,
+    {
+        let offset_count = row_count.checked_add(1).expect("CSR row count fits usize");
+        let mut offsets = vec![0u32; offset_count];
+
+        let Some((_, fill)) = entries.clone().next() else {
+            return Self {
+                offsets,
+                values: Vec::new(),
+            };
+        };
+
+        for (row, _) in entries.clone() {
+            let offset = row.checked_add(1).expect("CSR row index fits usize");
+            let count = offsets
+                .get_mut(offset)
+                .expect("CSR entry row is within the row count");
+            *count = count.checked_add(1).expect("CSR row length fits u32");
+        }
+
+        for index in 1..offsets.len() {
+            offsets[index] = offsets[index]
+                .checked_add(offsets[index - 1])
+                .expect("CSR entry count fits u32");
+        }
+
+        let mut cursor = offsets.clone();
+        let value_count = offsets.last().copied().unwrap_or(0) as usize;
+        let mut values = vec![fill; value_count];
+
+        for (row, value) in entries {
+            let index = cursor[row] as usize;
+            values[index] = value;
+            cursor[row] = cursor[row].checked_add(1).expect("CSR row cursor fits u32");
+        }
+
+        Self { offsets, values }
     }
 }
 
@@ -98,5 +196,35 @@ mod test {
             IlIndexRange::new(3, 2),
             Err(IlError::ReversedRange { .. })
         ));
+    }
+
+    #[test]
+    fn range_verifier_rejects_out_of_bounds_end() {
+        let range = IlIndexRange::new(0, 2).unwrap();
+
+        assert!(matches!(
+            range.verify_bounds(1),
+            Err(IlError::RangeOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn csr_preserves_rows_and_entry_order() {
+        let csr = IlCsr::from_entries(4, [(2, 4), (0, 1), (2, 5), (0, 2)].into_iter());
+
+        assert_eq!(csr.row(0), &[1, 2]);
+        assert!(csr.row(1).is_empty());
+        assert_eq!(csr.row(2), &[4, 5]);
+        assert!(csr.row(3).is_empty());
+        assert!(csr.row(4).is_empty());
+    }
+
+    #[test]
+    fn csr_builds_from_grouped_rows() {
+        let csr = IlCsr::from_rows([vec![1, 2], Vec::new(), vec![3]]);
+
+        assert_eq!(csr.row(0), &[1, 2]);
+        assert!(csr.row(1).is_empty());
+        assert_eq!(csr.row(2), &[3]);
     }
 }

@@ -56,16 +56,16 @@ impl IlSourceSpan {
             && pcode_index - self.first_pcode_index < self.pcode_count
     }
 
-    pub const fn contains_destination(&self, node: u32) -> bool {
-        self.destination.start() <= node as usize && (node as usize) < self.destination.end()
+    pub const fn contains_destination(&self, node: usize) -> bool {
+        self.destination.start() <= node && node < self.destination.end()
     }
 
-    pub fn find(spans: &[Self], node: u32) -> Option<Self> {
+    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
         spans
             .binary_search_by(|span| {
                 if span.contains_destination(node) {
                     Ordering::Equal
-                } else if node < span.destination().start() as u32 {
+                } else if node < span.destination().start() {
                     Ordering::Greater
                 } else {
                     Ordering::Less
@@ -124,20 +124,20 @@ impl IlParentSpan {
         self.source
     }
 
-    pub const fn contains_destination(&self, node: u32) -> bool {
-        self.destination.start() <= node as usize && (node as usize) < self.destination.end()
+    pub const fn contains_destination(&self, node: usize) -> bool {
+        self.destination.start() <= node && node < self.destination.end()
     }
 
-    pub const fn contains_source(&self, node: u32) -> bool {
-        self.source.start() <= node as usize && (node as usize) < self.source.end()
+    pub const fn contains_source(&self, node: usize) -> bool {
+        self.source.start() <= node && node < self.source.end()
     }
 
-    pub fn find(spans: &[Self], node: u32) -> Option<Self> {
+    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
         spans
             .binary_search_by(|span| {
                 if span.contains_destination(node) {
                     Ordering::Equal
-                } else if node < span.destination().start() as u32 {
+                } else if node < span.destination().start() {
                     Ordering::Greater
                 } else {
                     Ordering::Less
@@ -147,7 +147,7 @@ impl IlParentSpan {
             .map(|index| spans[index])
     }
 
-    pub fn find_all(spans: &[Self], node: u32) -> impl Iterator<Item = Self> + '_ {
+    pub fn find_all(spans: &[Self], node: usize) -> impl Iterator<Item = Self> + '_ {
         spans
             .iter()
             .copied()

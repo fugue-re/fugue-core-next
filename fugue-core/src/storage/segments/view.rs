@@ -19,10 +19,10 @@ pub struct SegmentMappingView<'a> {
 }
 
 impl<'a> SegmentMappingView<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
-        submap: &'a SegmentSubMapping,
+        submap: &SegmentSubMapping,
     ) -> Self {
         Self {
             mapping,
@@ -34,7 +34,7 @@ impl<'a> SegmentMappingView<'a> {
         }
     }
 
-    pub(super) fn from_parts(
+    pub(crate) fn from_parts(
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
         mapping_ref: SegmentMappingRef,
@@ -160,6 +160,10 @@ impl<'a> SegmentMappingView<'a> {
             .read_bytes(phys_offset, buf_slice)?;
 
         Ok(read_size)
+    }
+
+    pub fn mapping(&self) -> &'a SegmentMapping {
+        self.mapping
     }
 
     pub fn mapping_ref(&self) -> SegmentMappingRef {

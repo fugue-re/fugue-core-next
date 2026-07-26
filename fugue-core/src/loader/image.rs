@@ -36,7 +36,7 @@ impl<'a> ImageSegmentChunk<'a> {
         ImageSegmentChunk::Patch(patch)
     }
 
-    fn len(&self) -> usize {
+    fn size(&self) -> usize {
         match self {
             ImageSegmentChunk::Data(data) => data.len(),
             ImageSegmentChunk::Patch(patch) => patch.len(),
@@ -653,7 +653,7 @@ impl<'a> ImageSegment<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageSegmentContents<'a> {
     address: RawAddress,
-    len: u64,
+    size: u64,
     chunks: BTreeMap<usize, ImageSegmentChunk<'a>>,
     function_hints: BTreeSet<RawAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
@@ -668,13 +668,13 @@ impl<'a> ImageSegmentContents<'a> {
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> Self {
         let data = bytes.into();
-        let len = data.len() as u64;
+        let size = data.len() as u64;
         Self::from_data(
             ImageBankHandle::default(),
             address.into(),
             endian,
             data,
-            len,
+            size,
         )
     }
 
@@ -682,14 +682,14 @@ impl<'a> ImageSegmentContents<'a> {
         address: impl Into<RawAddress>,
         endian: Endian,
         bytes: impl Into<Cow<'a, [u8]>>,
-        len: u64,
+        size: u64,
     ) -> Self {
         Self::from_data(
             ImageBankHandle::default(),
             address.into(),
             endian,
             bytes.into(),
-            len,
+            size,
         )
     }
 
@@ -700,8 +700,8 @@ impl<'a> ImageSegmentContents<'a> {
         bytes: impl Into<Cow<'a, [u8]>>,
     ) -> Self {
         let data = bytes.into();
-        let len = data.len() as u64;
-        Self::from_data(bank, address.into(), endian, data, len)
+        let size = data.len() as u64;
+        Self::from_data(bank, address.into(), endian, data, size)
     }
 
     pub fn new_sparse_in_bank(
@@ -709,9 +709,9 @@ impl<'a> ImageSegmentContents<'a> {
         address: impl Into<RawAddress>,
         endian: Endian,
         bytes: impl Into<Cow<'a, [u8]>>,
-        len: u64,
+        size: u64,
     ) -> Self {
-        Self::from_data(bank, address.into(), endian, bytes.into(), len)
+        Self::from_data(bank, address.into(), endian, bytes.into(), size)
     }
 
     fn from_data(
@@ -719,7 +719,7 @@ impl<'a> ImageSegmentContents<'a> {
         address: RawAddress,
         endian: Endian,
         data: Cow<'a, [u8]>,
-        len: u64,
+        size: u64,
     ) -> Self {
         let mut chunks = BTreeMap::new();
         if !data.is_empty() {
@@ -727,7 +727,7 @@ impl<'a> ImageSegmentContents<'a> {
         }
         Self {
             address,
-            len,
+            size,
             chunks,
             function_hints: BTreeSet::new(),
             mapping_hints: BTreeMap::new(),
@@ -788,8 +788,8 @@ impl<'a> ImageSegmentContents<'a> {
         std::mem::take(&mut self.mapping_hints)
     }
 
-    pub fn len(&self) -> u64 {
-        self.len
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
     pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
@@ -797,7 +797,7 @@ impl<'a> ImageSegmentContents<'a> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.size == 0
     }
 
     pub fn endian(&self) -> Endian {
@@ -806,11 +806,11 @@ impl<'a> ImageSegmentContents<'a> {
 
     pub fn offset_of(&self, address: impl Into<RawAddress>) -> Option<u64> {
         let delta = address.into().checked_offset_from(self.address)?;
-        (delta < self.len).then_some(delta)
+        (delta < self.size).then_some(delta)
     }
 
     pub fn read_value<T: ByteCast>(&self, offset: u64) -> Option<T> {
-        if offset.checked_add(T::SIZEOF as u64)? > self.len {
+        if offset.checked_add(T::SIZEOF as u64)? > self.size {
             return None;
         }
         let offset = usize::try_from(offset).ok()?;
@@ -831,7 +831,7 @@ impl<'a> ImageSegmentContents<'a> {
     }
 
     pub fn write_value<T: ByteCast>(&mut self, offset: u64, value: T) -> Option<()> {
-        if offset.checked_add(T::SIZEOF as u64)? > self.len {
+        if offset.checked_add(T::SIZEOF as u64)? > self.size {
             return None;
         }
         let offset = usize::try_from(offset).ok()?;
@@ -860,7 +860,7 @@ impl<'a> ImageSegmentContents<'a> {
             .unwrap_or(offset);
 
         for (&start, chunk) in self.chunks.range(lower..end) {
-            let chunk_end = start + chunk.len();
+            let chunk_end = start + chunk.size();
             if chunk_end <= offset {
                 continue;
             }
@@ -886,14 +886,17 @@ impl<'a> ImageSegmentContents<'a> {
         let overlapping = self
             .chunks
             .range(lower..end)
-            .filter(|(start, chunk)| **start + chunk.len() > offset)
+            .filter(|(start, chunk)| **start + chunk.size() > offset)
             .map(|(&start, _)| start)
             .collect::<SmallVec<[usize; 4]>>();
 
         let mut remainders = SmallVec::<[(usize, ImageSegmentChunk<'a>); 2]>::new();
         for start in overlapping {
-            let chunk = self.chunks.remove(&start).unwrap();
-            let chunk_end = start + chunk.len();
+            let chunk = self
+                .chunks
+                .remove(&start)
+                .expect("overlapping image chunk exists");
+            let chunk_end = start + chunk.size();
             match (start < offset, chunk_end > end) {
                 (true, true) => {
                     let (head, tail) = chunk.split(offset - start, end - start);

@@ -1,12 +1,9 @@
-use std::num::NonZeroU32;
-
-use fugue_lifter::runtime::language::Language;
-use fugue_lifter::{Op, Varnode};
-
-use crate::il::common::{IlError, IlIndexRange, IlOpId};
+use crate::il::common::{IlIndexRange, IlOpId, il_id};
 use crate::il::pcode::PCodeError;
-use crate::ir::Address;
+use crate::ir::{Address, Location};
+use crate::lifter::{Language, Op, Varnode};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::common::archived_bitflags;
 
 #[derive(
     Debug,
@@ -35,42 +32,7 @@ impl LifterSpaceHandle {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
-#[repr(transparent)]
-pub struct PCodeLocationId(NonZeroU32);
-
-impl PCodeLocationId {
-    pub fn try_from_index(index: usize) -> Result<Self, IlError> {
-        let value = index
-            .checked_add(1)
-            .and_then(|value| u32::try_from(value).ok())
-            .and_then(NonZeroU32::new)
-            .ok_or(IlError::id_exhausted("PCode location"))?;
-
-        Ok(Self(value))
-    }
-
-    pub const fn index(&self) -> usize {
-        self.0.get() as usize - 1
-    }
-
-    pub const fn value(&self) -> u32 {
-        self.0.get()
-    }
-}
+il_id!(PCodeLocationId, "PCode location");
 
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -78,7 +40,7 @@ impl PCodeLocationId {
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct PCodeLocation {
     offset: u64,
-    width: u16,
+    size: u16,
     properties: PCodeLocationProperties,
     lifter_space: LifterSpaceHandle,
 }
@@ -92,56 +54,22 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct ArchivedPCodeLocationProperties(u16);
-
-unsafe impl rkyv::Portable for ArchivedPCodeLocationProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedPCodeLocationProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedPCodeLocationProperties
-where
-    u16: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { u16::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for PCodeLocationProperties {
-    type Archived = ArchivedPCodeLocationProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedPCodeLocationProperties(self.bits()));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for PCodeLocationProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<PCodeLocationProperties, D>
-    for ArchivedPCodeLocationProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<PCodeLocationProperties, D::Error> {
-        Ok(PCodeLocationProperties::from_bits_retain(self.0))
-    }
-}
+archived_bitflags!(
+    PCodeLocationProperties,
+    ArchivedPCodeLocationProperties,
+    u16
+);
 
 impl PCodeLocation {
     pub(crate) const fn new(
         lifter_space: LifterSpaceHandle,
         offset: u64,
-        width: u16,
+        size: u16,
         properties: PCodeLocationProperties,
     ) -> Self {
         Self {
             offset,
-            width,
+            size,
             properties,
             lifter_space,
         }
@@ -175,8 +103,12 @@ impl PCodeLocation {
         self.offset
     }
 
-    pub const fn width(&self) -> u16 {
-        self.width
+    pub const fn size(&self) -> u16 {
+        self.size
+    }
+
+    pub const fn bits(&self) -> u32 {
+        self.size as u32 * 8
     }
 
     pub const fn properties(&self) -> PCodeLocationProperties {
@@ -263,11 +195,9 @@ pub enum PCodeOpcode {
     UserOp = 60,
 }
 
-impl TryFrom<Op> for PCodeOpcode {
-    type Error = ();
-
-    fn try_from(op: Op) -> Result<Self, Self::Error> {
-        Ok(match op {
+impl PCodeOpcode {
+    pub(crate) fn from_op(op: Op) -> Option<Self> {
+        Some(match op {
             Op::Copy => Self::Copy,
             Op::Load(_) => Self::Load,
             Op::Store(_) => Self::Store,
@@ -328,13 +258,11 @@ impl TryFrom<Op> for PCodeOpcode {
             Op::ICall => Self::ICall,
             Op::Return => Self::Return,
             Op::Subpiece => Self::Subpiece,
-            Op::Arg => return Err(()),
+            Op::Arg => return None,
             Op::UserOp(_, _) => Self::UserOp,
         })
     }
-}
 
-impl PCodeOpcode {
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Copy => "copy",
@@ -399,6 +327,17 @@ impl PCodeOpcode {
             Self::Subpiece => "subpiece",
             Self::UserOp => "user_op",
         }
+    }
+
+    pub const fn requires_effect_space(&self) -> bool {
+        matches!(
+            self,
+            Self::Load | Self::Store | Self::IBranch | Self::ICall | Self::Return
+        )
+    }
+
+    pub const fn requires_target(&self) -> bool {
+        matches!(self, Self::Branch | Self::CBranch | Self::Call)
     }
 
     pub const fn fixed_operand_count(&self) -> Option<usize> {
@@ -494,7 +433,7 @@ impl PCodeOpcode {
         )
     }
 
-    pub const fn preserves_first_operand_width(&self) -> bool {
+    pub const fn preserves_first_operand_size(&self) -> bool {
         matches!(
             self,
             Self::Copy
@@ -527,7 +466,6 @@ impl PCodeOpcode {
                 | Self::FloatCeiling
                 | Self::FloatFloor
                 | Self::FloatRound
-                | Self::FloatToFloat
         )
     }
 
@@ -600,36 +538,33 @@ impl PCodeOp {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AddressAnnotationRole {
-    DirectTarget,
     ComputedSpace,
-    KnownTargets,
+    DirectTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddressAnnotationValue<'a> {
-    DirectTarget(Address),
+pub enum AddressAnnotationValue {
     ComputedSpace(AddressSpaceId),
-    KnownTargets(&'a [Address]),
+    DirectTarget(Location),
 }
 
-impl AddressAnnotationValue<'_> {
+impl AddressAnnotationValue {
     pub const fn role(&self) -> AddressAnnotationRole {
         match self {
             Self::DirectTarget(_) => AddressAnnotationRole::DirectTarget,
             Self::ComputedSpace(_) => AddressAnnotationRole::ComputedSpace,
-            Self::KnownTargets(_) => AddressAnnotationRole::KnownTargets,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddressAnnotation<'a> {
+pub struct AddressAnnotation {
     ordinal: IlOpId,
-    value: AddressAnnotationValue<'a>,
+    value: AddressAnnotationValue,
 }
 
-impl<'a> AddressAnnotation<'a> {
-    pub(crate) const fn new(ordinal: IlOpId, value: AddressAnnotationValue<'a>) -> Self {
+impl AddressAnnotation {
+    pub(crate) const fn new(ordinal: IlOpId, value: AddressAnnotationValue) -> Self {
         Self { ordinal, value }
     }
 
@@ -637,7 +572,7 @@ impl<'a> AddressAnnotation<'a> {
         self.ordinal
     }
 
-    pub const fn value(&self) -> &AddressAnnotationValue<'a> {
+    pub const fn value(&self) -> &AddressAnnotationValue {
         &self.value
     }
 }
@@ -645,12 +580,12 @@ impl<'a> AddressAnnotation<'a> {
 #[derive(Debug)]
 pub struct PCodeAddressContext<'a> {
     source: Address,
-    annotations: &'a [AddressAnnotation<'a>],
+    annotations: &'a [AddressAnnotation],
     cursor: usize,
 }
 
 impl<'a> PCodeAddressContext<'a> {
-    pub(crate) const fn new(source: Address, annotations: &'a [AddressAnnotation<'a>]) -> Self {
+    pub(crate) const fn new(source: Address, annotations: &'a [AddressAnnotation]) -> Self {
         Self {
             source,
             annotations,
@@ -666,7 +601,7 @@ impl<'a> PCodeAddressContext<'a> {
         &mut self,
         ordinal: IlOpId,
         role: AddressAnnotationRole,
-    ) -> Result<AddressAnnotationValue<'a>, PCodeError> {
+    ) -> Result<AddressAnnotationValue, PCodeError> {
         let Some(annotation) = self.annotations.get(self.cursor) else {
             return Err(PCodeError::missing_annotation(ordinal.value(), role));
         };
@@ -731,13 +666,13 @@ mod test {
         let target = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationValue::DirectTarget(target),
+            AddressAnnotationValue::DirectTarget(target.into()),
         )];
         let mut context = PCodeAddressContext::new(target, &annotations);
 
         assert!(matches!(
             context.take(ordinal, AddressAnnotationRole::DirectTarget),
-            Ok(AddressAnnotationValue::DirectTarget(taken)) if taken == target
+            Ok(AddressAnnotationValue::DirectTarget(taken)) if taken == target.into()
         ));
         assert!(context.ensure_consumed().is_ok());
     }
@@ -748,7 +683,7 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             ordinal,
-            AddressAnnotationValue::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source.into()),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -763,8 +698,8 @@ mod test {
         let ordinal = IlOpId::try_from_index(0).unwrap();
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [
-            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
-            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source)),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source.into())),
+            AddressAnnotation::new(ordinal, AddressAnnotationValue::DirectTarget(source.into())),
         ];
         let mut context = PCodeAddressContext::new(source, &annotations);
 
@@ -781,7 +716,7 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), RawAddress::from(0x401000u64));
         let annotations = [AddressAnnotation::new(
             first,
-            AddressAnnotationValue::DirectTarget(source),
+            AddressAnnotationValue::DirectTarget(source.into()),
         )];
         let mut context = PCodeAddressContext::new(source, &annotations);
 

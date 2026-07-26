@@ -3,9 +3,11 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::il::common::IlGraph;
+use crate::il::common::verify::{StructureVerifierError, verify_parent_spans, verify_source_spans};
+use crate::il::common::{IlAnalysis, IlError, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
 use crate::ir::FunctionId;
 use crate::storage::entities::MutableEntity;
+use crate::types::common::Revision;
 
 #[derive(
     Debug,
@@ -69,14 +71,6 @@ impl IlLevel {
     pub fn descendants_from(self) -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(move |level| *level >= self)
     }
-
-    pub const fn parent(self) -> Option<Self> {
-        match self {
-            Self::PCode => None,
-            Self::ECode => Some(Self::PCode),
-            Self::ECodeSsa => Some(Self::ECode),
-        }
-    }
 }
 
 impl fmt::Display for IlLevel {
@@ -107,22 +101,22 @@ impl FromStr for IlLevel {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct IlHeader {
+pub struct IlMetadata {
     function: FunctionId,
     schema: IlSchemaVersion,
-    input_revision: u64,
+    input_revision: Revision,
 }
 
-impl IlHeader {
-    pub(crate) const fn new(
+impl IlMetadata {
+    pub(crate) fn new(
         function: FunctionId,
         schema: IlSchemaVersion,
-        input_revision: u64,
+        input_revision: impl Into<Revision>,
     ) -> Self {
         Self {
             function,
             schema,
-            input_revision,
+            input_revision: input_revision.into(),
         }
     }
 
@@ -134,11 +128,11 @@ impl IlHeader {
         self.schema
     }
 
-    pub const fn input_revision(&self) -> u64 {
+    pub const fn input_revision(&self) -> Revision {
         self.input_revision
     }
 
-    pub fn set_input_revision(&mut self, revision: u64) {
+    pub fn set_input_revision(&mut self, revision: Revision) {
         self.input_revision = revision;
     }
 }
@@ -147,9 +141,51 @@ pub trait IlArtefact: MutableEntity<Key = FunctionId> {
     const LEVEL: IlLevel;
     const SCHEMA: IlSchemaVersion;
 
-    fn header(&self) -> &IlHeader;
-    fn header_mut(&mut self) -> &mut IlHeader;
+    fn metadata(&self) -> &IlMetadata;
+    fn metadata_mut(&mut self) -> &mut IlMetadata;
     fn graph(&self) -> &IlGraph;
+
+    fn verify_structure<E>(
+        &self,
+        source_spans: &[IlSourceSpan],
+        parent_spans: Option<&[IlParentSpan]>,
+        node_count: usize,
+    ) -> Result<(), E>
+    where
+        E: StructureVerifierError,
+    {
+        if self.metadata().schema() != Self::SCHEMA {
+            return Err(IlError::schema_mismatch(
+                Self::LEVEL,
+                Self::SCHEMA.value(),
+                self.metadata().schema().value(),
+            )
+            .into());
+        }
+
+        self.graph().verify().map_err(E::from_structure)?;
+        self.graph()
+            .verify_node_bounds(node_count)
+            .map_err(E::from_structure)?;
+        verify_source_spans(source_spans, node_count).map_err(E::from_structure)?;
+        if let Some(parent_spans) = parent_spans {
+            verify_parent_spans(parent_spans, node_count).map_err(E::from_structure)?;
+        }
+        Ok(())
+    }
+
+    fn analyse<A: IlAnalysis<Self>>(&self) -> A {
+        A::analyse(self)
+    }
+
+    fn rewrite<R: IlRewrite<Self>>(&mut self, mut rewrite: R) {
+        rewrite.rewrite(self);
+        #[cfg(debug_assertions)]
+        self.verify_after_rewrite();
+    }
+
+    #[cfg(debug_assertions)]
+    fn verify_after_rewrite(&self) {}
 }
 
 #[cfg(test)]

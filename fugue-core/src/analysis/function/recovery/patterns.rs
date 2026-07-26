@@ -12,9 +12,7 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::project::Project;
-use crate::storage::SegmentStorage;
-use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::segments::view::SegmentMappingView;
+use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentMappingView, SegmentStorage};
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryPatternMatcherError {
@@ -78,21 +76,20 @@ impl FunctionRecoveryPatternMatcher {
     }
 
     // NOTE: all segments are in the same space
-    fn for_each_segment<'a>(
-        segments: &'a SegmentStorage,
-        segm: &mut Option<SegmentMappingView<'a>>,
+    fn for_each_segment(
+        segments: &SegmentStorage,
+        mapping_cache: &mut SegmentMappingCache,
         space_id: AddressSpaceId,
         gap: RangeInclusive<RawAddress>,
         mut f: impl FnMut(RangeInclusive<RawAddress>, &[u8]),
     ) {
-        let current_segment = segm;
         let gap_end = *gap.end();
         let mut current_start = *gap.start();
 
-        let calculate_end = |segm: &SegmentMappingView| -> RawAddress {
-            let segm_end = segm.last().raw_address();
-            if segm_end <= gap_end {
-                segm_end
+        let calculate_end = |view: &SegmentMappingView| -> RawAddress {
+            let view_end = view.last().raw_address();
+            if view_end <= gap_end {
+                view_end
             } else {
                 gap_end
             }
@@ -100,39 +97,36 @@ impl FunctionRecoveryPatternMatcher {
 
         while current_start <= gap_end {
             let current_meta = Address::new(space_id, current_start);
-            let (range, segm) = if let Some(segm) = current_segment.as_ref()
-                && segm.contains(current_meta)
-            {
-                let match_end = calculate_end(segm);
-                let range = current_start..=match_end;
-
-                current_start = match_end + 1usize;
-
-                (range, segm)
-            } else {
-                let Ok(segment) = segments.view_at(current_meta) else {
-                    break;
-                };
-
-                let match_end = calculate_end(&segment);
-                let range = current_start..=match_end;
-
-                current_start = match_end + 1usize;
-
-                let segm = current_segment.insert(segment);
-
-                (range, &*segm)
-            };
-
-            let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(window) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
+            let Some(view) = mapping_cache.view_containing(segments, current_meta) else {
                 break;
             };
-            let Some(bytes) = window.as_contiguous() else {
-                continue;
+
+            let match_end = calculate_end(&view);
+            let range = current_start..=match_end;
+            let next_start = match_end.checked_add(1usize);
+
+            let size = 1usize + range.end().absolute_difference(range.start()) as usize;
+            let Ok(view) = mapping_cache
+                .contiguous_bytes_from(segments, Address::new(space_id, *range.start()))
+            else {
+                if let Some(next_start) = next_start {
+                    current_start = next_start;
+                    continue;
+                }
+                break;
+            };
+            let bytes = view
+                .as_contiguous()
+                .expect("contiguous mapping view must contain bytes");
+            let Some(bytes) = bytes.get(..size) else {
+                break;
             };
 
             f(range, bytes);
+            let Some(next_start) = next_start else {
+                break;
+            };
+            current_start = next_start;
         }
     }
 
@@ -155,11 +149,11 @@ impl FunctionRecoveryPatternMatcher {
         let arch = project.arch();
         let language = project.language();
 
-        let mut current_segm = None::<SegmentMappingView<'_>>;
+        let mut mapping_cache = SegmentMappingCache::new();
 
         for gap in gaps.ranges() {
             tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
-            Self::for_each_segment(segments, &mut current_segm, space_id, gap, |gap, bytes| {
+            Self::for_each_segment(segments, &mut mapping_cache, space_id, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = Address::new(space_id, *gap.start() + range.start);

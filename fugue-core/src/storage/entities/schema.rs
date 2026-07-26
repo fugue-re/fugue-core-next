@@ -4,7 +4,7 @@ use std::mem;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::ir::symbol::Symbol;
-use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress};
+use crate::ir::{Address, CodeBlock, Function, Id, Insn, RawAddress, Switch};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
@@ -70,9 +70,11 @@ pub const ENTITY_KEY_CODE_BLOCK_ENTITY_ID: EntityKeyId = EntityKeyId::new(3);
 pub const ENTITY_KEY_INSN_ENTITY_ID: EntityKeyId = EntityKeyId::new(4);
 pub const ENTITY_KEY_META_ADDRESS_ENTITY_ID: EntityKeyId = EntityKeyId::new(5);
 pub const ENTITY_KEY_SYMBOL_ENTITY_ID: EntityKeyId = EntityKeyId::new(6);
-pub const ENTITY_KEY_CALL_GRAPH_EDGE_ID: EntityKeyId = EntityKeyId::new(7);
+pub const ENTITY_KEY_CALL_GRAPH_FORWARD_ID: EntityKeyId = EntityKeyId::new(7);
 pub const ENTITY_KEY_REFERENCE_FORWARD_ID: EntityKeyId = EntityKeyId::new(8);
 pub const ENTITY_KEY_REFERENCE_INVERSE_ID: EntityKeyId = EntityKeyId::new(9);
+pub const ENTITY_KEY_SWITCH_ENTITY_ID: EntityKeyId = EntityKeyId::new(10);
+pub const ENTITY_KEY_CALL_GRAPH_INVERSE_ID: EntityKeyId = EntityKeyId::new(11);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -83,19 +85,41 @@ pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = EntityId::new(4);
 
 pub const ENTITY_FUNCTION_ID: EntityId = EntityId::new(5);
 pub const ENTITY_CODE_BLOCK_ID: EntityId = EntityId::new(6);
-pub const ENTITY_INSN_ID: EntityId = EntityId::new(7);
 pub const ENTITY_SYMBOL_ID: EntityId = EntityId::new(8);
-pub const ENTITY_CALL_GRAPH_FORWARD_EDGE_ID: EntityId = EntityId::new(9);
-pub const ENTITY_CALL_GRAPH_INVERSE_EDGE_ID: EntityId = EntityId::new(10);
-pub const ENTITY_CALL_GRAPH_INDEX_HEADER_ID: EntityId = EntityId::new(11);
+pub const ENTITY_CALL_GRAPH_EDGE_ID: EntityId = EntityId::new(9);
+pub const ENTITY_INDEX_HEADER_ID: EntityId = EntityId::new(11);
 pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
 pub const ENTITY_REFERENCE_RECORD_ID: EntityId = EntityId::new(13);
-pub const ENTITY_REFERENCE_INDEX_HEADER_ID: EntityId = EntityId::new(14);
 pub const ENTITY_IL_PCODE_ID: EntityId = EntityId::new(15);
 pub const ENTITY_IL_ECODE_ID: EntityId = EntityId::new(16);
 pub const ENTITY_IL_ECODE_SSA_ID: EntityId = EntityId::new(17);
+pub const ENTITY_SWITCH_ID: EntityId = EntityId::new(18);
+pub const ENTITY_SWITCH_TABLE_ID: EntityId = EntityId::new(19);
 
 pub type EntityKeyPrefix = [u8; ENTITY_PREFIX_SIZE];
+
+#[cfg(feature = "sqlite")]
+pub const STORED_ENTITY_PREFIXES: &[EntityKeyPrefix] = &[
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_ARCHITECTURE_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_ATTRIBUTES_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_SYMBOL_TABLE_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_FUNCTION_TABLE_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_CODE_BLOCK_TABLE_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_INDEX_HEADER_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_PROJECT_REVISION_ID),
+    ENTITY_KEY_PROJECT_ENTITY_ID.prefix(ENTITY_SWITCH_TABLE_ID),
+    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_FUNCTION_ID),
+    ENTITY_KEY_CODE_BLOCK_ENTITY_ID.prefix(ENTITY_CODE_BLOCK_ID),
+    ENTITY_KEY_SYMBOL_ENTITY_ID.prefix(ENTITY_SYMBOL_ID),
+    ENTITY_KEY_CALL_GRAPH_FORWARD_ID.prefix(ENTITY_CALL_GRAPH_EDGE_ID),
+    ENTITY_KEY_CALL_GRAPH_INVERSE_ID.prefix(ENTITY_CALL_GRAPH_EDGE_ID),
+    ENTITY_KEY_REFERENCE_FORWARD_ID.prefix(ENTITY_REFERENCE_RECORD_ID),
+    ENTITY_KEY_REFERENCE_INVERSE_ID.prefix(ENTITY_REFERENCE_RECORD_ID),
+    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_PCODE_ID),
+    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_ECODE_ID),
+    ENTITY_KEY_FUNCTION_ENTITY_ID.prefix(ENTITY_IL_ECODE_SSA_ID),
+    ENTITY_KEY_SWITCH_ENTITY_ID.prefix(ENTITY_SWITCH_ID),
+];
 
 pub trait EntityKey: Clone + PartialEq + Eq + Hash {
     const ID: EntityKeyId;
@@ -119,6 +143,7 @@ pub enum ProjectEntity {
     CallGraphIndex = 0b0000_0101,
     Revision = 0b0000_0110,
     ReferenceIndex = 0b0000_0111,
+    SwitchTable = 0b0000_1000,
 }
 
 impl EntityKey for ProjectEntity {
@@ -135,6 +160,7 @@ impl EntityKey for ProjectEntity {
                 0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
                 0b0000_0110 => Some(ProjectEntity::Revision),
                 0b0000_0111 => Some(ProjectEntity::ReferenceIndex),
+                0b0000_1000 => Some(ProjectEntity::SwitchTable),
                 _ => None,
             }
         } else {
@@ -166,14 +192,13 @@ impl EntityKey for Address {
 
     fn decode(buf: &[u8]) -> Option<Self> {
         const SPACE_SIZE: usize = mem::size_of::<AddressSpaceId>();
-        const PACKED_SIZE: usize = mem::size_of::<RawAddress>() + SPACE_SIZE;
 
-        if buf.len() < PACKED_SIZE {
+        if buf.len() < Self::ENCODED_SIZE {
             return None;
         }
 
         let space = AddressSpaceId::from(u16::from_be_bytes(buf[..SPACE_SIZE].try_into().ok()?));
-        let address = u64::from_be_bytes(buf[SPACE_SIZE..PACKED_SIZE].try_into().ok()?);
+        let address = u64::from_be_bytes(buf[SPACE_SIZE..Self::ENCODED_SIZE].try_into().ok()?);
 
         Some(Address::new(space, address))
     }
@@ -182,6 +207,11 @@ impl EntityKey for Address {
         buf.put_u16(self.space().index() as u16);
         buf.put_u64(self.offset());
     }
+}
+
+impl Address {
+    pub(crate) const ENCODED_SIZE: usize =
+        mem::size_of::<AddressSpaceId>() + mem::size_of::<RawAddress>();
 }
 
 impl EntityKey for Id<Function> {
@@ -232,6 +262,18 @@ impl EntityKey for Id<Symbol> {
     }
 }
 
+impl EntityKey for Id<Switch> {
+    const ID: EntityKeyId = ENTITY_KEY_SWITCH_ENTITY_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        Id::<Switch>::decode_as_key(buf)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) {
+        Id::<Switch>::encode_as_key(self, buf);
+    }
+}
+
 pub trait Entity:
     rkyv::Archive<
         Archived: rkyv::Deserialize<
@@ -255,11 +297,15 @@ pub(crate) fn make_prefix<K: EntityKey, V: Entity>() -> EntityKeyPrefix {
     [K::ID.index() as u8, V::ID.index() as u8]
 }
 
-pub(crate) fn make_key<K: EntityKey, V: Entity>(k: &K) -> Bytes {
+pub fn make_key_with_entity_id<K: EntityKey>(k: &K, entity_id: EntityId) -> Bytes {
     let mut buf = BytesMut::new();
-    buf.extend(make_prefix::<K, V>());
+    buf.extend([K::ID.index() as u8, entity_id.index() as u8]);
     k.encode(&mut buf);
     buf.freeze()
+}
+
+pub(crate) fn make_key<K: EntityKey, V: Entity>(k: &K) -> Bytes {
+    make_key_with_entity_id(k, V::ID)
 }
 
 pub(crate) fn extract_key<K: EntityKey, V: Entity>(buf: BytesOrSlice<'_>) -> Option<K> {

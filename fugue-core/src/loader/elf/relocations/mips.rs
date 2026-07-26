@@ -27,13 +27,11 @@ where
             return;
         };
 
-        let offset_usize = offset;
-
         match reloc_type {
             R_MIPS_NONE | R_MIPS_JALR => {}
             R_MIPS_REL32 => {
                 // S + A when bound to a symbol, B + A when unbound (STN_UNDEF).
-                let implicit = self.mips_implicit_addend::<u32>(bytes, offset_usize, reloc);
+                let implicit = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i64);
 
                 let value = match reloc.target() {
@@ -58,10 +56,10 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                bytes.write_value(offset_usize, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_MIPS_32 => {
-                let implicit = self.mips_implicit_addend::<u32>(bytes, offset_usize, reloc);
+                let implicit = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i64);
 
                 let Some(symbol) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -77,10 +75,10 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                bytes.write_value(offset_usize, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_MIPS_16 => {
-                let implicit = self.mips_implicit_addend::<u16>(bytes, offset_usize, reloc);
+                let implicit = self.mips_implicit_addend::<u16>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i16 as i64);
 
                 let Some(symbol) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -96,12 +94,12 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                bytes.write_value(offset_usize, value as u16);
+                bytes.write_value(offset, value as u16);
             }
             R_MIPS_26 => {
                 // Target := ((A << 2) | (P & 0xf000_0000)) + S, encoded as
                 // (Target >> 2) in the low 26 bits of the instruction.
-                let insn = self.mips_implicit_addend::<u32>(bytes, offset_usize, reloc);
+                let insn = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let implicit_addend = (insn & 0x03ff_ffff) << 2;
                 let addend = reloc.addend().wrapping_add(implicit_addend as i64);
 
@@ -131,12 +129,12 @@ where
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {target:#x}");
 
                 let imm26 = (target >> 2) & 0x03ff_ffff;
-                bytes.update_value::<u32>(offset_usize, |i| (i & !0x03ff_ffff) | imm26);
+                bytes.update_value::<u32>(offset, |i| (i & !0x03ff_ffff) | imm26);
             }
             R_MIPS_PC16 => {
                 // (S + A - P) >> 2, with A taken from the sign-extended 16-bit
                 // immediate scaled by 4.
-                let insn = self.mips_implicit_addend::<u32>(bytes, offset_usize, reloc);
+                let insn = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let implicit_addend = ((insn & 0xffff) as i16 as i64) << 2;
                 let addend = reloc.addend().wrapping_add(implicit_addend);
 
@@ -162,7 +160,7 @@ where
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
                 let imm16 = (shifted as i32 as u32) & 0xffff;
-                bytes.update_value::<u32>(offset_usize, |i| (i & !0xffff) | imm16);
+                bytes.update_value::<u32>(offset, |i| (i & !0xffff) | imm16);
             }
             R_MIPS_GLOB_DAT => {
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -179,7 +177,7 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                bytes.write_value(offset_usize, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_MIPS_JUMP_SLOT => {
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -196,7 +194,7 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                bytes.write_value(offset_usize, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_MIPS_COPY => {
                 // Resolved at runtime by copying the symbol's bytes into this slot; nothing useful

@@ -1,6 +1,6 @@
+use std::io;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::{io, mem};
 
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -9,21 +9,15 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
 
 const PROJECT_ROCKSDB_DATA: &str = "entities.db";
-
-// Maximum batch size for bulk operations
-const BATCH_SIZE: usize = 1024;
-// Maximum size of a batch in bytes
-const BATCH_MEMORY_LIMIT: usize = 4 * 1024 * 1024; // 4 MiB
 
 impl From<rocksdb::Error> for EntityStorageError {
     fn from(error: rocksdb::Error) -> Self {
@@ -160,7 +154,7 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         Ok(RocksDbEntityBytesIterator::new(self, prefix))
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -180,10 +174,6 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         Ok(RocksDbEntityBytesAsIterator::new(self, prefix, f))
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        Ok(RocksDbEntityInserter::new(self))
-    }
-
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
         RocksDbEntityTransaction::new_reader(self)
     }
@@ -193,8 +183,8 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     }
 }
 
-#[repr(transparent)]
 struct RocksDbEntityKeyBytesIterator<'a> {
+    finished: bool,
     iter: rocksdb::DBRawIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
 }
 
@@ -208,7 +198,10 @@ impl<'a> RocksDbEntityKeyBytesIterator<'a> {
         let mut iter = storage.database.raw_iterator_opt(opts);
         iter.seek(prefix);
 
-        Box::new(Self { iter })
+        Box::new(Self {
+            finished: false,
+            iter,
+        })
     }
 }
 
@@ -216,8 +209,17 @@ impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
     type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.iter.valid() {
+        if self.finished {
             return None;
+        }
+        if !self.iter.valid() {
+            self.finished = true;
+            return self
+                .iter
+                .status()
+                .err()
+                .map(EntityStorageError::backing)
+                .map(Err);
         }
 
         let key = BytesOrSlice::from(self.iter.key()?.to_vec());
@@ -229,6 +231,7 @@ impl<'a> Iterator for RocksDbEntityKeyBytesIterator<'a> {
 }
 
 struct RocksDbEntityRangeBytesIterator<'a> {
+    finished: bool,
     iter: rocksdb::DBRawIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
     prefix: Box<[u8]>,
 }
@@ -257,6 +260,7 @@ impl<'a> RocksDbEntityRangeBytesIterator<'a> {
         }
 
         Box::new(Self {
+            finished: false,
             iter,
             prefix: prefix.into(),
         })
@@ -267,12 +271,22 @@ impl<'a> Iterator for RocksDbEntityRangeBytesIterator<'a> {
     type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.iter.valid() {
+        if self.finished {
             return None;
+        }
+        if !self.iter.valid() {
+            self.finished = true;
+            return self
+                .iter
+                .status()
+                .err()
+                .map(EntityStorageError::backing)
+                .map(Err);
         }
 
         let key = self.iter.key()?;
         if !key.starts_with(&self.prefix) {
+            self.finished = true;
             return None;
         }
 
@@ -288,15 +302,18 @@ impl<'a> Iterator for RocksDbEntityRangeBytesIterator<'a> {
     }
 }
 
-#[repr(transparent)]
 struct RocksDbEntityBytesIterator<'a> {
+    finished: bool,
     iter: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
+    prefix: Box<[u8]>,
 }
 
 impl<'a> RocksDbEntityBytesIterator<'a> {
     fn new(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityBytesIterator<'a> {
         Box::new(Self {
+            finished: false,
             iter: storage.database.prefix_iterator(prefix),
+            prefix: prefix.into(),
         })
     }
 }
@@ -305,21 +322,32 @@ impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
     type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|kv| {
-            kv.map(|(key, val)| {
-                (
-                    BytesOrSlice::from(key.into_vec()),
-                    BytesOrSlice::from(val.into_vec()),
-                )
-            })
-            .map_err(EntityStorageError::backing)
-        })
+        if self.finished {
+            return None;
+        }
+
+        match self.iter.next()? {
+            Ok((key, value)) if key.starts_with(&self.prefix) => Some(Ok((
+                BytesOrSlice::from(key.into_vec()),
+                BytesOrSlice::from(value.into_vec()),
+            ))),
+            Ok(_) => {
+                self.finished = true;
+                None
+            }
+            Err(error) => {
+                self.finished = true;
+                Some(Err(EntityStorageError::backing(error)))
+            }
+        }
     }
 }
 
 struct RocksDbEntityBytesAsIterator<'a, T> {
+    finished: bool,
     iter: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
     f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+    prefix: Box<[u8]>,
 }
 
 impl<'a, T> RocksDbEntityBytesAsIterator<'a, T>
@@ -335,8 +363,10 @@ where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
     {
         Box::new(Self {
+            finished: false,
             iter: storage.database.prefix_iterator(prefix),
             f: Box::new(f),
+            prefix: prefix.into(),
         })
     }
 }
@@ -345,68 +375,23 @@ impl<'a, T> Iterator for RocksDbEntityBytesAsIterator<'a, T> {
     type Item = Result<T, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|kv| {
-            let kv = kv.map_err(EntityStorageError::backing);
-            kv.and_then(|(key, val)| (self.f)(key.as_ref(), val.as_ref()))
-        })
-    }
-}
-
-struct RocksDbEntityInserter<'a> {
-    storage: &'a RocksDbEntityStorage,
-    batch: rocksdb::WriteBatchWithTransaction<true>,
-}
-
-impl<'a> RocksDbEntityInserter<'a> {
-    fn new(storage: &'a RocksDbEntityStorage) -> EntityBytesBulkInserter<'a> {
-        Box::new(Self {
-            storage,
-            batch: rocksdb::WriteBatchWithTransaction::<true>::default(),
-        })
-    }
-}
-
-impl<'a> Drop for RocksDbEntityInserter<'a> {
-    fn drop(&mut self) {
-        // if the inserter is dropped without committing, we should still flush the batch
-        if self.batch.is_empty() {
-            return;
+        if self.finished {
+            return None;
         }
 
-        let batch = mem::take(&mut self.batch);
-
-        if let Err(e) = self.storage.database.write(batch) {
-            tracing::warn!("failed to flush batch to storage: {e}")
+        match self.iter.next()? {
+            Ok((key, value)) if key.starts_with(&self.prefix) => {
+                Some((self.f)(key.as_ref(), value.as_ref()))
+            }
+            Ok(_) => {
+                self.finished = true;
+                None
+            }
+            Err(error) => {
+                self.finished = true;
+                Some(Err(EntityStorageError::backing(error)))
+            }
         }
-    }
-}
-
-impl<'a> EntityStorageBulkInserter<'a> for RocksDbEntityInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError> {
-        // flush the current batch before inserting more, if it exceeds the limits
-        if self.batch.len() >= BATCH_SIZE || self.batch.size_in_bytes() >= BATCH_MEMORY_LIMIT {
-            let batch = std::mem::take(&mut self.batch);
-            self.storage
-                .database
-                .write(batch)
-                .map_err(EntityStorageError::backing)?;
-        }
-
-        self.batch.put(key, value);
-
-        Ok(())
-    }
-
-    fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
-        let batch = mem::take(&mut self.batch);
-        self.storage
-            .database
-            .write(batch)
-            .map_err(EntityStorageError::backing)
     }
 }
 
@@ -464,7 +449,10 @@ impl<'a> EntityStorageTransactionalWriter<'a> for RocksDbEntityTransaction<'a> {
 
 #[cfg(test)]
 mod test {
+    use std::error::Error;
     use std::ops::Bound;
+
+    use rocksdb::{OptimisticTransactionDB, Options};
 
     use super::RocksDbEntityStorage;
     use crate::ir::Address;
@@ -473,6 +461,11 @@ mod test {
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     struct TestEntity {
+        value: u64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct OtherTestEntity {
         value: u64,
     }
 
@@ -486,8 +479,33 @@ mod test {
         const ID: EntityId = EntityId::new(125);
     }
 
+    impl Entity for OtherTestEntity {
+        const ID: EntityId = EntityId::new(126);
+    }
+
     #[test]
-    fn rocksdb_scan_range_respects_inclusive_and_exclusive_bounds()
+    fn rocksdb_iter_prefix_stops_before_next_entity_kind() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+        let address = Address::from(1u64);
+
+        storage.insert(&address, &TestEntity::new(1))?;
+        storage.insert(&address, &OtherTestEntity { value: 2 })?;
+
+        let entities = storage
+            .iter::<Address, TestEntity>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entities, vec![(address, TestEntity::new(1))]);
+        Ok(())
+    }
+
+    #[test]
+    fn rocksdb_iter_range_respects_inclusive_and_exclusive_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let mut options = rocksdb::Options::default();
@@ -502,19 +520,19 @@ mod test {
         }
 
         let included = storage
-            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(excluded, vec![3, 4]);
 
         let unbounded = storage
-            .scan_range::<Address, TestEntity>(Bound::Unbounded)?
+            .iter_range::<Address, TestEntity>(Bound::Unbounded)?
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(unbounded, vec![1, 2, 3, 4]);

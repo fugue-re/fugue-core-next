@@ -1,16 +1,15 @@
-pub mod builder;
-pub mod expression;
-pub mod format;
-pub mod operation;
 pub mod ssa;
-pub mod transform;
+
+mod builder;
+mod expression;
+mod format;
+mod operation;
+mod transform;
+mod verify;
 
 pub(crate) use builder::ECodeBuilder;
 pub use builder::{ECODE_SCHEMA_VERSION, ECodeIr};
 pub use expression::{ECodeExpr, ECodeExprOpcode};
-pub use format::{
-    ECodeExprDisplay, ECodeExprOpcodeDisplay, ECodeIrDisplay, ECodeStmtDisplay,
-    ECodeStmtOpcodeDisplay,
-};
+pub use format::ECodeIrDisplay;
 pub use operation::{ECodeStmt, ECodeStmtOpcode};
 pub use transform::PCodeToECode;

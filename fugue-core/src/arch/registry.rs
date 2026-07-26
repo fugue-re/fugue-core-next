@@ -21,9 +21,9 @@ type LanguageProvideFn = fn(
 ) -> Result<Option<&'static Language>, LanguageError>;
 
 pub struct ArchProvider {
-    pub name: &'static str,
-    pub supports: ArchSupportsFn,
-    pub create: ArchCreateFn,
+    name: &'static str,
+    supports: ArchSupportsFn,
+    create: ArchCreateFn,
 }
 
 impl ArchProvider {
@@ -53,8 +53,8 @@ impl Registration for ArchProvider {
 registry::collect!(ArchProvider);
 
 pub struct LanguageProvider {
-    pub name: &'static str,
-    pub provide: LanguageProvideFn,
+    name: &'static str,
+    provide: LanguageProvideFn,
 }
 
 impl LanguageProvider {

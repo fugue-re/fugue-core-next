@@ -1,11 +1,10 @@
-use crate::il::common::{IlBlock, IlBlockId, IlBlockPredecessors};
+use crate::il::common::{IlAnalysis, IlArtefact, IlBlock, IlBlockId, IlBlockPredecessors, IlCsr};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominance {
     entry: Option<IlBlockId>,
     immediate_dominators: Vec<Option<IlBlockId>>,
-    children_offsets: Vec<u32>,
-    children: Vec<IlBlockId>,
+    children: IlCsr<IlBlockId>,
     preorder: Vec<u32>,
     postorder: Vec<u32>,
     reachable: Vec<bool>,
@@ -23,17 +22,8 @@ impl IlDominance {
             .flatten()
     }
 
-    pub fn children(&self, block: IlBlockId) -> &[IlBlockId] {
-        let Some(start) = self.children_offsets.get(block.index()).copied() else {
-            return &[];
-        };
-        let end = self
-            .children_offsets
-            .get(block.index() + 1)
-            .copied()
-            .unwrap_or(start);
-
-        &self.children[start as usize..end as usize]
+    pub fn children_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        self.children.row(block.index())
     }
 
     pub fn is_reachable(&self, block: IlBlockId) -> bool {
@@ -88,10 +78,9 @@ impl IlDominance {
     }
 
     fn add_child_frontiers(&self, block: IlBlockId, frontiers: &mut [Vec<IlBlockId>]) {
-        for child in self.children(block) {
-            let child_frontiers = frontiers[child.index()].clone();
-
-            for frontier in child_frontiers {
+        for child in self.children_for(block) {
+            for index in 0..frontiers[child.index()].len() {
+                let frontier = frontiers[child.index()][index];
                 if self.immediate_dominator(frontier) != Some(block) {
                     Self::push_frontier(frontiers, block, frontier);
                 }
@@ -127,7 +116,7 @@ impl IlDominance {
 
             stack.push((block, true));
 
-            for child in self.children(block).iter().rev() {
+            for child in self.children_for(block).iter().rev() {
                 stack.push((*child, false));
             }
         }
@@ -136,24 +125,24 @@ impl IlDominance {
     }
 }
 
+impl<I: IlArtefact> IlAnalysis<I> for IlDominance {
+    fn analyse(ir: &I) -> Self {
+        let Some(entry) = ir.graph().entry_block() else {
+            return Self::default();
+        };
+
+        Self::from_blocks(ir.graph().blocks(), ir.graph().successors(), entry)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominanceFrontier {
-    offsets: Vec<u32>,
-    frontiers: Vec<IlBlockId>,
+    frontiers: IlCsr<IlBlockId>,
 }
 
 impl IlDominanceFrontier {
-    pub fn frontier(&self, block: IlBlockId) -> &[IlBlockId] {
-        let Some(start) = self.offsets.get(block.index()).copied() else {
-            return &[];
-        };
-        let end = self
-            .offsets
-            .get(block.index() + 1)
-            .copied()
-            .unwrap_or(start);
-
-        &self.frontiers[start as usize..end as usize]
+    pub fn frontier_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        self.frontiers.row(block.index())
     }
 
     pub(crate) fn place_phis(
@@ -174,7 +163,7 @@ impl IlDominanceFrontier {
         }
 
         while let Some(block) = queue.pop() {
-            for frontier in self.frontier(block) {
+            for frontier in self.frontier_for(block) {
                 if placed[frontier.index()] {
                     continue;
                 }
@@ -194,28 +183,21 @@ impl IlDominanceFrontier {
         IlPhiPlacement::new(phis)
     }
 
-    fn from_frontiers(frontiers: Vec<Vec<IlBlockId>>) -> Self {
-        let mut offsets = Vec::with_capacity(frontiers.len() + 1);
-        let mut values = Vec::new();
-        let mut offset = 0u32;
-
-        offsets.push(offset);
-
-        for mut frontier in frontiers {
+    fn from_frontiers(mut frontiers: Vec<Vec<IlBlockId>>) -> Self {
+        for frontier in &mut frontiers {
             frontier.sort();
-
-            for block in frontier {
-                values.push(block);
-                offset += 1;
-            }
-
-            offsets.push(offset);
         }
 
         Self {
-            offsets,
-            frontiers: values,
+            frontiers: IlCsr::from_rows(frontiers),
         }
+    }
+}
+
+impl<I: IlArtefact> IlAnalysis<I> for IlDominanceFrontier {
+    fn analyse(ir: &I) -> Self {
+        ir.analyse::<IlDominance>()
+            .frontiers(ir.graph().blocks(), ir.graph().successors())
     }
 }
 
@@ -267,13 +249,12 @@ impl<'a> DominanceBuilder<'a> {
         self.solve_immediate_dominators();
         self.immediate_dominators[self.entry.index()] = None;
 
-        let (children_offsets, children) = self.build_children();
-        let (preorder, postorder) = self.build_intervals(&children_offsets, &children);
+        let children = self.build_children();
+        let (preorder, postorder) = self.build_intervals(&children);
 
         IlDominance {
             entry: Some(self.entry),
             immediate_dominators: self.immediate_dominators,
-            children_offsets,
             children,
             preorder,
             postorder,
@@ -347,7 +328,7 @@ impl<'a> DominanceBuilder<'a> {
 
     fn processed_predecessors(&self, block: IlBlockId) -> impl Iterator<Item = IlBlockId> + '_ {
         self.predecessors
-            .predecessors(block)
+            .predecessors_for(block)
             .iter()
             .copied()
             .filter(|predecessor| {
@@ -362,53 +343,35 @@ impl<'a> DominanceBuilder<'a> {
 
         while first != second {
             while self.positions[first.index()] > self.positions[second.index()] {
-                first = self.immediate_dominators[first.index()].unwrap_or(self.entry);
+                first = self.immediate_dominators[first.index()]
+                    .expect("processed block has an immediate dominator");
             }
 
             while self.positions[second.index()] > self.positions[first.index()] {
-                second = self.immediate_dominators[second.index()].unwrap_or(self.entry);
+                second = self.immediate_dominators[second.index()]
+                    .expect("processed block has an immediate dominator");
             }
         }
 
         first
     }
 
-    fn build_children(&self) -> (Vec<u32>, Vec<IlBlockId>) {
-        let mut offsets = vec![0u32; self.blocks.len() + 1];
+    fn build_children(&self) -> IlCsr<IlBlockId> {
+        let entries =
+            self.immediate_dominators
+                .iter()
+                .enumerate()
+                .filter_map(|(block_index, dominator)| {
+                    let dominator = dominator.as_ref()?;
+                    let block = IlBlockId::try_from_index(block_index)
+                        .expect("block count fits the block id space");
+                    Some((dominator.index(), block))
+                });
 
-        for dominator in self.immediate_dominators.iter().flatten() {
-            offsets[dominator.index() + 1] += 1;
-        }
-
-        for index in 1..offsets.len() {
-            offsets[index] += offsets[index - 1];
-        }
-
-        let mut cursor = offsets.clone();
-        let fill = IlBlockId::try_from_index(0).expect("block id zero is representable");
-        let mut children = vec![fill; *offsets.last().unwrap_or(&0) as usize];
-
-        for (block_index, dominator) in self.immediate_dominators.iter().enumerate() {
-            let Some(dominator) = dominator else {
-                continue;
-            };
-            let block = IlBlockId::try_from_index(block_index)
-                .expect("block count fits the block id space");
-            let cursor_index = dominator.index();
-            let index = cursor[cursor_index] as usize;
-
-            children[index] = block;
-            cursor[cursor_index] += 1;
-        }
-
-        (offsets, children)
+        IlCsr::from_entries(self.blocks.len(), entries)
     }
 
-    fn build_intervals(
-        &self,
-        children_offsets: &[u32],
-        children: &[IlBlockId],
-    ) -> (Vec<u32>, Vec<u32>) {
+    fn build_intervals(&self, children: &IlCsr<IlBlockId>) -> (Vec<u32>, Vec<u32>) {
         let mut preorder = vec![u32::MAX; self.blocks.len()];
         let mut postorder = vec![u32::MAX; self.blocks.len()];
         let mut next = 0u32;
@@ -429,10 +392,7 @@ impl<'a> DominanceBuilder<'a> {
             next += 1;
             stack.push((block, true));
 
-            let start = children_offsets[block.index()] as usize;
-            let end = children_offsets[block.index() + 1] as usize;
-
-            for child in children[start..end].iter().rev() {
+            for child in children.row(block.index()).iter().rev() {
                 stack.push((*child, false));
             }
         }
@@ -462,7 +422,7 @@ mod test {
         assert!(dominance.dominates(block_id(0)?, block_id(2)?));
         assert!(dominance.dominates(block_id(1)?, block_id(2)?));
         assert!(!dominance.dominates(block_id(2)?, block_id(1)?));
-        assert_eq!(dominance.children(block_id(0)?), &[block_id(1)?]);
+        assert_eq!(dominance.children_for(block_id(0)?), &[block_id(1)?]);
 
         Ok(())
     }
@@ -497,10 +457,10 @@ mod test {
         let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
         let frontiers = dominance.frontiers(&blocks, &successors);
 
-        assert_eq!(frontiers.frontier(block_id(0)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(3)?]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[block_id(3)?]);
-        assert_eq!(frontiers.frontier(block_id(3)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(0)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[block_id(3)?]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[block_id(3)?]);
+        assert_eq!(frontiers.frontier_for(block_id(3)?), &[]);
 
         Ok(())
     }
@@ -560,10 +520,10 @@ mod test {
         let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
         let frontiers = dominance.frontiers(&blocks, &successors);
 
-        assert_eq!(frontiers.frontier(block_id(0)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(1)?]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[block_id(1)?]);
-        assert_eq!(frontiers.frontier(block_id(3)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(0)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[block_id(1)?]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[block_id(1)?]);
+        assert_eq!(frontiers.frontier_for(block_id(3)?), &[]);
 
         Ok(())
     }
@@ -590,8 +550,8 @@ mod test {
 
         assert!(!dominance.is_reachable(block_id(0)?));
         assert!(dominance.is_reachable(block_id(2)?));
-        assert_eq!(frontiers.frontier(block_id(1)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[]);
 
         Ok(())
     }

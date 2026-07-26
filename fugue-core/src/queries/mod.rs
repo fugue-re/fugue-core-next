@@ -1,3 +1,4 @@
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -13,36 +14,37 @@ use crate::il::common::{IlError, IlLevel};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
-use crate::ir::cfg::FlowGraph;
+use crate::ir::cfg::FlowTargets;
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
-    SegmentProperties, Symbol, SymbolEntry, SymbolProperties,
+    SegmentProperties, Switch, Symbol, SymbolEntry, SymbolProperties,
 };
 use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
+use crate::types::Confidence;
 
 mod cache;
-mod derived;
+mod cached;
 mod index;
 mod read;
 
-use cache::QueryCache;
-pub use derived::{Cached, Dependency};
+use cache::{QueryCache, QueryCachedIl};
+pub use cached::{Cached, Dependency};
 use index::ChangeIndex;
 
-const MAX_QUERY_PAGE_LEN: usize = 4096;
+const MAX_QUERY_PAGE_COUNT: usize = 4096;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct QueryPage<T> {
+pub struct QueryPage<T, C = T> {
     entries: Arc<[T]>,
-    next_cursor: Option<T>,
+    next_cursor: Option<C>,
 }
 
-impl<T> QueryPage<T> {
-    pub fn new(entries: impl Into<Arc<[T]>>, next_cursor: Option<T>) -> Self {
+impl<T, C> QueryPage<T, C> {
+    pub fn new(entries: impl Into<Arc<[T]>>, next_cursor: Option<C>) -> Self {
         Self {
             entries: entries.into(),
             next_cursor,
@@ -53,7 +55,7 @@ impl<T> QueryPage<T> {
         &self.entries
     }
 
-    pub fn next_cursor(&self) -> Option<&T> {
+    pub fn next_cursor(&self) -> Option<&C> {
         self.next_cursor.as_ref()
     }
 }
@@ -78,27 +80,20 @@ impl From<EngineError> for QueryError {
     }
 }
 
-impl PartialEq for QueryError {
-    fn eq(&self, other: &Self) -> bool {
-        matches!((self, other), (Self::Stopped, Self::Stopped))
-    }
-}
+const WALK_PAGE_COUNT: usize = 256;
 
-impl Eq for QueryError {}
-
-const WALK_PAGE_LEN: usize = 256;
-
-pub struct Paged<T, F> {
+pub struct Paged<T, F, C = T> {
     fetch: F,
     buffer: VecDeque<T>,
-    cursor: Option<T>,
+    cursor: Option<C>,
     exhausted: bool,
 }
 
-impl<T, F> Paged<T, F>
+impl<T, F, C> Paged<T, F, C>
 where
     T: Clone,
-    F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
+    C: Clone,
+    F: FnMut(Option<C>) -> Result<QueryPage<T, C>, QueryError>,
 {
     fn new(fetch: F) -> Self {
         Self {
@@ -110,10 +105,11 @@ where
     }
 }
 
-impl<T, F> Iterator for Paged<T, F>
+impl<T, F, C> Iterator for Paged<T, F, C>
 where
     T: Clone,
-    F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
+    C: Clone,
+    F: FnMut(Option<C>) -> Result<QueryPage<T, C>, QueryError>,
 {
     type Item = Result<T, QueryError>;
 
@@ -146,35 +142,35 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallEdge {
-    caller: Address,
-    callee: Address,
+    source: Address,
+    target: Address,
 }
 
 impl CallEdge {
-    pub fn new(caller: impl Into<Address>, callee: impl Into<Address>) -> Self {
+    pub fn new(source: impl Into<Address>, target: impl Into<Address>) -> Self {
         Self {
-            caller: caller.into(),
-            callee: callee.into(),
+            source: source.into(),
+            target: target.into(),
         }
     }
 
-    pub fn caller(&self) -> Address {
-        self.caller
+    pub fn source(&self) -> Address {
+        self.source
     }
 
-    pub fn callee(&self) -> Address {
-        self.callee
+    pub fn target(&self) -> Address {
+        self.target
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolRecord {
+pub struct SymbolRow {
     address: Address,
     properties: SymbolProperties,
     symbol: Symbol,
 }
 
-impl SymbolRecord {
+impl SymbolRow {
     pub fn new(
         address: impl Into<Address>,
         symbol: impl Into<Symbol>,
@@ -204,15 +200,50 @@ impl SymbolRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchRow {
+    switch: Switch,
+}
+
+impl SwitchRow {
+    pub fn branch(&self) -> Address {
+        self.switch.branch()
+    }
+
+    pub fn switch(&self) -> &Switch {
+        &self.switch
+    }
+
+    pub fn case_count(&self) -> usize {
+        self.switch.case_count()
+    }
+
+    pub fn has_default(&self) -> bool {
+        self.switch.has_default()
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.switch.confidence()
+    }
+}
+
+impl From<&Switch> for SwitchRow {
+    fn from(switch: &Switch) -> Self {
+        Self {
+            switch: switch.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MappingRecord {
+pub struct MappingRow {
     mapping: SegmentMappingId,
     start: Address,
     size: u64,
     properties: SegmentProperties,
 }
 
-impl MappingRecord {
+impl MappingRow {
     pub fn new(
         mapping: SegmentMappingId,
         start: impl Into<Address>,
@@ -253,14 +284,14 @@ impl MappingRecord {
     }
 }
 
-impl PartialOrd for MappingRecord {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+impl PartialOrd for MappingRow {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for MappingRecord {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+impl Ord for MappingRow {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
         self.start
             .cmp(&other.start)
             .then_with(|| self.mapping.cmp(&other.mapping))
@@ -280,7 +311,7 @@ pub struct QueryReader {
 }
 
 impl QueryReader {
-    pub(crate) fn new(
+    fn new(
         active: Arc<AtomicBool>,
         gate: Arc<RwLock<()>>,
         project: Arc<RwLock<Project>>,
@@ -325,26 +356,26 @@ impl QueryReader {
         Ok(self.changes.read().changed_since(since, kinds, region))
     }
 
-    pub fn flow_graph(&self, entry: Address) -> Result<Option<Arc<FlowGraph>>, QueryError> {
+    pub fn flow_targets(&self, entry: Address) -> Result<Option<Arc<FlowTargets>>, QueryError> {
         let _query_guard = self.enter_query()?;
 
-        if let Some(cached) = self.cache.get(entry) {
+        if let Some(cached) = self.cache.flow_targets(entry) {
             return Ok(cached);
         }
 
-        let graph = {
+        let targets = {
             let project = self.project.read();
             let read = ProjectRead::new(&project);
             read.function(entry)
-                .map(|function| read.flow_graph(function))
+                .map(|function| read.flow_targets(function))
         };
 
-        self.cache.insert(entry, graph.clone());
-        Ok(graph)
+        self.cache.insert_flow_targets(entry, targets.clone());
+        Ok(targets)
     }
 
     pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
-        if let Some(cached) = self.cached_pcode(function)? {
+        if let Some(cached) = self.cached_il::<PCodeIr>(function)? {
             return Ok(Some(cached));
         }
 
@@ -352,23 +383,11 @@ impl QueryReader {
             return Ok(None);
         }
 
-        self.cached_pcode(function)
-    }
-
-    fn cached_pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
-        let _query_guard = self.enter_query()?;
-
-        if let Some(cached) = self.cache.pcode(function) {
-            return Ok(cached);
-        }
-
-        let ir = { self.project.read().pcode(function)? }.map(Arc::new);
-        self.cache.insert_pcode(function, ir.clone());
-        Ok(ir)
+        self.cached_il::<PCodeIr>(function)
     }
 
     pub fn ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
-        if let Some(cached) = self.cached_ecode(function)? {
+        if let Some(cached) = self.cached_il::<ECodeIr>(function)? {
             return Ok(Some(cached));
         }
 
@@ -376,23 +395,11 @@ impl QueryReader {
             return Ok(None);
         }
 
-        self.cached_ecode(function)
-    }
-
-    fn cached_ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
-        let _query_guard = self.enter_query()?;
-
-        if let Some(cached) = self.cache.ecode(function) {
-            return Ok(cached);
-        }
-
-        let ir = { self.project.read().ecode(function)? }.map(Arc::new);
-        self.cache.insert_ecode(function, ir.clone());
-        Ok(ir)
+        self.cached_il::<ECodeIr>(function)
     }
 
     pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
-        if let Some(cached) = self.cached_ecode_ssa(function)? {
+        if let Some(cached) = self.cached_il::<ECodeSsaIr>(function)? {
             return Ok(Some(cached));
         }
 
@@ -400,21 +407,21 @@ impl QueryReader {
             return Ok(None);
         }
 
-        self.cached_ecode_ssa(function)
+        self.cached_il::<ECodeSsaIr>(function)
     }
 
-    fn cached_ecode_ssa(
-        &self,
-        function: FunctionId,
-    ) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
+    fn cached_il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
+    where
+        T: QueryCachedIl,
+    {
         let _query_guard = self.enter_query()?;
 
-        if let Some(cached) = self.cache.ecode_ssa(function) {
+        if let Some(cached) = T::cached(&self.cache, function) {
             return Ok(cached);
         }
 
-        let ir = { self.project.read().ecode_ssa(function)? }.map(Arc::new);
-        self.cache.insert_ecode_ssa(function, ir.clone());
+        let ir = { self.project.read().lifted::<T>(function)? }.map(Arc::new);
+        T::insert_cached(&self.cache, function, ir.clone());
         Ok(ir)
     }
 
@@ -450,21 +457,25 @@ impl QueryReader {
         })
     }
 
-    pub fn call_edges(
+    pub fn call_edge_page(
         &self,
         after: Option<CallEdge>,
         limit: usize,
     ) -> Result<QueryPage<CallEdge>, QueryError> {
-        self.with_project(|read| read.call_edges(after, limit))
+        self.with_project(|read| read.call_edge_page(after, limit))
     }
 
-    pub fn callees_of(
+    pub fn callee_page(
         &self,
         entry: Address,
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.callees_of(entry, after, limit))
+        self.with_project(|read| read.callee_page(entry, after, limit))
+    }
+
+    pub fn function_id_at(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
+        self.with_project(|read| read.function(entry).map(|function| function.id()))
     }
 
     pub fn function_page(
@@ -476,57 +487,76 @@ impl QueryReader {
         self.with_project(|read| read.function_page(space, after, limit))
     }
 
-    pub fn callers_of(
+    pub fn caller_page(
         &self,
         entry: Address,
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.callers_of(entry, after, limit))
+        self.with_project(|read| read.caller_page(entry, after, limit))
     }
 
-    pub fn references_from(
+    pub fn outgoing_reference_page(
         &self,
         from: Address,
         after: Option<Reference>,
         limit: usize,
     ) -> Result<QueryPage<Reference>, QueryError> {
-        self.with_project(|read| read.references_from(from, after, limit))
+        self.with_project(|read| read.outgoing_reference_page(from, after, limit))
     }
 
-    pub fn references_to(
+    pub fn incoming_reference_page(
         &self,
         to: Address,
         after: Option<Reference>,
         limit: usize,
     ) -> Result<QueryPage<Reference>, QueryError> {
-        self.with_project(|read| read.references_to(ReferenceTarget::from(to), after, limit))
+        self.with_project(|read| {
+            read.incoming_reference_page(ReferenceTarget::from(to), after, limit)
+        })
     }
 
     pub fn mapping_page(
         &self,
         space: AddressSpaceId,
-        after: Option<MappingRecord>,
+        after: Option<MappingRow>,
         limit: usize,
-    ) -> Result<QueryPage<MappingRecord>, QueryError> {
+    ) -> Result<QueryPage<MappingRow>, QueryError> {
         self.with_project(|read| read.mapping_page(space, after, limit))
     }
 
     pub fn symbol_page(
         &self,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> Result<QueryPage<SymbolRecord>, QueryError> {
+    ) -> Result<QueryPage<SymbolRow>, QueryError> {
         self.with_project(|read| read.symbol_page(after, limit))
     }
 
-    pub fn symbols_at(
+    pub fn symbol_page_at(
         &self,
         address: Address,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> Result<QueryPage<SymbolRecord>, QueryError> {
-        self.with_project(|read| read.symbols_at(address, after, limit))
+    ) -> Result<QueryPage<SymbolRow>, QueryError> {
+        self.with_project(|read| read.symbol_page_at(address, after, limit))
+    }
+
+    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchRow>, QueryError> {
+        self.with_project(|read| read.switch_at(branch))
+    }
+
+    pub fn switch_page(
+        &self,
+        after: Option<Address>,
+        limit: usize,
+    ) -> Result<QueryPage<SwitchRow, Address>, QueryError> {
+        self.with_project(|read| read.switch_page(after, limit))
+    }
+
+    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchRow, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.switch_page(cursor, WALK_PAGE_COUNT))
     }
 
     pub fn functions(
@@ -538,37 +568,37 @@ impl QueryReader {
             reader.function_page(
                 space,
                 cursor.map(|address| address.raw_address()),
-                WALK_PAGE_LEN,
+                WALK_PAGE_COUNT,
             )
         })
     }
 
-    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRecord, QueryError>> {
+    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_COUNT))
     }
 
     pub fn mappings(
         &self,
         space: AddressSpaceId,
-    ) -> impl Iterator<Item = Result<MappingRecord, QueryError>> {
+    ) -> impl Iterator<Item = Result<MappingRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_COUNT))
     }
 
-    pub fn edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
+    pub fn call_edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.call_edges(cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.call_edge_page(cursor, WALK_PAGE_COUNT))
     }
 
     pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.callers_of(entry, cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.caller_page(entry, cursor, WALK_PAGE_COUNT))
     }
 
     pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.callees_of(entry, cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.callee_page(entry, cursor, WALK_PAGE_COUNT))
     }
 
     pub fn outgoing_references(
@@ -576,7 +606,7 @@ impl QueryReader {
         from: Address,
     ) -> impl Iterator<Item = Result<Reference, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.references_from(from, cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.outgoing_reference_page(from, cursor, WALK_PAGE_COUNT))
     }
 
     pub fn incoming_references(
@@ -584,7 +614,7 @@ impl QueryReader {
         to: Address,
     ) -> impl Iterator<Item = Result<Reference, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.references_to(to, cursor, WALK_PAGE_LEN))
+        Paged::new(move |cursor| reader.incoming_reference_page(to, cursor, WALK_PAGE_COUNT))
     }
 
     fn with_project<T>(&self, query: impl FnOnce(ProjectRead<'_>) -> T) -> Result<T, QueryError> {
@@ -658,7 +688,7 @@ impl QueryEngine {
                 ChangeRecord::FunctionAdded { entry, .. }
                 | ChangeRecord::FunctionChanged { entry, .. }
                 | ChangeRecord::FunctionRemoved { entry, .. } => {
-                    self.cache.evict(*entry);
+                    self.cache.evict_flow_targets(*entry);
                 }
                 ChangeRecord::LiftedMaterialised { function, level }
                 | ChangeRecord::LiftedRemoved { function, level } => {
@@ -689,6 +719,7 @@ pub(crate) type QueryWriteGuard = ArcRwLockWriteGuard<RawRwLock, ()>;
 
 #[cfg(test)]
 mod test {
+    use std::error::Error;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -696,20 +727,21 @@ mod test {
 
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::analysis::function::recovery::{PartialCodeBlock, PartialFunction};
     use crate::engine::change::FunctionChangeKind;
     use crate::il::common::{
-        IlArtefact, IlBlockId, IlGraph, IlHeader, IlIndexRange, IlSourceSpan, IlValueId,
+        IlArtefact, IlBlockId, IlDominance, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan,
+        IlValueId,
     };
-    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::ssa::{
+        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses,
+    };
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
     use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
     use crate::il::storage::IlRevert;
-    use crate::ir::{AddressRange, ReferenceKind};
+    use crate::ir::{AddressRange, IncompleteCodeBlock, IncompleteFunction, ReferenceKind};
     use crate::loader::Loader;
     use crate::project::ProjectTransaction;
-    use crate::queries::cache::CFG_CACHE_CAPACITY;
-    use crate::queries::index::{CENSUS_INTERVAL, ChangeIndex, MAX_CHANGE_RUNS};
+    use crate::queries::index::{ChangeIndex, MAX_CHANGE_RUNS};
 
     #[test]
     fn test_query_page_exposes_entries_and_next_cursor() {
@@ -731,7 +763,7 @@ mod test {
     }
 
     impl Fixture {
-        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        fn new() -> Result<Self, Box<dyn Error>> {
             let loader = Loader::from_file("tests/ls.elf")?;
             let project = Arc::new(RwLock::new(Project::new_transient(&loader)?));
             let queries = QueryEngine::new(project.clone());
@@ -749,7 +781,7 @@ mod test {
         fn commit_with<T>(
             &mut self,
             mutate: impl FnOnce(&mut ProjectTransaction<'_>) -> Result<T, ProjectError>,
-        ) -> Result<T, Box<dyn std::error::Error>> {
+        ) -> Result<T, Box<dyn Error>> {
             let (changes, value) = {
                 let mut project = self.project.write();
                 let mut transaction = project.transaction("query fixture");
@@ -766,26 +798,23 @@ mod test {
             Ok(value)
         }
 
-        fn commit_function(
-            &mut self,
-            function: PartialFunction,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        fn commit_function(&mut self, function: IncompleteFunction) -> Result<(), Box<dyn Error>> {
             self.commit_function_with_id(function).map(drop)
         }
 
         fn commit_function_with_id(
             &mut self,
-            function: PartialFunction,
-        ) -> Result<FunctionId, Box<dyn std::error::Error>> {
+            function: IncompleteFunction,
+        ) -> Result<FunctionId, Box<dyn Error>> {
             self.commit_with(|transaction| transaction.add_function(function))
         }
 
-        fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn std::error::Error>> {
+        fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn Error>> {
             self.commit_with(|transaction| transaction.remove_function(entry))
                 .map(drop)
         }
 
-        fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn std::error::Error>>
+        fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn Error>>
         where
             T: IlArtefact,
             IlRevert: From<(FunctionId, Option<T>)>,
@@ -797,29 +826,27 @@ mod test {
             self.queries.apply_changes(changes);
         }
 
-        fn function_at(entry: Address) -> PartialFunction {
+        fn function_at(entry: Address) -> IncompleteFunction {
             Self::function_with_len(entry, 1)
         }
 
-        fn function_with_len(entry: Address, len: usize) -> PartialFunction {
-            let mut function = PartialFunction::new(entry);
-            function.push_block(PartialCodeBlock::new(
-                entry,
-                len,
-                Vec::new(),
-                Default::default(),
-            ));
+        fn function_with_len(entry: Address, len: usize) -> IncompleteFunction {
+            let mut function = IncompleteFunction::new(entry);
+            function.push_block(
+                IncompleteCodeBlock::try_new(entry, len, Vec::new(), Default::default())
+                    .expect("test block length must be valid"),
+            );
             function
         }
 
         fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
             let mut builder = PCodeBuilder::new(
                 self.project.read().language(),
-                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
                 IlGraph::default(),
             );
 
-            builder.replace_source_spans(vec![IlSourceSpan::new(
+            builder.set_source_spans(vec![IlSourceSpan::new(
                 IlIndexRange::EMPTY,
                 Address::new(AddressSpaceId::new(1), u64::from(tag)),
                 u32::from(tag),
@@ -834,7 +861,7 @@ mod test {
         fn pcode_for(&self, function: FunctionId) -> PCodeIr {
             PCodeBuilder::new(
                 self.project.read().language(),
-                IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
                 IlGraph::default(),
             )
             .build(&CancellationToken::default())
@@ -843,7 +870,7 @@ mod test {
 
         fn ecode_for(function: FunctionId) -> ECodeIr {
             ECodeBuilder::new(
-                IlHeader::new(function, ECODE_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, ECODE_SCHEMA_VERSION, 0),
                 IlGraph::default(),
             )
             .build(&CancellationToken::default())
@@ -852,7 +879,7 @@ mod test {
 
         fn ecode_ssa_for(function: FunctionId) -> ECodeSsaIr {
             ECodeSsaBuilder::new(
-                IlHeader::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
                 IlGraph::default(),
             )
             .build(&CancellationToken::default())
@@ -862,7 +889,7 @@ mod test {
         fn materialise_lifted_chain(
             &mut self,
             function: FunctionId,
-        ) -> Result<PublishedIl, Box<dyn std::error::Error>> {
+        ) -> Result<PublishedIl, Box<dyn Error>> {
             let mut pcode = self.pcode_for(function);
             let mut ecode = Self::ecode_for(function);
             let mut ecode_ssa = Self::ecode_ssa_for(function);
@@ -880,7 +907,7 @@ mod test {
     }
 
     #[test]
-    fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let mut ir = fixture.pcode_with_span(FunctionId::default(), 7, 3);
 
@@ -896,7 +923,7 @@ mod test {
     }
 
     #[test]
-    fn test_query_reader_memoises_lifted_reads() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_memoises_lifted_reads() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
         let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
@@ -905,25 +932,20 @@ mod test {
         fixture.queries.cache.clear_lifted();
 
         let reader = fixture.reader();
-        assert_eq!(fixture.queries.cache.lifted_len(), 0);
-
-        reader.pcode(function)?.expect("pcode should be visible");
-        assert_eq!(fixture.queries.cache.lifted_len(), 1);
-
-        reader
+        let first = reader.pcode(function)?.expect("pcode should be visible");
+        let second = reader
             .pcode(function)?
             .expect("cached pcode should be visible");
-        assert_eq!(fixture.queries.cache.lifted_len(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
 
         fixture.commit_function(Fixture::function_with_len(entry, 2))?;
-        assert_eq!(fixture.queries.cache.lifted_len(), 0);
+        assert!(reader.pcode(function)?.is_none());
 
         Ok(())
     }
 
     #[test]
-    fn test_query_reader_lifted_snapshot_survives_invalidation()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_lifted_snapshot_survives_invalidation() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
         let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
@@ -945,7 +967,7 @@ mod test {
     }
 
     #[test]
-    fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let function = FunctionId::default();
 
@@ -969,7 +991,7 @@ mod test {
     }
 
     #[test]
-    fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let function = FunctionId::default();
 
@@ -979,24 +1001,24 @@ mod test {
         let ir = reader
             .ecode_ssa(function)?
             .expect("ssa ir should be available");
-        let uses = ir.uses();
-        let dominance = ir.dominance();
-        let frontiers = ir.dominance_frontiers();
-        let liveness = ir.liveness();
+        let uses = ir.analyse::<ECodeSsaUses>();
+        let dominance = ir.analyse::<IlDominance>();
+        let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         let value = IlValueId::try_from_index(0)?;
         let block = IlBlockId::try_from_index(0)?;
 
         assert!(uses.uses_for(value).is_empty());
         assert!(!dominance.is_reachable(block));
-        assert!(frontiers.frontier(block).is_empty());
+        assert!(frontiers.frontier_for(block).is_empty());
         assert!(liveness.live_in(block).is_empty());
         assert!(liveness.live_out(block).is_empty());
         Ok(())
     }
 
     #[test]
-    fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let edited = Address::from(0x1_0000_0000u64);
         let same_window = Address::new(edited.space(), edited.offset() + 0x10);
@@ -1007,17 +1029,21 @@ mod test {
         fixture.commit_function(Fixture::function_at(distant))?;
 
         let reader = fixture.reader();
-        let edited_before = reader.flow_graph(edited)?.ok_or("edited missing")?;
-        let neighbour_before = reader.flow_graph(same_window)?.ok_or("neighbour missing")?;
-        let distant_before = reader.flow_graph(distant)?.ok_or("distant missing")?;
+        let edited_before = reader.flow_targets(edited)?.ok_or("edited missing")?;
+        let neighbour_before = reader
+            .flow_targets(same_window)?
+            .ok_or("neighbour missing")?;
+        let distant_before = reader.flow_targets(distant)?.ok_or("distant missing")?;
 
         fixture.commit_function(Fixture::function_with_len(edited, 2))?;
 
-        let edited_after = reader.flow_graph(edited)?.ok_or("edited missing after")?;
+        let edited_after = reader.flow_targets(edited)?.ok_or("edited missing after")?;
         let neighbour_after = reader
-            .flow_graph(same_window)?
+            .flow_targets(same_window)?
             .ok_or("neighbour missing after")?;
-        let distant_after = reader.flow_graph(distant)?.ok_or("distant missing after")?;
+        let distant_after = reader
+            .flow_targets(distant)?
+            .ok_or("distant missing after")?;
 
         assert!(!Arc::ptr_eq(&edited_before, &edited_after));
         assert!(Arc::ptr_eq(&neighbour_before, &neighbour_after));
@@ -1027,7 +1053,7 @@ mod test {
     }
 
     #[test]
-    fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entries = (0..8u64)
             .map(|index| Address::from(0x1_0000_0000u64 + index * 0x10))
@@ -1042,8 +1068,8 @@ mod test {
         for edited_index in 0..entries.len() {
             let before = entries
                 .iter()
-                .map(|entry| Ok(reader.flow_graph(*entry)?.ok_or("function missing")?))
-                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+                .map(|entry| Ok(reader.flow_targets(*entry)?.ok_or("function missing")?))
+                .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
             fixture.commit_function(Fixture::function_with_len(
                 entries[edited_index],
@@ -1051,7 +1077,9 @@ mod test {
             ))?;
 
             for (index, entry) in entries.iter().enumerate() {
-                let after = reader.flow_graph(*entry)?.ok_or("function missing after")?;
+                let after = reader
+                    .flow_targets(*entry)?
+                    .ok_or("function missing after")?;
                 let stable = Arc::ptr_eq(&before[index], &after);
                 assert_eq!(
                     stable,
@@ -1065,48 +1093,47 @@ mod test {
     }
 
     #[test]
-    fn test_function_removal_invalidates_cached_flow_graph()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
 
         fixture.commit_function(Fixture::function_at(entry))?;
 
         let reader = fixture.reader();
-        assert!(reader.flow_graph(entry)?.is_some());
+        assert!(reader.flow_targets(entry)?.is_some());
 
         fixture.remove_function(entry)?;
 
-        assert!(reader.flow_graph(entry)?.is_none());
+        assert!(reader.flow_targets(entry)?.is_none());
 
         Ok(())
     }
 
     #[test]
-    fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
 
         let reader = fixture.reader();
-        assert!(reader.flow_graph(entry)?.is_none());
-        assert!(reader.flow_graph(entry)?.is_none());
+        assert!(reader.flow_targets(entry)?.is_none());
+        assert!(reader.flow_targets(entry)?.is_none());
 
         fixture.commit_function(Fixture::function_at(entry))?;
 
-        assert!(reader.flow_graph(entry)?.is_some());
+        assert!(reader.flow_targets(entry)?.is_some());
 
         Ok(())
     }
 
     #[test]
-    fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
 
         fixture.commit_function(Fixture::function_at(entry))?;
 
         let reader = fixture.reader();
-        let before = reader.flow_graph(entry)?.ok_or("function missing")?;
+        let before = reader.flow_targets(entry)?.ok_or("function missing")?;
 
         let revision = fixture.next_revision();
         fixture.apply(&ChangeSet::with_records(
@@ -1117,7 +1144,7 @@ mod test {
         ));
 
         let after = reader
-            .flow_graph(entry)?
+            .flow_targets(entry)?
             .ok_or("function missing after write")?;
 
         assert!(Arc::ptr_eq(&before, &after));
@@ -1126,32 +1153,19 @@ mod test {
     }
 
     #[test]
-    fn test_query_memo_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = Fixture::new()?;
-        let reader = fixture.reader();
-
-        for index in 0..(CFG_CACHE_CAPACITY as u64 * 2) {
-            let _ = reader.flow_graph(Address::from(0x1_0000_0000u64 + index * 0x10))?;
-        }
-
-        assert!(fixture.queries.cache.len() <= CFG_CACHE_CAPACITY);
-        Ok(())
-    }
-
-    #[test]
-    fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
 
         fixture.commit_function(Fixture::function_with_len(entry, 4))?;
 
         let reader = fixture.reader();
-        let before = reader.flow_graph(entry)?.ok_or("function missing")?;
+        let before = reader.flow_targets(entry)?.ok_or("function missing")?;
 
         fixture.queries.cache.clear();
 
         let after = reader
-            .flow_graph(entry)?
+            .flow_targets(entry)?
             .ok_or("function missing after clear")?;
 
         assert!(!Arc::ptr_eq(&before, &after));
@@ -1161,7 +1175,7 @@ mod test {
     }
 
     #[test]
-    fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1204,8 +1218,7 @@ mod test {
     }
 
     #[test]
-    fn test_reference_change_is_observable_from_both_endpoints()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_reference_change_is_observable_from_both_endpoints() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1238,7 +1251,7 @@ mod test {
     }
 
     #[test]
-    fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1272,7 +1285,7 @@ mod test {
     }
 
     #[test]
-    fn test_region_less_changes_are_observable() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_region_less_changes_are_observable() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1317,8 +1330,7 @@ mod test {
     }
 
     #[test]
-    fn test_region_bearing_precision_survives_region_less_kinds()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_region_bearing_precision_survives_region_less_kinds() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1347,7 +1359,7 @@ mod test {
     }
 
     #[test]
-    fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1417,31 +1429,7 @@ mod test {
     }
 
     #[test]
-    fn test_change_index_census_bounds_run_count() {
-        let space = AddressSpaceId::from(0u8);
-        let mut index = ChangeIndex::new(Revision::new(0));
-
-        for step in 1..(MAX_CHANGE_RUNS as u64 * 4) {
-            let range = AddressRange::new(
-                space,
-                RawAddress::from(step * 0x400),
-                RawAddress::from(step * 0x400 + 0x3f),
-            );
-            index.apply(&ChangeSet::with_records(
-                Revision::new(step),
-                [ChangeRecord::BytesWritten { range }],
-            ));
-
-            assert!(
-                index.max_run_count() <= MAX_CHANGE_RUNS + CENSUS_INTERVAL,
-                "amortised census let a group exceed the run bound by more than one interval"
-            );
-        }
-    }
-
-    #[test]
-    fn test_cached_recomputes_only_on_dependency_change() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn test_cached_recomputes_only_on_dependency_change() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1488,7 +1476,7 @@ mod test {
     }
 
     #[test]
-    fn test_cached_composes_across_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_cached_composes_across_inputs() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
@@ -1555,7 +1543,7 @@ mod test {
     }
 
     #[test]
-    fn test_cached_region_less_dependency() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_cached_region_less_dependency() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 

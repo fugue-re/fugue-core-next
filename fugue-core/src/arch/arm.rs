@@ -66,10 +66,7 @@ impl ArchT for Arm {
 
     fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
-        let alignment = if t_mode != 0 { 2 } else { 4 };
-        let cleared = RawAddress::from(addr.offset() & !1);
-        let naddr = cleared.wrap(self.language()).align(alignment);
-        (naddr == cleared).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
+        self.canonicalise_with_mode(addr, t_mode)
     }
 
     fn canonicalise_address_with(
@@ -80,10 +77,7 @@ impl ArchT for Arm {
         let t_mode = (addr.offset() & 1 == 1
             || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1)
             as u32;
-        let alignment = if t_mode != 0 { 2 } else { 4 };
-        let cleared = RawAddress::from(addr.offset() & !1);
-        let naddr = cleared.wrap(self.language()).align(alignment);
-        (naddr == cleared).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
+        self.canonicalise_with_mode(addr, t_mode)
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -128,6 +122,17 @@ impl ArchT for Arm {
 }
 
 impl Arm {
+    fn canonicalise_with_mode(
+        &self,
+        address: RawAddress,
+        t_mode: u32,
+    ) -> Option<(RawAddress, ContextSet)> {
+        let alignment = if t_mode != 0 { 2 } else { 4 };
+        let cleared = address.align_down(2);
+        let canonical = cleared.wrap_and_align_with(self.language(), alignment);
+        (canonical == cleared).then_some((canonical, ContextSet::single(self.data.t_mode, t_mode)))
+    }
+
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: &'static Language) -> Arch {
         let is_thumb = language.variant().ends_with("T");
@@ -270,8 +275,34 @@ impl ArmDisassembler {
             | Opcode::RFE(_, _)
             | Opcode::SVC
             | Opcode::SMC
+            | Opcode::TBB
+            | Opcode::TBH
             | Opcode::UDF => true,
-            Opcode::MVN | Opcode::MOV => insn.operands[0] == Operand::Reg(pc),
+            Opcode::AND
+            | Opcode::EOR
+            | Opcode::SUB
+            | Opcode::RSB
+            | Opcode::ADD
+            | Opcode::ADC
+            | Opcode::SBC
+            | Opcode::RSC
+            | Opcode::ORR
+            | Opcode::MOV
+            | Opcode::BIC
+            | Opcode::MVN
+            | Opcode::LSL
+            | Opcode::LSR
+            | Opcode::ASR
+            | Opcode::RRX
+            | Opcode::ROR
+            | Opcode::ORN
+            | Opcode::LDR => insn.operands[0] == Operand::Reg(pc),
+            Opcode::POP => {
+                matches!(insn.operands[0], Operand::RegList(list) if list & (1u16 << pc.number()) != 0)
+            }
+            Opcode::LDM(_, _, _, _) => {
+                matches!(insn.operands[1], Operand::RegList(list) if list & (1u16 << pc.number()) != 0)
+            }
             _ => false,
         }
     }

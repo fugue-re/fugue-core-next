@@ -1,11 +1,11 @@
 use crate::ir::{Address, Insn, InsnTarget};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FlowGraph {
+pub struct FlowTargets {
     targets: Vec<FlowTarget>,
 }
 
-impl FlowGraph {
+impl FlowTargets {
     pub fn new(targets: impl Into<Vec<FlowTarget>>) -> Self {
         Self {
             targets: targets.into(),
@@ -85,6 +85,10 @@ impl FlowKind {
 
     pub fn is_fall(&self) -> bool {
         matches!(self, Self::Fall)
+    }
+
+    pub fn is_global(&self) -> bool {
+        self.is_call() || self.is_return()
     }
 
     pub fn is_indirect(&self) -> bool {

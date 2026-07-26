@@ -552,12 +552,6 @@ pub struct RateLimiterConfig {
     pub auto_tuned: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SstFileManagerConfig {
-    pub max_allowed_space_usage: u64,
-    pub compaction_buffer_size: u64,
-}
-
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UniversalCompactionOptions {
@@ -883,11 +877,6 @@ pub enum MemtableFactoryConfig {
 }
 
 impl RocksDbOptions {
-    /// Create a new empty options structure
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Apply these options to a rocksdb Options instance
     pub fn apply(&self, opts: &mut rocksdb::Options) {
         // Basic options

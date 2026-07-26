@@ -11,27 +11,30 @@ pub(crate) const CENSUS_INTERVAL: usize = 256;
 enum RegionGroupKind {
     Bytes,
     Functions,
-    Symbols,
-    Segments,
     References,
+    Segments,
+    Switches,
+    Symbols,
 }
 
 impl RegionGroupKind {
-    const ALL: [RegionGroupKind; 5] = [
+    const ALL: [RegionGroupKind; 6] = [
         RegionGroupKind::Bytes,
         RegionGroupKind::Functions,
-        RegionGroupKind::Symbols,
-        RegionGroupKind::Segments,
         RegionGroupKind::References,
+        RegionGroupKind::Segments,
+        RegionGroupKind::Switches,
+        RegionGroupKind::Symbols,
     ];
 
     fn index(self) -> usize {
         match self {
             RegionGroupKind::Bytes => 0,
             RegionGroupKind::Functions => 1,
-            RegionGroupKind::Symbols => 2,
+            RegionGroupKind::References => 2,
             RegionGroupKind::Segments => 3,
-            RegionGroupKind::References => 4,
+            RegionGroupKind::Switches => 4,
+            RegionGroupKind::Symbols => 5,
         }
     }
 
@@ -44,6 +47,7 @@ impl RegionGroupKind {
                 ChangeKinds::SEGMENT_MAPPED | ChangeKinds::SEGMENT_UNMAPPED
             }
             RegionGroupKind::References => ChangeKinds::REFERENCES,
+            RegionGroupKind::Switches => ChangeKinds::SWITCHES,
         }
     }
 
@@ -124,6 +128,8 @@ impl RegionGroup {
 }
 
 struct GlobalWatermarks {
+    lifted: Revision,
+    restored: Revision,
     space_created: Revision,
     mapping_created: Revision,
     mapping_changed: Revision,
@@ -132,6 +138,8 @@ struct GlobalWatermarks {
 impl GlobalWatermarks {
     fn new(revision: Revision) -> Self {
         Self {
+            lifted: revision,
+            restored: revision,
             space_created: revision,
             mapping_created: revision,
             mapping_changed: revision,
@@ -139,6 +147,9 @@ impl GlobalWatermarks {
     }
 
     fn bump(&mut self, kind: ChangeKinds, revision: Revision) {
+        if kind.intersects(ChangeKinds::LIFTED) {
+            self.lifted = self.lifted.max(revision);
+        }
         if kind.intersects(ChangeKinds::SPACE_CREATED) {
             self.space_created = self.space_created.max(revision);
         }
@@ -152,6 +163,12 @@ impl GlobalWatermarks {
 
     fn latest(&self, kinds: ChangeKinds) -> Revision {
         let mut latest = Revision::new(0);
+        if kinds.intersects(ChangeKinds::LIFTED) {
+            latest = latest.max(self.lifted);
+        }
+        if kinds.intersects(ChangeKinds::RESTORED) {
+            latest = latest.max(self.restored);
+        }
         if kinds.intersects(ChangeKinds::SPACE_CREATED) {
             latest = latest.max(self.space_created);
         }
@@ -165,6 +182,8 @@ impl GlobalWatermarks {
     }
 
     fn restore(&mut self, revision: Revision) {
+        self.lifted = self.lifted.max(revision);
+        self.restored = self.restored.max(revision);
         self.space_created = self.space_created.max(revision);
         self.mapping_created = self.mapping_created.max(revision);
         self.mapping_changed = self.mapping_changed.max(revision);
@@ -233,13 +252,72 @@ impl ChangeIndex {
         }
         self.global.restore(revision);
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn max_run_count(&self) -> usize {
-        self.groups
-            .iter()
-            .map(RegionGroup::run_count)
-            .max()
-            .unwrap_or(0)
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::engine::change::ChangeRecord;
+    use crate::il::common::IlLevel;
+    use crate::ir::{FunctionId, RawAddress};
+
+    #[test]
+    fn census_bounds_run_count() {
+        let space = AddressSpaceId::from(0u8);
+        let mut index = ChangeIndex::new(Revision::new(0));
+
+        for step in 1..(MAX_CHANGE_RUNS as u64 * 4) {
+            let range = AddressRange::new(
+                space,
+                RawAddress::from(step * 0x400),
+                RawAddress::from(step * 0x400 + 0x3f),
+            );
+            index.apply(&ChangeSet::with_records(
+                Revision::new(step),
+                [ChangeRecord::BytesWritten { range }],
+            ));
+
+            let max_run_count = index
+                .groups
+                .iter()
+                .map(RegionGroup::run_count)
+                .max()
+                .unwrap_or(0);
+            assert!(
+                max_run_count <= MAX_CHANGE_RUNS + CENSUS_INTERVAL,
+                "amortised census let a group exceed the run bound by more than one interval"
+            );
+        }
+    }
+
+    #[test]
+    fn lifted_changes_advance_global_watermark() {
+        let mut index = ChangeIndex::new(Revision::new(0));
+        index.apply(&ChangeSet::with_records(
+            Revision::new(7),
+            [ChangeRecord::LiftedMaterialised {
+                function: FunctionId::default(),
+                level: IlLevel::ECode,
+            }],
+        ));
+        assert_eq!(
+            index.latest_change(ChangeKinds::LIFTED, &AddressRangeSet::new()),
+            Revision::new(7)
+        );
+    }
+
+    #[test]
+    fn restored_changes_advance_global_watermark() {
+        let mut index = ChangeIndex::new(Revision::new(0));
+        index.apply(&ChangeSet::with_records(
+            Revision::new(7),
+            [ChangeRecord::Restored {
+                to: Revision::new(7),
+            }],
+        ));
+        assert_eq!(
+            index.latest_change(ChangeKinds::RESTORED, &AddressRangeSet::new()),
+            Revision::new(7)
+        );
     }
 }

@@ -5,7 +5,7 @@ use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::{
     SegmentRangeOverlap, SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
-    SegmentView,
+    SegmentStorageProviderId, SegmentView,
 };
 use crate::types::AttributeMap;
 
@@ -59,6 +59,7 @@ impl InMemorySegmentStorage {
 
 impl SegmentStorageProviderFromSegmentRange for InMemorySegmentStorage {
     fn from_segment_range(
+        _id: SegmentStorageProviderId,
         range: RangeInclusive<Address>,
         _attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
@@ -109,14 +110,29 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
         }
 
         let chunk_end = self.chunk_end();
+        let end = offset + write;
+        if offset < self.base && end > self.base {
+            let prefix = self.base - offset;
+            self.overlay.write(offset as u64, data[..prefix].to_vec());
+
+            let remaining = &data[prefix..];
+            let in_place = self.chunk.len().min(remaining.len());
+            self.chunk[..in_place].copy_from_slice(&remaining[..in_place]);
+            if remaining.len() > self.chunk.len() {
+                self.chunk.extend_from_slice(&remaining[in_place..]);
+            }
+            self.overlay.clear_range(self.base as u64, self.chunk.len());
+            return Ok(write);
+        }
+
         if offset >= self.base && offset <= chunk_end {
-            let end = offset + write;
             let local = offset - self.base;
             let in_place = chunk_end.min(end) - offset;
             self.chunk[local..local + in_place].copy_from_slice(&data[..in_place]);
             if end > chunk_end {
                 self.chunk.extend_from_slice(&data[in_place..]);
             }
+            self.overlay.clear_range(offset as u64, write);
             return Ok(write);
         }
 
@@ -246,6 +262,19 @@ mod test {
     }
 
     #[test]
+    fn test_write_from_below_updates_chunk_overlap() -> Result<(), SegmentStorageError> {
+        let mut store = InMemorySegmentStorage::with_size(0x1000);
+        store.write_bytes(0x100, b"AAAA")?;
+        store.write_bytes(0x0fe, b"bbbb")?;
+
+        let mut bytes = [0u8; 6];
+        store.read_bytes(0x0fe, &mut bytes)?;
+
+        assert_eq!(&bytes, b"bbbbAA");
+        Ok(())
+    }
+
+    #[test]
     fn test_sparse_outlier_and_gaps() -> Result<(), SegmentStorageError> {
         let mut store = InMemorySegmentStorage::with_size(0x1_0000);
         store.write_bytes(0, b"hello")?;
@@ -272,13 +301,29 @@ mod test {
     }
 
     #[test]
+    fn chunk_growth_replaces_covered_overlay_bytes() -> Result<(), SegmentStorageError> {
+        let mut store = InMemorySegmentStorage::with_size(0x1000);
+        store.write_bytes(0, b"AAAA")?;
+        store.write_bytes(8, b"old!")?;
+        store.write_bytes(4, b"BBBBCCCC")?;
+
+        let mut direct = [0u8; 12];
+        store.read_bytes(0, &mut direct)?;
+        let mut viewed = [0u8; 12];
+        store.view_bytes(0, 12)?.read_into(&mut viewed);
+        assert_eq!(&direct, b"AAAABBBBCCCC");
+        assert_eq!(viewed, direct);
+        Ok(())
+    }
+
+    #[test]
     fn test_view_spans_gap() -> Result<(), SegmentStorageError> {
         let mut store = InMemorySegmentStorage::with_size(0x1000);
         store.write_bytes(0, b"AAAA")?;
         store.write_bytes(8, b"BBBB")?;
 
         let view = store.view_bytes(0, 12)?;
-        assert_eq!(view.len(), 12);
+        assert_eq!(view.size(), 12);
         assert_eq!(
             view.as_contiguous(),
             Some(&b"AAAA"[..]),
@@ -290,7 +335,7 @@ mod test {
         assert_eq!(&buf, b"AAAA\0\0\0\0BBBB");
 
         let run = store.view_bytes_from(0)?;
-        assert_eq!(run.len(), 4, "view_bytes_from stops at the chunk's end");
+        assert_eq!(run.size(), 4, "view_bytes_from stops at the chunk's end");
         Ok(())
     }
 }

@@ -63,6 +63,10 @@ impl IlError {
         Self::MissingComponent { level, component }
     }
 
+    pub const fn publish_after_semantic_mutation() -> Self {
+        Self::PublishAfterSemanticMutation
+    }
+
     pub const fn range_out_of_bounds(end: u32, len: usize) -> Self {
         Self::RangeOutOfBounds { end, len }
     }

@@ -1,14 +1,25 @@
+use std::collections::BTreeMap;
+
 use ustr::Ustr;
 
-use crate::ir::{Address, CodeBlockId, Id};
+use crate::ir::block::CodeBlockFlowCursor;
+use crate::ir::{
+    Address, CodeBlockId, CodeBlockRef, CodeBlockTable, FlowTarget, Id, Reference, ReferenceKey,
+    ReferenceOrigin, ReferenceProperties,
+};
 use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::types::common::archived_bitflags;
 
-pub mod frame;
+pub(crate) mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
-pub mod table;
-pub use table::FunctionTable;
+pub(crate) mod incomplete;
+pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
+
+mod table;
+pub(crate) use table::FunctionTableRevert;
+pub use table::{FunctionMut, FunctionRef, FunctionTable, FunctionTableError};
 
 pub type FunctionId = Id<Function>;
 
@@ -61,46 +72,7 @@ bitflags::bitflags! {
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedFunctionProperties(rkyv::Archived<u32>);
-
-unsafe impl rkyv::Portable for ArchivedFunctionProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedFunctionProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedFunctionProperties
-where
-    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for FunctionProperties {
-    type Archived = ArchivedFunctionProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedFunctionProperties(
-            rkyv::primitive::ArchivedU32::from_native(self.bits()),
-        ));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for FunctionProperties {
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<FunctionProperties, D>
-    for ArchivedFunctionProperties
-{
-    fn deserialize(&self, _: &mut D) -> Result<FunctionProperties, D::Error> {
-        Ok(FunctionProperties::from_bits_truncate(self.0.to_native()))
-    }
-}
+archived_bitflags!(FunctionProperties, ArchivedFunctionProperties, u32);
 
 impl Function {
     pub fn new(id: FunctionId, entry: impl Into<Address>) -> Self {
@@ -189,6 +161,53 @@ impl Function {
 
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = (Address, CodeBlockId)> + '_ {
         self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
+    }
+
+    pub fn flow_targets<'a>(
+        &'a self,
+        blocks: &'a CodeBlockTable,
+    ) -> impl Iterator<Item = FlowTarget> + 'a {
+        let mut ids = self.blocks();
+        let mut block = None::<CodeBlockRef<'a>>;
+        let mut cursor = CodeBlockFlowCursor::default();
+
+        std::iter::from_fn(move || {
+            loop {
+                if let Some(current) = block.as_ref()
+                    && let Some(target) = current.next_flow_target(&mut cursor)
+                {
+                    return Some(target);
+                }
+
+                block = ids.find_map(|(_, id)| blocks.get_by_id(id));
+                cursor = CodeBlockFlowCursor::default();
+                block.as_ref()?;
+            }
+        })
+    }
+
+    pub(crate) fn flow_references(&self, blocks: &CodeBlockTable) -> Vec<Reference> {
+        let mut coalesced = BTreeMap::<ReferenceKey, ReferenceProperties>::new();
+
+        for target in self
+            .flow_targets(blocks)
+            .filter(|target| target.kind().is_global())
+        {
+            let reference = Reference::from_flow(target.from(), target.to(), target.kind());
+            let key = ReferenceKey::new(reference.from(), reference.target());
+            coalesced
+                .entry(key)
+                .and_modify(|properties| *properties |= reference.properties())
+                .or_insert_with(|| reference.properties());
+        }
+
+        coalesced
+            .into_iter()
+            .map(|(key, properties)| {
+                Reference::flow(key.from(), key.target(), properties)
+                    .with_origin(ReferenceOrigin::Derived)
+            })
+            .collect()
     }
 
     pub fn block_at(&self, address: Address) -> Option<CodeBlockId> {

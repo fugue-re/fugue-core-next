@@ -39,7 +39,7 @@ impl fmt::Debug for Shellcode<'_> {
 pub enum ShellcodeError {
     #[error("mapping {1} bytes at {0} will overflow the default address space")]
     AddressOverflow(RawAddress, usize),
-    #[error("buffer to map must be not be empty")]
+    #[error("buffer to map must not be empty")]
     ZeroSized,
 }
 

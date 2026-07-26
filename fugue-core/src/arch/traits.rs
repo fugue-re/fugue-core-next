@@ -103,9 +103,7 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
-        let naddr = addr
-            .wrap(self.language())
-            .align(self.language().address_alignment());
+        let naddr = addr.wrap_and_align(self.language());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 

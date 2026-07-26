@@ -1,4 +1,6 @@
-use crate::il::common::{IlOpId, IlValueId};
+use rustc_hash::FxHashMap;
+
+use crate::il::common::{IlAnalysis, IlCsr, IlOpId, IlValueId};
 use crate::il::ecode::ssa::ECodeSsaIr;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -27,57 +29,89 @@ impl ECodeSsaUse {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ECodeSsaUses {
-    offsets: Vec<u32>,
-    uses: Vec<ECodeSsaUse>,
+    uses: IlCsr<ECodeSsaUse>,
 }
 
 impl ECodeSsaUses {
-    pub fn build(body: &ECodeSsaIr) -> Self {
-        let mut offsets = vec![0u32; body.values().len() + 1];
+    pub fn uses_for(&self, value: IlValueId) -> &[ECodeSsaUse] {
+        self.uses.row(value.index())
+    }
+}
 
-        for operation in body.operations() {
-            for operand in operation.operands().slice(body.value_operands()) {
-                offsets[operand.index() + 1] += 1;
-            }
-        }
-
-        for index in 1..offsets.len() {
-            offsets[index] += offsets[index - 1];
-        }
-
-        let mut cursor = offsets.clone();
-        let fill = IlOpId::try_from_index(0).expect("operation id zero is representable");
-        let mut uses = vec![ECodeSsaUse::new(fill, 0); *offsets.last().unwrap_or(&0) as usize];
-
-        for (operation_index, operation) in body.operations().iter().enumerate() {
-            let operation_id = IlOpId::try_from_index(operation_index)
-                .expect("operation count fits the operation id space");
-
-            for (operand_index, operand) in operation
-                .operands()
-                .slice(body.value_operands())
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaUses {
+    fn analyse(body: &ECodeSsaIr) -> Self {
+        let entries =
+            body.operations()
                 .iter()
                 .enumerate()
-            {
-                let cursor_index = operand.index();
-                let slot = cursor[cursor_index] as usize;
+                .flat_map(|(operation_index, operation)| {
+                    let operation_id = IlOpId::try_from_index(operation_index)
+                        .expect("operation count fits the operation id space");
 
-                uses[slot] = ECodeSsaUse::new(operation_id, operand_index as u32);
-                cursor[cursor_index] += 1;
+                    body.operation_operands(operation).iter().enumerate().map(
+                        move |(operand_index, operand)| {
+                            (
+                                operand.index(),
+                                ECodeSsaUse::new(operation_id, operand_index as u32),
+                            )
+                        },
+                    )
+                });
+
+        Self {
+            uses: IlCsr::from_entries(body.values().len(), entries),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ECodeSsaBlockArgumentInputs {
+    inputs: FxHashMap<IlValueId, Vec<IlValueId>>,
+}
+
+impl ECodeSsaBlockArgumentInputs {
+    pub fn inputs_for(&self, argument: IlValueId) -> Option<&[IlValueId]> {
+        self.inputs.get(&argument).map(Vec::as_slice)
+    }
+
+    pub(crate) fn iter(&self) -> impl Clone + Iterator<Item = (IlValueId, &[IlValueId])> {
+        self.inputs
+            .iter()
+            .map(|(&argument, inputs)| (argument, inputs.as_slice()))
+    }
+}
+
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgumentInputs {
+    fn analyse(body: &ECodeSsaIr) -> Self {
+        let block_count = body.graph().blocks().len();
+        let arguments = IlCsr::from_entries(
+            block_count,
+            body.block_arguments()
+                .iter()
+                .map(|argument| (argument.block().index(), argument.value())),
+        );
+        let incoming = IlCsr::from_entries(
+            block_count,
+            body.graph()
+                .successors()
+                .iter()
+                .enumerate()
+                .map(|(edge, target)| (target.index(), edge)),
+        );
+
+        let mut inputs = FxHashMap::default();
+        for block in 0..block_count {
+            for (position, &argument) in arguments.row(block).iter().enumerate() {
+                let argument_inputs = incoming
+                    .row(block)
+                    .iter()
+                    .filter_map(|&edge| body.arguments_for_edge(edge).get(position).copied())
+                    .collect();
+                inputs.insert(argument, argument_inputs);
             }
         }
 
-        Self { offsets, uses }
-    }
-
-    pub fn uses_for(&self, value: IlValueId) -> &[ECodeSsaUse] {
-        let index = value.index();
-        let Some(start) = self.offsets.get(index).copied() else {
-            return &[];
-        };
-        let end = self.offsets.get(index + 1).copied().unwrap_or(start);
-
-        &self.uses[start as usize..end as usize]
+        Self { inputs }
     }
 }
 
@@ -85,28 +119,16 @@ impl ECodeSsaUses {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange};
+    use crate::il::common::{IlArtefact, IlGraph, IlIndexRange, IlMetadata};
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
     };
     use crate::ir::FunctionId;
 
     #[test]
-    fn uses_returns_value_uses() {
-        let value = IlValueId::try_from_index(0).unwrap();
-        let user = IlOpId::try_from_index(2).unwrap();
-        let index = ECodeSsaUses {
-            offsets: vec![0, 1],
-            uses: vec![ECodeSsaUse::new(user, 3)],
-        };
-
-        assert_eq!(index.uses_for(value), &[ECodeSsaUse::new(user, 3)]);
-    }
-
-    #[test]
     fn uses_builds_from_ssa_body() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
         let (left, left_results) = builder.push_result_value(64).unwrap();
 
         builder
@@ -139,7 +161,7 @@ mod test {
             ))
             .unwrap();
         let body = builder.build(&CancellationToken::default()).unwrap();
-        let index = ECodeSsaUses::build(&body);
+        let index = body.analyse::<ECodeSsaUses>();
 
         assert_eq!(
             index.uses_for(left),

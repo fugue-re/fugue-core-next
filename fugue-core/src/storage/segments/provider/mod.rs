@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::num::TryFromIntError;
 use std::ops::{Range, RangeInclusive};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 
@@ -11,14 +11,14 @@ use crate::storage::StoragePersistence;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
 
-pub mod memmap;
+pub(crate) mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;
 
-pub mod memory;
+pub(crate) mod memory;
 pub use memory::InMemorySegmentStorage;
 
-pub mod registry;
-pub use registry::*;
+pub(crate) mod registry;
+pub use registry::{SegmentStorageProviderEntry, SegmentStorageProviderRegistry};
 
 #[derive(
     Debug,
@@ -46,6 +46,10 @@ impl SegmentStorageProviderId {
 
     pub const fn index(&self) -> usize {
         self.0 as usize
+    }
+
+    pub(crate) fn path_in(&self, root: &Path) -> PathBuf {
+        root.join(format!("segment-{self}"))
     }
 }
 
@@ -147,6 +151,7 @@ impl SegmentStorageDescriptor {
 
 pub trait SegmentStorageProviderFromSegmentRange: SegmentStorageProvider + 'static {
     fn from_segment_range(
+        id: SegmentStorageProviderId,
         range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError>
@@ -199,21 +204,21 @@ impl<'a> SegmentChunk<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SegmentView<'a> {
     chunks: SmallVec<[SegmentChunk<'a>; 1]>,
-    len: u64,
+    size: u64,
 }
 
 impl<'a> SegmentView<'a> {
-    pub fn new(len: u64) -> Self {
+    pub fn new(size: u64) -> Self {
         Self {
             chunks: SmallVec::new(),
-            len,
+            size,
         }
     }
 
     pub fn contiguous(bytes: impl Into<Cow<'a, [u8]>>) -> Self {
         let bytes = bytes.into();
-        let len = bytes.len() as u64;
-        let mut view = Self::new(len);
+        let size = bytes.len() as u64;
+        let mut view = Self::new(size);
         view.push(0, bytes);
         view
     }
@@ -225,16 +230,16 @@ impl<'a> SegmentView<'a> {
         }
     }
 
-    pub fn len(&self) -> u64 {
-        self.len
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
-    pub fn set_len(&mut self, len: u64) {
-        self.len = len;
+    pub fn set_size(&mut self, size: u64) {
+        self.size = size;
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.size == 0
     }
 
     pub fn chunks(&self) -> &[SegmentChunk<'a>] {
@@ -242,7 +247,7 @@ impl<'a> SegmentView<'a> {
     }
 
     pub fn as_contiguous(&self) -> Option<&[u8]> {
-        if self.len == 0 {
+        if self.size == 0 {
             return Some(&[]);
         }
         self.chunks

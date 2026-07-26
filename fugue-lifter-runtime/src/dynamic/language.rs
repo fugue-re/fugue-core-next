@@ -84,6 +84,8 @@ pub struct Language {
     pub(crate) user_ops: Box<[Box<str>]>,
     pub(crate) context_vars: Box<[(Box<str>, ContextBitRange)]>,
     pub(crate) context_defaults: Box<[(Box<str>, u32)]>,
+    #[allow(clippy::type_complexity)]
+    pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -164,6 +166,7 @@ impl Language {
             user_ops,
             context_vars,
             context_defaults,
+            call_preserved_registers,
             space_names,
         } = self;
 
@@ -222,6 +225,7 @@ impl Language {
             space_names: space_names.install(),
             context_vars: context_vars.install(),
             context_defaults: context_defaults.install(),
+            call_preserved_registers: call_preserved_registers.install(),
             data: language_data,
         }))
     }
@@ -278,6 +282,30 @@ impl Language {
         }
         register_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         register_ranges.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        let mut call_preserved_registers = sleigh
+            .compiler_conventions()
+            .keys()
+            .map(|compiler| {
+                let registers = sleigh
+                    .call_preserved_registers(compiler)
+                    .expect("compiler convention comes from the language")
+                    .into_iter()
+                    .map(|varnode| {
+                        Varnode::new(
+                            u8::try_from(varnode.space().index())
+                                .expect("address-space identifier fits in u8"),
+                            varnode.offset(),
+                            u16::try_from(varnode.size()).expect("register size fits in u16"),
+                        )
+                    })
+                    .collect();
+                (Box::<str>::from(compiler.as_str()), registers)
+            })
+            .collect::<Vec<_>>();
+        call_preserved_registers.sort_by(|a, b| a.0.cmp(&b.0));
+        let call_preserved_registers = call_preserved_registers
+            .into_iter()
+            .collect::<Box<[(Box<str>, Box<[Varnode]>)]>>();
 
         let root_dtree = tables.root_dtree_id();
 
@@ -335,6 +363,7 @@ impl Language {
             user_ops,
             context_vars: context_pairs.into_boxed_slice(),
             context_defaults,
+            call_preserved_registers,
             space_names,
         }
     }

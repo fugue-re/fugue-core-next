@@ -1,21 +1,22 @@
-use super::{FunctionRecoveryError, PartialFunction};
+use super::FunctionRecoveryError;
+use crate::ir::IncompleteFunction;
 use crate::project::Project;
 use crate::types::Confidence;
 
 pub struct FunctionRecoveryCommitContext {
-    function: PartialFunction,
+    function: IncompleteFunction,
     confidence: Confidence,
 }
 
 impl FunctionRecoveryCommitContext {
-    pub fn new(function: PartialFunction, confidence: Confidence) -> Self {
+    pub fn new(function: IncompleteFunction, confidence: Confidence) -> Self {
         Self {
             function,
             confidence,
         }
     }
 
-    pub fn function(&self) -> &PartialFunction {
+    pub fn function(&self) -> &IncompleteFunction {
         &self.function
     }
 
@@ -23,7 +24,7 @@ impl FunctionRecoveryCommitContext {
         self.confidence
     }
 
-    pub(crate) fn into_function(self) -> PartialFunction {
+    pub(crate) fn into_function(self) -> IncompleteFunction {
         self.function
     }
 }

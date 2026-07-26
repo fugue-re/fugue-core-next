@@ -7,7 +7,7 @@ use crate::il::ecode::ssa::{
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeSsaOpcodeDisplay(pub ECodeSsaOpcode);
+struct ECodeSsaOpcodeDisplay(ECodeSsaOpcode);
 
 impl fmt::Display for ECodeSsaOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -24,6 +24,12 @@ pub struct ECodeSsaIrDisplay<'a> {
 impl<'a> ECodeSsaIrDisplay<'a> {
     pub(crate) const fn new(body: &'a ECodeSsaIr) -> Self {
         Self { body }
+    }
+}
+
+impl ECodeSsaIr {
+    pub const fn display(&self) -> ECodeSsaIrDisplay<'_> {
+        ECodeSsaIrDisplay::new(self)
     }
 }
 
@@ -59,7 +65,7 @@ impl fmt::Display for ECodeSsaIrDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeSsaValueDisplay<'a> {
+struct ECodeSsaValueDisplay<'a> {
     id: IlValueId,
     value: &'a ECodeSsaValue,
 }
@@ -88,7 +94,7 @@ impl fmt::Display for ECodeSsaValueDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeSsaBlockArgDisplay<'a> {
+struct ECodeSsaBlockArgDisplay<'a> {
     index: usize,
     argument: &'a ECodeSsaBlockArg,
 }
@@ -111,7 +117,7 @@ impl fmt::Display for ECodeSsaBlockArgDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeSsaMemoryDomainDisplay<'a> {
+struct ECodeSsaMemoryDomainDisplay<'a> {
     index: usize,
     domain: &'a ECodeSsaMemoryDomain,
 }
@@ -132,7 +138,7 @@ impl fmt::Display for ECodeSsaMemoryDomainDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct ECodeSsaOpDisplay<'a> {
+struct ECodeSsaOpDisplay<'a> {
     body: &'a ECodeSsaIr,
     index: usize,
     operation: &'a ECodeSsaOp,
@@ -250,14 +256,14 @@ impl fmt::Display for ECodeSsaOpDisplay<'_> {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlHeader, IlIndexRange};
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata};
     use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
     use crate::ir::FunctionId;
 
     #[test]
     fn ssa_body_display_is_deterministic() {
-        let header = IlHeader::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        let mut builder = ECodeSsaBuilder::new(header, IlGraph::default());
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
         let (value, results) = builder.push_result_value(64).unwrap();
 
         builder

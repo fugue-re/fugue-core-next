@@ -1,93 +1,98 @@
-use std::error::Error as StdError;
-
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::ir::Address;
+use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId};
 use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
-pub mod analysis;
-pub use analysis::{FunctionRecovery, FunctionRecoveryExtension};
+pub(crate) mod analysis;
+pub use analysis::{FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension};
 
-pub mod builder;
-pub use builder::{FunctionBuilder, FunctionBuilderContext, PartialFunctionWithContext};
+pub(crate) mod builder;
+pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
 
-pub mod hooks;
+pub(crate) mod hooks;
 pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
-pub mod ir;
-pub use ir::{InsnEntry, PartialCodeBlock, PartialFunction};
-
-pub mod patterns;
+pub(crate) mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
-pub mod translator;
-pub use translator::Translator;
+pub(crate) mod resolver;
+pub use resolver::InsnResolver;
 
-pub const DEFAULT_MAX_BLOCK_SIZE: usize = u16::MAX as usize;
-pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
+mod structuring;
+
+pub const DEFAULT_MAX_BLOCK_INSNS: usize = u16::MAX as usize;
+pub const DEFAULT_MAX_FUNCTION_BLOCKS: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
-    #[error("failed to create block: {0}")]
-    BlockCreation(anyhow::Error),
     #[error("commit hook failed: {0}")]
     CommitHook(AnalysisError),
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
-    #[error("failed to create function: {0}")]
-    FunctionCreation(anyhow::Error),
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
-    #[error("invalid block index: {0}")]
-    InvalidBlockId(usize),
+    #[error(transparent)]
+    Instruction(#[from] InsnError),
+    #[error("invalid block id: {0:?}")]
+    InvalidBlockId(IncompleteCodeBlockId),
+    #[error("invalid block length at {address}: {length} bytes exceeds u16 capacity")]
+    InvalidBlockLength { address: Address, length: usize },
     #[error(
-        "invalid block size at {0}; number of instructions ({1}) must be non-zero and less than {2}"
+        "invalid block size at {address}; number of instructions ({instructions}) must be non-zero and less than {maximum}"
     )]
-    InvalidBlockSize(Address, usize, usize),
+    InvalidBlockSize {
+        address: Address,
+        instructions: usize,
+        maximum: usize,
+    },
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
-    #[error("invalid function at {0}; number of blocks ({1}) must be less than {2}")]
-    InvalidFunctionSize(Address, usize, usize),
-    #[error("invalid instruction index: {0}")]
-    InvalidInstructionId(usize),
+    #[error(
+        "invalid function at {address}; number of blocks ({blocks}) must be less than {maximum}"
+    )]
+    InvalidFunctionSize {
+        address: Address,
+        blocks: usize,
+        maximum: usize,
+    },
+    #[error("invalid instruction id: {0:?}")]
+    InvalidInstructionId(InsnId),
     #[error(transparent)]
     Lifting(#[from] LifterError),
-    #[error("post-lifting pass failed: {0}")]
-    PostLiftingPass(AnalysisError),
+    #[error("post-structuring pass failed: {0}")]
+    PostStructuringPass(AnalysisError),
     #[error(transparent)]
     SegmentStorage(#[from] SegmentStorageError),
 }
 
 impl FunctionRecoveryError {
-    pub fn block_creation<E>(err: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        FunctionRecoveryError::BlockCreation(err.into())
-    }
-
-    pub fn function_creation<E>(err: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        FunctionRecoveryError::FunctionCreation(err.into())
-    }
-
-    pub fn invalid_block_id(id: usize) -> Self {
+    pub fn invalid_block_id(id: IncompleteCodeBlockId) -> Self {
         FunctionRecoveryError::InvalidBlockId(id)
     }
 
+    pub fn invalid_block_length(address: Address, length: usize) -> Self {
+        FunctionRecoveryError::InvalidBlockLength { address, length }
+    }
+
     pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
-        FunctionRecoveryError::InvalidBlockSize(addr, num_insns, max_insns)
+        FunctionRecoveryError::InvalidBlockSize {
+            address: addr,
+            instructions: num_insns,
+            maximum: max_insns,
+        }
     }
 
     pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
-        FunctionRecoveryError::InvalidFunctionSize(addr, num_blocks, max_blocks)
+        FunctionRecoveryError::InvalidFunctionSize {
+            address: addr,
+            blocks: num_blocks,
+            maximum: max_blocks,
+        }
     }
 
-    pub fn invalid_instruction_id(id: usize) -> Self {
+    pub fn invalid_instruction_id(id: InsnId) -> Self {
         FunctionRecoveryError::InvalidInstructionId(id)
     }
 }
@@ -125,8 +130,8 @@ impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
         FunctionRecoveryConfig {
             commit_pending_functions: true,
-            max_function_blocks: DEFAULT_MAX_FUNCTION_SIZE,
-            max_block_insns: DEFAULT_MAX_BLOCK_SIZE,
+            max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
+            max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
             use_fine_grained_block_coverage: false,
             use_segment_function_hints: true,
             use_segment_mapping_hints: true,
@@ -154,7 +159,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_function_blocks(&mut self, max: usize) {
-        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_SIZE);
+        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_BLOCKS);
     }
 
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
@@ -167,7 +172,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_block_insns(&mut self, max: usize) {
-        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_SIZE);
+        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_INSNS);
     }
 
     pub fn with_max_block_insns(mut self, max: usize) -> Self {

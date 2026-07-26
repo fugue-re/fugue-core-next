@@ -6,26 +6,26 @@ use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::runtime::operand;
 pub use fugue_lifter::{
-    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp, Varnode,
+    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp as RawPCodeOp, Varnode,
 };
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
 use thiserror::Error;
 
 use crate::ir::Address;
 
-pub mod disassembler;
+pub(crate) mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
-pub mod dynamic;
+pub(crate) mod dynamic;
 pub use dynamic::{
     LanguageLoader, resolve_language, resolve_language_id, resolve_language_id_with,
     resolve_language_with,
 };
 
-mod core;
-pub use core::{Lifter, LifterError};
+mod lift;
+pub use lift::{Lifter, LifterError};
 
-pub mod traits;
+pub(crate) mod traits;
 
 pub const MAX_CONTEXT_UPDATES: usize = 2;
 

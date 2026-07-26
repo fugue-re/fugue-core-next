@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
+use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
 use smol_str::SmolStr;
 use thiserror::Error;
@@ -16,11 +16,10 @@ use self::change::{
 };
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
-use crate::analysis::function::recovery::PartialFunction;
-use crate::il::common::{IlError, IlLevel};
+use crate::il::common::IlLevel;
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, RawAddressRangeSet, Reference, ReferenceTarget,
-    SymbolEntry, SymbolIndex,
+    Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
+    ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{QueryEngine, QueryReader};
@@ -34,6 +33,7 @@ use crate::storage::segments::space::AddressSpaceId;
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 const MAX_PENDING_REGION_RANGES: usize = 4096;
+const MAX_COMPLETION_ROUNDS: usize = 256;
 const IDLE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 pub const DEFAULT_ANALYSER_MAX_FAILURES: usize = 3;
 
@@ -42,8 +42,8 @@ pub mod change;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistencePolicy {
     Manual,
-    OnIdle,
     OnCommit,
+    OnIdle,
 }
 
 impl PersistencePolicy {
@@ -75,7 +75,7 @@ pub struct Priority(i32);
 
 impl Priority {
     pub const DISCOVERY: Self = Self(0);
-    pub const DERIVED: Self = Self(1_000);
+    pub const ENRICHMENT: Self = Self(1_000);
 
     pub const fn new(value: i32) -> Self {
         Self(value)
@@ -83,14 +83,6 @@ impl Priority {
 
     pub const fn value(&self) -> i32 {
         self.0
-    }
-
-    pub const fn before(&self) -> Self {
-        Self(self.0 - 1)
-    }
-
-    pub const fn after(&self) -> Self {
-        Self(self.0 + 1)
     }
 }
 
@@ -107,12 +99,12 @@ impl Display for Priority {
 }
 
 #[derive(Clone, Default)]
-pub struct AnalysisCx {
+pub struct AnalysisContext {
     cancellation: CancellationToken,
     progress: Progress,
 }
 
-impl AnalysisCx {
+impl AnalysisContext {
     pub fn new(cancellation: CancellationToken, progress: Progress) -> Self {
         Self {
             cancellation,
@@ -138,24 +130,19 @@ pub trait Analyser: Send {
         Priority::default()
     }
 
-    fn enabled_by_default(&self, project: &Project) -> bool {
-        let _ = project;
-        true
-    }
-
     fn can_analyse(&self, project: &Project) -> bool;
 
     fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError>;
 
     fn analysis_ended(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
         let _ = cx;
@@ -228,44 +215,10 @@ pub enum EngineError {
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnalysisMessageKind {
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalysisMessage {
-    analyser: &'static str,
-    kind: AnalysisMessageKind,
-    message: String,
-}
-
-impl AnalysisMessage {
-    pub fn new(
-        analyser: &'static str,
-        kind: AnalysisMessageKind,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            analyser,
-            kind,
-            message: message.into(),
-        }
-    }
-
-    pub fn analyser(&self) -> &'static str {
-        self.analyser
-    }
-
-    pub fn kind(&self) -> AnalysisMessageKind {
-        self.kind
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
+    #[error("subscription has no pending changes")]
+    SubscriptionEmpty,
+    #[error("subscription receive timed out")]
+    SubscriptionTimeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,19 +246,19 @@ impl BytePatch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionPatch {
-    function: PartialFunction,
+    function: IncompleteFunction,
 }
 
 impl FunctionPatch {
-    pub fn new(function: PartialFunction) -> Self {
+    pub fn new(function: IncompleteFunction) -> Self {
         Self { function }
     }
 
-    pub fn function(&self) -> &PartialFunction {
+    pub fn function(&self) -> &IncompleteFunction {
         &self.function
     }
 
-    fn into_function(self) -> PartialFunction {
+    fn into_function(self) -> IncompleteFunction {
         self.function
     }
 }
@@ -654,6 +607,7 @@ pub enum ProjectUpdate {
     AddFunction(FunctionPatch),
     AddMappingToSpace(MappingPlacement),
     AddReference(Reference),
+    AddSwitch(Switch),
     DeprioritiseMapping(MappingPriorityUpdate),
     InsertSymbol(SymbolPatch),
     PrioritiseMapping(MappingPriorityUpdate),
@@ -661,6 +615,7 @@ pub enum ProjectUpdate {
     RemoveFunction(FunctionRemoval),
     RemoveMapping(MappingRemoval),
     RemoveReference(ReferenceRemoval),
+    RemoveSwitch(Address),
     RemoveSymbol(SymbolRemoval),
     ResizeMapping(MappingResize),
     UpdateMappingMetadata(MappingMetadataUpdate),
@@ -668,7 +623,7 @@ pub enum ProjectUpdate {
 }
 
 impl ProjectUpdate {
-    pub fn add_function(function: PartialFunction) -> Self {
+    pub fn add_function(function: IncompleteFunction) -> Self {
         Self::AddFunction(FunctionPatch::new(function))
     }
 
@@ -700,7 +655,7 @@ impl ProjectUpdate {
         Self::DeprioritiseMapping(MappingPriorityUpdate::new(space, mapping))
     }
 
-    pub fn insert_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
+    pub fn add_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
         Self::InsertSymbol(SymbolPatch::new(index, entry))
     }
 
@@ -730,6 +685,14 @@ impl ProjectUpdate {
 
     pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
         Self::RemoveReference(ReferenceRemoval::new(from, target))
+    }
+
+    pub fn add_switch(switch: Switch) -> Self {
+        Self::AddSwitch(switch)
+    }
+
+    pub fn remove_switch(branch: impl Into<Address>) -> Self {
+        Self::RemoveSwitch(branch.into())
     }
 
     pub fn remove_symbol(index: SymbolIndex) -> Self {
@@ -772,9 +735,15 @@ impl ProjectUpdate {
                 transaction.add_reference(reference)?;
                 Ok(())
             }
+            Self::AddSwitch(mut switch) => {
+                switch.mark_override();
+                let branch = switch.branch();
+                transaction.add_switch(branch, move |id, _| switch.with_id(id))?;
+                Ok(())
+            }
             Self::InsertSymbol(patch) => {
                 let (index, entry) = patch.into_parts();
-                transaction.insert_symbol(index, entry);
+                transaction.add_symbol(index, entry)?;
                 Ok(())
             }
             Self::PrioritiseMapping(priority) => {
@@ -787,8 +756,12 @@ impl ProjectUpdate {
                 transaction.remove_reference(removal.from(), removal.target())?;
                 Ok(())
             }
+            Self::RemoveSwitch(branch) => {
+                transaction.remove_switch(branch)?;
+                Ok(())
+            }
             Self::RemoveSymbol(removal) => {
-                transaction.remove_symbol_by_index(removal.index());
+                transaction.remove_symbol_by_index(removal.index())?;
                 Ok(())
             }
             Self::ResizeMapping(resize) => {
@@ -821,25 +794,34 @@ pub(crate) enum Intake {
         level: IlLevel,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
+    Flush(Sender<Result<(), EngineError>>),
     FlushDerivedReferences {
         function: FunctionId,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
+    Save(Sender<Result<(), EngineError>>),
+    Shutdown,
+    Subscribe(Subscriber),
     Update {
         update: ProjectUpdate,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
-    Flush(Sender<Result<(), EngineError>>),
-    Save(Sender<Result<(), EngineError>>),
-    Shutdown,
-    Subscribe(Subscriber),
+}
+
+enum AnalysisFailure {
+    Error(AnalysisError),
+    Panicked(String),
+}
+
+enum TransactionResult<T, E> {
+    Committed { value: T, changes: ChangeSet },
+    RolledBack(E),
 }
 
 struct WorkerStartup {
     project: Arc<RwLock<Project>>,
     queries: QueryEngine,
     persistence_policy: PersistencePolicy,
-    messages: Arc<RwLock<Vec<AnalysisMessage>>>,
     poison: Arc<OnceLock<String>>,
     cancellation: CancellationToken,
     progress: Progress,
@@ -852,7 +834,6 @@ impl WorkerStartup {
             self.project,
             self.queries,
             self.persistence_policy,
-            self.messages,
             self.poison,
             self.cancellation,
             self.progress,
@@ -884,7 +865,10 @@ impl Subscriber {
         Self { rx, tx, filter }
     }
 
-    fn materialise(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
+    fn materialise(&self, changes: &ChangeSet, resync: &mut Option<Arc<ChangeSet>>) -> bool {
+        if self.tx.receiver_count() == 1 {
+            return false;
+        }
         let scoped = match changes.scoped_to(&self.filter) {
             Some(scoped) => Arc::new(scoped),
             None => return true,
@@ -893,7 +877,20 @@ impl Subscriber {
         match self.tx.try_send(scoped) {
             Ok(()) => true,
             Err(TrySendError::Disconnected(_)) => false,
-            Err(TrySendError::Full(_)) => self.resync(resync.clone()),
+            Err(TrySendError::Full(_)) => {
+                let resync = resync.get_or_insert_with(|| {
+                    Arc::new(
+                        ChangeSet::with_records(
+                            changes.revision(),
+                            [ChangeRecord::Restored {
+                                to: changes.revision(),
+                            }],
+                        )
+                        .with_provenance(ChangeSource::engine("resync")),
+                    )
+                });
+                self.resync(resync.clone())
+            }
         }
     }
 
@@ -929,7 +926,18 @@ impl AnalyserState {
     }
 
     fn add_pending(&mut self, regions: &AddressRangeSet) {
-        self.pending = self.pending.union(regions);
+        for range in regions.ranges() {
+            self.pending.insert_range(range);
+        }
+        self.limit_pending_ranges();
+    }
+
+    fn add_pending_range(&mut self, range: AddressRange) {
+        self.pending.insert_range(range);
+        self.limit_pending_ranges();
+    }
+
+    fn limit_pending_ranges(&mut self) {
         if self.pending.range_count() > MAX_PENDING_REGION_RANGES {
             self.pending = self.pending.spanning_ranges();
         }
@@ -970,6 +978,19 @@ impl AnalyserState {
         }
 
         self.add_pending(regions);
+        self.schedule_pending(index, queue);
+    }
+
+    fn schedule_range(&mut self, index: usize, range: AddressRange, queue: &mut AnalysisQueue) {
+        if self.disabled {
+            return;
+        }
+
+        self.add_pending_range(range);
+        self.schedule_pending(index, queue);
+    }
+
+    fn schedule_pending(&mut self, index: usize, queue: &mut AnalysisQueue) {
         if self.scheduled {
             return;
         }
@@ -1025,9 +1046,7 @@ impl AnalysisQueue {
 pub struct AnalysisEngine {
     cancellation: CancellationToken,
     handle: Option<JoinHandle<()>>,
-    messages: Arc<RwLock<Vec<AnalysisMessage>>>,
     poison: Arc<OnceLock<String>>,
-    progress: Progress,
     query_reader: QueryReader,
     tx: Sender<Intake>,
 }
@@ -1056,14 +1075,12 @@ impl AnalysisEngine {
     ) -> Result<Self, EngineError> {
         let (tx, rx) = flume::bounded(channel_capacity);
         let cancellation = CancellationToken::default();
-        let messages = Arc::new(RwLock::new(Vec::new()));
         let poison = Arc::new(OnceLock::new());
         let progress = Progress::default();
         let project = Arc::new(RwLock::new(project));
         let queries = QueryEngine::new(project.clone());
         let query_reader = queries.reader().with_intake(tx.clone());
         let worker_cancellation = cancellation.clone();
-        let worker_messages = messages.clone();
         let worker_poison = poison.clone();
         let worker_state_poison = poison.clone();
         let worker_progress = progress.clone();
@@ -1074,7 +1091,6 @@ impl AnalysisEngine {
                     project,
                     queries,
                     persistence_policy,
-                    messages: worker_messages,
                     poison: worker_state_poison,
                     cancellation: worker_cancellation,
                     progress: worker_progress,
@@ -1095,25 +1111,10 @@ impl AnalysisEngine {
         Ok(Self {
             cancellation,
             handle: Some(handle),
-            messages,
             poison,
-            progress,
             query_reader,
             tx,
         })
-    }
-
-    pub fn schedule(
-        &self,
-        trigger: Trigger,
-        regions: RawAddressRangeSet,
-    ) -> Result<(), EngineError> {
-        let mut mapped = AddressRangeSet::new();
-        for range in regions.ranges() {
-            mapped.insert_raw_range(AddressSpaceId::default(), range);
-        }
-
-        self.schedule_ranges(trigger, mapped)
     }
 
     pub fn schedule_ranges(
@@ -1149,15 +1150,15 @@ impl AnalysisEngine {
         self.apply_update(ProjectUpdate::write_bytes(address, bytes))
     }
 
-    pub fn insert_symbol(
+    pub fn add_symbol(
         &self,
         index: SymbolIndex,
         entry: SymbolEntry,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::insert_symbol(index, entry))
+        self.apply_update(ProjectUpdate::add_symbol(index, entry))
     }
 
-    pub fn add_function(&self, function: PartialFunction) -> Result<ChangeSet, EngineError> {
+    pub fn add_function(&self, function: IncompleteFunction) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::add_function(function))
     }
 
@@ -1171,6 +1172,14 @@ impl AnalysisEngine {
         target: ReferenceTarget,
     ) -> Result<ChangeSet, EngineError> {
         self.apply_update(ProjectUpdate::remove_reference(from, target))
+    }
+
+    pub fn add_switch(&self, switch: Switch) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::add_switch(switch))
+    }
+
+    pub fn remove_switch(&self, branch: impl Into<Address>) -> Result<ChangeSet, EngineError> {
+        self.apply_update(ProjectUpdate::remove_switch(branch))
     }
 
     pub fn add_mapping_to_space(
@@ -1352,14 +1361,6 @@ impl AnalysisEngine {
         self.cancellation.clone()
     }
 
-    pub fn take_run_log(&self) -> Vec<AnalysisMessage> {
-        std::mem::take(&mut *self.messages.write())
-    }
-
-    pub fn progress(&self) -> Progress {
-        self.progress.clone()
-    }
-
     pub fn subscribe(&self) -> SubscriptionBuilder<'_> {
         SubscriptionBuilder::new(self)
     }
@@ -1402,27 +1403,27 @@ impl<'a> SubscriptionBuilder<'a> {
         }
     }
 
-    pub fn kinds(mut self, kinds: ChangeKinds) -> Self {
+    pub fn with_kinds(mut self, kinds: ChangeKinds) -> Self {
         self.filter = self.filter.with_kinds(kinds);
         self
     }
 
-    pub fn region(mut self, region: AddressRangeSet) -> Self {
+    pub fn with_region(mut self, region: AddressRangeSet) -> Self {
         self.filter = self.filter.with_region(region);
         self
     }
 
-    pub fn category(mut self, category: ChangeCategory) -> Self {
+    pub fn with_category(mut self, category: ChangeCategory) -> Self {
         self.filter = self.filter.with_category(category);
         self
     }
 
-    pub fn source_label(mut self, label: impl Into<SmolStr>) -> Self {
+    pub fn with_source_label(mut self, label: impl Into<SmolStr>) -> Self {
         self.filter = self.filter.with_source_label(label);
         self
     }
 
-    pub fn capacity(mut self, capacity: usize) -> Self {
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity;
         self
     }
@@ -1441,12 +1442,18 @@ impl Subscription {
         self.rx.recv().map_err(|_| EngineError::Stopped)
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Arc<ChangeSet>, RecvTimeoutError> {
-        self.rx.recv_timeout(timeout)
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Arc<ChangeSet>, EngineError> {
+        self.rx.recv_timeout(timeout).map_err(|error| match error {
+            flume::RecvTimeoutError::Disconnected => EngineError::Stopped,
+            flume::RecvTimeoutError::Timeout => EngineError::SubscriptionTimeout,
+        })
     }
 
-    pub fn try_recv(&self) -> Result<Arc<ChangeSet>, TryRecvError> {
-        self.rx.try_recv()
+    pub fn try_recv(&self) -> Result<Arc<ChangeSet>, EngineError> {
+        self.rx.try_recv().map_err(|error| match error {
+            TryRecvError::Disconnected => EngineError::Stopped,
+            TryRecvError::Empty => EngineError::SubscriptionEmpty,
+        })
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Arc<ChangeSet>> + '_ {
@@ -1492,7 +1499,6 @@ struct Worker {
     cancellation: CancellationToken,
     dirty_revision: Option<Revision>,
     last_checkpoint: Option<Instant>,
-    messages: Arc<RwLock<Vec<AnalysisMessage>>>,
     persistence_policy: PersistencePolicy,
     poison: Arc<OnceLock<String>>,
     progress: Progress,
@@ -1507,7 +1513,6 @@ impl Worker {
         project: Arc<RwLock<Project>>,
         queries: QueryEngine,
         persistence_policy: PersistencePolicy,
-        messages: Arc<RwLock<Vec<AnalysisMessage>>>,
         poison: Arc<OnceLock<String>>,
         cancellation: CancellationToken,
         progress: Progress,
@@ -1516,7 +1521,7 @@ impl Worker {
         let project_read = project.read();
         for provider in registry::iter::<AnalyserProvider>() {
             let analyser = provider.build(&project_read)?;
-            if analyser.enabled_by_default(&project_read) && analyser.can_analyse(&project_read) {
+            if analyser.can_analyse(&project_read) {
                 analysers.push(AnalyserState::new(analyser));
             }
         }
@@ -1527,7 +1532,6 @@ impl Worker {
             cancellation,
             dirty_revision: None,
             last_checkpoint: None,
-            messages,
             persistence_policy,
             poison,
             progress,
@@ -1540,17 +1544,6 @@ impl Worker {
         worker.seed_existing_hints();
 
         Ok(worker)
-    }
-
-    fn record_message(
-        &mut self,
-        analyser: &'static str,
-        kind: AnalysisMessageKind,
-        message: impl Into<String>,
-    ) {
-        self.messages
-            .write()
-            .push(AnalysisMessage::new(analyser, kind, message));
     }
 
     fn cancel_pending_work(&mut self) {
@@ -1741,30 +1734,33 @@ impl Worker {
             return Err(EngineError::Poisoned(message.clone()));
         }
 
-        let mut completion_ran = false;
+        let mut completion_pending = false;
+        let mut completion_rounds = 0usize;
 
         loop {
-            let mut ran_analyser = false;
-
             while let Some(index) = self.queue.pop_next() {
-                ran_analyser = true;
+                completion_pending = true;
                 self.run_analyser(index)?;
             }
 
-            if !ran_analyser {
-                if !completion_ran {
-                    completion_ran = true;
-                    self.run_completion_hooks()?;
-                    if !self.queue.is_empty() {
-                        continue;
+            if completion_pending {
+                completion_pending = false;
+                self.run_completion_hooks()?;
+                if !self.queue.is_empty() {
+                    completion_rounds += 1;
+                    if completion_rounds > MAX_COMPLETION_ROUNDS {
+                        return Err(
+                            self.poison_and_stop("completion hooks did not converge".to_owned())
+                        );
                     }
+                    continue;
                 }
-
-                if self.persistence_policy == PersistencePolicy::OnIdle {
-                    self.persist_dirty_debounced()?;
-                }
-                return Ok(());
             }
+
+            if self.persistence_policy == PersistencePolicy::OnIdle {
+                self.persist_dirty_debounced()?;
+            }
+            return Ok(());
         }
     }
 
@@ -1778,6 +1774,14 @@ impl Worker {
         for index in 0..self.analysers.len() {
             if self.analysers[index].triggers.contains(&trigger) {
                 self.schedule_analyser(index, regions);
+            }
+        }
+    }
+
+    fn route_range(&mut self, trigger: Trigger, range: AddressRange) {
+        for index in 0..self.analysers.len() {
+            if self.analysers[index].triggers.contains(&trigger) {
+                self.schedule_analyser_range(index, range);
             }
         }
     }
@@ -1811,60 +1815,85 @@ impl Worker {
     fn route_record(&mut self, record: &ChangeRecord) {
         match record {
             ChangeRecord::BytesWritten { range } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert_range(*range);
-                self.route_direct(Trigger::BytesWritten, &regions);
+                self.route_range(Trigger::BytesWritten, *range);
             }
             ChangeRecord::FunctionAdded { entry, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert(*entry);
-                self.route_direct(Trigger::FunctionAdded, &regions);
+                self.route_range(Trigger::FunctionAdded, AddressRange::point(*entry));
             }
             ChangeRecord::FunctionChanged { entry, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert(*entry);
-                self.route_direct(Trigger::FunctionChanged, &regions);
+                self.route_range(Trigger::FunctionChanged, AddressRange::point(*entry));
             }
             ChangeRecord::FunctionRemoved { entry, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert(*entry);
-                self.route_direct(Trigger::FunctionRemoved, &regions);
+                self.route_range(Trigger::FunctionRemoved, AddressRange::point(*entry));
             }
             ChangeRecord::Restored { .. } => {}
             ChangeRecord::SegmentMapped { range, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert_range(*range);
-                self.route_direct(Trigger::BytesMapped, &regions);
-                self.route_direct(Trigger::SegmentMapped, &regions);
+                self.route_range(Trigger::BytesMapped, *range);
+                self.route_range(Trigger::SegmentMapped, *range);
             }
             ChangeRecord::SegmentMappingCreated { .. } => {}
             ChangeRecord::SegmentMappingChanged { .. } => {}
             ChangeRecord::SegmentUnmapped { range, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert_range(*range);
-                self.route_direct(Trigger::SegmentUnmapped, &regions);
+                self.route_range(Trigger::SegmentUnmapped, *range);
             }
             ChangeRecord::SpaceCreated { .. } => {}
             ChangeRecord::SymbolAdded { address, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert(*address);
-                self.route_direct(Trigger::SymbolAdded, &regions);
+                self.route_range(Trigger::SymbolAdded, AddressRange::point(*address));
             }
             ChangeRecord::SymbolRemoved { address, .. } => {
-                let mut regions = AddressRangeSet::new();
-                regions.insert(*address);
-                self.route_direct(Trigger::SymbolRemoved, &regions);
+                self.route_range(Trigger::SymbolRemoved, AddressRange::point(*address));
             }
             ChangeRecord::ReferenceAdded { .. }
             | ChangeRecord::ReferenceRemoved { .. }
             | ChangeRecord::ReferencesChanged { .. }
             | ChangeRecord::LiftedMaterialised { .. }
-            | ChangeRecord::LiftedRemoved { .. } => {}
+            | ChangeRecord::LiftedRemoved { .. }
+            | ChangeRecord::SwitchAdded { .. }
+            | ChangeRecord::SwitchRemoved { .. } => {}
         }
     }
 
     fn schedule_analyser(&mut self, index: usize, regions: &AddressRangeSet) {
         self.analysers[index].schedule(index, regions, &mut self.queue);
+    }
+
+    fn schedule_analyser_range(&mut self, index: usize, range: AddressRange) {
+        self.analysers[index].schedule_range(index, range, &mut self.queue);
+    }
+
+    fn with_transaction<T, E>(
+        &mut self,
+        source: ChangeSource,
+        operation: impl FnOnce(&mut Self, &mut ProjectTransaction<'_>) -> Result<T, E>,
+    ) -> Result<TransactionResult<T, E>, EngineError> {
+        let query_write = self.queries.write_guard();
+        let project_lock = self.project.clone();
+        let mut project = project_lock.write();
+        let mut transaction = project.transaction(source);
+
+        match operation(self, &mut transaction) {
+            Ok(value) => {
+                let changes = transaction.commit()?;
+                if !changes.is_empty() {
+                    self.begin_publish(&changes);
+                }
+                drop(project);
+                drop(query_write);
+                if !changes.is_empty() {
+                    self.finish_publish(&changes)?;
+                }
+                Ok(TransactionResult::Committed { value, changes })
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback() {
+                    project.abandon_persistence();
+                    return Err(self.poison_and_stop(rollback_error.to_string()));
+                }
+                drop(project);
+                drop(query_write);
+                Ok(TransactionResult::RolledBack(error))
+            }
+        }
     }
 
     fn run_analyser(&mut self, index: usize) -> Result<(), EngineError> {
@@ -1876,77 +1905,52 @@ impl Worker {
         let regions = self.analysers[index].take_pending();
         let name = self.analysers[index].analyser.name();
         self.progress.reset();
-        let cx = AnalysisCx::new(self.cancellation.child(), self.progress.clone());
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::analysis(
-            self.analysers[index].analyser.name(),
-        ));
-
-        // Catch only to poison and stop; the engine never resumes after a panic.
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.analysers[index]
-                .analyser
-                .analyse(&mut transaction, &regions, &cx)
-        }));
+        let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone());
+        let result =
+            self.with_transaction(ChangeSource::analysis(name), |worker, transaction| {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    worker.analysers[index]
+                        .analyser
+                        .analyse(transaction, &regions, &cx)
+                })) {
+                    Ok(Ok(())) => Ok(Ok(())),
+                    Ok(Err(AnalysisError::Cancelled(cancelled))) => Ok(Err(cancelled)),
+                    Ok(Err(error)) => Err(AnalysisFailure::Error(error)),
+                    Err(payload) => Err(AnalysisFailure::Panicked(Self::panic_message(
+                        payload.as_ref(),
+                    ))),
+                }
+            })?;
 
         match result {
-            Ok(Ok(())) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
+            TransactionResult::Committed { value: Ok(()), .. } => {
                 self.analysers[index].record_success();
-                if !changes.is_empty() {
-                    self.finish_publish(changes)?;
-                }
                 if self.analysers[index].analyser.has_pending_work() {
                     self.analysers[index].schedule_resume(index, &mut self.queue);
                 }
                 self.progress.clear_message();
                 Ok(())
             }
-            Ok(Err(AnalysisError::Cancelled(cancelled))) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-                if !changes.is_empty() {
-                    self.finish_publish(changes)?;
-                }
+            TransactionResult::Committed {
+                value: Err(cancelled),
+                ..
+            } => {
                 self.progress.clear_message();
                 Err(AnalysisError::Cancelled(cancelled).into())
             }
-            Ok(Err(error)) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                drop(project);
-                drop(query_write);
+            TransactionResult::RolledBack(AnalysisFailure::Error(error)) => {
                 tracing::warn!("analyser {name} failed: {error}");
                 let disabled = self.analysers[index].record_failure();
-                self.record_message(name, AnalysisMessageKind::Error, error.to_string());
                 if disabled {
                     tracing::warn!("analyser {name} disabled after repeated failures");
                 }
                 self.progress.clear_message();
                 Ok(())
             }
-            Err(payload) => {
-                let poisoned = self.poison_and_stop(Self::panic_message(payload.as_ref()));
-                if let Err(error) = transaction.rollback() {
-                    tracing::error!("failed to roll back transaction after panic: {error}");
-                }
-                project.abandon_persistence();
-                drop(project);
-                drop(query_write);
+            TransactionResult::RolledBack(AnalysisFailure::Panicked(message)) => {
+                self.project.write().abandon_persistence();
                 self.progress.clear_message();
-                Err(poisoned)
+                Err(self.poison_and_stop(message))
             }
         }
     }
@@ -1966,104 +1970,58 @@ impl Worker {
     fn run_completion_hook(&mut self, index: usize) -> Result<(), EngineError> {
         let name = self.analysers[index].analyser.name();
         self.progress.reset();
-        let cx = AnalysisCx::new(self.cancellation.child(), self.progress.clone());
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction =
-            project.transaction(ChangeSource::analysis(format!("{name} completion")));
-
-        // Catch only to poison and stop; the engine never resumes after a panic.
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.analysers[index]
-                .analyser
-                .analysis_ended(&mut transaction, &cx)
-        }));
+        let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone());
+        let result = self.with_transaction(
+            ChangeSource::analysis(format!("{name} completion")),
+            |worker, transaction| match catch_unwind(AssertUnwindSafe(|| {
+                worker.analysers[index]
+                    .analyser
+                    .analysis_ended(transaction, &cx)
+            })) {
+                Ok(Ok(())) => Ok(Ok(())),
+                Ok(Err(AnalysisError::Cancelled(cancelled))) => Ok(Err(cancelled)),
+                Ok(Err(error)) => Err(AnalysisFailure::Error(error)),
+                Err(payload) => Err(AnalysisFailure::Panicked(Self::panic_message(
+                    payload.as_ref(),
+                ))),
+            },
+        )?;
 
         match result {
-            Ok(Ok(())) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-                if !changes.is_empty() {
-                    self.finish_publish(changes)?;
-                }
+            TransactionResult::Committed { value: Ok(()), .. } => {
                 self.progress.clear_message();
                 Ok(())
             }
-            Ok(Err(AnalysisError::Cancelled(cancelled))) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-                if !changes.is_empty() {
-                    self.finish_publish(changes)?;
-                }
+            TransactionResult::Committed {
+                value: Err(cancelled),
+                ..
+            } => {
                 self.progress.clear_message();
                 Err(AnalysisError::Cancelled(cancelled).into())
             }
-            Ok(Err(error)) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                drop(project);
-                drop(query_write);
+            TransactionResult::RolledBack(AnalysisFailure::Error(error)) => {
                 tracing::warn!("analyser {name} completion failed: {error}");
                 let disabled = self.analysers[index].record_failure();
-                self.record_message(name, AnalysisMessageKind::Error, error.to_string());
                 if disabled {
                     tracing::warn!("analyser {name} disabled after repeated failures");
                 }
                 self.progress.clear_message();
                 Ok(())
             }
-            Err(payload) => {
-                let poisoned = self.poison_and_stop(Self::panic_message(payload.as_ref()));
-                if let Err(error) = transaction.rollback() {
-                    tracing::error!("failed to roll back transaction after panic: {error}");
-                }
-                project.abandon_persistence();
-                drop(project);
-                drop(query_write);
+            TransactionResult::RolledBack(AnalysisFailure::Panicked(message)) => {
+                self.project.write().abandon_persistence();
                 self.progress.clear_message();
-                Err(poisoned)
+                Err(self.poison_and_stop(message))
             }
         }
     }
 
     fn apply_update(&mut self, update: ProjectUpdate) -> Result<ChangeSet, EngineError> {
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::agent("update"));
-        let result = update.apply(&mut transaction);
-
-        match result {
-            Ok(()) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-
-                if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
-                }
-
-                Ok(changes)
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                Err(error.into())
-            }
+        match self.with_transaction(ChangeSource::agent("update"), |_, transaction| {
+            update.apply(transaction)
+        })? {
+            TransactionResult::Committed { changes, .. } => Ok(changes),
+            TransactionResult::RolledBack(error) => Err(error.into()),
         }
     }
 
@@ -2072,76 +2030,25 @@ impl Worker {
         function: FunctionId,
         level: IlLevel,
     ) -> Result<ChangeSet, EngineError> {
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::agent("ensure IR"));
         let cancellation = self.cancellation.child();
-        let result = transaction.ensure_lifted(function, level, &cancellation);
+        let result = self
+            .with_transaction(ChangeSource::agent("ensure IR"), |_, transaction| {
+                transaction.ensure_lifted(function, level, &cancellation)
+            })?;
 
         match result {
-            Ok(_) => {
-                let changes = transaction.commit()?;
-                let present = match level {
-                    IlLevel::PCode => project.pcode(function)?.is_some(),
-                    IlLevel::ECode => project.ecode(function)?.is_some(),
-                    IlLevel::ECodeSsa => project.ecode_ssa(function)?.is_some(),
-                };
-
-                if !present {
-                    return Err(
-                        ProjectError::from(IlError::missing_artefact(function, level)).into(),
-                    );
-                }
-
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-
-                if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
-                }
-
-                Ok(changes)
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                Err(error.into())
-            }
+            TransactionResult::Committed { changes, .. } => Ok(changes),
+            TransactionResult::RolledBack(error) => Err(error.into()),
         }
     }
 
     fn flush_derived_references(&mut self, function: FunctionId) -> Result<ChangeSet, EngineError> {
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::agent("flush IR references"));
-
-        match transaction.flush_derived_references(function) {
-            Ok(_) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-
-                if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
-                }
-
-                Ok(changes)
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                Err(error.into())
-            }
+        match self.with_transaction(
+            ChangeSource::agent("flush IR references"),
+            |_, transaction| transaction.flush_derived_references(function),
+        )? {
+            TransactionResult::Committed { changes, .. } => Ok(changes),
+            TransactionResult::RolledBack(error) => Err(error.into()),
         }
     }
 
@@ -2149,64 +2056,26 @@ impl Worker {
         &mut self,
         builder: SegmentMappingBuilder,
     ) -> Result<MappingCreationResult, EngineError> {
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::agent("update"));
-        let result = transaction.create_mapping_from_builder(builder);
-
-        match result {
-            Ok(mapping) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-
-                if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
-                }
-
-                Ok(MappingCreationResult::new(mapping, changes))
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                Err(error.into())
-            }
+        match self.with_transaction(ChangeSource::agent("update"), |_, transaction| {
+            transaction.create_mapping_from_builder(builder)
+        })? {
+            TransactionResult::Committed {
+                value: mapping,
+                changes,
+            } => Ok(MappingCreationResult::new(mapping, changes)),
+            TransactionResult::RolledBack(error) => Err(error.into()),
         }
     }
 
     fn create_space(&mut self) -> Result<SpaceCreationResult, EngineError> {
-        let query_write = self.queries.write_guard();
-        let project_lock = self.project.clone();
-        let mut project = project_lock.write();
-        let mut transaction = project.transaction(ChangeSource::agent("update"));
-        let result = transaction.create_space();
-
-        match result {
-            Ok(space) => {
-                let changes = transaction.commit()?;
-                if !changes.is_empty() {
-                    self.begin_publish(&changes);
-                }
-                drop(project);
-                drop(query_write);
-
-                if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
-                }
-
-                Ok(SpaceCreationResult::new(space, changes))
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback() {
-                    return Err(self.poison_and_stop(rollback_error.to_string()));
-                }
-                Err(error.into())
-            }
+        match self.with_transaction(ChangeSource::agent("update"), |_, transaction| {
+            transaction.create_space()
+        })? {
+            TransactionResult::Committed {
+                value: space,
+                changes,
+            } => Ok(SpaceCreationResult::new(space, changes)),
+            TransactionResult::RolledBack(error) => Err(error.into()),
         }
     }
 
@@ -2216,20 +2085,11 @@ impl Worker {
         self.queries.apply_changes(changes);
     }
 
-    fn finish_publish(&mut self, changes: ChangeSet) -> Result<(), EngineError> {
-        let resync = Arc::new(
-            ChangeSet::with_records(
-                changes.revision(),
-                [ChangeRecord::Restored {
-                    to: changes.revision(),
-                }],
-            )
-            .attributed_to(ChangeSource::engine("resync")),
-        );
-        let changes = Arc::new(changes);
+    fn finish_publish(&mut self, changes: &ChangeSet) -> Result<(), EngineError> {
+        let mut resync = None;
         self.subscribers
-            .retain(|subscriber| subscriber.materialise(&changes, &resync));
-        self.route_changes(&changes);
+            .retain(|subscriber| subscriber.materialise(changes, &mut resync));
+        self.route_changes(changes);
         if self.persistence_policy == PersistencePolicy::OnCommit {
             self.persist_dirty()?;
         }
@@ -2285,9 +2145,10 @@ impl Worker {
         if let Some(revision) = restored_revision {
             let restored = Arc::new(
                 ChangeSet::with_records(revision, [ChangeRecord::Restored { to: revision }])
-                    .attributed_to(ChangeSource::engine("restore")),
+                    .with_provenance(ChangeSource::engine("restore")),
             );
-            if !subscriber.materialise(&restored, &restored) {
+            let mut resync = Some(restored.clone());
+            if !subscriber.materialise(&restored, &mut resync) {
                 return;
             }
         }
@@ -2302,7 +2163,7 @@ mod test {
 
     use super::change::{ChangeFilter, ChangeRecord, ChangeSet, Revision};
     use super::{
-        Analyser, AnalyserState, AnalysisCx, AnalysisQueue, Priority, Subscriber, Trigger,
+        Analyser, AnalyserState, AnalysisContext, AnalysisQueue, Priority, Subscriber, Trigger,
     };
     use crate::analysis::AnalysisError;
     use crate::ir::{Address, AddressRangeSet};
@@ -2333,7 +2194,7 @@ mod test {
             &mut self,
             transaction: &mut ProjectTransaction<'_>,
             regions: &AddressRangeSet,
-            cx: &AnalysisCx,
+            cx: &AnalysisContext,
         ) -> Result<(), AnalysisError> {
             let _ = transaction;
             let _ = regions;
@@ -2398,20 +2259,24 @@ mod test {
                 space: AddressSpaceId::from(0u8),
             }],
         ));
-        let resync = Arc::new(ChangeSet::with_records(
-            Revision::new(2),
-            [ChangeRecord::Restored {
-                to: Revision::new(2),
-            }],
-        ));
+        let mut resync = None;
 
-        assert!(subscriber.materialise(&first, &resync));
-        assert!(subscriber.materialise(&second, &resync));
+        assert!(subscriber.materialise(&first, &mut resync));
+        assert!(subscriber.materialise(&second, &mut resync));
 
         let delivered = rx.try_recv()?;
-        assert_eq!(&*delivered, &*resync);
+        assert_eq!(&*delivered, &*resync.expect("resync must be materialised"));
         assert!(rx.try_recv().is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn dropped_subscription_is_pruned_despite_internal_receiver() {
+        let (tx, rx) = flume::bounded(1);
+        let subscriber = Subscriber::new(tx, rx.clone(), ChangeFilter::new());
+        drop(rx);
+        let changes = Arc::new(ChangeSet::new(Revision::new(1)));
+        assert!(!subscriber.materialise(&changes, &mut None));
     }
 }

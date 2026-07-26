@@ -1,14 +1,20 @@
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, Id, IdSet, InsnList};
+use crate::ir::insn::InsnFlowCursor;
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowTarget, Id, IdSet, Insn, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::common::archived_bitflags;
 
-pub mod table;
-pub use table::CodeBlockTable;
+pub(crate) mod incomplete;
+pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
+
+mod table;
+pub(crate) use table::CodeBlockTableAllocation;
+pub use table::{CodeBlockMut, CodeBlockRef, CodeBlockTable, CodeBlockTableError};
 
 pub type CodeBlockId = Id<CodeBlock>;
 
@@ -24,6 +30,12 @@ pub struct CodeBlock {
     predecessors: IdSet<CodeBlock>,
     properties: CodeBlockProperties,
     context: ContextSet,
+}
+
+#[derive(Default)]
+pub(crate) struct CodeBlockFlowCursor {
+    instruction: usize,
+    target: InsnFlowCursor,
 }
 
 impl AsRef<CodeBlock> for CodeBlock {
@@ -69,46 +81,7 @@ bitflags::bitflags! {
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedCodeBlockProperties(rkyv::Archived<u32>);
-
-unsafe impl rkyv::Portable for ArchivedCodeBlockProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedCodeBlockProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedCodeBlockProperties
-where
-    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for CodeBlockProperties {
-    type Archived = ArchivedCodeBlockProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedCodeBlockProperties(
-            rkyv::primitive::ArchivedU32::from_native(self.bits()),
-        ));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for CodeBlockProperties {
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
-    for ArchivedCodeBlockProperties
-{
-    fn deserialize(&self, _: &mut D) -> Result<CodeBlockProperties, D::Error> {
-        Ok(CodeBlockProperties::from_bits(self.0.to_native()).unwrap_or(CodeBlockProperties::NONE))
-    }
-}
+archived_bitflags!(CodeBlockProperties, ArchivedCodeBlockProperties, u32);
 
 impl CodeBlock {
     pub fn new(id: Id<Self>, start: Address, len: NonZeroUsize, instructions: InsnList) -> Self {
@@ -186,12 +159,9 @@ impl CodeBlock {
         self.start.space()
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.len as _
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     pub fn range(&self) -> RangeInclusive<Address> {
@@ -213,13 +183,28 @@ impl CodeBlock {
     }
 
     pub fn coverage_into(&self, covered: &mut AddressRangeSet) {
-        if !self.is_empty() {
-            covered.insert_range(self.address_range());
-        }
+        covered.insert_range(self.address_range());
     }
 
     pub fn instructions(&self) -> &InsnList {
         &self.instructions
+    }
+
+    pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.instructions.iter().flat_map(Insn::flow_targets)
+    }
+
+    pub(crate) fn next_flow_target(&self, cursor: &mut CodeBlockFlowCursor) -> Option<FlowTarget> {
+        while let Some(instruction) = self.instructions.get(cursor.instruction) {
+            if let Some(target) = instruction.next_flow_target(&mut cursor.target) {
+                return Some(target);
+            }
+
+            cursor.instruction += 1;
+            cursor.target = InsnFlowCursor::default();
+        }
+
+        None
     }
 
     pub fn mark_entry(&mut self) {

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::num::ParseIntError;
-use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
 
-use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
+use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
 
 use crate::lifter::{ContextSet, Language, Varnode};
@@ -404,6 +404,10 @@ impl RawAddress {
         RawAddress(offset)
     }
 
+    pub fn align_down(&self, alignment: usize) -> RawAddress {
+        RawAddress(self.0 & !(alignment as u64).wrapping_sub(1))
+    }
+
     pub fn absolute_difference(&self, other: &RawAddress) -> u64 {
         if self >= other {
             self.offset().wrapping_sub(other.offset())
@@ -421,7 +425,7 @@ impl RawAddress {
     }
 
     pub fn wrap_and_align_with(&self, language: &Language, alignment: usize) -> RawAddress {
-        self.align(alignment).wrap(language)
+        self.wrap(language).align(alignment)
     }
 
     pub fn in_space_bounds(&self, language: &Language) -> bool {
@@ -448,7 +452,19 @@ impl ToRawAddress for Varnode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
@@ -541,11 +557,15 @@ impl AddressWithContext {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct RawAddressRangeSet(RangeSetBlaze<u64>);
+pub struct RawAddressRangeSet(RangeInclusiveSet<u64>);
 
 impl FromIterator<RawAddress> for RawAddressRangeSet {
     fn from_iter<T: IntoIterator<Item = RawAddress>>(iter: T) -> Self {
-        Self(iter.into_iter().map(|addr| addr.offset()).collect())
+        Self(
+            iter.into_iter()
+                .map(|address| address.offset()..=address.offset())
+                .collect(),
+        )
     }
 }
 
@@ -561,7 +581,11 @@ impl FromIterator<RangeInclusive<RawAddress>> for RawAddressRangeSet {
 
 impl FromIterator<Address> for RawAddressRangeSet {
     fn from_iter<T: IntoIterator<Item = Address>>(iter: T) -> Self {
-        Self(iter.into_iter().map(|addr| addr.offset()).collect())
+        Self(
+            iter.into_iter()
+                .map(|address| address.offset()..=address.offset())
+                .collect(),
+        )
     }
 }
 
@@ -577,17 +601,19 @@ impl FromIterator<RangeInclusive<Address>> for RawAddressRangeSet {
 
 impl RawAddressRangeSet {
     pub fn new() -> Self {
-        Self(RangeSetBlaze::new())
+        Self(RangeInclusiveSet::new())
     }
 
     pub fn insert(&mut self, address: impl Into<RawAddress>) -> bool {
-        self.0.insert(address.into().offset())
+        let address = address.into().offset();
+        let inserted = !self.0.contains(&address);
+        self.0.insert(address..=address);
+        inserted
     }
 
     pub fn insert_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
         let range = range.into();
-        self.0
-            .ranges_insert(range.start().offset()..=range.end().offset());
+        self.0.insert(range.start().offset()..=range.end().offset());
     }
 
     pub fn intersects_range(&self, range: impl Into<RangeInclusive<RawAddress>>) -> bool {
@@ -595,18 +621,19 @@ impl RawAddressRangeSet {
         let start = range.start().offset();
         let end = range.end().offset();
 
-        self.0
-            .ranges()
-            .any(|covered| *covered.start() <= end && start <= *covered.end())
+        start <= end && self.0.overlaps(&(start..=end))
     }
 
     pub fn insert_meta_range(&mut self, range: RangeInclusive<Address>) {
-        self.0
-            .ranges_insert(range.start().offset()..=range.end().offset());
+        self.0.insert(range.start().offset()..=range.end().offset());
     }
 
     pub fn difference(&self, other: &Self) -> Self {
-        Self(&self.0 - &other.0)
+        let mut difference = self.clone();
+        for range in other.0.iter() {
+            difference.0.remove(range.clone());
+        }
+        difference
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -618,15 +645,16 @@ impl RawAddressRangeSet {
     }
 
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        Self(&self.0 ^ &other.0)
+        self.difference(other).union(&other.difference(self))
     }
 
     pub fn remove(&mut self, address: impl Into<RawAddress>) {
-        self.0.remove(address.into().offset());
+        let address = address.into().offset();
+        self.0.remove(address..=address);
     }
 
     pub fn contains(&self, address: impl Into<RawAddress>) -> bool {
-        self.0.contains(address.into().offset())
+        self.0.contains(&address.into().offset())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -634,30 +662,24 @@ impl RawAddressRangeSet {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RawAddress> + use<'_> {
-        self.0.iter().map(RawAddress::from)
+        self.0
+            .iter()
+            .flat_map(|range| range.clone())
+            .map(RawAddress::from)
     }
 
     pub fn ranges(&self) -> impl Iterator<Item = RangeInclusive<RawAddress>> + use<'_> {
         self.0
-            .ranges()
+            .iter()
             .map(|r| RawAddress::from(*r.start())..=RawAddress::from(*r.end()))
     }
 
     pub fn range_count(&self) -> usize {
-        self.0.ranges().count()
+        self.0.len()
     }
 
     pub fn span(&self) -> Option<RangeInclusive<RawAddress>> {
-        let mut ranges = self.ranges();
-        let first = ranges.next()?;
-        let start = *first.start();
-        let mut end = *first.end();
-
-        for range in ranges {
-            end = *range.end();
-        }
-
-        Some(start..=end)
+        Some(RawAddress::from(*self.0.first()?.start())..=RawAddress::from(*self.0.last()?.end()))
     }
 
     pub fn clear(&mut self) {
@@ -705,7 +727,7 @@ impl AddressRange {
         Address::new(self.space, self.end)
     }
 
-    pub fn len(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         self.end
             .offset()
             .saturating_sub(self.start.offset())
@@ -840,7 +862,7 @@ impl AddressRangeSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RawAddressMap<V>(RangeMapBlaze<u64, V>)
+pub struct RawAddressMap<V>(RangeInclusiveMap<u64, V>)
 where
     V: Clone + Eq;
 
@@ -871,23 +893,29 @@ where
     V: Clone + Eq,
 {
     pub fn new() -> Self {
-        Self(RangeMapBlaze::new())
+        Self(RangeInclusiveMap::new())
     }
 
     pub fn insert(&mut self, address: impl Into<RawAddress>, value: V) -> Option<V> {
-        self.0.insert(address.into().offset(), value)
+        let address = address.into().offset();
+        let previous = self.0.get(&address).cloned();
+        self.0.insert(address..=address, value);
+        previous
     }
 
     pub fn remove(&mut self, address: impl Into<RawAddress>) -> Option<V> {
-        self.0.remove(address.into().offset())
+        let address = address.into().offset();
+        let previous = self.0.get(&address).cloned();
+        self.0.remove(address..=address);
+        previous
     }
 
     pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
-        self.0.contains_key(address.into().offset())
+        self.0.contains_key(&address.into().offset())
     }
 
     pub fn get(&self, address: impl Into<RawAddress>) -> Option<&V> {
-        self.0.get(address.into().offset())
+        self.0.get(&address.into().offset())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -899,28 +927,37 @@ where
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &V)> {
-        self.0.iter().map(|(k, v)| (RawAddress::from(k), v))
+        self.0.iter().flat_map(|(range, value)| {
+            range
+                .clone()
+                .map(move |address| (RawAddress::from(address), value))
+        })
     }
 
     pub fn range(
         &self,
         range: impl RangeBounds<RawAddress>,
     ) -> impl Iterator<Item = (RawAddress, V)> {
-        let start = range.start_bound().map(|addr| addr.offset());
-        let end = range.end_bound().map(|addr| addr.offset());
-        self.0
-            .range((start, end))
-            .map(|(k, v)| (RawAddress::from(k), v))
+        let range = raw_address_bounds(&range);
+        range.into_iter().flat_map(move |query| {
+            self.0
+                .overlapping(query.clone())
+                .flat_map(move |(stored, value)| {
+                    let start = (*stored.start()).max(*query.start());
+                    let end = (*stored.end()).min(*query.end());
+                    (start..=end).map(move |address| (RawAddress::from(address), value.clone()))
+                })
+        })
     }
 
     pub fn insert_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>, value: V) {
         let range = range.into();
         self.0
-            .ranges_insert(range.start().offset()..=range.end().offset(), value);
+            .insert(range.start().offset()..=range.end().offset(), value);
     }
 
     pub fn run_count(&self) -> usize {
-        self.0.range_values().count()
+        self.0.len()
     }
 }
 
@@ -932,12 +969,29 @@ where
         let range = range.into();
         let start = range.start().offset();
         let end = range.end().offset();
-        self.0
-            .range_values()
-            .filter(|(run, _)| *run.start() <= end && start <= *run.end())
-            .map(|(_, value)| value.clone())
-            .max()
+        (start <= end)
+            .then(|| {
+                self.0
+                    .overlapping(start..=end)
+                    .map(|(_, value)| value.clone())
+                    .max()
+            })
+            .flatten()
     }
+}
+
+fn raw_address_bounds(range: &impl RangeBounds<RawAddress>) -> Option<RangeInclusive<u64>> {
+    let start = match range.start_bound() {
+        Bound::Included(address) => address.offset(),
+        Bound::Excluded(address) => address.offset().checked_add(1)?,
+        Bound::Unbounded => u64::MIN,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(address) => address.offset(),
+        Bound::Excluded(address) => address.offset().checked_sub(1)?,
+        Bound::Unbounded => u64::MAX,
+    };
+    (start <= end).then_some(start..=end)
 }
 
 #[derive(
@@ -1228,6 +1282,8 @@ impl From<&Address> for usize {
 }
 
 impl Address {
+    pub const MINIMUM: Self = Self::zero(AddressSpaceId::new(0));
+
     pub fn new(space: AddressSpaceId, address: impl Into<RawAddress>) -> Self {
         Self {
             space,
@@ -1257,6 +1313,23 @@ impl Address {
             Some(space_id) => Self::new(space_id, address),
             None => Self::in_default_space(address),
         }
+    }
+
+    pub(crate) fn bounds_in_space<R>(space: AddressSpaceId, range: &R) -> (Bound<Self>, Bound<Self>)
+    where
+        R: RangeBounds<RawAddress> + ?Sized,
+    {
+        let start = match range.start_bound() {
+            Bound::Included(address) => Bound::Included(Self::new(space, *address)),
+            Bound::Excluded(address) => Bound::Excluded(Self::new(space, *address)),
+            Bound::Unbounded => Bound::Included(Self::zero(space)),
+        };
+        let end = match range.end_bound() {
+            Bound::Included(address) => Bound::Included(Self::new(space, *address)),
+            Bound::Excluded(address) => Bound::Excluded(Self::new(space, *address)),
+            Bound::Unbounded => Bound::Included(Self::new(space, RawAddress::MAX)),
+        };
+        (start, end)
     }
 
     pub fn raw_address(&self) -> RawAddress {
@@ -1411,9 +1484,101 @@ impl<T: RangeAddress> AddressRangeExt<T> for Range<T> {
     }
 }
 
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct AddressTable {
+    address: Address,
+    element_size: u32,
+    element_count: u32,
+    shift: u8,
+}
+
+impl AddressTable {
+    pub fn new(address: Address, element_size: u32) -> Self {
+        Self {
+            address,
+            element_size,
+            element_count: 0,
+            shift: 0,
+        }
+    }
+
+    pub fn with_element_count(mut self, element_count: u32) -> Self {
+        self.set_element_count(element_count);
+        self
+    }
+
+    pub fn with_shift(mut self, shift: u8) -> Self {
+        self.shift = shift;
+        self
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn element_size(&self) -> u32 {
+        self.element_size
+    }
+
+    pub fn element_count(&self) -> u32 {
+        self.element_count
+    }
+
+    pub fn set_element_count(&mut self, count: u32) {
+        self.element_count = count;
+    }
+
+    pub fn shift(&self) -> u8 {
+        self.shift
+    }
+
+    pub fn size(&self) -> u64 {
+        self.element_count as u64 * self.element_size as u64
+    }
+
+    pub fn entry_address(&self, index: u32) -> Address {
+        self.address + index as u64 * self.element_size as u64
+    }
+
+    pub fn range(&self) -> Option<AddressRange> {
+        let size = self.size();
+        if size == 0 {
+            return None;
+        }
+        let start = self.address.raw_address();
+        Some(AddressRange::new(
+            self.address.space(),
+            start,
+            start + size - 1u64,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn empty_address_table_has_no_range() {
+        let table = AddressTable::new(Address::from(0x1000u64), 4);
+        assert_eq!(table.range(), None);
+    }
+
+    #[test]
+    fn zero_element_size_table_has_no_range() {
+        let mut table = AddressTable::new(Address::from(0x1000u64), 0);
+        table.set_element_count(4);
+        assert_eq!(table.range(), None);
+    }
+
+    #[test]
+    fn raw_address_aligns_in_both_directions() {
+        let address = RawAddress::from(0x1003u64);
+        assert_eq!(address.align(4), RawAddress::from(0x1004u64));
+        assert_eq!(address.align_down(4), RawAddress::from(0x1000u64));
+    }
 
     #[test]
     fn inclusive_size() {
@@ -1472,11 +1637,6 @@ mod test {
             RawAddress::from(4u64)..=RawAddress::from(8u64)
         );
     }
-}
-
-#[cfg(test)]
-mod address_range_test {
-    use super::*;
 
     fn range(space: u8, start: u64, end: u64) -> AddressRange {
         AddressRange::new(
@@ -1487,19 +1647,19 @@ mod address_range_test {
     }
 
     #[test]
-    fn test_address_range_contains_and_len() {
+    fn address_range_contains_and_size() {
         let span = range(0, 0x1000, 0x1fff);
 
         assert!(span.contains(RawAddress::from(0x1000u64)));
         assert!(span.contains(RawAddress::from(0x1fffu64)));
         assert!(!span.contains(RawAddress::from(0xfffu64)));
         assert!(!span.contains(RawAddress::from(0x2000u64)));
-        assert_eq!(span.len(), 0x1000);
+        assert_eq!(span.size(), 0x1000);
         assert!(!span.is_empty());
     }
 
     #[test]
-    fn test_address_range_intersects() {
+    fn address_range_intersects() {
         let base = range(0, 0x1000, 0x1fff);
 
         assert!(base.intersects(&range(0, 0x1fff, 0x2fff)));
@@ -1511,7 +1671,7 @@ mod address_range_test {
     }
 
     #[test]
-    fn test_address_range_set_ranges_round_trip() {
+    fn address_range_set_ranges_round_trip() {
         let mut covered = AddressRangeSet::new();
         covered.insert_range(range(0, 0x1000, 0x1fff));
         covered.insert_range(range(0, 0x2000, 0x2fff));
@@ -1526,7 +1686,7 @@ mod address_range_test {
     }
 
     #[test]
-    fn test_address_range_set_intersection_agrees_with_brute_force() {
+    fn address_range_set_intersection_agrees_with_brute_force() {
         let mut covered = AddressRangeSet::new();
         covered.insert_range(range(0, 0x1000, 0x1fff));
         covered.insert_range(range(0, 0x4000, 0x4fff));
@@ -1549,5 +1709,65 @@ mod address_range_test {
             other.insert_range(candidate);
             assert_eq!(covered.intersects(&other), brute);
         }
+    }
+
+    #[test]
+    fn raw_address_range_set_preserves_set_operations() {
+        let mut left = RawAddressRangeSet::new();
+        left.insert_range(RawAddress::from(1u64)..=RawAddress::from(5u64));
+        left.insert_range(RawAddress::from(10u64)..=RawAddress::from(12u64));
+        let mut right = RawAddressRangeSet::new();
+        right.insert_range(RawAddress::from(4u64)..=RawAddress::from(10u64));
+
+        let offsets = |set: RawAddressRangeSet| {
+            set.iter()
+                .map(|address| address.offset())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(offsets(left.difference(&right)), vec![1, 2, 3, 11, 12]);
+        assert_eq!(offsets(left.intersection(&right)), vec![4, 5, 10]);
+        assert_eq!(
+            offsets(left.symmetric_difference(&right)),
+            vec![1, 2, 3, 6, 7, 8, 9, 11, 12]
+        );
+        assert_eq!(offsets(left.union(&right)), (1u64..=12).collect::<Vec<_>>());
+        assert_eq!(
+            left.span(),
+            Some(RawAddress::from(1u64)..=RawAddress::from(12u64))
+        );
+    }
+
+    #[test]
+    fn raw_address_map_bounds_and_overlaps_preserve_point_semantics() {
+        let mut map = RawAddressMap::new();
+        map.insert_range(RawAddress::from(2u64)..=RawAddress::from(5u64), 1u32);
+        map.insert_range(RawAddress::from(8u64)..=RawAddress::from(10u64), 2u32);
+        assert_eq!(map.insert(RawAddress::from(4u64), 3), Some(1));
+        assert_eq!(map.run_count(), 4);
+
+        let bounded = map
+            .range((
+                Bound::Excluded(RawAddress::from(2u64)),
+                Bound::Excluded(RawAddress::from(9u64)),
+            ))
+            .map(|(address, value)| (address.offset(), value))
+            .collect::<Vec<_>>();
+
+        assert_eq!(bounded, vec![(3, 1), (4, 3), (5, 1), (8, 2)]);
+        assert_eq!(
+            map.max_in_range(RawAddress::from(4u64)..=RawAddress::from(8u64)),
+            Some(3)
+        );
+        assert_eq!(map.remove(RawAddress::from(4u64)), Some(3));
+        assert_eq!(map.get(RawAddress::from(4u64)), None);
+        assert!(
+            map.range((
+                Bound::Excluded(RawAddress::MAX),
+                Bound::<RawAddress>::Unbounded,
+            ))
+            .next()
+            .is_none()
+        );
     }
 }

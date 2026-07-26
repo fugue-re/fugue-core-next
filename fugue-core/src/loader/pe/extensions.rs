@@ -109,8 +109,8 @@ type ArchResolveFn =
     fn(&ImageContext<'_>, &LanguageSource<'_>) -> Result<Option<Arch>, LoaderError>;
 
 pub struct ArchResolver {
-    pub name: &'static str,
-    pub resolve_architecture: ArchResolveFn,
+    name: &'static str,
+    resolve_architecture: ArchResolveFn,
 }
 
 impl ArchResolver {
@@ -128,21 +128,8 @@ impl ArchResolver {
     ) -> Result<Option<Arch>, LoaderError> {
         (self.resolve_architecture)(context, source)
     }
-}
 
-impl Registration for ArchResolver {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-registry::collect!(ArchResolver);
-
-#[fugue_core::extension]
-impl ArchResolver {
-    const NAME: &str = "pe-builtins";
-
-    fn resolve_architecture(
+    fn resolve_builtin(
         context: &ImageContext<'_>,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
@@ -180,6 +167,17 @@ impl ArchResolver {
         let arch = Arch::try_new(language).map_err(LoaderError::extension)?;
         Ok(Some(arch))
     }
+}
+
+impl Registration for ArchResolver {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+registry::collect!(ArchResolver);
+registry::submit! {
+    ArchResolver::new("pe-builtins", ArchResolver::resolve_builtin)
 }
 
 pub struct AnalysisContext<'a> {
@@ -233,8 +231,8 @@ type FunctionRecoveryHandlerFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
 pub struct FunctionRecoveryHandler {
-    pub name: &'static str,
-    pub apply: FunctionRecoveryHandlerFn,
+    name: &'static str,
+    apply: FunctionRecoveryHandlerFn,
 }
 
 impl FunctionRecoveryHandler {
@@ -327,20 +325,13 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
     }
 
     pub fn apply_relocation(&mut self) -> Result<bool, LoaderError> {
-        let mut applied = false;
-
         for handler in registry::iter::<RelocationHandler>() {
             if self.apply_relocation_with(handler)? {
-                if applied {
-                    return Err(LoaderError::extension_with(
-                        "ambiguous PE relocation handler",
-                    ));
-                }
-                applied = true;
+                return Ok(true);
             }
         }
 
-        Ok(applied)
+        Ok(false)
     }
 
     fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
@@ -351,8 +342,8 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
 type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
 
 pub struct RelocationHandler {
-    pub name: &'static str,
-    pub apply_relocation: RelocationApplyFn,
+    name: &'static str,
+    apply_relocation: RelocationApplyFn,
 }
 
 impl RelocationHandler {

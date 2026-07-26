@@ -1,2 +1,7 @@
-pub mod recovery;
-pub use recovery::{FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError};
+pub(crate) mod recovery;
+pub use recovery::{
+    FunctionBuilder, FunctionBuilderContext, FunctionDiscoveryContext, FunctionRecovery,
+    FunctionRecoveryCommitContext, FunctionRecoveryCommitHook, FunctionRecoveryConfig,
+    FunctionRecoveryError, FunctionRecoveryExtension, FunctionRecoveryPatternMatcher,
+    FunctionRecoveryPatternMatcherError, FunctionRecoveryState, InsnResolver,
+};

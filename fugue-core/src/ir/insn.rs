@@ -1,13 +1,11 @@
 use std::fmt;
 
-use fugue_lifter::Op;
-use fugue_lifter::runtime::language::Language;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::cfg::FlowKind;
-use crate::ir::{Address, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
-use crate::lifter::PCodeOp;
+use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
+use crate::lifter::{Language, Op, RawPCodeOp};
+use crate::types::common::archived_bitflags;
 
 pub type InsnId = Id<Insn>;
 
@@ -44,12 +42,17 @@ pub struct Insn {
     length: u8,
 }
 
+#[derive(Default)]
+pub(crate) struct InsnFlowCursor {
+    target: usize,
+}
+
 impl Insn {
     pub(crate) fn from_resolved_flow(
         language: &'static Language,
         address: Address,
         length: usize,
-        operations: &[PCodeOp],
+        operations: &[RawPCodeOp],
     ) -> Result<Self, InsnError> {
         let mut targets = SmallVec::new();
         Self::push_targets_for_operations(language, address, length, operations, &mut targets);
@@ -66,6 +69,16 @@ impl Insn {
             targets,
             length: Self::checked_length(length)?,
         })
+    }
+
+    pub(crate) fn resolve_flow(
+        &mut self,
+        language: &'static Language,
+        length: usize,
+        operations: &[RawPCodeOp],
+    ) -> Result<(), InsnError> {
+        *self = Self::from_resolved_flow(language, self.address, length, operations)?;
+        Ok(())
     }
 
     pub(crate) fn from_disassembly(
@@ -91,7 +104,7 @@ impl Insn {
         language: &'static Language,
         address: Address,
         length: usize,
-        operations: &[PCodeOp],
+        operations: &[RawPCodeOp],
         targets: &mut SmallVec<[(u16, InsnTarget); 2]>,
     ) {
         let op_count = operations.len() as u16;
@@ -359,28 +372,52 @@ impl Insn {
     pub fn iter_targets<'a>(
         &'a self,
     ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
-        use InsnTarget::*;
-        use InsnTargetKind::*;
-
-        self.targets.iter().filter_map(|(_, target)| match *target {
-            IntraBlk(taken, _) if taken.position() == 0 => Some((target, Local, taken.address())),
-            InterBlk(taken) => Some((target, Local, taken)),
-            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((target, Global, taken)),
-            _ => None,
+        self.targets.iter().filter_map(|(_, target)| {
+            Self::resolved_target(target).map(|(kind, to)| (target, kind, to))
         })
     }
 
+    pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.iter_targets()
+            .filter_map(move |(target, _, to)| FlowTarget::from_insn_target(self, target, to))
+    }
+
+    pub(crate) fn next_flow_target(&self, cursor: &mut InsnFlowCursor) -> Option<FlowTarget> {
+        while let Some((_, target)) = self.targets.get(cursor.target) {
+            cursor.target += 1;
+
+            if let Some((_, to)) = Self::resolved_target(target)
+                && let Some(target) = FlowTarget::from_insn_target(self, target, to)
+            {
+                return Some(target);
+            }
+        }
+
+        None
+    }
+
     pub fn flow_references(&self) -> impl Iterator<Item = Reference> + '_ {
-        self.iter_targets().filter_map(move |(target, kind, to)| {
-            if kind != InsnTargetKind::Global {
+        self.flow_targets().filter_map(|target| {
+            if !target.kind().is_global() {
                 return None;
             }
-            let flow = FlowKind::from_insn_target(self, target)?;
             Some(
-                Reference::from_flow(self.address(), to, flow)
+                Reference::from_flow(target.from(), target.to(), target.kind())
                     .with_origin(ReferenceOrigin::Derived),
             )
         })
+    }
+
+    fn resolved_target(target: &InsnTarget) -> Option<(InsnTargetKind, Address)> {
+        use InsnTarget::*;
+        use InsnTargetKind::*;
+
+        match *target {
+            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
+            InterBlk(taken) => Some((Local, taken)),
+            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((Global, taken)),
+            _ => None,
+        }
     }
 }
 
@@ -438,45 +475,7 @@ impl Default for InsnProperties {
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedInsnProperties(rkyv::primitive::ArchivedU16);
-unsafe impl rkyv::Portable for ArchivedInsnProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedInsnProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedInsnProperties
-where
-    rkyv::primitive::ArchivedU16: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU16::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for InsnProperties {
-    type Archived = ArchivedInsnProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedInsnProperties(
-            rkyv::primitive::ArchivedU16::from_native(self.bits()),
-        ));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for InsnProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<InsnProperties, D>
-    for ArchivedInsnProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<InsnProperties, D::Error> {
-        Ok(InsnProperties::from_bits_truncate(self.0.to_native()))
-    }
-}
+archived_bitflags!(InsnProperties, ArchivedInsnProperties, u16);
 
 impl InsnProperties {
     pub(crate) fn from_targets(targets: &[(u16, InsnTarget)]) -> Self {
@@ -485,11 +484,12 @@ impl InsnProperties {
         for (_, target) in targets.iter() {
             match target {
                 InsnTarget::IntraBlk(_, true) => prop |= Self::FALL,
-                InsnTarget::IntraBlk(_, false)
-                | InsnTarget::InterBlk(_)
-                | InsnTarget::Unresolved => prop |= Self::BRANCH,
-                InsnTarget::InterSub(_) => prop |= Self::CALL,
-                InsnTarget::InterRet(_, _) => prop |= Self::RETURN,
+                InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
+                InsnTarget::Unresolved => prop |= Self::BRANCH | Self::INDIRECT,
+                InsnTarget::InterSub(Some(_)) => prop |= Self::CALL,
+                InsnTarget::InterSub(None) => prop |= Self::CALL | Self::INDIRECT,
+                InsnTarget::InterRet(Some(_), _) => prop |= Self::RETURN,
+                InsnTarget::InterRet(None, _) => prop |= Self::RETURN | Self::INDIRECT,
                 _ => (),
             }
         }

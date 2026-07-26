@@ -87,7 +87,7 @@ where
 
         let start = bytes.address().offset();
         let end = start
-            .checked_add(bytes.len())
+            .checked_add(bytes.size())
             .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
 
         while let Some(block) = blocks.next().map_err(LoaderError::format)? {
@@ -116,7 +116,7 @@ where
     ) -> Result<(), LoaderError> {
         let start = bytes.address();
         let end = start
-            .checked_add(bytes.len())
+            .checked_add(bytes.size())
             .ok_or_else(|| LoaderError::address_overflow(start))?;
 
         for (slot, target) in self.import_slots.range(start..end) {

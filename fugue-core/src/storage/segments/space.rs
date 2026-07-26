@@ -98,6 +98,7 @@ pub struct AddressSpace {
     kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
+    generation: u64,
 }
 
 pub(crate) struct AddressSpaceRevert {
@@ -149,6 +150,8 @@ impl AddressSpaceRevert {
         for range in self.ranges {
             range.restore(space);
         }
+
+        space.touch();
     }
 }
 
@@ -255,11 +258,20 @@ impl AddressSpace {
             kind,
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
+            generation: 0,
         }
     }
 
     pub fn id(&self) -> AddressSpaceId {
         self.id
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn touch(&mut self) {
+        self.generation += 1;
     }
 
     pub fn base(&self) -> Option<AddressSpaceId> {
@@ -290,6 +302,7 @@ impl AddressSpace {
         self.priority_list
             .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
         self.priority_list.push(mapping_ref);
+        self.touch();
     }
 
     fn insert_submap_top(
@@ -338,6 +351,7 @@ impl AddressSpace {
         self.priority_list
             .retain(|r| r.mapping_id() != mapping_ref.mapping_id());
         self.priority_list.insert(0, mapping_ref);
+        self.touch();
 
         let Some(span) = size.checked_sub(1) else {
             return;
@@ -404,6 +418,7 @@ impl AddressSpace {
         {
             let mapping_ref = self.priority_list.remove(pos);
             self.priority_list.insert(0, mapping_ref);
+            self.touch();
         }
     }
 
@@ -426,17 +441,15 @@ impl AddressSpace {
         for (iv, view) in overlapping {
             self.submaps.remove(iv);
 
-            // preserve the portion before the rebuild range
             if view.start() < range_start
                 && let Some(left) = view.with_end(range_start)
             {
                 self.submaps.insert(left.range(), left);
             }
-            if view.last() > range_last {
-                // preserve the portion after the rebuild range
-                if let Some(right) = view.with_start(range_end) {
-                    self.submaps.insert(right.range(), right);
-                }
+            if view.last() > range_last
+                && let Some(right) = view.with_start(range_end)
+            {
+                self.submaps.insert(right.range(), right);
             }
         }
 
@@ -456,6 +469,8 @@ impl AddressSpace {
 
             self.insert_submap_top(mapping_ref, clamped_start, clamped_size, properties);
         }
+
+        self.touch();
     }
 
     pub(crate) fn remove_mapping(&mut self, mapping_id: SegmentMappingId) {
@@ -471,6 +486,7 @@ impl AddressSpace {
         }
 
         self.priority_list.retain(|r| r.mapping_id() != mapping_id);
+        self.touch();
     }
 
     pub fn priority_list(&self) -> &[SegmentMappingRef] {

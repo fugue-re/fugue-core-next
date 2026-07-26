@@ -16,6 +16,7 @@ pub const ATTRIBUTE_ENTRY_POINT: &str = "project.entry_point";
 pub const ATTRIBUTE_IMAGE_BASE: &str = "project.image_base";
 pub const ATTRIBUTE_LOADER_FORMAT: &str = "project.loader_format";
 pub const ATTRIBUTE_ADDRESS_SPACE: &str = "loader.address_space";
+pub const ATTRIBUTE_COMPILER_SPEC_ID: &str = "project.compiler_spec_id";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[repr(transparent)]
@@ -488,7 +489,7 @@ macro_rules! attributes {
     (@accum $attrs:ident; $key:expr => { $($json:tt)* } $(, $($rest:tt)*)?) => {
         $attrs.set_attr(
             $key,
-            $crate::types::attributes::serde_json::json!({ $($json)* }),
+            $crate::types::serde_json::json!({ $($json)* }),
         );
         $crate::attributes!(@accum $attrs; $($($rest)*)?);
     };
@@ -498,7 +499,7 @@ macro_rules! attributes {
     };
     ( $($input:tt)* ) => {{
         #[allow(unused_mut)]
-        let mut attrs = $crate::types::attributes::AttributeMap::new();
+        let mut attrs = $crate::types::AttributeMap::new();
         $crate::attributes!(@accum attrs; $($input)*);
         attrs
     }};

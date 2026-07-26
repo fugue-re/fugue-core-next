@@ -38,13 +38,13 @@ impl ECodeStmtOpcode {
 
     pub const fn fixed_operand_count(&self) -> Option<usize> {
         match self {
-            Self::WriteRegister | Self::WriteFlag | Self::Trap => Some(0),
-            Self::Branch
-            | Self::BranchIndirect
-            | Self::Call
-            | Self::CallIndirect
-            | Self::Return => Some(1),
-            Self::Store | Self::ConditionalBranch => Some(2),
+            Self::WriteRegister | Self::WriteFlag | Self::Branch | Self::Call | Self::Trap => {
+                Some(0)
+            }
+            Self::BranchIndirect | Self::ConditionalBranch | Self::CallIndirect | Self::Return => {
+                Some(1)
+            }
+            Self::Store => Some(2),
             Self::Intrinsic => None,
         }
     }
@@ -58,10 +58,6 @@ impl ECodeStmtOpcode {
             self,
             Self::Store | Self::BranchIndirect | Self::CallIndirect
         )
-    }
-
-    pub const fn requires_immediate(&self) -> bool {
-        matches!(self, Self::WriteRegister | Self::WriteFlag)
     }
 }
 

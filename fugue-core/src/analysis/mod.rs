@@ -11,13 +11,8 @@ use crate::project::Project;
 
 pub mod control;
 pub mod function;
-
-pub mod core {
-    pub use super::control::{CancellationToken, Cancelled, Progress};
-    pub use super::function::recovery::{
-        FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError,
-    };
-}
+pub mod switch;
+pub mod value;
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
@@ -119,7 +114,8 @@ where
         let target = target.borrow();
 
         if let Some(index) = self.passes.get_index_of(target) {
-            self.passes.shift_insert(index, name.into(), Box::new(pass));
+            self.passes
+                .insert_before(index + 1, name.into(), Box::new(pass));
         } else {
             self.passes.insert(name.into(), Box::new(pass));
         }
@@ -367,7 +363,8 @@ where
         let target = target.borrow();
 
         if let Some(index) = self.passes.get_index_of(target) {
-            self.passes.shift_insert(index, name.into(), Box::new(pass));
+            self.passes
+                .insert_before(index + 1, name.into(), Box::new(pass));
         } else {
             self.passes.insert(name.into(), Box::new(pass));
         }
@@ -714,6 +711,44 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn no_op(_project: &mut Project, _state: &mut NoState) -> Result<(), AnalysisError> {
+        Ok(())
+    }
+
+    #[test]
+    fn insert_after_places_pass_after_target() {
+        let mut group = AnalysisGroup::new();
+        group.add_pass("first", no_op);
+        group.add_pass("last", no_op);
+        group.insert_after("first", "middle", no_op);
+        assert_eq!(
+            group.passes().map(|(name, _)| name).collect::<Vec<_>>(),
+            ["first", "middle", "last"]
+        );
+
+        let mut manager = AnalysisManager::new();
+        manager.add_pass("first", no_op);
+        manager.add_pass("last", no_op);
+        manager.insert_after("first", "middle", no_op);
+        assert_eq!(
+            manager.passes().map(|(name, _)| name).collect::<Vec<_>>(),
+            ["first", "middle", "last"]
+        );
+    }
+
+    #[test]
+    fn insert_after_the_last_pass_moves_an_existing_pass_to_the_end() {
+        let mut group = AnalysisGroup::new();
+        group.add_pass("first", no_op);
+        group.add_pass("second", no_op);
+        group.add_pass("third", no_op);
+        group.insert_after("third", "first", no_op);
+        assert_eq!(
+            group.passes().map(|(name, _)| name).collect::<Vec<_>>(),
+            ["second", "third", "first"]
+        );
+    }
 
     #[test]
     #[ignore = "requires local language data and binary fixtures"]

@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
 use fugue_core::ir::RawAddress;
-use fugue_core::loader::elf::ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS;
-use fugue_core::types::AttributeMap;
-use fugue_core::types::attributes::{
+use fugue_core::loader::ATTRIBUTE_ELF_OVERRIDE_SEGMENT_PERMISSIONS as ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS;
+use fugue_core::types::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_IMAGE_BASE,
-    ATTRIBUTE_PROJECT_PATH,
+    ATTRIBUTE_PROJECT_PATH, AttributeMap,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};

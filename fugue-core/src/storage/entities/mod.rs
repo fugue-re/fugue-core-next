@@ -1,11 +1,17 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, align_of};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
+use bytes::Bytes;
+use rkyv::Archived;
+use rkyv::api::root_position;
+use rkyv::rancor::Error as RkyvError;
+use rkyv::util::AlignedVec;
 use thiserror::Error;
 
 use crate::loader::Loadable;
@@ -13,34 +19,37 @@ use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
-pub mod dummy;
+pub(crate) mod dummy;
 pub use dummy::DummyEntityStorage;
 
-pub mod memory;
+pub(crate) mod memory;
 pub use memory::InMemoryEntityStorage;
 
 #[cfg(feature = "mdbx")]
-pub mod mdbx;
+pub(crate) mod mdbx;
 #[cfg(feature = "mdbx")]
 pub use mdbx::MdbxEntityStorage;
 
 #[cfg(feature = "rocksdb")]
-pub mod rocksdb;
+pub(crate) mod rocksdb;
 #[cfg(feature = "rocksdb")]
 pub use rocksdb::RocksDbEntityStorage;
 
-pub mod schema;
-pub use schema::{Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix, ProjectEntity};
+pub(crate) mod schema;
+pub use schema::{
+    ENTITY_PROJECT_REVISION_ID, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
+    ProjectEntity, make_key_with_entity_id,
+};
 
 #[cfg(feature = "sqlite")]
-pub mod sqlite;
+pub(crate) mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteEntityStorage;
 
-pub mod writer;
+pub(crate) mod writer;
 pub use writer::{WriteBackAction, WriteBackWorker};
 
-pub mod cache;
+pub(crate) mod cache;
 pub(crate) use cache::{CachedMut, CachedRef, EntityCache};
 pub use cache::{EntityMut, EntityRef, MutableEntity};
 
@@ -70,14 +79,14 @@ pub enum EntityStorageError {
     InvalidKeyFormat,
     #[error("invalid key size")]
     InvalidKeySize,
-    #[error("write-back worker poisoned: {0}")]
-    WriteBackPoisoned(String),
-    #[error("failed to load project data from `{0}`: {1}")]
-    ProjectData(PathBuf, io::ErrorKind),
     #[error("no project path specified")]
     NoProjectPath,
+    #[error("failed to load project data from `{0}`: {1}")]
+    ProjectData(PathBuf, io::ErrorKind),
     #[error(transparent)]
     Unsupported(anyhow::Error),
+    #[error("write-back worker poisoned: {0}")]
+    WriteBackPoisoned(String),
 }
 
 impl EntityStorageError {
@@ -129,14 +138,18 @@ impl EntityStorageError {
     }
 }
 
-pub trait EntityStorageBulkInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError>;
+fn decode_entity<E: Entity>(bytes: &[u8]) -> Result<E, EntityStorageError> {
+    let root = root_position::<Archived<E>>(bytes.len());
+    let root_pointer = bytes.as_ptr().wrapping_add(root);
+    if root_pointer.align_offset(align_of::<Archived<E>>()) == 0
+        && let Ok(entity) = rkyv::from_bytes::<E, RkyvError>(bytes)
+    {
+        return Ok(entity);
+    }
 
-    fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
+    let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+    rkyv::from_bytes::<E, RkyvError>(&aligned).map_err(EntityStorageError::decode)
 }
 
 pub type EntityBytesIterator<'a> =
@@ -170,10 +183,7 @@ impl<'a> EntityTransactionalReader<'a> {
         let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
-            .map(|bytes| {
-                rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes.as_slice())
-                    .map_err(EntityStorageError::decode)
-            })
+            .map(|bytes| decode_entity(bytes.as_slice()))
             .transpose()
     }
 
@@ -188,7 +198,6 @@ impl<'a> EntityTransactionalReader<'a> {
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
             .transpose()
-            .map_err(EntityStorageError::decode)
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
@@ -231,10 +240,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         let key = schema::make_key::<K, E>(key);
         self.inner
             .get(&key)?
-            .map(|bytes| {
-                rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes.as_slice())
-                    .map_err(EntityStorageError::decode)
-            })
+            .map(|bytes| decode_entity(bytes.as_slice()))
             .transpose()
     }
 
@@ -249,7 +255,6 @@ impl<'a> EntityTransactionalWriter<'a> {
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
             .transpose()
-            .map_err(EntityStorageError::decode)
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
@@ -311,38 +316,6 @@ impl<'a> Drop for EntityTransactionalWriter<'a> {
     }
 }
 
-pub type EntityBytesBulkInserter<'a> = Box<dyn EntityStorageBulkInserter<'a> + 'a>;
-
-pub struct EntityBulkInserter<'a> {
-    inner: EntityBytesBulkInserter<'a>,
-}
-
-impl<'a> EntityBulkInserter<'a> {
-    pub fn new(inner: EntityBytesBulkInserter<'a>) -> Self {
-        Self { inner }
-    }
-
-    pub fn insert<K: EntityKey, E: Entity>(
-        &mut self,
-        key: &K,
-        entity: &E,
-    ) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
-            .map(|v| v.to_vec())
-            .map_err(EntityStorageError::encode)?;
-
-        let key = BytesOrSlice::from(key);
-        let encoded = BytesOrSlice::from(encoded);
-
-        self.inner.insert(key, encoded)
-    }
-
-    pub fn commit(self) -> Result<(), EntityStorageError> {
-        self.inner.commit()
-    }
-}
-
 pub trait EntityStorageProviderFromLoadable: EntityStorageProvider + 'static {
     // Creates a new storage provider from the given loadable object.
     fn from_loadable(
@@ -362,71 +335,6 @@ pub trait EntityStorageProviderFromStorage: EntityStorageProviderFromLoadable {
         Self: Sized;
 }
 
-/*
-pub trait EntityStorageBytesAsIterator {
-    fn next_as<F, T>(&mut self, f: F) -> Result<Option<T>, EntityStorageError>
-    where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError>;
-}
-
-pub trait ErasedEntityStorageBytesAsIterator {
-    fn erased_next_as<'a>(
-        &mut self,
-        f: &mut OutMapper2<'a>,
-    ) -> Result<Option<Out>, EntityStorageError>;
-}
-
-impl EntityStorageBytesAsIterator for dyn ErasedEntityStorageBytesAsIterator {
-    fn next_as<F, T>(&mut self, f: F) -> Result<Option<T>, EntityStorageError>
-    where
-        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError>,
-    {
-        let mut mapper = OutMapper2::new(f);
-        let t = self
-            .erased_next_as(&mut mapper)?
-            .map(|out| unsafe { out.take::<T>() });
-        Ok(t)
-    }
-}
-
-impl<T> ErasedEntityStorageBytesAsIterator for T
-where
-    T: EntityStorageBytesAsIterator,
-{
-    fn erased_next_as<'a>(
-        &mut self,
-        mapper: &mut OutMapper2<'a>,
-    ) -> Result<Option<Out>, EntityStorageError> {
-        self.next_as(move |kbytes, ebytes| mapper.apply(kbytes, ebytes))
-    }
-}
-
-pub struct EntityBytesAsIterator<'a, T> {
-    iter: ErasedEntityBytesAsIterator<'a>,
-    _marker: std::marker::PhantomData<T>,
-}
-
-pub struct ErasedEntityBytesAsIterator<'a> {
-    mapper: OutMapper2<'a>,
-    inner: Box<dyn ErasedEntityStorageBytesAsIterator + 'a>,
-}
-
-impl<T> Iterator for EntityBytesAsIterator<'_, T>
-where
-    T: Entity,
-{
-    type Item = Result<T, EntityStorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .inner
-            .erased_next_as(&mut self.iter.mapper)
-            .transpose()
-            .map(|out| out.map(|v| unsafe { v.take::<T>() }))
-    }
-}
-*/
-
 pub type EntityBytesAsIterator<'a, T> =
     Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>;
 
@@ -445,7 +353,7 @@ pub trait EntityStorageProvider: Send + Sync {
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError>;
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -459,13 +367,84 @@ pub trait EntityStorageProvider: Send + Sync {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a;
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
-
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
 
     fn persistence(&self) -> StoragePersistence {
         PERSISTENT
+    }
+}
+
+enum BufferedEntityWrite {
+    Insert(Bytes, Bytes),
+    Remove(Bytes),
+}
+
+pub struct BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    storage: &'a S,
+    writes: RefCell<Vec<BufferedEntityWrite>>,
+}
+
+impl<'a, S> BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    pub fn new(storage: &'a S) -> Self {
+        Self {
+            storage,
+            writes: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<'a, S> EntityStorageTransactionalReader<'a> for BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        self.storage.get(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        self.storage.contains(key)
+    }
+}
+
+impl<'a, S> EntityStorageTransactionalWriter<'a> for BufferedEntityWriter<'a, S>
+where
+    S: EntityStorageProvider + ?Sized,
+{
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.writes.borrow_mut().push(BufferedEntityWrite::Insert(
+            Bytes::copy_from_slice(key),
+            value.into_bytes(),
+        ));
+        Ok(())
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.writes
+            .borrow_mut()
+            .push(BufferedEntityWrite::Remove(Bytes::copy_from_slice(key)));
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
+        for write in self.writes.into_inner() {
+            match write {
+                BufferedEntityWrite::Insert(key, value) => {
+                    self.storage
+                        .insert(key.as_ref(), BytesOrSlice::from(value))?;
+                }
+                BufferedEntityWrite::Remove(key) => {
+                    self.storage.remove(key.as_ref())?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -488,7 +467,7 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         &self,
         prefix: &[u8],
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError>;
-    fn erased_scan_range(
+    fn erased_iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -498,8 +477,6 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         prefix: &[u8],
         mapper: OutMapper2<'a>,
     ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError>;
-
-    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError>;
 
     fn erased_transactional_reader(
         &self,
@@ -551,12 +528,12 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         self.erased_iter_prefix(prefix)
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        self.erased_scan_range(prefix, start)
+        self.erased_iter_range(prefix, start)
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -572,10 +549,6 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
             .erased_iter_prefix_as(prefix, mapper)?
             .map(|out| out.map(|v| unsafe { v.take::<T>() }));
         Ok(Box::new(iter))
-    }
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.erased_bulk_inserter()
     }
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
@@ -633,12 +606,12 @@ where
         self.iter_prefix(prefix)
     }
 
-    fn erased_scan_range(
+    fn erased_iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        self.scan_range(prefix, start)
+        self.iter_range(prefix, start)
     }
 
     fn erased_iter_prefix_as<'a>(
@@ -649,10 +622,6 @@ where
         let iter =
             self.iter_prefix_as(prefix, move |kbytes, ebytes| mapper.apply(kbytes, ebytes))?;
         Ok(Box::new(iter))
-    }
-
-    fn erased_bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.bulk_inserter()
     }
 
     fn erased_transactional_reader(
@@ -727,9 +696,7 @@ impl EntityStorage {
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
-        self.backing.get_as(&key, |bytes| {
-            rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes).map_err(EntityStorageError::decode)
-        })
+        self.backing.get_as(&key, decode_entity::<E>)
     }
 
     pub fn get_as<K, E, F, T>(&self, key: &K, f: F) -> Result<Option<T>, EntityStorageError>
@@ -765,10 +732,6 @@ impl EntityStorage {
         self.backing.insert(&key, value)
     }
 
-    pub fn bulk_inserter(&self) -> Result<EntityBulkInserter, EntityStorageError> {
-        Ok(EntityBulkInserter::new(self.backing.bulk_inserter()?))
-    }
-
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
         let key = schema::make_key::<K, E>(key);
         self.backing.remove(&key)
@@ -788,15 +751,14 @@ impl EntityStorage {
                 result.and_then(|(key, value)| {
                     let key = schema::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(value.as_slice())
-                        .map_err(EntityStorageError::decode)?;
+                    let val = decode_entity::<E>(value.as_slice())?;
                     Ok((key, val))
                 })
             })) as EntityIterator<'_, K, E>
         })
     }
 
-    pub fn scan_range<K: EntityKey, E: Entity>(
+    pub fn iter_range<K: EntityKey, E: Entity>(
         &self,
         start: Bound<&K>,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
@@ -812,13 +774,12 @@ impl EntityStorage {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.backing.scan_range(&pfx, start).map(|iter| {
+        self.backing.iter_range(&pfx, start).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
                     let key = schema::extract_key::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    let val = rkyv::from_bytes::<E, rkyv::rancor::Error>(value.as_slice())
-                        .map_err(EntityStorageError::decode)?;
+                    let val = decode_entity::<E>(value.as_slice())?;
                     Ok((key, val))
                 })
             })) as EntityIterator<'_, K, E>
@@ -882,6 +843,107 @@ mod test {
 
     impl Entity for TestEntity {
         const ID: EntityId = EntityId::new(0);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct TestTableEntity {
+        values: Vec<u64>,
+    }
+
+    impl Entity for TestTableEntity {
+        const ID: EntityId = EntityId::new(1);
+    }
+
+    struct TestTransactionalStorage;
+
+    impl<'a> EntityStorageTransactionalReader<'a> for TestTransactionalStorage {
+        fn get(&self, _key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+            Ok(Some(BytesOrSlice::from(Vec::new())))
+        }
+
+        fn contains(&self, _key: &[u8]) -> Result<bool, EntityStorageError> {
+            Ok(true)
+        }
+    }
+
+    impl<'a> EntityStorageTransactionalWriter<'a> for TestTransactionalStorage {
+        fn insert(&self, _key: &[u8], _value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+            Ok(())
+        }
+
+        fn remove(&self, _key: &[u8]) -> Result<(), EntityStorageError> {
+            Ok(())
+        }
+
+        fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn decode_entity_accepts_unaligned_backend_bytes() -> Result<(), EntityStorageError> {
+        let entity = TestEntity {
+            id: 1,
+            name: "unaligned".to_owned(),
+        };
+        let encoded = rkyv::to_bytes::<RkyvError>(&entity).map_err(EntityStorageError::encode)?;
+        let mut storage = AlignedVec::<16>::with_capacity(encoded.len() + 1);
+        storage.push(0);
+        storage.extend_from_slice(&encoded);
+        let bytes = &storage[1..];
+
+        let root = root_position::<Archived<TestEntity>>(bytes.len());
+        let root_pointer = bytes.as_ptr().wrapping_add(root);
+        assert_ne!(
+            root_pointer.align_offset(align_of::<Archived<TestEntity>>()),
+            0
+        );
+        assert_eq!(decode_entity::<TestEntity>(bytes)?, entity);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_entity_accepts_aligned_root_with_unaligned_interior() -> Result<(), EntityStorageError>
+    {
+        let entity = TestTableEntity {
+            values: vec![1, 2, 3],
+        };
+        let encoded = rkyv::to_bytes::<RkyvError>(&entity).map_err(EntityStorageError::encode)?;
+        let mut storage = AlignedVec::<16>::with_capacity(encoded.len() + 4);
+        storage.extend_from_slice(&[0; 4]);
+        storage.extend_from_slice(&encoded);
+        let bytes = &storage[4..];
+
+        let root = root_position::<Archived<TestTableEntity>>(bytes.len());
+        let root_pointer = bytes.as_ptr().wrapping_add(root);
+        assert_eq!(
+            root_pointer.align_offset(align_of::<Archived<TestTableEntity>>()),
+            0
+        );
+        assert_ne!(bytes.as_ptr().align_offset(align_of::<u64>()), 0);
+        assert!(rkyv::from_bytes::<TestTableEntity, RkyvError>(bytes).is_err());
+        assert_eq!(decode_entity::<TestTableEntity>(bytes)?, entity);
+        Ok(())
+    }
+
+    #[test]
+    fn transactional_get_as_preserves_closure_error_kind() {
+        let address = Address::from(42u64);
+        let reader = EntityTransactionalReader::new(Box::new(TestTransactionalStorage));
+        let error = reader
+            .get_as::<_, TestEntity, _, ()>(&address, |_| {
+                Err(EntityStorageError::backing_with("reader sentinel"))
+            })
+            .expect_err("reader closure error must be returned");
+        assert!(matches!(error, EntityStorageError::Backing(_)));
+
+        let writer = EntityTransactionalWriter::new(Box::new(TestTransactionalStorage));
+        let error = writer
+            .get_as::<_, TestEntity, _, ()>(&address, |_| {
+                Err(EntityStorageError::backing_with("writer sentinel"))
+            })
+            .expect_err("writer closure error must be returned");
+        assert!(matches!(error, EntityStorageError::Backing(_)));
     }
 
     #[test]

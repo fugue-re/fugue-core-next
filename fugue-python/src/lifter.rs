@@ -1,6 +1,6 @@
 use fugue_core::ir::Address as CoreAddress;
 use fugue_core::lifter::{
-    Language as CoreLanguage, Lifter as CoreLifter, Op as CoreOp, PCodeOp as CorePCodeOp,
+    Language as CoreLanguage, Lifter as CoreLifter, Op as CoreOp, RawPCodeOp as CorePCodeOp,
     Varnode as CoreVarnode,
 };
 use pyo3::prelude::*;
@@ -89,7 +89,6 @@ fn convert_instruction(
         address: Address::from_core(address),
         length,
         next_address: Address::from_core(address + length),
-        properties: 0,
         disassembly,
         pcode,
         text,
@@ -171,7 +170,7 @@ impl Lifter {
         let mut operations = Vec::new();
         let length = self
             .inner
-            .lift_into(address, &bytes, &mut operations)
+            .lift(address, &bytes, &mut operations)
             .map_err(lifter_error)?;
         let language = self.inner.language();
 
@@ -195,8 +194,6 @@ pub(crate) struct Instruction {
     length: usize,
     #[pyo3(get)]
     next_address: Address,
-    #[pyo3(get)]
-    properties: u16,
     #[pyo3(get)]
     disassembly: Option<String>,
     #[pyo3(get)]

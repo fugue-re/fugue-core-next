@@ -3,15 +3,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
-use fugue_core::analysis::core::FunctionRecoveryConfig;
-use fugue_core::analysis::function::recovery::analysis::FunctionDiscoveryContext;
-use fugue_core::analysis::function::recovery::{FunctionBuilderContext, FunctionRecovery};
+use fugue_core::analysis::function::{
+    FunctionBuilderContext, FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryConfig,
+};
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
-use fugue_core::arch::aarch64::AArch64;
-use fugue_core::arch::arm::Arm;
-use fugue_core::arch::x86::X86;
-use fugue_core::arch::x86_64::X86_64;
-use fugue_core::arch::Arch;
+use fugue_core::arch::{AArch64, Arch, Arm, X86, X86_64};
 use fugue_core::ir::{
     Address, AddressWithContext, ExternSegment, FlowKind, RawAddress, SegmentProperties,
     SymbolIndex, SymbolProperties, SymbolTableSelector, TransientSymbolTable,
@@ -22,8 +18,7 @@ use fugue_core::loader::{
     LoadableFromFile, LoadableMetadata, LoaderError,
 };
 use fugue_core::project::Project;
-use fugue_core::storage::segments::mapping::SegmentMappingProvenance;
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
+use fugue_core::storage::{SegmentMappingProvenance, DEFAULT_SPACE_ID};
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
 

@@ -1,147 +1,84 @@
-use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::io;
+use std::error::Error;
+use std::fmt::Debug;
 use std::ops::Bound;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, LazyLock, Mutex};
 use std::time::Duration;
+use std::{io, iter, thread};
 
 use bytes::Bytes;
-use fallible_iterator::FallibleIterator;
+use fallible_iterator::{FallibleIterator, convert};
 use fugue_core::analysis::control::Cancelled;
-use fugue_core::analysis::function::recovery::{
-    FunctionRecovery, FunctionRecoveryExtension, PartialCodeBlock, PartialFunction,
-};
+use fugue_core::analysis::function::{FunctionRecovery, FunctionRecoveryExtension};
+use fugue_core::analysis::switch::SwitchRecovery;
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::Arch;
 use fugue_core::engine::change::{ChangeCategory, ChangeKinds, ChangeRecord, Revision};
 use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisCx, AnalysisEngine, AnalysisMessageKind,
-    DEFAULT_ANALYSER_MAX_FAILURES, EngineError, MappingMetadataUpdate, PersistencePolicy, Priority,
-    Trigger,
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, DEFAULT_ANALYSER_MAX_FAILURES,
+    EngineError, MappingMetadataUpdate, PersistencePolicy, Priority, Trigger,
 };
 use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, Endian, FunctionId, RawAddress, Reference,
-    ReferenceProperties, ReferenceTarget, SegmentProperties, SymbolEntry, SymbolIndex,
-    SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, RawAddress,
+    Reference, ReferenceProperties, ReferenceTarget, SegmentProperties, Switch, SwitchCase,
+    SwitchId, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
-use fugue_core::lifter::resolve_language;
+use fugue_core::lifter::{ContextSet, resolve_language};
 use fugue_core::loader::{
     ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
 use fugue_core::project::{Project, ProjectError, ProjectTransaction};
-use fugue_core::queries::{
-    CallEdge, MappingRecord, QueryError, QueryPage, QueryReader, SymbolRecord,
-};
+use fugue_core::queries::{CallEdge, MappingRow, QueryError, QueryPage, SymbolRow};
 use fugue_core::registry;
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::PersistentStorageProvider;
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::entities::SqliteEntityStorage;
-use fugue_core::storage::entities::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageTransactionalReader,
-    EntityStorageTransactionalWriter, InMemoryEntityStorage,
-};
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
-use fugue_core::storage::segments::mapping::{
-    SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind, SegmentMappingProvenance,
-};
-use fugue_core::storage::segments::{DEFAULT_SPACE_ID, InMemorySegmentStorage};
 use fugue_core::storage::{
-    EntityStorage, EntityStorageError, PERSISTENT, SegmentStorage, StorageContainer,
-    StoragePersistence, StorageProvider, StorageProviderError,
+    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesAsIterator,
+    EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter,
+    EntityKeyBytesIterator, EntityStorage, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
+    ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind,
+    SegmentMappingProvenance, SegmentStorage, StorageContainer, StoragePersistence,
+    StorageProvider, StorageProviderError, TransientStorageProvider, make_key_with_entity_id,
 };
 #[cfg(feature = "sqlite")]
-use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::storage::{
+    DefaultPersistentSegmentStorage, PersistentStorageProvider, SqliteEntityStorage,
+};
+#[cfg(feature = "sqlite")]
+use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
 use fugue_core::types::{AttributeMap, BytesOrSlice};
+
+mod common;
+
+use common::{one_block_function, writable_address};
 
 const TEST_ANALYSER_ATTR: &str = "fugue.test.engine-analyser";
 const TEST_CHUNKED_RECOVERY_ATTR: &str = "fugue.test.chunked-recovery";
+const TEST_SWITCH_RECOVERY_ATTR: &str = "fugue.test.switch-recovery";
 
 #[cfg(feature = "sqlite")]
 type SqliteProjectProvider =
     PersistentStorageProvider<SqliteEntityStorage<PERSISTENT>, DefaultPersistentSegmentStorage>;
 
+static COMPLETION_ANALYSE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static COMPLETION_END_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FAILING_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
+static FAILING_ANALYSER_TEST_LOCK: Mutex<()> = Mutex::new(());
 static FAIL_ENTITY_INSERTS: AtomicBool = AtomicBool::new(false);
+static FAIL_ENTITY_REMOVES: AtomicBool = AtomicBool::new(false);
+static PROJECT_REVISION_KEY: LazyLock<Bytes> =
+    LazyLock::new(|| make_key_with_entity_id(&ProjectEntity::Revision, ENTITY_PROJECT_REVISION_ID));
+static PROJECT_REVISION_INSERTS: AtomicUsize = AtomicUsize::new(0);
 static SAVE_FAILURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 static STORM_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
-const PROJECT_REVISION_KEY: &[u8] = &[0, 12, 6];
-
-fn run_query<T>(mut query: impl FnMut() -> Result<T, QueryError>) -> Result<T, QueryError> {
-    query()
-}
 
 #[derive(Default)]
 struct FailingSaveEntityStorage {
     inner: InMemoryEntityStorage,
-}
-
-enum FailingSaveWrite {
-    Insert(Bytes, Bytes),
-    Remove(Bytes),
-}
-
-struct FailingSaveTransaction<'a> {
-    storage: &'a FailingSaveEntityStorage,
-    writes: RefCell<Vec<FailingSaveWrite>>,
-}
-
-impl<'a> FailingSaveTransaction<'a> {
-    fn new(storage: &'a FailingSaveEntityStorage) -> Self {
-        Self {
-            storage,
-            writes: RefCell::new(Vec::new()),
-        }
-    }
-}
-
-impl<'a> EntityStorageTransactionalReader<'a> for FailingSaveTransaction<'a> {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        self.storage.get(key)
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        self.storage.contains(key)
-    }
-}
-
-impl<'a> EntityStorageTransactionalWriter<'a> for FailingSaveTransaction<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        self.writes.borrow_mut().push(FailingSaveWrite::Insert(
-            Bytes::copy_from_slice(key),
-            value.into_bytes(),
-        ));
-        Ok(())
-    }
-
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
-        self.writes
-            .borrow_mut()
-            .push(FailingSaveWrite::Remove(Bytes::copy_from_slice(key)));
-        Ok(())
-    }
-
-    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        for write in self.writes.into_inner() {
-            match write {
-                FailingSaveWrite::Insert(key, value) => {
-                    self.storage
-                        .insert(key.as_ref(), BytesOrSlice::from(value))?;
-                }
-                FailingSaveWrite::Remove(key) => {
-                    self.storage.remove(key.as_ref())?;
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 impl EntityStorageProviderFromLoadable for FailingSaveEntityStorage {
@@ -168,7 +105,11 @@ impl EntityStorageProvider for FailingSaveEntityStorage {
     }
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        if FAIL_ENTITY_INSERTS.load(Ordering::SeqCst) && key == PROJECT_REVISION_KEY {
+        if key == PROJECT_REVISION_KEY.as_ref() {
+            PROJECT_REVISION_INSERTS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        if FAIL_ENTITY_INSERTS.load(Ordering::SeqCst) && key == PROJECT_REVISION_KEY.as_ref() {
             return Err(EntityStorageError::backing(io::Error::other(
                 "injected save failure",
             )));
@@ -178,6 +119,12 @@ impl EntityStorageProvider for FailingSaveEntityStorage {
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        if FAIL_ENTITY_REMOVES.load(Ordering::SeqCst) {
+            return Err(EntityStorageError::backing(io::Error::other(
+                "injected rollback failure",
+            )));
+        }
+
         self.inner.remove(key)
     }
 
@@ -196,12 +143,12 @@ impl EntityStorageProvider for FailingSaveEntityStorage {
         self.inner.iter_prefix(prefix)
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        self.inner.scan_range(prefix, start)
+        self.inner.iter_range(prefix, start)
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -216,16 +163,12 @@ impl EntityStorageProvider for FailingSaveEntityStorage {
         self.inner.iter_prefix_as(prefix, f)
     }
 
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        self.inner.bulk_inserter()
-    }
-
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        Ok(Box::new(FailingSaveTransaction::new(self)))
+        Ok(Box::new(BufferedEntityWriter::new(self)))
     }
 
     fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-        Ok(Box::new(FailingSaveTransaction::new(self)))
+        Ok(Box::new(BufferedEntityWriter::new(self)))
     }
 
     fn persistence(&self) -> StoragePersistence {
@@ -241,6 +184,8 @@ impl StorageProvider for FailingSaveStorageProvider {
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError> {
         FAIL_ENTITY_INSERTS.store(false, Ordering::SeqCst);
+        FAIL_ENTITY_REMOVES.store(false, Ordering::SeqCst);
+        PROJECT_REVISION_INSERTS.store(0, Ordering::SeqCst);
 
         let entities = EntityStorage::new(FailingSaveEntityStorage::from_loadable(
             loadable, attributes,
@@ -254,7 +199,7 @@ impl StorageProvider for FailingSaveStorageProvider {
     }
 
     fn from_storage(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError> {
         let _ = path;
@@ -294,21 +239,34 @@ impl Analyser for FailingTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
+        FAILING_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
 
         if self.mode == "mutating-error"
             && let Some(address) = regions.ranges().next().map(|range| range.start_address())
         {
-            transaction.insert_symbol(
-                SymbolIndex::new(SymbolTableSelector::new(251), 0),
-                SymbolEntry::new(
-                    address,
-                    "rolled_back_symbol",
-                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-                ),
-            );
+            transaction
+                .add_symbol(
+                    SymbolIndex::new(SymbolTableSelector::new(251), 0),
+                    SymbolEntry::new(
+                        address,
+                        "rolled_back_symbol",
+                        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                    ),
+                )
+                .map_err(|error| AnalysisError::pass_failed(self.mode, error))?;
+            if let Some(function) = transaction
+                .project()
+                .functions()
+                .get_by_address(address)
+                .map(|function| function.id())
+            {
+                transaction
+                    .ensure_lifted(function, IlLevel::PCode, cx.cancellation())
+                    .map_err(|error| AnalysisError::pass_failed(self.mode, error))?;
+            }
         }
 
         Err(AnalysisError::pass_failed(
@@ -319,38 +277,6 @@ impl Analyser for FailingTestAnalyser {
 }
 
 struct PanickingTestAnalyser;
-
-static COMPLETION_ANALYSE_COUNT: AtomicUsize = AtomicUsize::new(0);
-static COMPLETION_END_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-struct CompletionTestAnalyser {
-    address: Option<Address>,
-    completed: bool,
-}
-
-impl CompletionTestAnalyser {
-    fn new() -> Self {
-        Self {
-            address: None,
-            completed: false,
-        }
-    }
-}
-
-struct DerivedSymbolAnalyser {
-    next_index: usize,
-}
-
-impl DerivedSymbolAnalyser {
-    fn new() -> Self {
-        Self { next_index: 0 }
-    }
-}
-
-struct StormTestAnalyser;
-struct CancellingTestAnalyser;
-struct CancellationFollowUpAnalyser;
-struct PanickingCompletionTestAnalyser;
 
 impl Analyser for PanickingTestAnalyser {
     fn name(&self) -> &'static str {
@@ -373,18 +299,20 @@ impl Analyser for PanickingTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
         if let Some(address) = regions.ranges().next().map(|range| range.start_address()) {
-            transaction.insert_symbol(
-                SymbolIndex::new(SymbolTableSelector::new(252), 0),
-                SymbolEntry::new(
-                    address,
-                    "panicked_torn_symbol",
-                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-                ),
-            );
+            transaction
+                .add_symbol(
+                    SymbolIndex::new(SymbolTableSelector::new(252), 0),
+                    SymbolEntry::new(
+                        address,
+                        "panicked_torn_symbol",
+                        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                    ),
+                )
+                .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
             let target = address
                 .checked_add(0x100u64)
                 .expect("torn reference target");
@@ -393,6 +321,20 @@ impl Analyser for PanickingTestAnalyser {
                 .expect("torn reference asserted");
         }
         panic!("test analyser panic");
+    }
+}
+
+struct CompletionTestAnalyser {
+    address: Option<Address>,
+    completed: bool,
+}
+
+impl CompletionTestAnalyser {
+    fn new() -> Self {
+        Self {
+            address: None,
+            completed: false,
+        }
     }
 }
 
@@ -417,7 +359,7 @@ impl Analyser for CompletionTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
         let _ = cx;
@@ -429,7 +371,7 @@ impl Analyser for CompletionTestAnalyser {
     fn analysis_ended(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
         let Some(address) = self.address.take() else {
@@ -442,17 +384,21 @@ impl Analyser for CompletionTestAnalyser {
         }
 
         self.completed = true;
-        transaction.insert_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(252), 1),
-            SymbolEntry::new(
-                address,
-                "completion_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-            ),
-        );
+        transaction
+            .add_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(252), 1),
+                SymbolEntry::new(
+                    address,
+                    "completion_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            )
+            .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
         Ok(())
     }
 }
+
+struct PanickingCompletionTestAnalyser;
 
 impl Analyser for PanickingCompletionTestAnalyser {
     fn name(&self) -> &'static str {
@@ -475,7 +421,7 @@ impl Analyser for PanickingCompletionTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
         let _ = regions;
@@ -486,11 +432,21 @@ impl Analyser for PanickingCompletionTestAnalyser {
     fn analysis_ended(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = transaction;
         let _ = cx;
         panic!("test completion panic");
+    }
+}
+
+struct DerivedSymbolAnalyser {
+    next_index: usize,
+}
+
+impl DerivedSymbolAnalyser {
+    fn new() -> Self {
+        Self { next_index: 0 }
     }
 }
 
@@ -504,7 +460,7 @@ impl Analyser for DerivedSymbolAnalyser {
     }
 
     fn priority(&self) -> Priority {
-        Priority::DERIVED
+        Priority::ENRICHMENT
     }
 
     fn can_analyse(&self, project: &Project) -> bool {
@@ -519,26 +475,30 @@ impl Analyser for DerivedSymbolAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
 
         for range in regions.ranges() {
             let address = range.start_address();
-            transaction.insert_symbol(
-                SymbolIndex::new(SymbolTableSelector::new(253), self.next_index),
-                SymbolEntry::new(
-                    address,
-                    "derived_function",
-                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-                ),
-            );
+            transaction
+                .add_symbol(
+                    SymbolIndex::new(SymbolTableSelector::new(253), self.next_index),
+                    SymbolEntry::new(
+                        address,
+                        "derived_function",
+                        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                    ),
+                )
+                .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
             self.next_index += 1;
         }
 
         Ok(())
     }
 }
+
+struct StormTestAnalyser;
 
 impl Analyser for StormTestAnalyser {
     fn name(&self) -> &'static str {
@@ -561,7 +521,7 @@ impl Analyser for StormTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
         STORM_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
@@ -570,17 +530,21 @@ impl Analyser for StormTestAnalyser {
             return Ok(());
         };
 
-        transaction.insert_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(250), 0),
-            SymbolEntry::new(
-                address,
-                "storm_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-            ),
-        );
+        transaction
+            .add_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(250), 0),
+                SymbolEntry::new(
+                    address,
+                    "storm_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            )
+            .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
         Ok(())
     }
 }
+
+struct CancellingTestAnalyser;
 
 impl Analyser for CancellingTestAnalyser {
     fn name(&self) -> &'static str {
@@ -603,25 +567,29 @@ impl Analyser for CancellingTestAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
         let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
             return Err(Cancelled.into());
         };
 
-        transaction.insert_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(248), 0),
-            SymbolEntry::new(
-                address,
-                "cancel_committed_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-            ),
-        );
+        transaction
+            .add_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(248), 0),
+                SymbolEntry::new(
+                    address,
+                    "cancel_committed_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            )
+            .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
 
         Err(Cancelled.into())
     }
 }
+
+struct CancellationFollowUpAnalyser;
 
 impl Analyser for CancellationFollowUpAnalyser {
     fn name(&self) -> &'static str {
@@ -633,7 +601,7 @@ impl Analyser for CancellationFollowUpAnalyser {
     }
 
     fn priority(&self) -> Priority {
-        Priority::DERIVED
+        Priority::ENRICHMENT
     }
 
     fn can_analyse(&self, project: &Project) -> bool {
@@ -648,21 +616,23 @@ impl Analyser for CancellationFollowUpAnalyser {
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
         regions: &AddressRangeSet,
-        cx: &AnalysisCx,
+        cx: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let _ = cx;
         let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
             return Ok(());
         };
 
-        transaction.insert_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(248), 1),
-            SymbolEntry::new(
-                address,
-                "cancel_followup_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-            ),
-        );
+        transaction
+            .add_symbol(
+                SymbolIndex::new(SymbolTableSelector::new(248), 1),
+                SymbolEntry::new(
+                    address,
+                    "cancel_followup_symbol",
+                    SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                ),
+            )
+            .map_err(|error| AnalysisError::pass_failed(self.name(), error))?;
 
         Ok(())
     }
@@ -706,7 +676,7 @@ fn build_cancellation_follow_up_analyser(
     Ok(Box::new(CancellationFollowUpAnalyser))
 }
 
-fn configure_chunked_recovery(
+fn configure_test_recovery(
     project: &Project,
     recovery: &mut FunctionRecovery,
 ) -> Result<(), AnalysisError> {
@@ -717,6 +687,13 @@ fn configure_chunked_recovery(
     {
         recovery.set_chunk_function_limit(Some(1));
         recovery.set_chunk_candidate_limit(Some(1));
+    }
+    if project
+        .attributes()
+        .get_attr::<bool>(TEST_SWITCH_RECOVERY_ATTR)
+        .unwrap_or(false)
+    {
+        recovery.add_builder_post_structuring_pass("switch-recovery", SwitchRecovery::new());
     }
 
     Ok(())
@@ -759,20 +736,26 @@ registry::submit! {
 }
 
 registry::submit! {
-    FunctionRecoveryExtension::new("test-chunked-recovery", configure_chunked_recovery)
+    FunctionRecoveryExtension::new("test-recovery", configure_test_recovery)
 }
 
-fn project_with_test_analyser(mode: &'static str) -> Result<Project, Box<dyn std::error::Error>> {
+fn project_with_test_analyser(mode: &'static str) -> Result<Project, Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut attributes = AttributeMap::new();
     attributes.set_attr(TEST_ANALYSER_ATTR, mode);
-    Ok(Project::new_transient_with(&loader, attributes)?)
+    Ok(Project::new_with_provider::<TransientStorageProvider>(
+        &loader, attributes,
+    )?)
 }
 
-fn trigger_test_analyser(
-    engine: &AnalysisEngine,
-    address: Address,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn project_with_writable_address() -> Result<(Project, Address), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let address = writable_address(&project, 0x20)?;
+    Ok((project, address))
+}
+
+fn trigger_test_analyser(engine: &AnalysisEngine, address: Address) -> Result<(), Box<dyn Error>> {
     let mut regions = AddressRangeSet::new();
     regions.insert(address);
     engine.schedule_ranges(Trigger::BytesWritten, regions)?;
@@ -780,30 +763,9 @@ fn trigger_test_analyser(
     Ok(())
 }
 
-fn function_id_at(reader: &QueryReader, entry: Address) -> Result<Option<FunctionId>, QueryError> {
-    Ok(reader
-        .project()?
-        .functions()
-        .get_by_address(entry)
-        .map(|function| function.id()))
-}
-
-fn symbol_exists(
-    engine: &AnalysisEngine,
-    address: Address,
-    symbol: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    Ok(engine
-        .query_reader()?
-        .symbols_at(address, None, 4096)?
-        .entries()
-        .iter()
-        .any(|record| record.symbol().as_str() == symbol))
-}
-
-fn assert_strict_cursor_pages<T, F>(mut next_page: F) -> Result<Vec<T>, Box<dyn std::error::Error>>
+fn assert_strict_cursor_pages<T, F>(mut next_page: F) -> Result<Vec<T>, Box<dyn Error>>
 where
-    T: Copy + Ord + std::fmt::Debug,
+    T: Copy + Ord + Debug,
     F: FnMut(Option<T>) -> Result<QueryPage<T>, QueryError>,
 {
     let mut cursor = None;
@@ -834,7 +796,7 @@ where
 }
 
 #[test]
-fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
 
     let mut imperative = Project::new_transient(&loader)?;
@@ -850,7 +812,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
 
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.subscribe().capacity(4096).build()?;
+    let changes = engine.subscribe().with_capacity(4096).build()?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let mut engine_functions = BTreeSet::new();
@@ -891,7 +853,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
     }
 
     let flow_graph = reader
-        .flow_graph(entry)?
+        .flow_targets(entry)?
         .ok_or_else(|| io::Error::other("fixture entry flow graph missing"))?;
     let expected_callees = flow_graph
         .targets()
@@ -900,17 +862,17 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
         .map(|target| target.to())
         .collect::<BTreeSet<_>>();
     let callees = reader
-        .callees_of(entry, None, 4096)?
+        .callee_page(entry, None, 4096)?
         .entries()
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     let call_edges = reader
-        .call_edges(None, 4096)?
+        .call_edge_page(None, 4096)?
         .entries()
         .iter()
-        .filter(|edge| edge.caller() == entry)
-        .map(|edge| edge.callee())
+        .filter(|edge| edge.source() == entry)
+        .map(|edge| edge.target())
         .collect::<BTreeSet<_>>();
 
     assert_eq!(callees, expected_callees);
@@ -922,7 +884,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn std::error::Error>> {
+fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -940,10 +902,10 @@ fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn std::error::Erro
     assert!(!functions.is_empty());
 
     let symbols =
-        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
     assert!(!symbols.is_empty());
 
-    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     assert!(!mappings.is_empty());
@@ -952,7 +914,7 @@ fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -969,7 +931,7 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn st
 
     engine.wait_until_idle()?;
     for (index, symbol) in inserted.iter().cloned().enumerate() {
-        engine.insert_symbol(
+        engine.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(247), index),
             symbol,
         )?;
@@ -978,17 +940,17 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn st
     let reader = engine.query_reader()?;
     let mut expected = inserted
         .iter()
-        .map(|entry| SymbolRecord::new(entry.address(), entry.symbol(), entry.properties()))
+        .map(|entry| SymbolRow::new(entry.address(), entry.symbol(), entry.properties()))
         .collect::<Vec<_>>();
     expected.sort();
 
-    let symbols_at = assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| {
-        reader.symbols_at(address, cursor, 1)
+    let symbols_at = assert_strict_cursor_pages::<SymbolRow, _>(|cursor| {
+        reader.symbol_page_at(address, cursor, 1)
     })?;
     assert_eq!(symbols_at, expected);
 
     let symbol_page =
-        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
     let shared_address = symbol_page
         .into_iter()
         .filter(|record| record.address() == address)
@@ -999,7 +961,7 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let view = project
@@ -1050,7 +1012,7 @@ fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn s
     let _ = (first, second);
     let reader = engine.query_reader()?;
 
-    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     let shared_start_records = mappings
@@ -1064,7 +1026,7 @@ fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::Error>> {
+fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut unchunked_project = Project::new_transient(&loader)?;
     let mut chunked_project = Project::new_transient(&loader)?;
@@ -1088,7 +1050,7 @@ fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::
             &mut chunked,
             &mut transaction,
             &regions,
-            &AnalysisCx::default(),
+            &AnalysisContext::default(),
         )?;
         transaction.commit()?;
 
@@ -1114,19 +1076,18 @@ fn test_chunked_function_recovery_converges() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_reader_observes_progress_during_chunked_function_recovery()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_reader_observes_progress_during_chunked_function_recovery() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut attributes = AttributeMap::new();
     attributes.set_attr(TEST_CHUNKED_RECOVERY_ATTR, true);
-    let project = Project::new_transient_with(&loader, attributes)?;
+    let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
     let engine = AnalysisEngine::new(project)?;
     let reader = engine.query_reader()?;
     let running = Arc::new(AtomicBool::new(true));
     let started = Arc::new(Barrier::new(2));
     let observed = Arc::new(Mutex::new(Vec::new()));
 
-    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+    thread::scope(|scope| -> Result<(), Box<dyn Error>> {
         let reader_running = running.clone();
         let reader_started = started.clone();
         let observed = observed.clone();
@@ -1142,7 +1103,7 @@ fn test_reader_observes_progress_during_chunked_function_recovery()
                         .push(revision);
                     last = Some(revision);
                 }
-                std::thread::yield_now();
+                thread::yield_now();
             }
             Ok(())
         });
@@ -1167,7 +1128,7 @@ fn test_reader_observes_progress_during_chunked_function_recovery()
 }
 
 #[test]
-fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn std::error::Error>> {
+fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -1178,14 +1139,13 @@ fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn s
 
     drop(engine);
 
-    assert_eq!(reader.revision(), Err(QueryError::Stopped));
+    assert!(matches!(reader.revision(), Err(QueryError::Stopped)));
 
     Ok(())
 }
 
 #[test]
-fn test_query_readers_block_until_idle_during_concurrent_updates()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_query_readers_block_until_idle_during_concurrent_updates() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -1197,7 +1157,7 @@ fn test_query_readers_block_until_idle_during_concurrent_updates()
     let running = Arc::new(AtomicBool::new(true));
     let start = Arc::new(Barrier::new(5));
 
-    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+    thread::scope(|scope| -> Result<(), Box<dyn Error>> {
         let mut readers = Vec::new();
         for _ in 0..4 {
             let reader = reader.clone();
@@ -1225,7 +1185,7 @@ fn test_query_readers_block_until_idle_during_concurrent_updates()
                 format!("concurrent_query_symbol_{index}"),
                 SymbolProperties::LOCAL,
             );
-            engine.insert_symbol(
+            engine.add_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(246), index),
                 symbol,
             )?;
@@ -1247,7 +1207,7 @@ fn test_query_readers_block_until_idle_during_concurrent_updates()
 }
 
 #[test]
-fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn Error>> {
     struct HintLoader {
         arch: Arch,
         attributes: AttributeMap,
@@ -1287,8 +1247,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn std::
             )
             .with_backing(ImageBacking::in_default_bank(0u64));
 
-            Box::new(fallible_iterator::convert(std::iter::once(Ok(segment))))
-                as ImageSegmentIterator<'a>
+            Box::new(convert(iter::once(Ok(segment)))) as ImageSegmentIterator<'a>
         }
 
         fn image_contents<'a>(
@@ -1298,8 +1257,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn std::
             let mut contents = ImageSegmentContents::new(0x1000u64, Endian::Little, vec![0xc3u8]);
             contents.add_function_hint(0x1000u64);
 
-            Box::new(fallible_iterator::convert(std::iter::once(Ok(contents))))
-                as ImageSegmentContentsIterator<'a>
+            Box::new(convert(iter::once(Ok(contents)))) as ImageSegmentContentsIterator<'a>
         }
     }
 
@@ -1337,7 +1295,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn std::
 
 #[test]
 fn test_function_recovery_cancel_before_seeding_leaves_project_unchanged()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut project = Project::new_transient(&loader)?;
     let revision = project.revision();
@@ -1358,21 +1316,16 @@ fn test_function_recovery_cancel_before_seeding_leaves_project_unchanged()
 }
 
 #[test]
-fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
-    let address = project
-        .segments()
-        .iter_views(DEFAULT_SPACE_ID)?
-        .find(|view| view.properties().is_writable())
-        .map(|view| view.start())
-        .ok_or_else(|| io::Error::other("fixture writable segment missing"))?;
+    let address = writable_address(&project, 1)?;
     let engine = AnalysisEngine::new(project)?;
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let revision = reader.revision()?;
-    let changes = engine.subscribe().capacity(16).build()?;
+    let changes = engine.subscribe().with_capacity(16).build()?;
 
     let written = engine.write_bytes(address, [0xcc])?;
 
@@ -1392,8 +1345,7 @@ fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1402,18 +1354,12 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
-    let mut partial = PartialFunction::new(entry);
-    partial.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(partial)?;
+    engine.add_function(one_block_function(entry, 1))?;
     engine.wait_until_idle()?;
     let function = {
         let reader = engine.query_reader()?;
-        function_id_at(&reader, entry)?
+        reader
+            .function_id_at(entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
@@ -1432,7 +1378,7 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
     let ssa = reader
         .ecode_ssa(function)?
         .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
-    assert_eq!(ssa.header().function(), function);
+    assert_eq!(ssa.metadata().function(), function);
 
     let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
     assert!(ensured.records().is_empty());
@@ -1442,7 +1388,7 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
 
 #[test]
 fn test_engine_ensure_lifted_cancelled_rolls_back_without_materialising()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1451,17 +1397,11 @@ fn test_engine_ensure_lifted_cancelled_rolls_back_without_materialising()
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
-    let mut partial = PartialFunction::new(entry);
-    partial.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(partial)?;
+    engine.add_function(one_block_function(entry, 1))?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let function = function_id_at(&reader, entry)?
+    let function = reader
+        .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
     let revision = reader.revision()?;
 
@@ -1497,7 +1437,7 @@ fn test_engine_ensure_lifted_cancelled_rolls_back_without_materialising()
 }
 
 #[test]
-fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn std::error::Error>> {
+fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1506,18 +1446,12 @@ fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn std::err
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
-    let mut partial = PartialFunction::new(entry);
-    partial.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(partial)?;
+    engine.add_function(one_block_function(entry, 1))?;
     engine.wait_until_idle()?;
 
     let reader = engine.query_reader()?;
-    let function = function_id_at(&reader, entry)?
+    let function = reader
+        .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
     assert!(reader.project()?.pcode(function)?.is_none());
@@ -1533,7 +1467,7 @@ fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1542,18 +1476,12 @@ fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn st
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
-    let mut partial = PartialFunction::new(entry);
-    partial.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(partial)?;
+    engine.add_function(one_block_function(entry, 1))?;
     engine.wait_until_idle()?;
     let function = {
         let reader = engine.query_reader()?;
-        function_id_at(&reader, entry)?
+        reader
+            .function_id_at(entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
@@ -1571,8 +1499,7 @@ fn test_engine_flush_derived_references_is_idempotent() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_engine_partial_write_rolls_back_without_materialising()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_partial_write_rolls_back_without_materialising() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let address = project
@@ -1585,7 +1512,7 @@ fn test_engine_partial_write_rolls_back_without_materialising()
     let engine = AnalysisEngine::new(project)?;
 
     engine.wait_until_idle()?;
-    let changes = engine.subscribe().capacity(16).build()?;
+    let changes = engine.subscribe().with_capacity(16).build()?;
 
     assert!(engine.write_bytes(address, [0xcc, 0xdd]).is_err());
     assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
@@ -1594,7 +1521,7 @@ fn test_engine_partial_write_rolls_back_without_materialising()
 }
 
 #[test]
-fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1605,7 +1532,7 @@ fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::err
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
     let revision = reader.revision()?;
-    let changes = engine.subscribe().capacity(16).build()?;
+    let changes = engine.subscribe().with_capacity(16).build()?;
     let index = SymbolIndex::new(SymbolTableSelector::new(250), 0);
     let symbol = SymbolEntry::new(
         entry,
@@ -1613,7 +1540,7 @@ fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::err
         SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
     );
 
-    let inserted = engine.insert_symbol(index, symbol.clone())?;
+    let inserted = engine.add_symbol(index, symbol.clone())?;
 
     assert!(inserted.revision() > revision);
     assert!(inserted.records().contains(&ChangeRecord::SymbolAdded {
@@ -1623,7 +1550,7 @@ fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::err
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &inserted);
     assert!(
         reader
-            .symbols_at(entry, None, 16)?
+            .symbol_page_at(entry, None, 16)?
             .entries()
             .iter()
             .any(|record| record.symbol() == symbol.symbol())
@@ -1639,7 +1566,7 @@ fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::err
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &removed);
     assert!(
         !reader
-            .symbols_at(entry, None, 16)?
+            .symbol_page_at(entry, None, 16)?
             .entries()
             .iter()
             .any(|record| record.symbol() == symbol.symbol())
@@ -1649,8 +1576,7 @@ fn test_engine_symbol_edits_materialise_changes() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn test_engine_symbol_replacement_materialises_removed_and_added()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_symbol_replacement_materialises_removed_and_added() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let old_entry = project
@@ -1674,8 +1600,8 @@ fn test_engine_symbol_replacement_materialises_removed_and_added()
         SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
     );
 
-    engine.insert_symbol(index, old_symbol.clone())?;
-    let replaced = engine.insert_symbol(index, new_symbol.clone())?;
+    engine.add_symbol(index, old_symbol.clone())?;
+    let replaced = engine.add_symbol(index, new_symbol.clone())?;
 
     assert!(replaced.records().contains(&ChangeRecord::SymbolRemoved {
         address: old_entry,
@@ -1689,14 +1615,14 @@ fn test_engine_symbol_replacement_materialises_removed_and_added()
     let reader = engine.query_reader()?;
     assert!(
         !reader
-            .symbols_at(old_entry, None, 16)?
+            .symbol_page_at(old_entry, None, 16)?
             .entries()
             .iter()
             .any(|record| record.symbol() == old_symbol.symbol())
     );
     assert!(
         reader
-            .symbols_at(new_entry, None, 16)?
+            .symbol_page_at(new_entry, None, 16)?
             .entries()
             .iter()
             .any(|record| record.symbol() == new_symbol.symbol())
@@ -1706,7 +1632,7 @@ fn test_engine_symbol_replacement_materialises_removed_and_added()
 }
 
 #[test]
-fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -1716,8 +1642,8 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::erro
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let changes = engine.subscribe().capacity(16).build()?;
-    assert!(reader.flow_graph(entry)?.is_some());
+    let changes = engine.subscribe().with_capacity(16).build()?;
+    assert!(reader.flow_targets(entry)?.is_some());
 
     let removed = engine.remove_function(entry)?;
 
@@ -1726,50 +1652,43 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn std::erro
         ChangeRecord::FunctionRemoved { entry: removed_entry, .. } if *removed_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &removed);
-    assert!(reader.flow_graph(entry)?.is_none());
+    assert!(reader.flow_targets(entry)?.is_none());
     assert!(
         !reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
             .entries()
             .contains(&entry)
     );
-    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+    assert!(reader.callee_page(entry, None, 4096)?.entries().is_empty());
     assert!(
         !reader
-            .call_edges(None, 4096)?
+            .call_edge_page(None, 4096)?
             .entries()
             .iter()
-            .any(|edge| edge.caller() == entry)
+            .any(|edge| edge.source() == entry)
     );
 
-    let mut function = PartialFunction::new(entry);
-    function.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    let added = engine.add_function(function)?;
+    let added = engine.add_function(one_block_function(entry, 1))?;
 
     assert!(added.records().iter().any(|record| matches!(
         record,
         ChangeRecord::FunctionAdded { entry: added_entry, .. } if *added_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &added);
-    assert!(reader.flow_graph(entry)?.is_some());
+    assert!(reader.flow_targets(entry)?.is_some());
     assert!(
         reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
             .entries()
             .contains(&entry)
     );
-    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+    assert!(reader.callee_page(entry, None, 4096)?.entries().is_empty());
 
     Ok(())
 }
 
 #[test]
-fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn std::error::Error>> {
+fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -1786,22 +1705,23 @@ fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn s
     })?
     .into_iter()
     .collect::<BTreeSet<_>>();
-    let edges = assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edges(cursor, 1))?;
+    let edges =
+        assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edge_page(cursor, 1))?;
     let edge = edges
         .iter()
         .copied()
         .find(|edge| {
-            edge.caller() != edge.callee()
-                && functions.contains(&edge.caller())
-                && functions.contains(&edge.callee())
+            edge.source() != edge.target()
+                && functions.contains(&edge.source())
+                && functions.contains(&edge.target())
         })
         .ok_or_else(|| io::Error::other("fixture has no live non-recursive call edge"))?;
 
-    let removed = engine.remove_function(edge.callee())?;
+    let removed = engine.remove_function(edge.target())?;
 
     assert!(removed.records().iter().any(|record| matches!(
         record,
-        ChangeRecord::FunctionRemoved { entry, .. } if *entry == edge.callee()
+        ChangeRecord::FunctionRemoved { entry, .. } if *entry == edge.target()
     )));
     engine.wait_until_idle()?;
 
@@ -1815,19 +1735,19 @@ fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn s
     .into_iter()
     .collect::<BTreeSet<_>>();
     let callers_after =
-        assert_strict_cursor_pages(|cursor| reader.callers_of(edge.callee(), cursor, 1))?;
+        assert_strict_cursor_pages(|cursor| reader.caller_page(edge.target(), cursor, 1))?;
     let edges_after =
-        assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edges(cursor, 1))?;
+        assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edge_page(cursor, 1))?;
 
-    assert!(!functions_after.contains(&edge.callee()));
-    assert!(callers_after.contains(&edge.caller()));
+    assert!(!functions_after.contains(&edge.target()));
+    assert!(callers_after.contains(&edge.source()));
     assert!(edges_after.contains(&edge));
 
     Ok(())
 }
 
 #[test]
-fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let view = project
@@ -1862,9 +1782,10 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let changes = engine.subscribe().capacity(16).build()?;
+    let changes = engine.subscribe().with_capacity(16).build()?;
     assert!(
-        run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
+        reader
+            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.mapping() == mapping_id)
@@ -1889,7 +1810,8 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
             })
     );
     assert!(
-        !run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
+        !reader
+            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.mapping() == created_id)
@@ -1916,7 +1838,8 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
         ),
     }));
     assert!(
-        run_query(|| reader.mapping_page(extra_space, None, 4096))?
+        reader
+            .mapping_page(extra_space, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.mapping() == created_id)
@@ -1955,7 +1878,8 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
         }
     }
     assert!(delivered);
-    let remapped_record = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
+    let remapped_record = reader
+        .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
         .entries()
         .iter()
         .find(|record| record.mapping() == mapping_id)
@@ -1981,7 +1905,8 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
         }
     }
     assert!(delivered);
-    let resized_record = run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
+    let resized_record = reader
+        .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
         .entries()
         .iter()
         .find(|record| record.mapping() == mapping_id)
@@ -2004,7 +1929,8 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
     }
     assert!(delivered);
     assert!(
-        !run_query(|| reader.mapping_page(DEFAULT_SPACE_ID, None, 4096))?
+        !reader
+            .mapping_page(DEFAULT_SPACE_ID, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.mapping() == mapping_id)
@@ -2014,7 +1940,7 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_idle_cancel_does_not_poison_future_work() -> Result<(), Box<dyn std::error::Error>> {
+fn test_idle_cancel_does_not_poison_future_work() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -2031,7 +1957,7 @@ fn test_idle_cancel_does_not_poison_future_work() -> Result<(), Box<dyn std::err
 
 #[test]
 fn test_cancelling_analyser_commits_partial_progress_and_clears_followup()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("cancelling-test")?;
     let address = project
         .entry()
@@ -2041,8 +1967,20 @@ fn test_cancelling_analyser_commits_partial_progress_and_clears_followup()
     engine.wait_until_idle()?;
     trigger_test_analyser(&engine, address)?;
 
-    assert!(symbol_exists(&engine, address, "cancel_committed_symbol")?);
-    assert!(!symbol_exists(&engine, address, "cancel_followup_symbol")?);
+    let reader = engine.query_reader()?;
+    let symbols = reader.symbol_page_at(address, None, 4096)?;
+    assert!(
+        symbols
+            .entries()
+            .iter()
+            .any(|record| record.symbol().as_str() == "cancel_committed_symbol")
+    );
+    assert!(
+        symbols
+            .entries()
+            .iter()
+            .all(|record| record.symbol().as_str() != "cancel_followup_symbol")
+    );
     assert!(!engine.cancellation_token().is_cancelled());
     engine.save()?;
 
@@ -2050,8 +1988,7 @@ fn test_cancelling_analyser_commits_partial_progress_and_clears_followup()
 }
 
 #[test]
-fn test_engine_constructors_accept_explicit_persistence_policy()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_constructors_accept_explicit_persistence_policy() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
@@ -2068,8 +2005,7 @@ fn test_engine_constructors_accept_explicit_persistence_policy()
 }
 
 #[test]
-fn test_manual_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_manual_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn Error>> {
     let _guard = SAVE_FAILURE_TEST_LOCK
         .lock()
         .map_err(|_| io::Error::other("save failure test lock poisoned"))?;
@@ -2099,8 +2035,7 @@ fn test_manual_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn
 }
 
 #[test]
-fn test_on_idle_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_on_idle_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dyn Error>> {
     let _guard = SAVE_FAILURE_TEST_LOCK
         .lock()
         .map_err(|_| io::Error::other("save failure test lock poisoned"))?;
@@ -2132,8 +2067,7 @@ fn test_on_idle_save_failure_reaches_caller_and_can_retry() -> Result<(), Box<dy
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_on_idle_persists_revision_and_reopen_sends_restored()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_on_idle_persists_revision_and_reopen_sends_restored() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let project_path = directory.path().join("engine.fdbz");
     let mut attributes = AttributeMap::new();
@@ -2156,7 +2090,7 @@ fn test_on_idle_persists_revision_and_reopen_sends_restored()
     assert_eq!(reopened.revision(), revision);
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
-    let changes = engine.subscribe().capacity(1).build()?;
+    let changes = engine.subscribe().with_capacity(1).build()?;
     let restored = changes.recv_timeout(Duration::from_secs(1))?;
 
     assert_eq!(restored.revision(), revision);
@@ -2170,8 +2104,7 @@ fn test_on_idle_persists_revision_and_reopen_sends_restored()
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_manual_save_reopen_queries_saved_state_and_single_restored()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_manual_save_reopen_queries_saved_state_and_single_restored() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let project_path = directory.path().join("engine-saved-state.fdbz");
     let mut attributes = AttributeMap::new();
@@ -2194,8 +2127,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
         SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
     );
     let symbol_name = symbol.symbol();
-    let inserted =
-        engine.insert_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 0), symbol)?;
+    let inserted = engine.add_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 0), symbol)?;
 
     assert!(inserted.records().contains(&ChangeRecord::SymbolAdded {
         address: entry,
@@ -2203,7 +2135,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
     }));
     assert!(
         reader
-            .symbols_at(entry, None, 4096)?
+            .symbol_page_at(entry, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.symbol() == symbol_name)
@@ -2221,7 +2153,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
     assert_eq!(reopened.revision(), revision);
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
-    let changes = engine.subscribe().capacity(2).build()?;
+    let changes = engine.subscribe().with_capacity(2).build()?;
     let restored = changes.recv_timeout(Duration::from_secs(1))?;
 
     assert_eq!(restored.revision(), revision);
@@ -2233,7 +2165,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
     assert!(
         engine
             .query_reader()?
-            .symbols_at(entry, None, 4096)?
+            .symbol_page_at(entry, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.symbol() == symbol_name)
@@ -2244,7 +2176,7 @@ fn test_manual_save_reopen_queries_saved_state_and_single_restored()
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Error>> {
+fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let project_path = directory.path().join("engine-il-artefacts.fdbz");
     let mut attributes = AttributeMap::new();
@@ -2260,17 +2192,11 @@ fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Erro
     let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
 
     engine.wait_until_idle()?;
-    let mut function = PartialFunction::new(entry);
-    function.push_block(PartialCodeBlock::new(
-        entry,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(function)?;
+    engine.add_function(one_block_function(entry, 1))?;
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let function = function_id_at(&reader, entry)?
+    let function = reader
+        .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
     engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
@@ -2297,7 +2223,8 @@ fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Erro
 
     let engine = AnalysisEngine::with_policy(reopened, PersistencePolicy::Manual)?;
     let reader = engine.query_reader()?;
-    let function = function_id_at(&reader, entry)?
+    let function = reader
+        .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("reopened function ID missing"))?;
 
     let snapshot = reader.project()?;
@@ -2310,8 +2237,7 @@ fn test_manual_save_reopen_reads_lifted() -> Result<(), Box<dyn std::error::Erro
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let project_path = directory.path().join("engine-on-commit.fdbz");
     let mut attributes = AttributeMap::new();
@@ -2333,8 +2259,7 @@ fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn 
         SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
     );
     let symbol_name = symbol.symbol();
-    let inserted =
-        engine.insert_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 1), symbol)?;
+    let inserted = engine.add_symbol(SymbolIndex::new(SymbolTableSelector::new(254), 1), symbol)?;
     let revision = inserted.revision();
     drop(engine);
 
@@ -2348,7 +2273,7 @@ fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn 
     assert!(
         engine
             .query_reader()?
-            .symbols_at(entry, None, 4096)?
+            .symbol_page_at(entry, None, 4096)?
             .entries()
             .iter()
             .any(|record| record.symbol() == symbol_name)
@@ -2358,8 +2283,11 @@ fn test_on_commit_persists_update_before_result_returns() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn test_analyser_error_is_logged_without_poisoning_engine() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_analyser_error_does_not_poison_engine() -> Result<(), Box<dyn Error>> {
+    let _guard = FAILING_ANALYSER_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("failing analyser test lock poisoned"))?;
+    FAILING_ANALYSER_RUNS.store(0, Ordering::SeqCst);
     let project = project_with_test_analyser("error-test")?;
     let address = project
         .entry()
@@ -2370,16 +2298,18 @@ fn test_analyser_error_is_logged_without_poisoning_engine() -> Result<(), Box<dy
     trigger_test_analyser(&engine, address)?;
     engine.save()?;
 
-    let messages = engine.take_run_log();
-    assert!(messages.iter().any(|message| {
-        message.analyser() == "error-test" && message.kind() == AnalysisMessageKind::Error
-    }));
+    assert_eq!(FAILING_ANALYSER_RUNS.load(Ordering::SeqCst), 1);
+    engine.poison_check()?;
 
     Ok(())
 }
 
 #[test]
-fn test_repeated_analyser_errors_disable_analyser() -> Result<(), Box<dyn std::error::Error>> {
+fn test_repeated_analyser_errors_disable_analyser() -> Result<(), Box<dyn Error>> {
+    let _guard = FAILING_ANALYSER_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("failing analyser test lock poisoned"))?;
+    FAILING_ANALYSER_RUNS.store(0, Ordering::SeqCst);
     let project = project_with_test_analyser("error-test")?;
     let address = project
         .entry()
@@ -2391,25 +2321,22 @@ fn test_repeated_analyser_errors_disable_analyser() -> Result<(), Box<dyn std::e
         trigger_test_analyser(&engine, address)?;
     }
 
-    let messages = engine.take_run_log();
     assert_eq!(
-        messages
-            .iter()
-            .filter(|message| {
-                message.analyser() == "error-test" && message.kind() == AnalysisMessageKind::Error
-            })
-            .count(),
+        FAILING_ANALYSER_RUNS.load(Ordering::SeqCst),
         DEFAULT_ANALYSER_MAX_FAILURES
     );
 
     trigger_test_analyser(&engine, address)?;
-    assert!(engine.take_run_log().is_empty());
+    assert_eq!(
+        FAILING_ANALYSER_RUNS.load(Ordering::SeqCst),
+        DEFAULT_ANALYSER_MAX_FAILURES
+    );
 
     Ok(())
 }
 
 #[test]
-fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("panicking-test")?;
     let address = project
         .entry()
@@ -2431,7 +2358,7 @@ fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn std::error::Error>> 
         Err(EngineError::Poisoned(message)) if message.contains("test analyser panic")
     ));
     assert!(matches!(
-        engine.insert_symbol(
+        engine.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(249), 0),
             SymbolEntry::new(
                 address,
@@ -2447,7 +2374,7 @@ fn test_panicking_analyser_is_fatal() -> Result<(), Box<dyn std::error::Error>> 
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn std::error::Error>> {
+fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let project_path = directory.path().join("engine-panic-torn.fdbz");
     let mut attributes = AttributeMap::new();
@@ -2508,7 +2435,7 @@ fn test_panicking_analyser_does_not_persist_torn_state() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn test_panicking_completion_hook_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+fn test_panicking_completion_hook_is_fatal() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("completion-panic-test")?;
     let engine = AnalysisEngine::new(project)?;
 
@@ -2527,7 +2454,7 @@ fn test_panicking_completion_hook_is_fatal() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_completion_hook_runs_once_after_drain() -> Result<(), Box<dyn std::error::Error>> {
+fn test_completion_hook_runs_once_after_drain() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("completion-test")?;
     let address = project
         .entry()
@@ -2540,7 +2467,7 @@ fn test_completion_hook_runs_once_after_drain() -> Result<(), Box<dyn std::error
     COMPLETION_END_COUNT.store(0, Ordering::SeqCst);
     trigger_test_analyser(&engine, address)?;
 
-    let symbols = reader.symbols_at(address, None, 4096)?;
+    let symbols = reader.symbol_page_at(address, None, 4096)?;
     assert_eq!(
         symbols
             .entries()
@@ -2555,17 +2482,17 @@ fn test_completion_hook_runs_once_after_drain() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn std::error::Error>> {
+fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("derived-symbol")?;
     let entry = project
         .entry()
         .ok_or_else(|| io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.subscribe().capacity(4096).build()?;
+    let changes = engine.subscribe().with_capacity(4096).build()?;
 
     engine.wait_until_idle()?;
     let reader = engine.query_reader()?;
-    let symbols = reader.symbols_at(entry, None, 4096)?;
+    let symbols = reader.symbol_page_at(entry, None, 4096)?;
 
     assert!(
         symbols
@@ -2599,54 +2526,51 @@ fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn run_storm_analyser_scenario(
-    storm: bool,
-) -> Result<(usize, Vec<SymbolRecord>), Box<dyn std::error::Error>> {
-    STORM_ANALYSER_RUNS.store(0, Ordering::SeqCst);
+#[test]
+fn test_engine_storm_regions_coalesce_to_single_analyser_task() -> Result<(), Box<dyn Error>> {
+    let run_scenario = |storm: bool| -> Result<(usize, Vec<SymbolRow>), Box<dyn Error>> {
+        STORM_ANALYSER_RUNS.store(0, Ordering::SeqCst);
 
-    let project = project_with_test_analyser("storm-test")?;
-    let entry = project
-        .entry()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
-    let engine = AnalysisEngine::new(project)?;
+        let project = project_with_test_analyser("storm-test")?;
+        let entry = project
+            .entry()
+            .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+        let engine = AnalysisEngine::new(project)?;
 
-    engine.wait_until_idle()?;
+        engine.wait_until_idle()?;
 
-    if storm {
-        for offset in 0..512u64 {
-            let end = entry
-                .raw_address()
-                .checked_add(RawAddress::from(offset))
-                .ok_or_else(|| io::Error::other("fixture entry cannot form storm range"))?;
+        if storm {
+            for offset in 0..512u64 {
+                let end = entry
+                    .raw_address()
+                    .checked_add(RawAddress::from(offset))
+                    .ok_or_else(|| io::Error::other("fixture entry cannot form storm range"))?;
+                let mut regions = AddressRangeSet::new();
+                regions.insert_raw_range(entry.space(), entry.raw_address()..=end);
+                engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+            }
+        } else {
             let mut regions = AddressRangeSet::new();
-            regions.insert_raw_range(entry.space(), entry.raw_address()..=end);
+            regions.insert(entry);
             engine.schedule_ranges(Trigger::BytesWritten, regions)?;
         }
-    } else {
-        let mut regions = AddressRangeSet::new();
-        regions.insert(entry);
-        engine.schedule_ranges(Trigger::BytesWritten, regions)?;
-    }
 
-    engine.wait_until_idle()?;
+        engine.wait_until_idle()?;
 
-    let symbols = engine
-        .query_reader()?
-        .symbols_at(entry, None, 4096)?
-        .entries()
-        .iter()
-        .copied()
-        .filter(|symbol| symbol.symbol().as_str() == "storm_symbol")
-        .collect::<Vec<_>>();
+        let symbols = engine
+            .query_reader()?
+            .symbol_page_at(entry, None, 4096)?
+            .entries()
+            .iter()
+            .copied()
+            .filter(|symbol| symbol.symbol().as_str() == "storm_symbol")
+            .collect::<Vec<_>>();
 
-    Ok((STORM_ANALYSER_RUNS.load(Ordering::SeqCst), symbols))
-}
+        Ok((STORM_ANALYSER_RUNS.load(Ordering::SeqCst), symbols))
+    };
 
-#[test]
-fn test_engine_storm_regions_coalesce_to_single_analyser_task()
--> Result<(), Box<dyn std::error::Error>> {
-    let (calm_runs, calm_symbols) = run_storm_analyser_scenario(false)?;
-    let (storm_runs, storm_symbols) = run_storm_analyser_scenario(true)?;
+    let (calm_runs, calm_symbols) = run_scenario(false)?;
+    let (storm_runs, storm_symbols) = run_scenario(true)?;
 
     assert_eq!(calm_runs, 1);
     assert!(
@@ -2660,8 +2584,11 @@ fn test_engine_storm_regions_coalesce_to_single_analyser_task()
 }
 
 #[test]
-fn test_analyser_error_rolls_back_without_materialising_records()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_analyser_error_rolls_back_without_materialising_records() -> Result<(), Box<dyn Error>> {
+    let _guard = FAILING_ANALYSER_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("failing analyser test lock poisoned"))?;
+    FAILING_ANALYSER_RUNS.store(0, Ordering::SeqCst);
     let project = project_with_test_analyser("mutating-error")?;
     let address = project
         .entry()
@@ -2670,48 +2597,82 @@ fn test_analyser_error_rolls_back_without_materialising_records()
 
     engine.wait_until_idle()?;
     let revision = engine.query_reader()?.revision()?;
-    let changes = engine.subscribe().capacity(16).build()?;
+    let changes = engine.subscribe().with_capacity(16).build()?;
     trigger_test_analyser(&engine, address)?;
 
     assert_eq!(engine.query_reader()?.revision()?, revision);
-    assert!(!symbol_exists(&engine, address, "rolled_back_symbol")?);
+    assert!(
+        engine
+            .query_reader()?
+            .symbol_page_at(address, None, 4096)?
+            .entries()
+            .iter()
+            .all(|record| record.symbol().as_str() != "rolled_back_symbol")
+    );
     assert!(changes.recv_timeout(Duration::from_millis(100)).is_err());
-    assert!(engine.take_run_log().iter().any(|message| {
-        message.analyser() == "mutating-error" && message.kind() == AnalysisMessageKind::Error
-    }));
+    assert_eq!(FAILING_ANALYSER_RUNS.load(Ordering::SeqCst), 1);
+    engine.poison_check()?;
 
     Ok(())
 }
 
-fn writable_start() -> Result<(Project, Address), Box<dyn std::error::Error>> {
+#[test]
+fn test_rollback_failure_abandons_project_persistence() -> Result<(), Box<dyn Error>> {
+    let _save_guard = SAVE_FAILURE_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("save failure test lock poisoned"))?;
+    let _analyser_guard = FAILING_ANALYSER_TEST_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("failing analyser test lock poisoned"))?;
     let loader = Loader::from_file("tests/ls.elf")?;
-    let project = Project::new_transient(&loader)?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_ANALYSER_ATTR, "mutating-error");
+    let mut project =
+        Project::new_with_provider::<FailingSaveStorageProvider>(&loader, attributes)?;
     let address = project
-        .segments()
-        .iter_views(DEFAULT_SPACE_ID)?
-        .find(|view| view.properties().is_writable() && view.size() >= 0x20)
-        .map(|view| view.start())
-        .ok_or_else(|| io::Error::other("fixture writable segment missing"))?;
-    Ok((project, address))
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let mut transaction = project.transaction("rollback failure test");
+    transaction.add_function(one_block_function(address, 1))?;
+    transaction.commit()?;
+    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::Manual)?;
+
+    engine.wait_until_idle()?;
+    FAIL_ENTITY_REMOVES.store(true, Ordering::SeqCst);
+    let mut regions = AddressRangeSet::new();
+    regions.insert(address);
+    engine.schedule_ranges(Trigger::BytesWritten, regions)?;
+    let result = engine.wait_until_idle();
+    FAIL_ENTITY_REMOVES.store(false, Ordering::SeqCst);
+
+    assert!(matches!(
+        result,
+        Err(EngineError::Poisoned(_)) | Err(EngineError::Stopped)
+    ));
+
+    PROJECT_REVISION_INSERTS.store(0, Ordering::SeqCst);
+    drop(engine);
+    assert_eq!(PROJECT_REVISION_INSERTS.load(Ordering::SeqCst), 0);
+
+    Ok(())
 }
 
 #[test]
-fn test_subscription_kind_filter_wakes_only_on_matching_kinds()
--> Result<(), Box<dyn std::error::Error>> {
-    let (project, address) = writable_start()?;
+fn test_subscription_kind_filter_wakes_only_on_matching_kinds() -> Result<(), Box<dyn Error>> {
+    let (project, address) = project_with_writable_address()?;
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
     let symbols = engine
         .subscribe()
-        .kinds(ChangeKinds::SYMBOLS)
-        .capacity(16)
+        .with_kinds(ChangeKinds::SYMBOLS)
+        .with_capacity(16)
         .build()?;
 
     engine.write_bytes(address, [0xccu8])?;
     assert!(symbols.recv_timeout(Duration::from_millis(100)).is_err());
 
-    engine.insert_symbol(
+    engine.add_symbol(
         SymbolIndex::new(SymbolTableSelector::new(200), 0),
         SymbolEntry::new(address, "scoped_symbol", SymbolProperties::LOCAL),
     )?;
@@ -2722,9 +2683,8 @@ fn test_subscription_kind_filter_wakes_only_on_matching_kinds()
 }
 
 #[test]
-fn test_subscription_region_filter_wakes_only_inside_region()
--> Result<(), Box<dyn std::error::Error>> {
-    let (project, address) = writable_start()?;
+fn test_subscription_region_filter_wakes_only_inside_region() -> Result<(), Box<dyn Error>> {
+    let (project, address) = project_with_writable_address()?;
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
@@ -2738,9 +2698,9 @@ fn test_subscription_region_filter_wakes_only_inside_region()
 
     let inside_region = engine
         .subscribe()
-        .kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::SPACE_CREATED)
-        .region(region)
-        .capacity(16)
+        .with_kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::SPACE_CREATED)
+        .with_region(region)
+        .with_capacity(16)
         .build()?;
 
     engine.write_bytes(outside, [0xccu8])?;
@@ -2762,19 +2722,19 @@ fn test_subscription_region_filter_wakes_only_inside_region()
 }
 
 #[test]
-fn test_subscription_drain_coalesces_commit_burst() -> Result<(), Box<dyn std::error::Error>> {
-    let (project, address) = writable_start()?;
+fn test_subscription_drain_coalesces_commit_burst() -> Result<(), Box<dyn Error>> {
+    let (project, address) = project_with_writable_address()?;
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
     let symbols = engine
         .subscribe()
-        .kinds(ChangeKinds::SYMBOLS)
-        .capacity(16)
+        .with_kinds(ChangeKinds::SYMBOLS)
+        .with_capacity(16)
         .build()?;
 
     for index in 0..8usize {
-        engine.insert_symbol(
+        engine.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(210), index),
             SymbolEntry::new(
                 address + index as u64,
@@ -2787,26 +2747,33 @@ fn test_subscription_drain_coalesces_commit_burst() -> Result<(), Box<dyn std::e
 
     let batch = symbols.drain().ok_or("burst produced no batch")?;
     assert!(batch.contains(ChangeKinds::SYMBOL_ADDED));
-    assert_eq!(batch.records_matching(ChangeKinds::SYMBOL_ADDED).count(), 8);
+    assert_eq!(
+        batch
+            .records()
+            .iter()
+            .filter(|record| record.kind() == ChangeKinds::SYMBOL_ADDED)
+            .count(),
+        8
+    );
     assert!(symbols.drain().is_none());
 
     Ok(())
 }
 
 #[test]
-fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn std::error::Error>> {
-    let (project, address) = writable_start()?;
+fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn Error>> {
+    let (project, address) = project_with_writable_address()?;
     let engine = AnalysisEngine::new(project)?;
     engine.wait_until_idle()?;
 
     let symbols = engine
         .subscribe()
-        .kinds(ChangeKinds::SYMBOLS)
-        .capacity(16)
+        .with_kinds(ChangeKinds::SYMBOLS)
+        .with_capacity(16)
         .build()?;
 
     for index in 0..4usize {
-        engine.insert_symbol(
+        engine.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(211), index),
             SymbolEntry::new(
                 address + index as u64,
@@ -2818,9 +2785,16 @@ fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn st
     engine.wait_until_idle()?;
 
     let burst = symbols.recv_batch()?;
-    assert_eq!(burst.records_matching(ChangeKinds::SYMBOL_ADDED).count(), 4);
+    assert_eq!(
+        burst
+            .records()
+            .iter()
+            .filter(|record| record.kind() == ChangeKinds::SYMBOL_ADDED)
+            .count(),
+        4
+    );
 
-    engine.insert_symbol(
+    engine.add_symbol(
         SymbolIndex::new(SymbolTableSelector::new(211), 4),
         SymbolEntry::new(address + 4u64, "batch_symbol", SymbolProperties::LOCAL),
     )?;
@@ -2828,7 +2802,11 @@ fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn st
 
     let single = symbols.recv_batch()?;
     assert_eq!(
-        single.records_matching(ChangeKinds::SYMBOL_ADDED).count(),
+        single
+            .records()
+            .iter()
+            .filter(|record| record.kind() == ChangeKinds::SYMBOL_ADDED)
+            .count(),
         1
     );
     assert!(single.revision() > burst.revision());
@@ -2837,13 +2815,13 @@ fn test_subscription_recv_batch_merges_queued_changes() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_subscription_changes_carry_provenance() -> Result<(), Box<dyn std::error::Error>> {
+fn test_subscription_changes_carry_provenance() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("derived-symbol")?;
     let entry = project
         .entry()
         .ok_or_else(|| io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.subscribe().capacity(4096).build()?;
+    let changes = engine.subscribe().with_capacity(4096).build()?;
 
     engine.wait_until_idle()?;
 
@@ -2864,7 +2842,7 @@ fn test_subscription_changes_carry_provenance() -> Result<(), Box<dyn std::error
             })
     }));
 
-    engine.insert_symbol(
+    engine.add_symbol(
         SymbolIndex::new(SymbolTableSelector::new(212), 0),
         SymbolEntry::new(entry, "provenance_symbol", SymbolProperties::LOCAL),
     )?;
@@ -2881,7 +2859,7 @@ fn test_subscription_changes_carry_provenance() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn std::error::Error>> {
+fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn Error>> {
     let project = project_with_test_analyser("derived-symbol")?;
     let entry = project
         .entry()
@@ -2891,23 +2869,23 @@ fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn std::er
 
     let analysis_only = engine
         .subscribe()
-        .kinds(ChangeKinds::SYMBOLS)
-        .category(ChangeCategory::Analysis)
-        .capacity(4096)
+        .with_kinds(ChangeKinds::SYMBOLS)
+        .with_category(ChangeCategory::Analysis)
+        .with_capacity(4096)
         .build()?;
     let user_only = engine
         .subscribe()
-        .kinds(ChangeKinds::SYMBOLS)
-        .category(ChangeCategory::Agent)
-        .capacity(4096)
+        .with_kinds(ChangeKinds::SYMBOLS)
+        .with_category(ChangeCategory::Agent)
+        .with_capacity(4096)
         .build()?;
     let derived_only = engine
         .subscribe()
-        .source_label("derived-symbol")
-        .capacity(4096)
+        .with_source_label("derived-symbol")
+        .with_capacity(4096)
         .build()?;
 
-    engine.insert_symbol(
+    engine.add_symbol(
         SymbolIndex::new(SymbolTableSelector::new(213), 0),
         SymbolEntry::new(entry, "actor_symbol", SymbolProperties::LOCAL),
     )?;
@@ -2921,14 +2899,7 @@ fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn std::er
     assert!(derived_only.drain().is_none());
 
     let target = entry + 0x40u64;
-    let mut function = PartialFunction::new(target);
-    function.push_block(PartialCodeBlock::new(
-        target,
-        1,
-        Vec::new(),
-        Default::default(),
-    ));
-    engine.add_function(function)?;
+    engine.add_function(one_block_function(target, 1))?;
     engine.wait_until_idle()?;
 
     let analysis_batch = analysis_only
@@ -2949,8 +2920,7 @@ fn test_subscription_source_filter_selects_actor() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_query_reader_symbol_iterator_equals_cursor_walk() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_query_reader_symbol_iterator_equals_cursor_walk() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -2977,8 +2947,7 @@ fn test_query_reader_symbol_iterator_equals_cursor_walk() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn std::error::Error>>
-{
+fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -2991,7 +2960,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
         .collect::<Result<Vec<_>, _>>()?;
     assert!(!entries.is_empty());
 
-    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+    thread::scope(|scope| -> Result<(), Box<dyn Error>> {
         let handles = (0..8)
             .map(|_| {
                 let reader = reader.clone();
@@ -3000,7 +2969,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
                     let anywhere = AddressRangeSet::new();
                     for _ in 0..200 {
                         for entry in &entries {
-                            reader.flow_graph(*entry)?;
+                            reader.flow_targets(*entry)?;
                             reader.latest_change(ChangeKinds::all(), &anywhere)?;
                         }
                     }
@@ -3017,15 +2986,15 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
         Ok(())
     })?;
 
-    let first = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
-    let second = reader.flow_graph(entries[0])?.ok_or("entry missing")?;
+    let first = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
+    let second = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
     assert!(Arc::ptr_eq(&first, &second));
 
     Ok(())
 }
 
 #[test]
-fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_recovers_derived_references() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
@@ -3033,10 +3002,10 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
     let reader = engine.query_reader()?;
 
     let callee = reader
-        .call_edges(None, 4096)?
+        .call_edge_page(None, 4096)?
         .entries()
         .iter()
-        .map(|edge| edge.callee())
+        .map(|edge| edge.target())
         .next()
         .ok_or_else(|| io::Error::other("no call edges recovered"))?;
 
@@ -3063,7 +3032,259 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_SWITCH_RECOVERY_ATTR, true);
+    let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let switches = reader.switches().collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        !switches.is_empty(),
+        "recovered switches must persist in the switch table"
+    );
+    for (branch, cases) in [
+        (0x4f55u64, 277usize),
+        (0x6efd, 73),
+        (0x10612, 5),
+        (0x12116, 54),
+        (0x149dd, 123),
+    ] {
+        let switch = switches
+            .iter()
+            .find(|record| record.branch() == Address::from(branch))
+            .ok_or_else(|| io::Error::other(format!("switch missing at {branch:#x}")))?;
+        assert_eq!(
+            switch.case_count(),
+            cases,
+            "switch at {branch:#x}: model={:?}, properties={:?}, confidence={}, default={}",
+            switch.switch().model(),
+            switch.switch().properties(),
+            switch.confidence(),
+            switch.has_default(),
+        );
+    }
+    let record = switches
+        .iter()
+        .find(|record| record.case_count() >= 2)
+        .ok_or_else(|| io::Error::other("no multi-case switch recovered from ls.elf"))?;
+    let switch = record.switch();
+
+    assert!(
+        !switch.function().is_invalid(),
+        "recovered switch must resolve its owning function"
+    );
+    let table = switch
+        .model()
+        .table()
+        .ok_or_else(|| io::Error::other("recovered switch has no table"))?;
+    assert!(
+        table.address().offset() != 0,
+        "recovered table must have a real address"
+    );
+
+    let outgoing = reader
+        .outgoing_references(record.branch())
+        .collect::<Result<Vec<_>, _>>()?;
+    for case in switch.cases() {
+        let target = case.target().address();
+        assert!(
+            outgoing.iter().any(|reference| {
+                reference.is_flow() && reference.target().address() == Some(target)
+            }),
+            "case target {target} must be integrated as a flow reference from the branch"
+        );
+    }
+
+    assert!(
+        switches.iter().any(|record| record.has_default()),
+        "a guarded switch must recover a default case"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/libipmi.so")?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_SWITCH_RECOVERY_ATTR, true);
+    let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+
+    let reader = engine.query_reader()?;
+    let switches = reader.switches().collect::<Result<Vec<_>, _>>()?;
+    let switch_addresses = switches
+        .iter()
+        .map(|record| record.branch().raw_address())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        switch_addresses.len(),
+        94,
+        "unexpected ARM switch branches: {switch_addresses:#x?}"
+    );
+
+    let branch = Address::from(0x3bec0u64);
+    let record = switches
+        .iter()
+        .find(|record| record.branch() == branch)
+        .ok_or_else(|| io::Error::other("ARM inline switch missing"))?;
+    let switch = record.switch();
+    let SwitchModel::InlineBranchTable(table) = switch.model() else {
+        return Err(io::Error::other("ARM switch has the wrong model").into());
+    };
+    assert_eq!(table.address(), Address::from(0x3bec8u64));
+    assert_eq!(table.element_size(), 4);
+    assert_eq!(table.element_count(), 4);
+    assert_eq!(
+        switch
+            .cases()
+            .iter()
+            .flat_map(|case| case.labels())
+            .map(|label| label.value())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+    );
+    assert_eq!(
+        switch
+            .cases()
+            .iter()
+            .map(|case| case.target().address())
+            .collect::<Vec<_>>(),
+        vec![
+            Address::from(0x3bf28u64),
+            Address::from(0x3bf28u64),
+            Address::from(0x3bed8u64),
+            Address::from(0x3bed8u64),
+        ],
+    );
+    assert_eq!(
+        switch.default_case().map(|case| case.target().address()),
+        Some(Address::from(0x3bf78u64)),
+    );
+
+    for (address, count) in [
+        (0x46df4u64, 33usize),
+        (0x489c8, 6),
+        (0x53d98, 8),
+        (0xe1e5c, 4),
+    ] {
+        let recovered = switches
+            .iter()
+            .find(|record| record.branch() == Address::from(address))
+            .ok_or_else(|| io::Error::other(format!("ARM switch missing at {address:#x}")))?;
+        assert_eq!(recovered.case_count(), count);
+    }
+
+    let outgoing = reader
+        .outgoing_references(branch)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(outgoing.iter().all(|reference| {
+        !reference.is_data() || reference.target().address() != Some(table.address())
+    }));
+
+    let function_entry = Address::from(0x3be5cu64);
+    let function_id = {
+        let project = reader.project()?;
+        let function = project
+            .functions()
+            .get_by_address(function_entry)
+            .ok_or_else(|| io::Error::other("ARM fixture function missing"))?;
+        for (_, block_id) in function.blocks() {
+            let block = project
+                .blocks()
+                .get_by_id(block_id)
+                .ok_or_else(|| io::Error::other("ARM fixture block missing"))?;
+            assert!(!(0x3c318..0x3c330).contains(&block.address().offset()));
+            assert!(block.instructions().iter().all(|instruction| {
+                !(0x3c318..0x3c330).contains(&instruction.address().offset())
+            }));
+        }
+        function.id()
+    };
+
+    assert!(reader.pcode(function_id)?.is_some());
+    assert!(reader.ecode(function_id)?.is_some());
+    assert!(reader.ecode_ssa(function_id)?.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.wait_until_idle()?;
+    let reader = engine.query_reader()?;
+    let baseline = reader.revision()?;
+
+    let table = entry + 0x400u64;
+    let mut switch = Switch::new(
+        SwitchId::default(),
+        entry,
+        SwitchModel::Absolute(AddressTable::new(table, 4).with_element_count(2)),
+    );
+    for offset in [0x40u64, 0x80] {
+        switch.add_case(SwitchCase::new(AddressWithContext::new(
+            entry + offset,
+            ContextSet::default(),
+        )));
+    }
+    let changes = engine.add_switch(switch)?;
+    assert!(changes.contains(ChangeKinds::SWITCH_ADDED));
+    assert!(changes.contains(ChangeKinds::REFERENCES));
+
+    let mut branch_region = AddressRangeSet::new();
+    branch_region.insert(entry);
+    assert!(reader.changed_since(baseline, ChangeKinds::SWITCHES, &branch_region)?);
+    assert!(reader.changed_since(baseline, ChangeKinds::REFERENCES, &branch_region)?);
+
+    let record = reader
+        .switch_at(entry)?
+        .ok_or_else(|| io::Error::other("switch missing after add"))?;
+    assert!(record.switch().is_override());
+    assert!(matches!(record.switch().model(), SwitchModel::Absolute(_)));
+    assert!(
+        !record.switch().function().is_invalid(),
+        "owning function should be resolved from the branch"
+    );
+
+    let outgoing = reader
+        .outgoing_references(entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        outgoing
+            .iter()
+            .any(|reference| reference.is_data() && reference.target().address() == Some(table)),
+        "table should gain a derived data reference"
+    );
+    for offset in [0x40u64, 0x80] {
+        assert!(
+            outgoing.iter().any(|reference| {
+                reference.is_flow() && reference.target().address() == Some(entry + offset)
+            }),
+            "case target should gain a derived flow reference"
+        );
+    }
+
+    let removed = engine.remove_switch(entry)?;
+    assert!(removed.contains(ChangeKinds::SWITCH_REMOVED));
+    assert!(removed.contains(ChangeKinds::REFERENCES));
+    assert!(reader.switch_at(entry)?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let entry = project
@@ -3090,7 +3311,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn std::error
     engine.add_reference(Reference::data(entry, to, ReferenceProperties::WRITE))?;
     let merged = engine
         .query_reader()?
-        .references_to(to, None, 64)?
+        .incoming_reference_page(to, None, 64)?
         .entries()
         .iter()
         .copied()

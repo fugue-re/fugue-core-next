@@ -6,48 +6,83 @@ use std::marker::PhantomData;
 use bytes::{BufMut, BytesMut};
 use tinyset::SetU64;
 
-pub mod address;
+use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
+use crate::storage::entities::{Entity, EntityId};
+
+pub(crate) mod address;
 pub use address::{
-    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, RawAddress,
-    RawAddressMap, RawAddressRangeSet, ToRawAddress,
+    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressTable, AddressWithContext,
+    RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
 };
 
-pub mod block;
-pub use block::{CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockTable};
+pub(crate) mod block;
+pub use block::{
+    CodeBlock, CodeBlockId, CodeBlockMut, CodeBlockProperties, CodeBlockRef, CodeBlockTable,
+    CodeBlockTableError, IncompleteCodeBlock, IncompleteCodeBlockId,
+};
 
-pub mod call_graph;
+pub(crate) mod call_graph;
 pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
-pub mod cfg;
+pub(crate) mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
-pub mod function;
-pub use function::{Function, FunctionId, FunctionProperties, FunctionTable};
+pub(crate) mod function;
+pub use function::{
+    Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
+    FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
+};
 
-pub mod insn;
+pub(crate) mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
-pub mod module;
+pub(crate) mod module;
 pub use module::{Module, ModuleId};
 
-pub mod location;
+pub(crate) mod location;
 pub use location::Location;
 
-pub mod reference;
+pub(crate) mod reference;
 pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
 };
 
-pub mod segment;
+pub(crate) mod segment;
 pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 
-pub mod symbol;
-pub use symbol::{
-    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties, SymbolRef,
-    SymbolTable, SymbolTableSelector, TransientSymbolTable,
+pub(crate) mod switch;
+pub use switch::{
+    Switch, SwitchCase, SwitchCaseLabel, SwitchId, SwitchModel, SwitchProperties, SwitchRef,
+    SwitchTable, SwitchTableError,
 };
+
+pub(crate) mod symbol;
+pub use symbol::{
+    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolInsertion, SymbolMap,
+    SymbolProperties, SymbolRef, SymbolTable, SymbolTableSelector, TransientSymbolTable,
+    existing_symbol, symbol,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct IndexHeader {
+    revision: u64,
+}
+
+impl IndexHeader {
+    fn new(revision: u64) -> Self {
+        Self { revision }
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+impl Entity for IndexHeader {
+    const ID: EntityId = ENTITY_INDEX_HEADER_ID;
+}
 
 pub struct Id<T> {
     id: u32,
@@ -164,7 +199,9 @@ impl<T> Id<T> {
     #[inline(always)]
     pub(crate) fn decode_as_key(buf: &[u8]) -> Option<Self> {
         if buf.len() == 8 {
-            Some(Self::from_key(u64::from_be_bytes(buf.try_into().unwrap())))
+            Some(Self::from_key(u64::from_be_bytes(
+                buf.try_into().expect("entity ID key is eight bytes"),
+            )))
         } else {
             None
         }
@@ -183,6 +220,93 @@ impl<T> Id<T> {
     #[inline(always)]
     const fn from_key(key: u64) -> Self {
         Self::with_generation(key as u32, (key >> 32) as u32)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdAllocation<T> {
+    free_ids_len: usize,
+    free_ids_tail: Vec<Id<T>>,
+    next_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdAllocator<T> {
+    free_ids: Vec<Id<T>>,
+    next_index: usize,
+}
+
+impl<T> Default for IdAllocator<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> IdAllocator<T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            free_ids: Vec::new(),
+            next_index: 0,
+        }
+    }
+
+    pub(crate) fn next_id(&self) -> Id<T> {
+        self.free_ids
+            .last()
+            .copied()
+            .unwrap_or_else(|| Id::from_index(self.next_index))
+    }
+
+    pub(crate) fn allocate(&mut self) -> Id<T> {
+        match self.free_ids.pop() {
+            Some(id) => id,
+            None => {
+                let id = Id::from_index(self.next_index);
+                self.next_index += 1;
+                id
+            }
+        }
+    }
+
+    pub(crate) fn try_allocate<R, E>(
+        &mut self,
+        f: impl FnOnce(Id<T>) -> Result<R, E>,
+    ) -> Result<(Id<T>, R), E> {
+        let id = self.next_id();
+        let value = f(id)?;
+        let allocated = self.allocate();
+        debug_assert_eq!(allocated, id);
+        Ok((id, value))
+    }
+
+    pub(crate) fn release(&mut self, id: Id<T>) {
+        self.free_ids.push(id.next_generation());
+    }
+
+    pub(crate) fn mark_allocated(&mut self, id: Id<T>) {
+        self.next_index = self.next_index.max(id.index() + 1);
+        self.free_ids
+            .retain(|free_id| free_id.index() != id.index());
+    }
+
+    pub(crate) fn checkpoint(&self, max_pops: usize) -> IdAllocation<T> {
+        let tail_start = self.free_ids.len().saturating_sub(max_pops);
+        IdAllocation {
+            free_ids_len: self.free_ids.len(),
+            free_ids_tail: self.free_ids[tail_start..].to_vec(),
+            next_index: self.next_index,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, allocation: IdAllocation<T>) {
+        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
+        self.free_ids.truncate(tail_start);
+        self.free_ids.extend(allocation.free_ids_tail);
+        self.next_index = allocation.next_index;
+    }
+
+    pub(crate) fn free_len(&self) -> usize {
+        self.free_ids.len()
     }
 }
 
@@ -335,5 +459,46 @@ where
             set,
             _marker: PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct Marker;
+
+    #[test]
+    fn id_allocator_restores_reuse_and_fresh_allocations() {
+        let mut allocator = IdAllocator::<Marker>::new();
+        let first = allocator.allocate();
+        let second = allocator.allocate();
+        let third = allocator.allocate();
+        allocator.release(first);
+        allocator.release(second);
+
+        let allocation = allocator.checkpoint(1);
+        assert_eq!(allocator.allocate(), second.next_generation());
+        allocator.release(third);
+        allocator.restore(allocation);
+
+        assert_eq!(allocator.free_len(), 2);
+        assert_eq!(allocator.next_id(), second.next_generation());
+
+        let mut fresh = IdAllocator::<Marker>::new();
+        assert_eq!(fresh.allocate().index(), 0);
+        let allocation = fresh.checkpoint(0);
+        assert_eq!(fresh.allocate().index(), 1);
+        fresh.restore(allocation);
+        assert_eq!(fresh.next_id().index(), 1);
+    }
+
+    #[test]
+    fn id_allocator_does_not_commit_failed_allocation() {
+        let mut allocator = IdAllocator::<Marker>::new();
+        let result = allocator.try_allocate(|_| Err::<(), _>("failure"));
+
+        assert_eq!(result, Err("failure"));
+        assert_eq!(allocator.next_id().index(), 0);
     }
 }

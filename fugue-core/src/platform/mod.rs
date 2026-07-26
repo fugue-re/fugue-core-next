@@ -92,6 +92,7 @@ impl TypeLayout {
 pub struct Platform {
     abi: Abi,
     calling_convention: CallingConvention,
+    compiler_spec_id: &'static str,
     os: OperatingSystem,
     type_layout: TypeLayout,
 }
@@ -101,6 +102,7 @@ impl Platform {
         Self {
             abi: Abi::Unknown,
             calling_convention: CallingConvention::Default,
+            compiler_spec_id: "default",
             os: OperatingSystem::Unknown,
             type_layout,
         }
@@ -116,6 +118,10 @@ impl Platform {
 
     pub fn calling_convention(&self) -> CallingConvention {
         self.calling_convention
+    }
+
+    pub(crate) fn compiler_spec_id(&self) -> &'static str {
+        self.compiler_spec_id
     }
 
     pub fn os(&self) -> OperatingSystem {
@@ -134,6 +140,10 @@ impl Platform {
         self.calling_convention = calling_convention;
     }
 
+    pub(crate) fn set_compiler_spec_id(&mut self, compiler_spec_id: &'static str) {
+        self.compiler_spec_id = compiler_spec_id;
+    }
+
     pub fn set_os(&mut self, os: OperatingSystem) {
         self.os = os;
     }
@@ -149,6 +159,11 @@ impl Platform {
 
     pub fn with_calling_convention(mut self, calling_convention: CallingConvention) -> Self {
         self.set_calling_convention(calling_convention);
+        self
+    }
+
+    pub(crate) fn with_compiler_spec_id(mut self, compiler_spec_id: &'static str) -> Self {
+        self.set_compiler_spec_id(compiler_spec_id);
         self
     }
 

@@ -63,7 +63,7 @@ where
         let (nt, _) = Pe::parse(data, &mut offset).map_err(LoaderError::format)?;
         let sections = nt.sections(data, offset).map_err(LoaderError::format)?;
 
-        let section_alignment = nt.optional_header().section_alignment() as u64;
+        let section_alignment = nt.optional_header().section_alignment() as usize;
         if section_alignment == 0 {
             return Err(LoaderError::format(
                 SectionTableRepairError::InvalidSectionAlignment,
@@ -86,20 +86,20 @@ where
             let pointer_to_raw_data = section.pointer_to_raw_data.get(LE) as u64;
 
             if virtual_size > 0 {
-                let section_end = virtual_address.checked_add(virtual_size).ok_or_else(|| {
-                    LoaderError::address_overflow(RawAddress::from(virtual_address))
-                })?;
-
-                let align_mask = section_alignment.wrapping_sub(1);
-                let end = section_end.wrapping_add(align_mask) & !align_mask;
+                let section_end = RawAddress::from(virtual_address)
+                    .checked_add(virtual_size)
+                    .ok_or_else(|| {
+                        LoaderError::address_overflow(RawAddress::from(virtual_address))
+                    })?;
+                let end = section_end.align(section_alignment);
                 if end < section_end {
                     return Err(LoaderError::address_overflow(RawAddress::from(
                         virtual_address,
                     )));
                 }
 
-                virtual_extent = virtual_extent.max(end);
-                has_repairable_section |= section_end <= input_len;
+                virtual_extent = virtual_extent.max(end.offset());
+                has_repairable_section |= section_end.offset() <= input_len;
             }
 
             if size_of_raw_data > 0 {

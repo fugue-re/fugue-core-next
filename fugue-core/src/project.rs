@@ -5,7 +5,6 @@ use thiserror::Error;
 use tracing::Span;
 
 use crate::analysis::control::{CancellationToken, Cancelled};
-use crate::analysis::function::recovery::{FunctionRecoveryError, PartialFunction};
 use crate::analysis::{AnalysisError, AnalysisGroup};
 use crate::arch::Arch;
 use crate::engine::change::{ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind, Revision};
@@ -14,13 +13,15 @@ use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa};
 use crate::il::ecode::{ECodeIr, PCodeToECode};
 use crate::il::pcode::{PCodeCanonicaliser, PCodeError, PCodeIr};
 use crate::il::storage::{IlPersist, IlRevert, IlStorageError};
-use crate::ir::function::table::FunctionTableRevert;
+use crate::ir::function::FunctionTableRevert;
 use crate::ir::reference::ReferenceRevert;
+use crate::ir::switch::SwitchTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphIndex, CodeBlockTable, FunctionId,
-    FunctionTable, RawAddress, Reference, ReferenceIndex, ReferenceKind, ReferenceOrigin,
-    ReferenceTarget, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
+    FunctionTable, IncompleteFunction, IncompleteFunctionError, RawAddress, Reference,
+    ReferenceIndex, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SwitchId, SwitchTable,
+    SwitchTableError, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
 };
 use crate::lifter::{Language, Lifter, LifterError};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -35,14 +36,15 @@ use crate::storage::segments::mapping::{
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageRevert, SegmentWriteRevert};
 use crate::storage::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_SYMBOL_CACHE_SIZE,
-    DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES, DEFAULT_SYMBOL_CACHE_BYTES,
-    DefaultProjectStorageProvider, SegmentStorageError, StorageContainer, StorageProvider,
-    StorageProviderError, TransientStorageProvider,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_SWITCH_CACHE_SIZE,
+    ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES, DEFAULT_FUNCTION_CACHE_BYTES,
+    DEFAULT_SWITCH_CACHE_BYTES, DEFAULT_SYMBOL_CACHE_BYTES, DefaultProjectStorageProvider,
+    SegmentStorageError, StorageContainer, StorageProvider, StorageProviderError,
+    TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
+    ATTRIBUTE_COMPILER_SPEC_ID, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
 };
 
 pub struct Project {
@@ -53,6 +55,7 @@ pub struct Project {
     pub(crate) blocks: CodeBlockTable,
     pub(crate) call_graph: CallGraphIndex,
     pub(crate) references: ReferenceIndex,
+    pub(crate) switches: SwitchTable,
     pub(crate) platform: Platform,
     restored_revision: Option<Revision>,
     pub(crate) attributes: AttributeMap,
@@ -61,6 +64,8 @@ pub struct Project {
     transaction_active: bool,
     persistable: bool,
     canonicaliser: PCodeCanonicaliser,
+    ecode_to_ssa: ECodeToSsa,
+    pcode_to_ecode: PCodeToECode,
     // NOTE: this must be that last field, so it will be dropped last.
     pub(crate) storage: StorageContainer,
 }
@@ -133,9 +138,9 @@ pub enum ProjectError {
     #[error("failed to create entity cache: {0}")]
     EntityStorage(#[from] EntityStorageError),
     #[error(transparent)]
-    FunctionRecovery(#[from] FunctionRecoveryError),
-    #[error(transparent)]
     Il(#[from] IlError),
+    #[error(transparent)]
+    IncompleteFunction(#[from] IncompleteFunctionError),
     #[error(transparent)]
     Lifter(#[from] LifterError),
     #[error(transparent)]
@@ -146,6 +151,8 @@ pub enum ProjectError {
     SegmentStorage(#[from] SegmentStorageError),
     #[error(transparent)]
     StorageProvider(#[from] StorageProviderError),
+    #[error(transparent)]
+    Switch(#[from] SwitchTableError),
 }
 
 impl From<Cancelled> for ProjectError {
@@ -184,6 +191,7 @@ pub struct ProjectTransaction<'p> {
     segment_reverts: Vec<SegmentStorageRevert>,
     segment_write_reverts: Vec<SegmentWriteRevert>,
     reference_reverts: Vec<ReferenceRevert>,
+    switch_reverts: Vec<SwitchTableRevert>,
     source: ChangeSource,
     committed: bool,
     span: Span,
@@ -211,16 +219,16 @@ impl ProjectTransaction<'_> {
         IlRevert: From<(FunctionId, Option<T>)>,
     {
         if self.records.iter().any(ChangeRecord::affects_lifted_inputs) {
-            return Err(IlError::PublishAfterSemanticMutation.into());
+            return Err(IlError::publish_after_semantic_mutation().into());
         }
 
-        ir.header_mut()
-            .set_input_revision(self.project.semantic_revision.value());
+        ir.metadata_mut()
+            .set_input_revision(self.project.semantic_revision);
 
         let revert = ir.persist(&self.project.storage.entities)?;
         self.ir_reverts.push(revert);
         self.records.push(ChangeRecord::LiftedMaterialised {
-            function: ir.header().function(),
+            function: ir.metadata().function(),
             level: T::LEVEL,
         });
 
@@ -252,7 +260,7 @@ impl ProjectTransaction<'_> {
 
         artefact.reference_coverage_into(&mut coverage);
 
-        let function = artefact.header().function();
+        let function = artefact.metadata().function();
         if function != FunctionId::INVALID
             && let Some(function) = self.project.functions.get_by_id(function)
         {
@@ -296,18 +304,20 @@ impl ProjectTransaction<'_> {
     ) -> Result<bool, ProjectError> {
         let removed = match level {
             IlLevel::PCode => {
-                let Some((previous, revert)) =
-                    PCodeIr::remove(&self.project.storage.entities, function)?
+                let Some(revert) = PCodeIr::remove(&self.project.storage.entities, function)?
                 else {
                     return Ok(false);
                 };
 
-                self.remove_references_derived_from(&previous)?;
+                let previous = revert
+                    .previous_pcode()
+                    .expect("PCode removal revert contains the previous PCode artefact");
+                self.remove_references_derived_from(previous)?;
                 self.ir_reverts.push(revert);
                 true
             }
             IlLevel::ECode => {
-                let Some((_, revert)) = ECodeIr::remove(&self.project.storage.entities, function)?
+                let Some(revert) = ECodeIr::remove(&self.project.storage.entities, function)?
                 else {
                     return Ok(false);
                 };
@@ -316,8 +326,7 @@ impl ProjectTransaction<'_> {
                 true
             }
             IlLevel::ECodeSsa => {
-                let Some((_, revert)) =
-                    ECodeSsaIr::remove(&self.project.storage.entities, function)?
+                let Some(revert) = ECodeSsaIr::remove(&self.project.storage.entities, function)?
                 else {
                     return Ok(false);
                 };
@@ -445,9 +454,15 @@ impl ProjectTransaction<'_> {
             &self.project.blocks,
             &self.project.storage.segments,
             function,
-            self.project.semantic_revision.value(),
+            self.project.semantic_revision,
             cancellation,
         )?;
+
+        if cfg!(debug_assertions)
+            && let Err(error) = ir.verify()
+        {
+            panic!("canonicalised pcode for {function:?} fails verification: {error}");
+        }
 
         self.materialise_lifted(&mut ir)?;
         Ok((true, ir))
@@ -474,7 +489,16 @@ impl ProjectTransaction<'_> {
         }
 
         let (_, source) = self.ensure_pcode_ir(function, cancellation)?;
-        let mut ir = PCodeToECode.transform(&source, cancellation)?;
+        let mut ir = self.project.pcode_to_ecode.transform(
+            &source,
+            &self.project.arch,
+            &self.project.platform,
+            cancellation,
+        )?;
+
+        if cfg!(debug_assertions) {
+            ir.verify().expect("transformed ecode fails verification");
+        }
 
         self.materialise_lifted(&mut ir)?;
 
@@ -491,7 +515,10 @@ impl ProjectTransaction<'_> {
         }
 
         let (_, source) = self.ensure_ecode_ir(function, cancellation)?;
-        let mut ir = ECodeToSsa.transform(&source, cancellation)?;
+        let mut ir = self
+            .project
+            .ecode_to_ssa
+            .transform_optimised(&source, cancellation)?;
 
         self.materialise_lifted(&mut ir)?;
 
@@ -505,7 +532,7 @@ impl ProjectTransaction<'_> {
         match T::load_current(
             &self.project.storage.entities,
             function,
-            self.project.semantic_revision.value(),
+            self.project.semantic_revision,
         ) {
             Ok(ir) => Ok(ir),
             Err(IlStorageError::Il(
@@ -526,7 +553,10 @@ impl ProjectTransaction<'_> {
         passes.analyse_with(self.project, state)
     }
 
-    pub fn add_function(&mut self, function: PartialFunction) -> Result<FunctionId, ProjectError> {
+    pub fn add_function(
+        &mut self,
+        function: IncompleteFunction,
+    ) -> Result<FunctionId, ProjectError> {
         let entry = function.entry();
         let revert = FunctionTableRevert::capture(
             &self.project.functions,
@@ -551,11 +581,7 @@ impl ProjectTransaction<'_> {
         let id = match function.commit(&mut self.project.functions, &mut self.project.blocks) {
             Ok(id) => id,
             Err(error) => {
-                revert.restore(
-                    &mut self.project.functions,
-                    &mut self.project.blocks,
-                    &mut self.project.call_graph,
-                )?;
+                self.restore_function(revert)?;
                 return Err(error.into());
             }
         };
@@ -578,11 +604,7 @@ impl ProjectTransaction<'_> {
             .project
             .functions
             .get_by_address(entry)
-            .map(|function| {
-                self.project
-                    .blocks
-                    .flow_references(function.blocks().map(|(_, id)| id))
-            })
+            .map(|function| function.flow_references(&self.project.blocks))
             .unwrap_or_default();
         let reference_revert = ReferenceRevert::capture(&self.project.references, &covered)?;
         let references_touched = !derived.is_empty() || reference_revert.had_derived();
@@ -660,6 +682,8 @@ impl ProjectTransaction<'_> {
         )?;
         self.reference_reverts.push(reference_revert);
 
+        self.remove_switches_of_function(id)?;
+
         let reference_coverage = references_touched.then(|| covered.clone());
 
         for block in blocks {
@@ -716,6 +740,141 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
+    pub fn add_switch<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, ProjectError>
+    where
+        F: FnOnce(SwitchId, Address) -> Switch,
+    {
+        let function = self
+            .project
+            .functions
+            .function_containing(&self.project.blocks, branch);
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch)?;
+        let id = self.project.switches.insert(branch, move |id, branch| {
+            let switch = f(id, branch);
+            Ok(match function {
+                Some(function) => switch.with_function(function),
+                None => switch,
+            })
+        })?;
+        self.switch_reverts.push(revert);
+        self.records.push(ChangeRecord::SwitchAdded { branch });
+        self.refresh_switch_references(branch)?;
+        Ok(id)
+    }
+
+    pub fn modify_switch<R>(
+        &mut self,
+        branch: Address,
+        f: impl FnOnce(&mut Switch) -> R,
+    ) -> Result<Option<R>, ProjectError> {
+        let function = self
+            .project
+            .functions
+            .function_containing(&self.project.blocks, branch);
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch)?;
+        let Some(result) = self
+            .project
+            .switches
+            .try_modify_by_branch(branch, |switch| {
+                let result = f(switch);
+                if let Some(function) = function {
+                    switch.set_function(function);
+                }
+                result
+            })?
+        else {
+            return Ok(None);
+        };
+        self.switch_reverts.push(revert);
+        self.records.push(ChangeRecord::SwitchAdded { branch });
+        self.refresh_switch_references(branch)?;
+        Ok(Some(result))
+    }
+
+    pub fn remove_switch(&mut self, branch: Address) -> Result<bool, ProjectError> {
+        let revert = SwitchTableRevert::capture(&self.project.switches, branch)?;
+        let removed = self.project.switches.try_remove_by_branch(branch)?;
+        if removed {
+            self.switch_reverts.push(revert);
+            self.replace_switch_references(branch, [])?;
+            self.records.push(ChangeRecord::SwitchRemoved { branch });
+        }
+        Ok(removed)
+    }
+
+    fn remove_switches_of_function(&mut self, function: FunctionId) -> Result<(), ProjectError> {
+        let branches = self
+            .project
+            .switches
+            .branches_of_function(function)
+            .collect::<Vec<_>>();
+
+        for branch in branches {
+            self.remove_switch(branch)?;
+        }
+
+        Ok(())
+    }
+
+    fn refresh_switch_references(&mut self, branch: Address) -> Result<bool, ProjectError> {
+        let references = self
+            .project
+            .switches
+            .get_by_branch(branch)
+            .map(|switch| switch.derived_references().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.replace_switch_references(branch, references)
+    }
+
+    fn replace_switch_references(
+        &mut self,
+        branch: Address,
+        references: impl IntoIterator<Item = Reference>,
+    ) -> Result<bool, ProjectError> {
+        let mut coverage = AddressRangeSet::new();
+        coverage.insert_range(AddressRange::point(branch));
+
+        let revert = ReferenceRevert::capture(&self.project.references, &coverage)?;
+        let (flow, data) = references
+            .into_iter()
+            .partition::<Vec<_>, _>(Reference::is_flow);
+
+        let flow_matches =
+            ReferenceIndex::derived_kind_matches(revert.previous(), &flow, ReferenceKind::Flow);
+        let data_matches =
+            ReferenceIndex::derived_kind_matches(revert.previous(), &data, ReferenceKind::Data);
+        if flow_matches && data_matches {
+            return Ok(false);
+        }
+
+        let result = (|| {
+            if !flow_matches {
+                self.project.references.replace_derived_of_kind(
+                    revert.previous(),
+                    flow,
+                    ReferenceKind::Flow,
+                )?;
+            }
+            if !data_matches {
+                self.project.references.replace_derived_of_kind(
+                    revert.previous(),
+                    data,
+                    ReferenceKind::Data,
+                )?;
+            }
+            Ok::<_, ProjectError>(())
+        })();
+        if let Err(error) = result {
+            revert.restore(&self.project.references)?;
+            return Err(error);
+        }
+
+        self.reference_reverts.push(revert);
+        self.records
+            .push(ChangeRecord::ReferencesChanged { coverage });
+        Ok(true)
+    }
+
     pub fn remove_reference(
         &mut self,
         from: Address,
@@ -737,41 +896,46 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
-    pub fn insert_symbol(&mut self, index: SymbolIndex, entry: SymbolEntry) -> SymbolId {
+    pub fn add_symbol(
+        &mut self,
+        index: SymbolIndex,
+        entry: SymbolEntry,
+    ) -> Result<SymbolId, ProjectError> {
         let address = entry.address();
         let symbol = entry.symbol();
         let removed = self
             .project
             .symbols
-            .get_by_index(index)
+            .try_get_by_index(index)?
             .and_then(|(_, existing)| {
                 (*existing != entry && existing.indices().len() == 1)
                     .then(|| (existing.address(), existing.symbol()))
             });
-        let mut revert = self.project.symbols.insert_revert(index, &entry);
-        let (is_new, id) = self
+        let revert = self.project.symbols.insert_revert(index, &entry)?;
+        self.symbol_reverts.push(revert);
+        let insertion = self
             .project
             .symbols
-            .insert(index, address, symbol, entry.properties());
-        revert.touch(id);
+            .insert(index, address, symbol, entry.properties())?;
+        self.symbol_reverts
+            .last_mut()
+            .expect("symbol revert was just added")
+            .touch(insertion.id());
 
         if let Some((address, symbol)) = removed {
             self.record_symbol_removed(address, symbol);
         }
 
-        if is_new {
+        if insertion.is_new() {
             self.records
                 .push(ChangeRecord::SymbolAdded { address, symbol });
         }
 
-        self.symbol_reverts.push(revert);
-
-        id
+        Ok(insertion.id())
     }
 
-    pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> usize {
+    pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> Result<usize, ProjectError> {
         let symbol = symbol.as_ref();
-        let revert = self.project.symbols.remove_symbol_revert(symbol);
         let removed = self
             .project
             .symbols
@@ -782,68 +946,71 @@ impl ProjectTransaction<'_> {
                     .collect::<SmallVec<[_; 4]>>()
             })
             .unwrap_or_default();
-        let count = self.project.symbols.remove(symbol);
-        self.record_symbols_removed(removed);
-        if count > 0 {
-            self.symbol_reverts.push(revert);
+        if removed.is_empty() {
+            return Ok(0);
         }
-        count
+
+        let revert = self.project.symbols.remove_symbol_revert(symbol)?;
+        self.symbol_reverts.push(revert);
+        let count = self.project.symbols.try_remove(symbol)?;
+        self.record_symbols_removed(removed);
+        Ok(count)
     }
 
-    pub fn remove_symbols_by_address(&mut self, address: Address) -> usize {
-        let revert = self.project.symbols.remove_address_revert(address);
+    pub fn remove_symbols_by_address(&mut self, address: Address) -> Result<usize, ProjectError> {
         let removed = self
             .project
             .symbols
             .get_by_address(address)
             .map(|(_, entry)| (entry.address(), entry.symbol()))
             .collect::<SmallVec<[_; 4]>>();
-        let count = self.project.symbols.remove_by_address(address);
-        self.record_symbols_removed(removed);
-        if count > 0 {
-            self.symbol_reverts.push(revert);
+        if removed.is_empty() {
+            return Ok(0);
         }
-        count
+
+        let revert = self.project.symbols.remove_address_revert(address)?;
+        self.symbol_reverts.push(revert);
+        let count = self.project.symbols.try_remove_by_address(address)?;
+        self.record_symbols_removed(removed);
+        Ok(count)
     }
 
-    pub fn remove_symbol_by_id(&mut self, id: SymbolId) -> bool {
-        let revert = self.project.symbols.remove_id_revert(id);
+    pub fn remove_symbol_by_id(&mut self, id: SymbolId) -> Result<bool, ProjectError> {
         let removed = self
             .project
             .symbols
-            .get_by_id(id)
+            .try_get_by_id(id)?
             .map(|entry| (entry.address(), entry.symbol()));
 
-        if !self.project.symbols.remove_by_id(id) {
-            return false;
-        }
+        let Some((address, symbol)) = removed else {
+            return Ok(false);
+        };
 
-        if let Some((address, symbol)) = removed {
-            self.record_symbol_removed(address, symbol);
-            self.symbol_reverts.push(revert);
-        }
+        let revert = self.project.symbols.remove_id_revert(id)?;
+        self.symbol_reverts.push(revert);
+        self.project.symbols.try_remove_by_id(id)?;
+        self.record_symbol_removed(address, symbol);
 
-        true
+        Ok(true)
     }
 
-    pub fn remove_symbol_by_index(&mut self, index: SymbolIndex) -> bool {
-        let revert = self.project.symbols.remove_index_revert(index);
+    pub fn remove_symbol_by_index(&mut self, index: SymbolIndex) -> Result<bool, ProjectError> {
         let removed = self
             .project
             .symbols
-            .get_by_index(index)
+            .try_get_by_index(index)?
             .map(|(_, entry)| (entry.address(), entry.symbol()));
 
-        if !self.project.symbols.remove_by_index(index) {
-            return false;
-        }
+        let Some((address, symbol)) = removed else {
+            return Ok(false);
+        };
 
-        if let Some((address, symbol)) = removed {
-            self.record_symbol_removed(address, symbol);
-            self.symbol_reverts.push(revert);
-        }
+        let revert = self.project.symbols.remove_index_revert(index)?;
+        self.symbol_reverts.push(revert);
+        self.project.symbols.try_remove_by_index(index)?;
+        self.record_symbol_removed(address, symbol);
 
-        true
+        Ok(true)
     }
 
     pub fn create_mapping_from_builder(
@@ -1201,6 +1368,22 @@ impl ProjectTransaction<'_> {
             .push(ChangeRecord::SymbolRemoved { address, symbol });
     }
 
+    fn restore_function(&mut self, revert: FunctionTableRevert) -> Result<(), ProjectError> {
+        let entry = revert.entry();
+        self.project.call_graph.remove_function_edges(entry)?;
+        revert.restore(&mut self.project.functions, &mut self.project.blocks)?;
+
+        let targets = self
+            .project
+            .functions
+            .get_by_address(entry)
+            .map(|function| CallGraphIndex::function_call_targets(&function, &self.project.blocks))
+            .unwrap_or_default();
+        self.project.call_graph.set_function_edges(entry, targets)?;
+
+        Ok(())
+    }
+
     pub fn commit(mut self) -> Result<ChangeSet, ProjectError> {
         let span = self.span.clone();
         let _entered = span.enter();
@@ -1214,12 +1397,13 @@ impl ProjectTransaction<'_> {
         self.committed = true;
         Ok(
             ChangeSet::with_records(self.project.revision, std::mem::take(&mut self.records))
-                .attributed_to(self.source.clone()),
+                .with_provenance(self.source.clone()),
         )
     }
 
     pub fn rollback(mut self) -> Result<(), ProjectError> {
-        let _entered = self.span.enter();
+        let span = self.span.clone();
+        let _entered = span.enter();
         self.committed = true;
         while let Some(revert) = self.ir_reverts.pop() {
             revert.restore(&self.project.storage.entities)?;
@@ -1227,12 +1411,11 @@ impl ProjectTransaction<'_> {
         while let Some(revert) = self.reference_reverts.pop() {
             revert.restore(&self.project.references)?;
         }
+        while let Some(revert) = self.switch_reverts.pop() {
+            revert.restore(&mut self.project.switches)?;
+        }
         while let Some(revert) = self.function_reverts.pop() {
-            revert.restore(
-                &mut self.project.functions,
-                &mut self.project.blocks,
-                &mut self.project.call_graph,
-            )?;
+            self.restore_function(revert)?;
         }
         while let Some(revert) = self.symbol_reverts.pop() {
             revert.restore(&mut self.project.symbols)?;
@@ -1262,13 +1445,6 @@ impl Project {
 
     pub fn new_transient(loadable: &impl Loadable) -> Result<Self, ProjectError> {
         Self::new_with_provider::<TransientStorageProvider>(loadable, AttributeMap::default())
-    }
-
-    pub fn new_transient_with(
-        loadable: &impl Loadable,
-        attributes: impl Into<AttributeMap>,
-    ) -> Result<Self, ProjectError> {
-        Self::new_with_provider::<TransientStorageProvider>(loadable, attributes)
     }
 
     pub fn new_with_provider<P>(
@@ -1309,7 +1485,7 @@ impl Project {
         };
 
         let language = arch.language();
-        let platform = loadable
+        let mut platform = loadable
             .map(Loadable::platform)
             .unwrap_or_else(|| arch.platform());
 
@@ -1319,6 +1495,15 @@ impl Project {
             // NOTE: we prefer the most recently set attributes, and use the persisted
             // attributes for vacant keys.
             attributes.merge_vacant(&nattributes);
+        }
+
+        if loadable.is_some() {
+            attributes.set_attr(ATTRIBUTE_COMPILER_SPEC_ID, platform.compiler_spec_id());
+        } else if let Some(compiler_spec_id) = attributes
+            .get_attr::<String>(ATTRIBUTE_COMPILER_SPEC_ID)
+            .and_then(|id| language.compiler_spec_id(&id))
+        {
+            platform = platform.with_compiler_spec_id(compiler_spec_id);
         }
 
         if let (Some(loadable), Some(resolution)) = (loadable, storage.image_resolution.as_ref())
@@ -1335,19 +1520,12 @@ impl Project {
             .get_attr::<usize>(ATTRIBUTE_SYMBOL_CACHE_SIZE)
             .unwrap_or(DEFAULT_SYMBOL_CACHE_BYTES);
 
-        let mut symbols = if storage.entities.is_transient() {
-            SymbolTable::new_transient()
-        } else {
-            match storage.write_back() {
-                Some(worker) => SymbolTable::new_with(
-                    storage.entities.clone(),
-                    worker.clone(),
-                    symbol_cache_bytes,
-                ),
-                None => SymbolTable::new(storage.entities.clone(), symbol_cache_bytes),
-            }
-            .inspect_err(|e| tracing::error!("failed to load symbol table: {e}"))?
-        };
+        let mut symbols = storage.table(
+            symbol_cache_bytes,
+            SymbolTable::with_worker,
+            SymbolTable::new_transient,
+            "symbol",
+        )?;
 
         if !SymbolTable::persisted(&storage.entities)? {
             let Some(loadable) = loadable else {
@@ -1365,7 +1543,7 @@ impl Project {
 
                 for (index, _, entry) in loadable_symbols.iter_by_index() {
                     if let Some(address) = resolution.resolve_address(entry.address()) {
-                        symbols.insert(index, address, entry.symbol(), entry.properties());
+                        symbols.insert(index, address, entry.symbol(), entry.properties())?;
                     }
                 }
             }
@@ -1377,17 +1555,12 @@ impl Project {
             .get_attr::<usize>(ATTRIBUTE_FUNCTION_CACHE_SIZE)
             .unwrap_or(DEFAULT_FUNCTION_CACHE_BYTES);
 
-        let functions = if storage.entities.is_transient() {
-            FunctionTable::new_transient()
-        } else {
-            match storage.write_back() {
-                Some(worker) => {
-                    FunctionTable::new_with(storage.entities.clone(), worker.clone(), cache_bytes)
-                }
-                None => FunctionTable::new(storage.entities.clone(), cache_bytes),
-            }
-            .inspect_err(|e| tracing::error!("failed to load function table: {e}"))?
-        };
+        let functions = storage.table(
+            cache_bytes,
+            FunctionTable::with_worker,
+            FunctionTable::new_transient,
+            "function",
+        )?;
 
         tracing::trace!("loading project code blocks");
 
@@ -1395,19 +1568,23 @@ impl Project {
             .get_attr::<usize>(ATTRIBUTE_CODE_BLOCK_CACHE_SIZE)
             .unwrap_or(DEFAULT_CODE_BLOCK_CACHE_BYTES);
 
-        let blocks = if storage.entities.is_transient() {
-            CodeBlockTable::new_transient()
-        } else {
-            match storage.write_back() {
-                Some(worker) => CodeBlockTable::new_with(
-                    storage.entities.clone(),
-                    worker.clone(),
-                    block_cache_bytes,
-                ),
-                None => CodeBlockTable::new(storage.entities.clone(), block_cache_bytes),
-            }
-            .inspect_err(|e| tracing::error!("failed to load code block table: {e}"))?
-        };
+        let blocks = storage.table(
+            block_cache_bytes,
+            CodeBlockTable::with_worker,
+            CodeBlockTable::new_transient,
+            "code block",
+        )?;
+
+        let switch_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_SWITCH_CACHE_SIZE)
+            .unwrap_or(DEFAULT_SWITCH_CACHE_BYTES);
+
+        let switches = storage.table(
+            switch_cache_bytes,
+            SwitchTable::with_worker,
+            SwitchTable::new_transient,
+            "switch",
+        )?;
 
         let revision_record = storage
             .entities
@@ -1422,16 +1599,12 @@ impl Project {
             .unwrap_or(revision);
         let restored_revision = (revision != Revision::default()).then_some(revision);
 
-        let call_graph = match storage.write_back() {
-            Some(worker) => CallGraphIndex::new_with(storage.entities.clone(), worker.clone()),
-            None => CallGraphIndex::new(storage.entities.clone())?,
-        };
+        let call_graph =
+            CallGraphIndex::new(storage.entities.clone(), storage.write_back().cloned())?;
         call_graph.ensure_current(functions.iter(), &blocks, revision.value())?;
 
-        let references = match storage.write_back() {
-            Some(worker) => ReferenceIndex::new_with(storage.entities.clone(), worker.clone()),
-            None => ReferenceIndex::new(storage.entities.clone())?,
-        };
+        let references =
+            ReferenceIndex::new(storage.entities.clone(), storage.write_back().cloned())?;
         references.ensure_current(functions.iter(), &blocks, revision.value())?;
 
         Ok(Self {
@@ -1442,6 +1615,7 @@ impl Project {
             blocks,
             call_graph,
             references,
+            switches,
             platform,
             restored_revision,
             attributes,
@@ -1449,6 +1623,8 @@ impl Project {
             semantic_revision,
             transaction_active: false,
             canonicaliser: PCodeCanonicaliser::default(),
+            ecode_to_ssa: ECodeToSsa::default(),
+            pcode_to_ecode: PCodeToECode::default(),
             persistable: true,
             storage,
         })
@@ -1551,13 +1727,6 @@ impl Project {
         Self::from_file_with_provider::<TransientStorageProvider>(path)
     }
 
-    pub fn from_file_transient_with(
-        path: impl AsRef<Path>,
-        attributes: impl Into<AttributeMap>,
-    ) -> Result<Self, ProjectError> {
-        Self::from_file_with_provider_and_attributes::<TransientStorageProvider>(path, attributes)
-    }
-
     pub fn from_file_with_provider<P>(path: impl AsRef<Path>) -> Result<Self, ProjectError>
     where
         P: StorageProvider,
@@ -1641,39 +1810,28 @@ impl Project {
         self.revision
     }
 
-    pub fn semantic_revision(&self) -> Revision {
-        self.semantic_revision
-    }
-
     pub fn restored_revision(&self) -> Option<Revision> {
         self.restored_revision
     }
 
     pub fn pcode(&self, function: FunctionId) -> Result<Option<PCodeIr>, ProjectError> {
-        PCodeIr::load_current(
-            &self.storage.entities,
-            function,
-            self.semantic_revision.value(),
-        )
-        .map_err(ProjectError::from)
+        self.lifted(function)
     }
 
     pub fn ecode(&self, function: FunctionId) -> Result<Option<ECodeIr>, ProjectError> {
-        ECodeIr::load_current(
-            &self.storage.entities,
-            function,
-            self.semantic_revision.value(),
-        )
-        .map_err(ProjectError::from)
+        self.lifted(function)
     }
 
     pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<ECodeSsaIr>, ProjectError> {
-        ECodeSsaIr::load_current(
-            &self.storage.entities,
-            function,
-            self.semantic_revision.value(),
-        )
-        .map_err(ProjectError::from)
+        self.lifted(function)
+    }
+
+    pub(crate) fn lifted<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
+    where
+        T: IlArtefact,
+    {
+        T::load_current(&self.storage.entities, function, self.semantic_revision)
+            .map_err(ProjectError::from)
     }
 
     pub(crate) fn abandon_persistence(&mut self) {
@@ -1697,6 +1855,7 @@ impl Project {
             segment_reverts: Vec::new(),
             segment_write_reverts: Vec::new(),
             reference_reverts: Vec::new(),
+            switch_reverts: Vec::new(),
             source,
             committed: false,
             span,
@@ -1729,6 +1888,14 @@ impl Project {
 
     pub fn references(&self) -> &ReferenceIndex {
         &self.references
+    }
+
+    pub fn switches(&self) -> &SwitchTable {
+        &self.switches
+    }
+
+    pub fn switches_mut(&mut self) -> &mut SwitchTable {
+        &mut self.switches
     }
 
     pub fn functions_mut(&mut self) -> &mut FunctionTable {
@@ -1821,6 +1988,9 @@ impl Project {
         tracing::debug!("persisting code block table");
         self.blocks.persist(&self.storage.entities)?;
 
+        tracing::debug!("persisting switch table");
+        self.switches.persist(&self.storage.entities)?;
+
         if let Some(worker) = self.storage.write_back() {
             tracing::debug!("draining write-back worker");
             worker.flush()?;
@@ -1847,26 +2017,27 @@ mod test {
     use std::io;
 
     use fugue_lifter::runtime::pcode::Inputs;
-    use fugue_lifter::{Op, PCodeOp as RawPCodeOp, Varnode};
 
     use super::*;
-    use crate::analysis::function::recovery::{InsnEntry, PartialCodeBlock};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::attributes;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlHeader, IlIndexRange, IlSchemaVersion,
-        IlSourceSpan, IlValueId,
+        IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlIndexRange,
+        IlMetadata, IlSchemaVersion, IlSourceSpan, IlValueId,
     };
-    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::ssa::{
+        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses,
+    };
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeStmtOpcode};
     use crate::il::pcode::{
-        AddressAnnotationRole, LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder,
-        PCodeLocation, PCodeLocationProperties, PCodeOp, PCodeOpcode,
+        LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
+        PCodeLocationProperties, PCodeOp, PCodeOpcode,
     };
     use crate::ir::{
-        Insn, InsnProperties, ReferenceProperties, SymbolProperties, SymbolTableSelector,
+        AddressWithContext, IncompleteCodeBlock, Insn, InsnEntry, InsnProperties,
+        ReferenceProperties, SwitchCase, SwitchModel, SymbolProperties, SymbolTableSelector,
     };
-    use crate::lifter::{ContextSet, resolve_language};
+    use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     use crate::storage::DefaultPersistentEntityStorage;
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
@@ -1900,10 +2071,10 @@ mod test {
         opcode: PCodeOpcode,
     ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, 0);
+        let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
         let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1)?,
             source,
             0,
@@ -1944,10 +2115,10 @@ mod test {
         source: Address,
     ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let header = IlHeader::new(function, PCODE_SCHEMA_VERSION, 0);
+        let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
         let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1)?,
             source,
             0,
@@ -1974,13 +2145,15 @@ mod test {
     }
 
     fn lift_test_ecode(source: &PCodeIr) -> Result<ECodeIr, IlError> {
-        PCodeToECode.transform(source, &CancellationToken::default())
+        let arch = Arch::new(resolve_language("x86:LE:64").expect("test language should resolve"));
+        let platform = arch.platform();
+        PCodeToECode::default().transform(source, &arch, &platform, &CancellationToken::default())
     }
 
     fn flow_resolved_load_function(
         entry: Address,
         data_offset: u64,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let operation = RawPCodeOp {
             op: Op::Load(language.default_space()),
@@ -1989,21 +2162,19 @@ mod test {
         };
         let operations = [operation];
         let insn = Insn::from_resolved_flow(language, entry, 1, &operations)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
+        function.push_block(IncompleteCodeBlock::new(
             entry,
             1,
-            vec![0],
+            vec![insn],
             ContextSet::default(),
         ));
 
@@ -2014,7 +2185,7 @@ mod test {
         entry: Address,
         callee: Address,
         length: usize,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
         let operation = RawPCodeOp {
             op: Op::Call,
@@ -2023,23 +2194,19 @@ mod test {
         };
         let operations = [operation];
         let insn = Insn::from_resolved_flow(language, entry, length, &operations)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            length,
-            vec![0],
-            ContextSet::default(),
-        ));
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         Ok(function)
     }
@@ -2047,25 +2214,21 @@ mod test {
     fn disassembled_function(
         entry: Address,
         length: usize,
-    ) -> Result<PartialFunction, Box<dyn std::error::Error>> {
+    ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
         let insn = Insn::from_disassembly(entry, length, InsnProperties::NEEDS_FLOW_RESOLUTION)?;
-        let mut function = PartialFunction::new(entry);
+        let mut function = IncompleteFunction::new(entry);
 
-        match function.insn_entry(entry) {
-            InsnEntry::Vacant(entry) => {
-                entry.insert(insn);
-            }
+        let insn = match function.insn_entry(entry) {
+            InsnEntry::Vacant(entry) => entry.insert(insn),
             InsnEntry::Occupied(_) => {
                 return Err(io::Error::other("test instruction unexpectedly occupied").into());
             }
-        }
+        };
 
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            length,
-            vec![0],
-            ContextSet::default(),
-        ));
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         Ok(function)
     }
@@ -2079,14 +2242,12 @@ mod test {
             .ok_or_else(|| io::Error::other("fixture writable segment missing").into())
     }
 
-    fn partial_function(entry: Address, len: usize) -> PartialFunction {
-        let mut function = PartialFunction::new(entry);
-        function.push_block(PartialCodeBlock::new(
-            entry,
-            len,
-            Vec::new(),
-            ContextSet::default(),
-        ));
+    fn incomplete_function(entry: Address, len: usize) -> IncompleteFunction {
+        let mut function = IncompleteFunction::new(entry);
+        function.push_block(
+            IncompleteCodeBlock::try_new(entry, len, Vec::new(), ContextSet::default())
+                .expect("test block length must be valid"),
+        );
 
         function
     }
@@ -2112,40 +2273,43 @@ mod test {
         )
     }
 
-    fn test_pcode(function: FunctionId, graph: IlGraph) -> PCodeIr {
+    fn pcode_for_test(function: FunctionId, graph: IlGraph) -> PCodeIr {
         let language = resolve_language("x86:LE:64").expect("test language should resolve");
         PCodeBuilder::new(
             language,
-            IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+            IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
             graph,
         )
         .build(&CancellationToken::default())
         .expect("test PCode IR should verify")
     }
 
-    fn test_tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
+    fn tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
         let language = resolve_language("x86:LE:64").expect("test language should resolve");
         let mut builder = PCodeBuilder::new(
             language,
-            IlHeader::new(function, PCODE_SCHEMA_VERSION, 0),
+            IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
             IlGraph::default(),
         );
-        builder.replace_source_spans(tagged_source_spans(payload));
+        builder.set_source_spans(tagged_source_spans(payload));
         builder
             .build(&CancellationToken::default())
             .expect("test PCode IR should verify")
     }
 
-    fn test_ecode(function: FunctionId, graph: IlGraph) -> ECodeIr {
-        ECodeBuilder::new(IlHeader::new(function, ECODE_SCHEMA_VERSION, 0), graph)
+    fn ecode_for_test(function: FunctionId, graph: IlGraph) -> ECodeIr {
+        ECodeBuilder::new(IlMetadata::new(function, ECODE_SCHEMA_VERSION, 0), graph)
             .build(&CancellationToken::default())
             .expect("test LIR should verify")
     }
 
-    fn test_ecode_ssa(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
-        ECodeSsaBuilder::new(IlHeader::new(function, ECODE_SSA_SCHEMA_VERSION, 0), graph)
-            .build(&CancellationToken::default())
-            .expect("test LIR SSA should verify")
+    fn ecode_ssa_for_test(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
+        ECodeSsaBuilder::new(
+            IlMetadata::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
+            graph,
+        )
+        .build(&CancellationToken::default())
+        .expect("test LIR SSA should verify")
     }
 
     fn first_mapping_placement(
@@ -2174,7 +2338,7 @@ mod test {
     fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
-        let stale_revision = project.semantic_revision().value();
+        let stale_revision = project.semantic_revision;
         {
             let mut transaction = project.transaction("test");
             transaction.create_space()?;
@@ -2182,7 +2346,7 @@ mod test {
         }
 
         let ir = PCodeIr::new(
-            IlHeader::new(function, PCODE_SCHEMA_VERSION, stale_revision),
+            IlMetadata::new(function, PCODE_SCHEMA_VERSION, stale_revision),
             IlGraph::default(),
             Vec::new(),
             Vec::new(),
@@ -2209,7 +2373,7 @@ mod test {
         let function = FunctionId::default();
         let schema = IlSchemaVersion::new(PCODE_SCHEMA_VERSION.value() + 1);
         let ir = PCodeIr::new(
-            IlHeader::new(function, schema, project.semantic_revision().value()),
+            IlMetadata::new(function, schema, project.semantic_revision),
             IlGraph::default(),
             Vec::new(),
             Vec::new(),
@@ -2388,6 +2552,103 @@ mod test {
                 .is_none()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn project_switch_insert_rolls_back() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let branch = Address::new(AddressSpaceId::new(1), 0x1000u64);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.add_switch(branch, |id, branch| {
+                Switch::new(id, branch, SwitchModel::Explicit)
+            })?;
+            assert!(
+                transaction
+                    .project()
+                    .switches()
+                    .get_by_branch(branch)
+                    .is_some()
+            );
+            transaction.rollback()?;
+        }
+
+        assert!(project.switches().get_by_branch(branch).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn project_removing_function_removes_its_switches() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::new(AddressSpaceId::new(1), 0x2000u64);
+        let target = Address::new(AddressSpaceId::new(1), 0x3000u64);
+        let default = Address::new(AddressSpaceId::new(1), 0x3500u64);
+
+        let (function_id, changes) = {
+            let mut transaction = project.transaction("test");
+            let function_id =
+                transaction.add_function(flow_resolved_load_function(entry, 0x4000)?)?;
+            transaction.add_switch(entry, |id, branch| {
+                let mut switch = Switch::new(id, branch, SwitchModel::Explicit);
+                switch.add_case(SwitchCase::new(AddressWithContext::new(
+                    target,
+                    ContextSet::default(),
+                )));
+                switch
+            })?;
+            assert!(
+                transaction
+                    .modify_switch(entry, |switch| {
+                        switch.set_default_case(SwitchCase::new(AddressWithContext::new(
+                            default,
+                            ContextSet::default(),
+                        )));
+                    })?
+                    .is_some()
+            );
+            let changes = transaction.commit()?;
+            (function_id, changes)
+        };
+
+        let switch = project
+            .switches()
+            .get_by_branch(entry)
+            .expect("switch present");
+        assert_eq!(switch.function(), function_id);
+        for destination in [target, default] {
+            let reference = project
+                .references
+                .get(entry, ReferenceTarget::from(destination))?;
+            assert!(reference.is_some_and(|reference| reference.origin().is_derived()));
+        }
+        assert_eq!(
+            changes
+                .records()
+                .iter()
+                .filter(|record| {
+                    matches!(record, ChangeRecord::SwitchAdded { branch } if *branch == entry)
+                })
+                .count(),
+            2
+        );
+
+        {
+            let mut transaction = project.transaction("test");
+            assert!(transaction.remove_function_by_id(function_id)?);
+            transaction.commit()?;
+        }
+
+        assert!(project.switches().get_by_branch(entry).is_none());
+        for destination in [target, default] {
+            assert!(
+                project
+                    .references
+                    .get(entry, ReferenceTarget::from(destination))?
+                    .is_none()
+            );
+        }
         Ok(())
     }
 
@@ -2579,8 +2840,8 @@ mod test {
     }
 
     #[test]
-    fn project_ensure_pcode_rejects_missing_computed_space()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn project_ensure_pcode_resolves_default_space_load() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
         let bytes = [0x48, 0x8b, 0x03];
@@ -2594,17 +2855,16 @@ mod test {
         };
 
         let mut transaction = project.transaction("test");
-        let result = transaction.ensure_pcode(function, &CancellationToken::default());
+        assert!(transaction.ensure_pcode(function, &CancellationToken::default())?);
+        transaction.commit()?;
 
-        match result {
-            Err(ProjectError::PCode(PCodeError::MissingAnnotation {
-                role: AddressAnnotationRole::ComputedSpace,
-                ..
-            })) => {}
-            other => panic!("unexpected ensure_pcode result: {other:?}"),
-        }
-
-        transaction.rollback()?;
+        let pcode = project.pcode(function)?.expect("pcode is materialised");
+        let load = pcode
+            .operations()
+            .iter()
+            .find(|operation| operation.opcode() == PCodeOpcode::Load)
+            .expect("load survives canonicalisation");
+        assert_eq!(load.effect_space(), Some(entry.space()));
 
         Ok(())
     }
@@ -2650,7 +2910,7 @@ mod test {
 
     #[test]
     #[ignore = "requires local language data and binary fixtures"]
-    fn test_project() -> Result<(), Box<dyn std::error::Error>> {
+    fn project() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
             let project = Project::from_file_transient("tests/ls.elf")?;
 
@@ -2672,8 +2932,10 @@ mod test {
 
     #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
     #[test]
-    fn test_project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("ls.fdbz");
             let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<
                     DefaultPersistentEntityStorage,
@@ -2682,10 +2944,22 @@ mod test {
             >(
                 "tests/ls.elf",
                 attributes![
-                    ATTRIBUTE_PROJECT_PATH => "tests/ls.fdbz"
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
                 ],
             )?;
 
+            let created_spec = project.platform().compiler_spec_id();
+            assert_eq!(created_spec, "gcc");
+            drop(project);
+
+            let project = Project::from_file_with_provider::<
+                PersistentStorageProvider<
+                    DefaultPersistentEntityStorage,
+                    DefaultPersistentSegmentStorage,
+                >,
+            >(project_path)?;
+
+            assert_eq!(project.platform().compiler_spec_id(), created_spec);
             drop(project);
 
             Ok(())
@@ -2694,14 +2968,27 @@ mod test {
 
     #[cfg(feature = "mdbx")]
     #[test]
-    fn test_project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("ls.mdbx.fdbz");
             let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
             >(
                 "tests/ls.elf",
                 attributes![
-                    ATTRIBUTE_PROJECT_PATH => "tests/ls.mdbx.fdbz"
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
+                ],
+            )?;
+
+            drop(project);
+
+            let project = Project::from_file_with_provider_and_attributes::<
+                PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+            >(
+                "tests/ls.elf",
+                attributes![
+                    ATTRIBUTE_PROJECT_PATH => project_path
                 ],
             )?;
 
@@ -2713,21 +3000,36 @@ mod test {
 
     #[cfg(feature = "rocksdb")]
     #[test]
-    fn test_project_standalone() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_standalone() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let _project = Project::from_file_with_provider::<
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("standalone.fdbz");
+            let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
-            >("tests/test-project.rdb.fdbz")?;
+            >(
+                "tests/ls.elf",
+                attributes![
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
+                ],
+            )?;
+
+            drop(project);
+
+            let project = Project::from_file_with_provider::<
+                PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+            >(project_path)?;
+
+            drop(project);
 
             Ok(())
         })
     }
 
     #[test]
-    fn test_lifted_materialise_remove_and_rollback() -> Result<(), Box<dyn std::error::Error>> {
+    fn lifted_materialise_remove_and_rollback() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
-        let mut materialised = test_tagged_pcode(function, &[1, 2, 3]);
+        let mut materialised = tagged_pcode(function, &[1, 2, 3]);
 
         let changes = {
             let mut transaction = project.transaction("test");
@@ -2747,7 +3049,7 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[4, 5, 6]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[4, 5, 6]))?;
             transaction.rollback()?;
         }
 
@@ -2769,9 +3071,9 @@ mod test {
     }
 
     #[test]
-    fn test_lifted_materialise_and_read() -> Result<(), Box<dyn std::error::Error>> {
+    fn lifted_materialise_and_read() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
-        let mut body = test_pcode(FunctionId::default(), IlGraph::default());
+        let mut body = pcode_for_test(FunctionId::default(), IlGraph::default());
 
         {
             let mut transaction = project.transaction("test");
@@ -2784,24 +3086,22 @@ mod test {
             .expect("PCode IR should be materialised");
 
         assert_eq!(read.operations(), body.operations());
-        assert_eq!(
-            read.header().input_revision(),
-            project.semantic_revision().value()
-        );
+        assert_eq!(read.metadata().input_revision(), project.semantic_revision);
 
         Ok(())
     }
 
     #[test]
-    fn test_project_reads_ecode_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
+    fn project_reads_ecode_ssa_derived_tables() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_pcode(function, single_block_graph()))?;
-            transaction.materialise_lifted(&mut test_ecode(function, single_block_graph()))?;
-            transaction.materialise_lifted(&mut test_ecode_ssa(function, single_block_graph()))?;
+            transaction.materialise_lifted(&mut pcode_for_test(function, single_block_graph()))?;
+            transaction.materialise_lifted(&mut ecode_for_test(function, single_block_graph()))?;
+            transaction
+                .materialise_lifted(&mut ecode_ssa_for_test(function, single_block_graph()))?;
             transaction.commit()?;
         }
 
@@ -2810,14 +3110,14 @@ mod test {
         let ir = project
             .ecode_ssa(function)?
             .expect("SSA IR should be available");
-        let uses = ir.uses();
-        let dominance = ir.dominance();
-        let frontiers = ir.dominance_frontiers();
-        let liveness = ir.liveness();
+        let uses = ir.analyse::<ECodeSsaUses>();
+        let dominance = ir.analyse::<IlDominance>();
+        let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert!(uses.uses_for(value).is_empty());
         assert!(dominance.dominates(entry, entry));
-        assert!(frontiers.frontier(entry).is_empty());
+        assert!(frontiers.frontier_for(entry).is_empty());
         assert!(liveness.live_in(entry).is_empty());
         assert!(liveness.live_out(entry).is_empty());
 
@@ -2825,10 +3125,10 @@ mod test {
     }
 
     #[test]
-    fn test_ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Error>> {
+    fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
-        let mut body = test_pcode(function, IlGraph::default());
+        let mut body = pcode_for_test(function, IlGraph::default());
 
         {
             let mut transaction = project.transaction("test");
@@ -2866,10 +3166,10 @@ mod test {
     }
 
     #[test]
-    fn test_ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Error>> {
+    fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
-        let mut body = test_pcode(function, IlGraph::default());
+        let mut body = pcode_for_test(function, IlGraph::default());
 
         {
             let mut transaction = project.transaction("test");
@@ -2906,15 +3206,16 @@ mod test {
     }
 
     #[test]
-    fn test_lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error::Error>> {
+    fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let function = FunctionId::default();
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
-            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
-            transaction.materialise_lifted(&mut test_ecode_ssa(function, IlGraph::default()))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut ecode_for_test(function, IlGraph::default()))?;
+            transaction
+                .materialise_lifted(&mut ecode_ssa_for_test(function, IlGraph::default()))?;
             transaction.commit()?;
         }
 
@@ -2949,28 +3250,28 @@ mod test {
     }
 
     #[test]
-    fn test_replacing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn replacing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = Address::from(0x4000u64);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
-            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut ecode_for_test(function, IlGraph::default()))?;
             transaction.commit()?;
         }
 
         let changes = {
             let mut transaction = project.transaction("test");
             assert_eq!(
-                transaction.add_function(partial_function(entry, 2))?,
+                transaction.add_function(incomplete_function(entry, 2))?,
                 function
             );
             transaction.commit()?
@@ -2991,18 +3292,17 @@ mod test {
     }
 
     #[test]
-    fn test_function_replacement_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn function_replacement_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = Address::from(0x4000u64);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
-        let mut materialised = test_tagged_pcode(function, &[1]);
+        let mut materialised = tagged_pcode(function, &[1]);
 
         {
             let mut transaction = project.transaction("test");
@@ -3012,7 +3312,7 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            transaction.add_function(partial_function(entry, 2))?;
+            transaction.add_function(incomplete_function(entry, 2))?;
             transaction.rollback()?;
         }
 
@@ -3030,20 +3330,67 @@ mod test {
     }
 
     #[test]
-    fn test_removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn function_replacement_rollback_restores_call_graph() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let entry = Address::from(0x4000u64);
+        let old_callee = Address::from(0x5000u64);
+        let new_callee = Address::from(0x6000u64);
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.add_function(calling_function(entry, old_callee, 1)?)?;
+            transaction.commit()?;
+        }
+
+        assert_eq!(
+            project
+                .call_graph
+                .callees(entry, None)?
+                .collect::<Result<Vec<_>, _>>()?,
+            vec![old_callee]
+        );
+
+        {
+            let mut transaction = project.transaction("test");
+            transaction.add_function(calling_function(entry, new_callee, 1)?)?;
+            assert_eq!(
+                transaction
+                    .project()
+                    .call_graph
+                    .callees(entry, None)?
+                    .collect::<Result<Vec<_>, _>>()?,
+                vec![new_callee]
+            );
+            transaction.rollback()?;
+        }
+
+        assert_eq!(
+            project
+                .call_graph
+                .callees(entry, None)?
+                .collect::<Result<Vec<_>, _>>()?,
+            vec![old_callee]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = Address::from(0x4000u64);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
             transaction.commit()?;
         }
 
@@ -3063,20 +3410,20 @@ mod test {
     }
 
     #[test]
-    fn test_byte_write_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn byte_write_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
             transaction.commit()?;
         }
 
@@ -3096,22 +3443,23 @@ mod test {
     }
 
     #[test]
-    fn test_byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error::Error>> {
+    fn byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
-            transaction.materialise_lifted(&mut test_ecode(function, IlGraph::default()))?;
-            transaction.materialise_lifted(&mut test_ecode_ssa(function, IlGraph::default()))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut ecode_for_test(function, IlGraph::default()))?;
+            transaction
+                .materialise_lifted(&mut ecode_ssa_for_test(function, IlGraph::default()))?;
             transaction.commit()?;
         }
 
@@ -3136,25 +3484,25 @@ mod test {
     }
 
     #[test]
-    fn test_symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
         let index = SymbolIndex::new(SymbolTableSelector::new(253), 250);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
-            transaction.insert_symbol(
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
+            transaction.add_symbol(
                 index,
                 SymbolEntry::new(entry, "old_display_name", SymbolProperties::FUNCTION),
-            );
+            )?;
             transaction.commit()?;
             function
         };
 
-        let mut pcode = test_tagged_pcode(function, &[1]);
-        let mut ecode = test_ecode(function, IlGraph::default());
-        let mut ssa = test_ecode_ssa(function, IlGraph::default());
+        let mut pcode = tagged_pcode(function, &[1]);
+        let mut ecode = ecode_for_test(function, IlGraph::default());
+        let mut ssa = ecode_ssa_for_test(function, IlGraph::default());
 
         {
             let mut transaction = project.transaction("test");
@@ -3164,17 +3512,17 @@ mod test {
             transaction.commit()?;
         }
 
-        let semantic_revision = project.semantic_revision();
+        let semantic_revision = project.semantic_revision;
         let changes = {
             let mut transaction = project.transaction("test");
-            transaction.insert_symbol(
+            transaction.add_symbol(
                 index,
                 SymbolEntry::new(entry, "new_display_name", SymbolProperties::FUNCTION),
-            );
+            )?;
             transaction.commit()?
         };
 
-        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert_eq!(project.semantic_revision, semantic_revision);
         assert!(
             !changes
                 .records()
@@ -3189,21 +3537,21 @@ mod test {
     }
 
     #[test]
-    fn test_reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
         let target = entry + 0x10u64;
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 2))?;
+            let function = transaction.add_function(incomplete_function(entry, 2))?;
             transaction.commit()?;
             function
         };
 
-        let mut pcode = test_tagged_pcode(function, &[1]);
-        let mut ecode = test_ecode(function, IlGraph::default());
-        let mut ssa = test_ecode_ssa(function, IlGraph::default());
+        let mut pcode = tagged_pcode(function, &[1]);
+        let mut ecode = ecode_for_test(function, IlGraph::default());
+        let mut ssa = ecode_ssa_for_test(function, IlGraph::default());
 
         {
             let mut transaction = project.transaction("test");
@@ -3213,7 +3561,7 @@ mod test {
             transaction.commit()?;
         }
 
-        let semantic_revision = project.semantic_revision();
+        let semantic_revision = project.semantic_revision;
         let changes = {
             let mut transaction = project.transaction("test");
             assert!(transaction.add_reference(Reference::data(
@@ -3224,7 +3572,7 @@ mod test {
             transaction.commit()?
         };
 
-        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert_eq!(project.semantic_revision, semantic_revision);
         assert!(
             !changes
                 .records()
@@ -3238,7 +3586,7 @@ mod test {
             transaction.commit()?
         };
 
-        assert_eq!(project.semantic_revision(), semantic_revision);
+        assert_eq!(project.semantic_revision, semantic_revision);
         assert!(
             !changes
                 .records()
@@ -3253,17 +3601,17 @@ mod test {
     }
 
     #[test]
-    fn test_byte_write_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn byte_write_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let entry = writable_address(&project)?;
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
-        let mut materialised = test_tagged_pcode(function, &[1]);
+        let mut materialised = tagged_pcode(function, &[1]);
 
         {
             let mut transaction = project.transaction("test");
@@ -3283,21 +3631,21 @@ mod test {
     }
 
     #[test]
-    fn test_mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let (space, mapping, range) = first_mapping_placement(&project);
         let entry = Address::new(space, range.0);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(function, &[1]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(function, &[1]))?;
             transaction.commit()?;
         }
 
@@ -3317,18 +3665,18 @@ mod test {
     }
 
     #[test]
-    fn test_mapping_removal_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
+    fn mapping_removal_rollback_restores_lifted() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let (space, mapping, range) = first_mapping_placement(&project);
         let entry = Address::new(space, range.0);
 
         let function = {
             let mut transaction = project.transaction("test");
-            let function = transaction.add_function(partial_function(entry, 1))?;
+            let function = transaction.add_function(incomplete_function(entry, 1))?;
             transaction.commit()?;
             function
         };
-        let mut materialised = test_tagged_pcode(function, &[1]);
+        let mut materialised = tagged_pcode(function, &[1]);
 
         {
             let mut transaction = project.transaction("test");
@@ -3348,8 +3696,7 @@ mod test {
     }
 
     #[test]
-    fn test_mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>> {
         let mut project = Project::from_file_transient("tests/ls.elf")?;
         let (space, mapping, old_range) = first_mapping_placement(&project);
         let old_entry = Address::new(space, old_range.0);
@@ -3363,16 +3710,16 @@ mod test {
 
         let (old_function, new_function) = {
             let mut transaction = project.transaction("test");
-            let old_function = transaction.add_function(partial_function(old_entry, 1))?;
-            let new_function = transaction.add_function(partial_function(new_entry, 1))?;
+            let old_function = transaction.add_function(incomplete_function(old_entry, 1))?;
+            let new_function = transaction.add_function(incomplete_function(new_entry, 1))?;
             transaction.commit()?;
             (old_function, new_function)
         };
 
         {
             let mut transaction = project.transaction("test");
-            transaction.materialise_lifted(&mut test_tagged_pcode(old_function, &[1]))?;
-            transaction.materialise_lifted(&mut test_tagged_pcode(new_function, &[2]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(old_function, &[1]))?;
+            transaction.materialise_lifted(&mut tagged_pcode(new_function, &[2]))?;
             transaction.commit()?;
         }
 

@@ -4,13 +4,14 @@ use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
-use super::{SegmentStorageError, SegmentStorageProvider};
+use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderId};
 use crate::ir::Address;
 use crate::types::AttributeMap;
 
 static REGISTRY: OnceLock<SegmentStorageProviderRegistry> = OnceLock::new();
 
 type FromSegmentRangeFn = fn(
+    id: SegmentStorageProviderId,
     range: RangeInclusive<Address>,
     attributes: &mut AttributeMap,
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
@@ -84,6 +85,7 @@ impl SegmentStorageProviderRegistry {
     pub fn from_segment_range(
         &self,
         tag: &str,
+        id: SegmentStorageProviderId,
         range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError> {
@@ -91,7 +93,7 @@ impl SegmentStorageProviderRegistry {
             SegmentStorageError::backing_with(format!("unknown provider tag: {tag}"))
         })?;
 
-        (entry.from_segment_range)(range, attributes)
+        (entry.from_segment_range)(id, range, attributes)
     }
 
     pub fn from_storage(

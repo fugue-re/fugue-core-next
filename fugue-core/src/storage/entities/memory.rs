@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-use std::mem;
 use std::ops::Bound;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -10,17 +8,13 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    EntityBytesAsIterator, EntityBytesBulkInserter, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageBulkInserter, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
-
-// Maximum batch size for bulk operations
-const BATCH_SIZE: usize = 1024;
 
 pub struct InMemoryEntityStorage {
     data: DashMap<EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
@@ -166,7 +160,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         })))
     }
 
-    fn scan_range(
+    fn iter_range(
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -227,10 +221,6 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             InMemoryIterator::new(map, prefix, |iter| iter.iter())
                 .map(move |res| res.and_then(|(k, e)| f(k.as_ref(), e.as_ref()))),
         ))
-    }
-
-    fn bulk_inserter(&self) -> Result<EntityBytesBulkInserter, EntityStorageError> {
-        Ok(Box::new(InMemoryEntityInserter::new(self)))
     }
 
     fn transactional_reader(
@@ -306,60 +296,6 @@ impl<'a> Iterator for InMemoryIterator<'a> {
     }
 }
 
-struct InMemoryEntityInserter<'a> {
-    batches: BTreeMap<EntityKeyPrefix, BTreeMap<BytesOrSlice<'a>, BytesOrSlice<'a>>>,
-    inner: &'a InMemoryEntityStorage,
-}
-
-impl<'a> InMemoryEntityInserter<'a> {
-    pub fn new(inner: &'a InMemoryEntityStorage) -> Self {
-        Self {
-            batches: BTreeMap::new(),
-            inner,
-        }
-    }
-}
-
-impl<'a> EntityStorageBulkInserter<'a> for InMemoryEntityInserter<'a> {
-    fn insert(
-        &mut self,
-        key: BytesOrSlice<'a>,
-        value: BytesOrSlice<'a>,
-    ) -> Result<(), EntityStorageError> {
-        let (prefix, key) = InMemoryEntityStorage::extract_key_parts(key.as_slice())
-            .ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-        let entry = self.batches.entry(prefix).or_default();
-
-        if entry.len() >= BATCH_SIZE {
-            let mut dentry = self.inner.data.entry(prefix).or_default();
-            dentry.extend(
-                mem::take(entry)
-                    .into_iter()
-                    .map(|(k, v)| (Bytes::copy_from_slice(&k), v.into_bytes())),
-            );
-
-            return Ok(());
-        }
-
-        entry.insert(Bytes::copy_from_slice(key).into(), value);
-
-        Ok(())
-    }
-
-    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        for (prefix, batch) in self.batches {
-            let mut map = self.inner.data.entry(prefix).or_default();
-            map.extend(
-                batch
-                    .into_iter()
-                    .map(|(key, value)| (key.into_bytes(), value.into_bytes())),
-            );
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::ops::Bound;
@@ -385,7 +321,7 @@ mod test {
     }
 
     #[test]
-    fn scan_range_respects_inclusive_and_exclusive_bounds() {
+    fn iter_range_respects_inclusive_and_exclusive_bounds() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         for value in 1..=4 {
@@ -395,7 +331,7 @@ mod test {
         }
 
         let included = storage
-            .scan_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()
@@ -403,7 +339,7 @@ mod test {
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .scan_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
             .unwrap()
             .map(|entry| entry.map(|(_, entity)| entity.value))
             .collect::<Result<Vec<_>, _>>()

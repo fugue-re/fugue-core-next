@@ -1,11 +1,9 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use super::{CallEdge, MappingRecord, QueryPage, SymbolRecord};
-use crate::ir::block::table::CodeBlockRef;
-use crate::ir::cfg::{FlowGraph, FlowTarget};
-use crate::ir::function::table::FunctionRef;
-use crate::ir::{Address, CallGraphEdgeKey, RawAddress, Reference, ReferenceTarget};
+use super::{CallEdge, MappingRow, QueryPage, SwitchRow, SymbolRow};
+use crate::ir::cfg::FlowTargets;
+use crate::ir::{Address, CallGraphEdgeKey, FunctionRef, RawAddress, Reference, ReferenceTarget};
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -22,8 +20,12 @@ impl<'p> ProjectRead<'p> {
         self.project
     }
 
-    pub(crate) fn call_edges(&self, after: Option<CallEdge>, limit: usize) -> QueryPage<CallEdge> {
-        let after = after.map(|edge| CallGraphEdgeKey::new(edge.caller(), edge.callee()));
+    pub(crate) fn call_edge_page(
+        &self,
+        after: Option<CallEdge>,
+        limit: usize,
+    ) -> QueryPage<CallEdge> {
+        let after = after.map(|edge| CallGraphEdgeKey::new(edge.source(), edge.target()));
         let edges = self
             .project
             .call_graph()
@@ -42,7 +44,7 @@ impl<'p> ProjectRead<'p> {
         self.project.functions().get_by_address(entry)
     }
 
-    pub(crate) fn callers_of(
+    pub(crate) fn caller_page(
         &self,
         entry: Address,
         after: Option<Address>,
@@ -58,7 +60,7 @@ impl<'p> ProjectRead<'p> {
         Self::page(callers, limit)
     }
 
-    pub(crate) fn callees_of(
+    pub(crate) fn callee_page(
         &self,
         entry: Address,
         after: Option<Address>,
@@ -69,12 +71,12 @@ impl<'p> ProjectRead<'p> {
             .unwrap_or_else(|| QueryPage::new(Vec::new(), None))
     }
 
-    pub(crate) fn flow_graph(&self, function: FunctionRef<'_>) -> Arc<FlowGraph> {
-        let blocks = function
-            .blocks()
-            .filter_map(|(_, id)| self.project.blocks().get_by_id(id));
+    pub(crate) fn flow_targets(&self, function: FunctionRef<'_>) -> Arc<FlowTargets> {
+        let targets = function
+            .flow_targets(self.project.blocks())
+            .collect::<Vec<_>>();
 
-        Arc::new(FlowGraph::new(Self::flow_targets(blocks)))
+        Arc::new(FlowTargets::new(targets))
     }
 
     pub(crate) fn function_page(
@@ -94,112 +96,117 @@ impl<'p> ProjectRead<'p> {
     pub(crate) fn mapping_page(
         &self,
         space: AddressSpaceId,
-        after: Option<MappingRecord>,
+        after: Option<MappingRow>,
         limit: usize,
-    ) -> QueryPage<MappingRecord> {
+    ) -> QueryPage<MappingRow> {
         let limit = Self::limit(limit);
         let Ok(views) = self
             .project
             .segments()
-            .iter_views_from(space, after.map(|record| record.start()))
+            .iter_views_from(space, after.map(|row| row.start()))
         else {
             return QueryPage::new(Vec::new(), None);
         };
 
-        let mut records = Vec::with_capacity(limit + 1);
+        let mut rows = Vec::with_capacity(limit + 1);
         let mut group = Vec::new();
         let mut current_start = None;
 
-        for record in views.map(|view| MappingRecord::from_view(&view)) {
-            if current_start.is_some_and(|start| start != record.start()) {
-                Self::push_ordered_mapping_group(&mut records, &mut group, after, limit);
-                if records.len() > limit {
+        for row in views.map(|view| MappingRow::from_view(&view)) {
+            if current_start.is_some_and(|start| start != row.start()) {
+                Self::push_ordered_group(&mut rows, &mut group, after, limit);
+                if rows.len() > limit {
                     break;
                 }
             }
 
-            current_start = Some(record.start());
-            group.push(record);
+            current_start = Some(row.start());
+            group.push(row);
         }
 
-        if records.len() <= limit {
-            Self::push_ordered_mapping_group(&mut records, &mut group, after, limit);
+        if rows.len() <= limit {
+            Self::push_ordered_group(&mut rows, &mut group, after, limit);
         }
 
-        Self::page(records, limit)
+        Self::page(rows, limit)
     }
 
     pub(crate) fn symbol_page(
         &self,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> QueryPage<SymbolRecord> {
+    ) -> QueryPage<SymbolRow> {
         let limit = Self::limit(limit);
         let start = after.map_or(Bound::Unbounded, |after| Bound::Included(after.address()));
         let symbols = self
             .project
             .symbols()
             .range_by_address((start, Bound::Unbounded))
-            .map(|(_, entry)| SymbolRecord::from_entry(&entry));
+            .map(|(_, entry)| SymbolRow::from_entry(&entry));
 
-        let mut records = Vec::with_capacity(limit + 1);
+        let mut rows = Vec::with_capacity(limit + 1);
         let mut group = Vec::new();
         let mut current_address = None;
 
-        for record in symbols {
-            if current_address.is_some_and(|address| address != record.address()) {
-                Self::push_ordered_symbol_group(&mut records, &mut group, after, limit);
-                if records.len() > limit {
+        for row in symbols {
+            if current_address.is_some_and(|address| address != row.address()) {
+                Self::push_ordered_group(&mut rows, &mut group, after, limit);
+                if rows.len() > limit {
                     break;
                 }
             }
 
-            current_address = Some(record.address());
-            group.push(record);
+            current_address = Some(row.address());
+            group.push(row);
         }
 
-        if records.len() <= limit {
-            Self::push_ordered_symbol_group(&mut records, &mut group, after, limit);
+        if rows.len() <= limit {
+            Self::push_ordered_group(&mut rows, &mut group, after, limit);
         }
 
-        Self::page(records, limit)
+        Self::page(rows, limit)
     }
 
-    pub(crate) fn symbols_at(
+    pub(crate) fn switch_at(&self, branch: Address) -> Option<SwitchRow> {
+        self.project
+            .switches()
+            .get_by_branch(branch)
+            .map(|switch| SwitchRow::from(&*switch))
+    }
+
+    pub(crate) fn switch_page(
+        &self,
+        after: Option<Address>,
+        limit: usize,
+    ) -> QueryPage<SwitchRow, Address> {
+        let rows = self
+            .project
+            .switches()
+            .entries_after(after)
+            .map(|switch| SwitchRow::from(&*switch));
+
+        Self::page_by(rows, limit, SwitchRow::branch)
+    }
+
+    pub(crate) fn symbol_page_at(
         &self,
         address: Address,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> QueryPage<SymbolRecord> {
-        let mut records = self
+    ) -> QueryPage<SymbolRow> {
+        let mut rows = self
             .project
             .symbols()
             .get_by_address(address)
-            .map(|(_, entry)| SymbolRecord::from_entry(&entry))
-            .filter(|record| after.is_none_or(|after| *record > after))
+            .map(|(_, entry)| SymbolRow::from_entry(&entry))
+            .filter(|row| after.is_none_or(|after| *row > after))
             .collect::<Vec<_>>();
-        records.sort();
+        rows.sort();
 
-        Self::page(records, limit)
+        Self::page(rows, limit)
     }
 
-    fn flow_targets<'a>(blocks: impl IntoIterator<Item = CodeBlockRef<'a>>) -> Vec<FlowTarget> {
-        let mut flow_targets = Vec::new();
-
-        for block in blocks {
-            for insn in block.instructions().iter() {
-                for (target, _, to) in insn.iter_targets() {
-                    if let Some(flow_target) = FlowTarget::from_insn_target(insn, target, to) {
-                        flow_targets.push(flow_target);
-                    }
-                }
-            }
-        }
-
-        flow_targets
-    }
-
-    pub(crate) fn references_from(
+    pub(crate) fn outgoing_reference_page(
         &self,
         from: Address,
         after: Option<Reference>,
@@ -215,7 +222,7 @@ impl<'p> ProjectRead<'p> {
         Self::page(references, limit)
     }
 
-    pub(crate) fn references_to(
+    pub(crate) fn incoming_reference_page(
         &self,
         target: ReferenceTarget,
         after: Option<Reference>,
@@ -248,36 +255,23 @@ impl<'p> ProjectRead<'p> {
     }
 
     fn limit(limit: usize) -> usize {
-        limit.clamp(1, super::MAX_QUERY_PAGE_LEN)
+        limit.clamp(1, super::MAX_QUERY_PAGE_COUNT)
     }
 
-    fn push_ordered_mapping_group(
-        records: &mut Vec<MappingRecord>,
-        group: &mut Vec<MappingRecord>,
-        after: Option<MappingRecord>,
+    fn push_ordered_group<T>(
+        rows: &mut Vec<T>,
+        group: &mut Vec<T>,
+        after: Option<T>,
         limit: usize,
-    ) {
+    ) where
+        T: Copy + Ord,
+    {
         group.sort();
-        records.extend(
+        rows.extend(
             group
                 .drain(..)
-                .filter(|record| after.is_none_or(|after| *record > after))
-                .take(limit + 1 - records.len()),
-        );
-    }
-
-    fn push_ordered_symbol_group(
-        records: &mut Vec<SymbolRecord>,
-        group: &mut Vec<SymbolRecord>,
-        after: Option<SymbolRecord>,
-        limit: usize,
-    ) {
-        group.sort();
-        records.extend(
-            group
-                .drain(..)
-                .filter(|record| after.is_none_or(|after| *record > after))
-                .take(limit + 1 - records.len()),
+                .filter(|row| after.is_none_or(|after| *row > after))
+                .take(limit + 1 - rows.len()),
         );
     }
 
@@ -285,12 +279,20 @@ impl<'p> ProjectRead<'p> {
     where
         T: Clone,
     {
+        Self::page_by(source, limit, Clone::clone)
+    }
+
+    fn page_by<T, C>(
+        source: impl IntoIterator<Item = T>,
+        limit: usize,
+        cursor: impl FnOnce(&T) -> C,
+    ) -> QueryPage<T, C> {
         let limit = Self::limit(limit);
         let mut entries = Vec::with_capacity(limit + 1);
         for entry in source.into_iter().take(limit + 1) {
             entries.push(entry);
         }
-        let next_cursor = (entries.len() > limit).then(|| entries[limit - 1].clone());
+        let next_cursor = (entries.len() > limit).then(|| cursor(&entries[limit - 1]));
         entries.truncate(limit);
 
         QueryPage::new(entries, next_cursor)
