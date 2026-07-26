@@ -33,6 +33,7 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
+use crate::platform::Platform;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
@@ -215,11 +216,7 @@ impl<'a> Pe<'a> {
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let path = path.as_ref();
-        let data = BytesOrMapping::from_file(path)?;
-        let mut loaded = Self::new_with(data, attributes)?;
-        loaded.path = Some(path.display().to_string());
-        Ok(loaded)
+        <Self as LoadableFromFile>::from_file_with(path, attributes)
     }
 
     pub fn entry(&self) -> Option<RawAddress> {
@@ -888,11 +885,6 @@ where
                 .checked_add(sect.size().wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(self.current_base))?;
 
-            if last_address < address {
-                tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
-                continue;
-            }
-
             let vrange = address..=last_address;
             let bank = self
                 .region_bank
@@ -1230,7 +1222,10 @@ impl LoadableFromFile for Pe<'_> {
     where
         Self: Sized,
     {
-        Self::from_file_with(path, attributes)
+        let path = path.as_ref();
+        let mut loaded = Self::new_with(BytesOrMapping::from_file(path)?, attributes)?;
+        loaded.path = Some(path.display().to_string());
+        Ok(loaded)
     }
 }
 
@@ -1255,6 +1250,12 @@ impl Loadable for Pe<'_> {
 
     fn architecture(&self) -> Arch {
         self.object.borrow_loaded().state.architecture.clone()
+    }
+
+    fn platform(&self) -> Platform {
+        self.architecture()
+            .platform()
+            .with_compiler_spec_id("windows")
     }
 
     fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {

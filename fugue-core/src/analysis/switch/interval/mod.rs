@@ -4,8 +4,7 @@ use rustc_hash::FxHashMap;
 use crate::analysis::function::recovery::InsnResolver;
 use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTargetResolver};
 use crate::analysis::value::StridedInterval;
-use crate::arch::Arch;
-use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlOpId, IlValueId};
+use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlValueId};
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaStridedIntervals,
 };
@@ -14,7 +13,6 @@ use crate::ir::{
     SwitchProperties,
 };
 use crate::lifter::ContextSet;
-use crate::storage::SegmentStorage;
 
 mod evaluator;
 mod guard;
@@ -27,12 +25,11 @@ use layout::{SwitchInlineTableLayout, SwitchTableLayout};
 pub(crate) struct SwitchIntervalContext<'analysis> {
     ssa: &'analysis ECodeSsaIr,
     blocks_by_source: FxHashMap<Address, IlBlockId>,
-    arch: &'analysis Arch,
-    segments: &'analysis SegmentStorage,
     config: SwitchRecoveryConfig,
     intervals: ECodeSsaStridedIntervals,
     dominance: IlDominance,
     block_argument_inputs: ECodeSsaBlockArgumentInputs,
+    cases: Vec<SwitchCase>,
 }
 
 struct SwitchCaseEnumeration {
@@ -43,11 +40,12 @@ struct SwitchCaseEnumeration {
 }
 
 impl SwitchCaseEnumeration {
-    fn cases(
+    fn populate_cases(
         &self,
+        cases: &mut Vec<SwitchCase>,
         mut resolve: impl FnMut(&BitVec) -> Option<AddressWithContext>,
-    ) -> Vec<SwitchCase> {
-        let mut cases = Vec::new();
+    ) {
+        cases.clear();
         for value in self.interval.iter().take(self.limit) {
             let Some(destination) = resolve(&value) else {
                 break;
@@ -60,7 +58,6 @@ impl SwitchCaseEnumeration {
             }
             cases.push(case);
         }
-        cases
     }
 
     fn guard(&self) -> Option<&SwitchGuard> {
@@ -77,34 +74,28 @@ impl SwitchCaseEnumeration {
 }
 
 impl<'analysis> SwitchIntervalContext<'analysis> {
-    pub(crate) fn new(
-        ssa: &'analysis ECodeSsaIr,
-        arch: &'analysis Arch,
-        segments: &'analysis SegmentStorage,
-        config: SwitchRecoveryConfig,
-    ) -> Self {
+    pub(crate) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
         let mut blocks_by_source = FxHashMap::default();
-        for (index, &source) in ssa.graph().block_sources().iter().enumerate() {
-            let block = IlBlockId::try_from_index(index).expect("block count fits the id space");
+        for (block, source) in ssa.graph().blocks_with_sources() {
             blocks_by_source.entry(source).or_insert(block);
         }
         Self {
             ssa,
             blocks_by_source,
-            arch,
-            segments,
             config,
             intervals: ssa.analyse::<ECodeSsaStridedIntervals>(),
             dominance: ssa.analyse::<IlDominance>(),
             block_argument_inputs: ssa.analyse::<ECodeSsaBlockArgumentInputs>(),
+            cases: Vec::new(),
         }
     }
 
     pub(crate) fn recover(
-        &self,
+        &mut self,
         branch: Address,
         context: &ContextSet,
         insn_resolver: &mut InsnResolver,
+        target_resolver: &mut SwitchTargetResolver<'_>,
     ) -> Option<RecoveredSwitch> {
         let target = self
             .ssa
@@ -113,34 +104,46 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             .and_then(|(_, operation)| self.ssa.operation_operands(operation).first().copied())?;
         context.apply(branch, insn_resolver.context_mut());
         if let Some(layout) = self.table_layout(target) {
-            return self.recover_loaded(branch, target, layout, context, insn_resolver);
+            return self.recover_loaded(
+                branch,
+                target,
+                layout,
+                context,
+                insn_resolver,
+                target_resolver,
+            );
         }
         if let Some(layout) = self.inline_table_layout(target) {
-            return self.recover_inline(branch, layout, context, insn_resolver);
+            return self.recover_inline(branch, layout, context, insn_resolver, target_resolver);
         }
         tracing::trace!("switch interval recovery at {branch}: no idiom");
         None
     }
 
     fn recover_loaded(
-        &self,
+        &mut self,
         branch: Address,
         target: IlValueId,
         layout: SwitchTableLayout,
         context: &ContextSet,
         insn_resolver: &mut InsnResolver,
+        target_resolver: &mut SwitchTargetResolver<'_>,
     ) -> Option<RecoveredSwitch> {
         let index = layout.index();
         let enumeration = self.case_enumeration(index, branch)?;
         let space = branch.space();
-        let mut target_resolver = SwitchTargetResolver::new(self.arch, self.segments, space);
+        target_resolver.set_space(space);
+        let mut cases = std::mem::take(&mut self.cases);
         let mut evaluator = SwitchTargetEvaluator::new(self, space);
-        let cases = enumeration.cases(|value| {
-            let target = evaluator.evaluate(target, index, value)?;
+        enumeration.populate_cases(&mut cases, |value| {
+            let target = evaluator.evaluate(target, index, value, |address, size| {
+                target_resolver.read_bitvec(address, size)
+            })?;
             target_resolver.resolve_value(&target, insn_resolver.context())
         });
 
         if cases.is_empty() {
+            self.cases = cases;
             tracing::trace!("switch interval recovery at {branch}: evaluation not closed");
             return None;
         }
@@ -155,26 +158,28 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             branch,
             context,
             insn_resolver,
-            &mut target_resolver,
+            target_resolver,
             &enumeration,
             recovered,
         ))
     }
 
     fn recover_inline(
-        &self,
+        &mut self,
         branch: Address,
         layout: SwitchInlineTableLayout,
         context: &ContextSet,
         insn_resolver: &mut InsnResolver,
+        target_resolver: &mut SwitchTargetResolver<'_>,
     ) -> Option<RecoveredSwitch> {
         let enumeration = self.case_enumeration(layout.index(), branch)?;
         let space = branch.space();
         let table_address = Address::new(space, layout.address());
         let mut table = AddressTable::new(table_address, layout.stride());
-        let mut target_resolver = SwitchTargetResolver::new(self.arch, self.segments, space);
-        let cases = enumeration.cases(|value| {
-            let entry = u32::try_from(value.unsigned_cast(u32::BITS).to_u64()?).ok()?;
+        target_resolver.set_space(space);
+        let mut cases = std::mem::take(&mut self.cases);
+        enumeration.populate_cases(&mut cases, |value| {
+            let entry = u32::try_from(value.to_u64()?).ok()?;
             let address = table.entry_address(entry);
             target_resolver.resolve_branch_target(
                 address,
@@ -185,21 +190,21 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         });
 
         if cases.is_empty() {
+            self.cases = cases;
             tracing::trace!("switch interval recovery at {branch}: inline table is not closed");
             return None;
         }
 
         table.set_element_count(cases.len() as u32);
-        let properties = enumeration.properties(cases.len())
-            | SwitchProperties::CONTIGUOUS_ENTRIES
-            | target_resolver.properties_for_targets(&cases);
+        let properties =
+            enumeration.properties(cases.len()) | target_resolver.properties_for_targets(&cases);
         let recovered =
             RecoveredSwitch::new(SwitchModel::InlineBranchTable(table), cases, properties);
         Some(self.finalise_recovery(
             branch,
             context,
             insn_resolver,
-            &mut target_resolver,
+            target_resolver,
             &enumeration,
             recovered,
         ))
@@ -232,7 +237,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         branch: Address,
         context: &ContextSet,
         insn_resolver: &mut InsnResolver,
-        target_resolver: &mut SwitchTargetResolver<'analysis>,
+        target_resolver: &mut SwitchTargetResolver<'_>,
         enumeration: &SwitchCaseEnumeration,
         recovered: RecoveredSwitch,
     ) -> RecoveredSwitch {
@@ -243,7 +248,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             insn_resolver,
             target_resolver,
         ) {
-            Some(default) => recovered.with_default(default),
+            Some(default) => recovered.with_fallback_default(Some(default)),
             None => recovered,
         }
     }
@@ -252,18 +257,18 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         let Some(operation) = self.ssa.defining_operation(index) else {
             return 0;
         };
-        let Some(constant) = self
-            .ssa
-            .operation_operands(operation)
-            .iter()
-            .find_map(|&operand| self.ssa.constant_value(operand))
-            .and_then(|constant| constant.to_u64())
-        else {
-            return 0;
-        };
+        let operands = self.ssa.operation_operands(operation);
         match operation.opcode() {
-            ECodeSsaOpcode::Sub => constant as i64,
-            ECodeSsaOpcode::Add => (constant as i64).wrapping_neg(),
+            ECodeSsaOpcode::Sub => operands
+                .get(1)
+                .and_then(|&operand| self.ssa.constant_value(operand))
+                .and_then(|constant| constant.to_u64())
+                .map_or(0, |constant| constant as i64),
+            ECodeSsaOpcode::Add => operands
+                .iter()
+                .find_map(|&operand| self.ssa.constant_value(operand))
+                .and_then(|constant| constant.to_u64())
+                .map_or(0, |constant| (constant as i64).wrapping_neg()),
             _ => 0,
         }
     }
@@ -294,8 +299,6 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             return Some(block);
         }
         let (operation, _) = self.ssa.operations_for_source(address).next()?;
-        let operation =
-            IlOpId::try_from_index(operation).expect("operation count fits the id space");
         self.ssa.block_for_operation(operation)
     }
 }

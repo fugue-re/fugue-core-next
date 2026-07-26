@@ -38,6 +38,29 @@ fn evaluate_folds_comparisons_at_operand_width() {
 }
 
 #[test]
+fn evaluate_folds_unsigned_comparisons_of_sign_extended_operands() {
+    let extended = ECodeSsaOpcode::SignExtend
+        .evaluate(16, &[BitVec::from_u64(0x80, 8)])
+        .expect("sign extension folds");
+    assert_eq!(extended, BitVec::from_u64(0xff80, 16).signed());
+
+    let five = BitVec::from_u64(5, 16);
+    let zero = BitVec::from_u64(0, 1);
+    assert_eq!(
+        ECodeSsaOpcode::IntLess.evaluate(1, &[extended.clone(), five.clone()]),
+        Some(zero.clone())
+    );
+    assert_eq!(
+        ECodeSsaOpcode::IntLessEqual.evaluate(1, &[extended.clone(), five]),
+        Some(zero)
+    );
+    assert_eq!(
+        ECodeSsaOpcode::IntSignedLess.evaluate(1, &[extended, BitVec::from_u64(5, 16)]),
+        Some(BitVec::from_u64(1, 1))
+    );
+}
+
+#[test]
 fn evaluate_folds_byte_wide_boolean_operations_to_zero_or_one() {
     let zero = BitVec::from_u64(0, 8);
     let one = BitVec::from_u64(1, 8);

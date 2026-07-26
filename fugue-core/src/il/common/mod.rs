@@ -20,3 +20,4 @@ pub use pool::IlIndexRange;
 pub(crate) use pool::{IlCsr, IlPool};
 pub use rewrite::IlRewrite;
 pub use span::{IlParentSpan, IlSourceSpan};
+pub use verify::{StructureError, StructureVerifierError};

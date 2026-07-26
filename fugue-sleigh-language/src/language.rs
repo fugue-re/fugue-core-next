@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use ustr::Ustr;
 use walkdir::WalkDir;
 
 use crate::compiler::CompilerSpec;
-use crate::convention::Convention;
+use crate::convention::{Convention, PrototypeOperand};
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::float_format::{FloatFormat, FloatFormats};
 use crate::processor::ProcessorSpec;
@@ -137,6 +138,27 @@ impl Language {
 
     pub fn compiler_conventions(&self) -> &Map<String, Convention> {
         &self.compiler_conventions
+    }
+
+    pub fn call_preserved_registers(&self, compiler: &str) -> Option<Vec<VarnodeData>> {
+        let convention = self.compiler_conventions.get(compiler)?;
+        let mut registers = BTreeSet::new();
+        for operand in convention.default_prototype().unaffected() {
+            match operand {
+                PrototypeOperand::Register { varnode, .. } => {
+                    registers.insert(*varnode);
+                }
+                PrototypeOperand::RegisterJoin {
+                    first_varnode,
+                    second_varnode,
+                    ..
+                } => {
+                    registers.extend([*first_varnode, *second_varnode]);
+                }
+                PrototypeOperand::StackRelative(_) => {}
+            }
+        }
+        Some(registers.into_iter().collect())
     }
 
     pub fn source_files(&self) -> &Map<String, usize> {

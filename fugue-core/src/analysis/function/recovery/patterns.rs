@@ -12,9 +12,7 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::project::Project;
-use crate::storage::segments::SegmentMappingCache;
-use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::segments::view::SegmentMappingView;
+use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentMappingView, SegmentStorage};
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryPatternMatcherError {
@@ -79,7 +77,8 @@ impl FunctionRecoveryPatternMatcher {
 
     // NOTE: all segments are in the same space
     fn for_each_segment(
-        mapping_cache: &mut SegmentMappingCache<'_>,
+        segments: &SegmentStorage,
+        mapping_cache: &mut SegmentMappingCache,
         space_id: AddressSpaceId,
         gap: RangeInclusive<RawAddress>,
         mut f: impl FnMut(RangeInclusive<RawAddress>, &[u8]),
@@ -98,25 +97,36 @@ impl FunctionRecoveryPatternMatcher {
 
         while current_start <= gap_end {
             let current_meta = Address::new(space_id, current_start);
-            let Some(view) = mapping_cache.view_containing(current_meta).cloned() else {
+            let Some(view) = mapping_cache.view_containing(segments, current_meta) else {
                 break;
             };
 
             let match_end = calculate_end(&view);
             let range = current_start..=match_end;
-            current_start = match_end + 1usize;
+            let next_start = match_end.checked_add(1usize);
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Ok(bytes) =
-                mapping_cache.contiguous_bytes_from(Address::new(space_id, *range.start()))
+            let Ok(view) = mapping_cache
+                .contiguous_bytes_from(segments, Address::new(space_id, *range.start()))
             else {
-                continue;
+                if let Some(next_start) = next_start {
+                    current_start = next_start;
+                    continue;
+                }
+                break;
             };
+            let bytes = view
+                .as_contiguous()
+                .expect("contiguous mapping view must contain bytes");
             let Some(bytes) = bytes.get(..size) else {
                 break;
             };
 
             f(range, bytes);
+            let Some(next_start) = next_start else {
+                break;
+            };
+            current_start = next_start;
         }
     }
 
@@ -139,11 +149,11 @@ impl FunctionRecoveryPatternMatcher {
         let arch = project.arch();
         let language = project.language();
 
-        let mut mapping_cache = SegmentMappingCache::new(segments);
+        let mut mapping_cache = SegmentMappingCache::new();
 
         for gap in gaps.ranges() {
             tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
-            Self::for_each_segment(&mut mapping_cache, space_id, gap, |gap, bytes| {
+            Self::for_each_segment(segments, &mut mapping_cache, space_id, gap, |gap, bytes| {
                 for pat in self.patterns.iter() {
                     for (range, ctx, confidence) in pat.matches(bytes) {
                         let start = Address::new(space_id, *gap.start() + range.start);

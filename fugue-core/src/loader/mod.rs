@@ -14,10 +14,20 @@ use crate::lifter::LanguageError;
 use crate::platform::Platform;
 use crate::types::{AttributeMap, BytesOrMapping};
 
-pub mod elf;
-pub use elf::Elf;
+pub(crate) mod elf;
+pub use elf::extensions::{
+    AnalysisContext as ElfAnalysisContext, ArchResolver as ElfArchResolver,
+    FunctionRecoveryHandler as ElfFunctionRecoveryHandler, ImageContext as ElfImageContext,
+    RelocationContext as ElfRelocationContext, RelocationHandler as ElfRelocationHandler,
+};
+pub use elf::{
+    ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_ELF_LOAD_HEADERS,
+    ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS as ATTRIBUTE_ELF_OVERRIDE_SEGMENT_PERMISSIONS,
+    ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES, ATTRIBUTE_SKIP_NOTE_SECTIONS,
+    ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfAnalysers, ElfFileRepr, ElfSegmentRelocator,
+};
 
-pub mod image;
+pub(crate) mod image;
 pub use image::{
     ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBanks, ImageLayout,
     ImageResolution, ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator,
@@ -28,10 +38,18 @@ pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap}
 // pub mod macho
 // pub use macho::Macho;
 
-pub mod pe;
-pub use pe::Pe;
+pub(crate) mod pe;
+pub use pe::extensions::{
+    AnalysisContext as PeAnalysisContext, ArchResolver as PeArchResolver,
+    FunctionRecoveryHandler as PeFunctionRecoveryHandler, ImageContext as PeImageContext,
+    RelocationContext as PeRelocationContext, RelocationHandler as PeRelocationHandler,
+};
+pub use pe::{
+    ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,
+    PE_IMPORT_SELECTOR, Pe, PeAnalysers, PeSegmentRelocator,
+};
 
-pub mod shellcode;
+pub(crate) mod shellcode;
 pub use shellcode::Shellcode;
 
 #[derive(Debug, Error)]
@@ -364,8 +382,7 @@ impl<'a> Loader<'a> {
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let data = BytesOrMapping::from_file(path)?;
-        Self::new_with(data, attributes)
+        <Self as LoadableFromFile>::from_file_with(path, attributes)
     }
 
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError> {
@@ -390,7 +407,8 @@ impl LoadableFromFile for Loader<'_> {
     where
         Self: Sized,
     {
-        Self::from_file_with(path, attributes)
+        let data = BytesOrMapping::from_file(path)?;
+        Self::new_with(data, attributes)
     }
 }
 

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::il::common::verify::{StructureError, verify_parent_spans, verify_source_spans};
+use crate::il::common::verify::{StructureError, StructureVerifierError};
 use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlError, IlLevel, IlOpId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
 
@@ -45,30 +45,19 @@ pub(crate) enum VerifyError {
     Structure(StructureError),
 }
 
-impl From<StructureError> for VerifyError {
-    fn from(error: StructureError) -> Self {
-        match error {
-            StructureError::Il(error) => Self::Il(error),
-            error => Self::Structure(error),
-        }
+impl StructureVerifierError for VerifyError {
+    fn structure(error: StructureError) -> Self {
+        Self::Structure(error)
     }
 }
 
 impl ECodeSsaIr {
     pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        if self.metadata().schema() != Self::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                Self::LEVEL,
-                Self::SCHEMA.value(),
-                self.metadata().schema().value(),
-            )
-            .into());
-        }
-
-        self.graph().verify()?;
-        self.graph().verify_node_bounds(self.operations().len())?;
-        verify_source_spans(self.source_spans(), self.operations().len())?;
-        verify_parent_spans(self.parent_spans(), self.operations().len())?;
+        self.verify_structure::<VerifyError>(
+            self.source_spans(),
+            Some(self.parent_spans()),
+            self.operations().len(),
+        )?;
         verify_memory_domains(self)?;
         verify_edge_arguments(self)?;
 
@@ -275,23 +264,32 @@ fn verify_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
     }
 
     let dominance = ir.analyse::<IlDominance>();
+    let operation_blocks = ir.operation_blocks();
 
-    verify_edge_argument_uses(ir, &dominance)?;
+    verify_edge_argument_uses(ir, &dominance, &operation_blocks)?;
 
     for (operation_index, operation) in ir.operations().iter().enumerate() {
         let operation_id = IlOpId::try_from_index(operation_index)?;
-        let Some(user_block) = ir.block_for_operation(operation_id) else {
+        let Some(user_block) = operation_blocks[operation_index] else {
             return Err(VerifyError::InvalidOperationPlacement {
                 operation: operation_id.value(),
             });
         };
 
         if !dominance.is_reachable(user_block) {
+            verify_operands_precede(ir, operation, operation_index)?;
             continue;
         }
 
         for operand in ir.operation_operands(operation) {
-            if !value_dominates_operation(ir, *operand, user_block, operation_index, &dominance)? {
+            if !value_dominates_operation(
+                ir,
+                *operand,
+                user_block,
+                operation_index,
+                &dominance,
+                &operation_blocks,
+            )? {
                 return Err(VerifyError::NonDominatingUse {
                     value: operand.value(),
                     user: operation_id.value(),
@@ -303,7 +301,34 @@ fn verify_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
     Ok(())
 }
 
-fn verify_edge_argument_uses(ir: &ECodeSsaIr, dominance: &IlDominance) -> Result<(), VerifyError> {
+fn verify_operands_precede(
+    ir: &ECodeSsaIr,
+    operation: &ECodeSsaOp,
+    operation_index: usize,
+) -> Result<(), VerifyError> {
+    let operation_id = IlOpId::try_from_index(operation_index)?;
+
+    for operand in ir.operation_operands(operation) {
+        let value = ir.values()[operand.index()];
+
+        if value.definition_kind() == ECodeSsaValueKind::Operation
+            && value.definition_index() as usize >= operation_index
+        {
+            return Err(VerifyError::NonDominatingUse {
+                value: operand.value(),
+                user: operation_id.value(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_edge_argument_uses(
+    ir: &ECodeSsaIr,
+    dominance: &IlDominance,
+    operation_blocks: &[Option<IlBlockId>],
+) -> Result<(), VerifyError> {
     for (predecessor_index, predecessor) in ir.graph().blocks().iter().enumerate() {
         let predecessor_id = IlBlockId::try_from_index(predecessor_index)?;
 
@@ -340,7 +365,7 @@ fn verify_edge_argument_uses(ir: &ECodeSsaIr, dominance: &IlDominance) -> Result
                     return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
                 }
 
-                if !value_dominates_edge(ir, *value, predecessor_id, dominance)? {
+                if !value_dominates_edge(ir, *value, predecessor_id, dominance, operation_blocks)? {
                     return Err(VerifyError::NonDominatingEdgeArgument {
                         value: value.value(),
                         predecessor: predecessor_id.value(),
@@ -356,20 +381,7 @@ fn verify_edge_argument_uses(ir: &ECodeSsaIr, dominance: &IlDominance) -> Result
 
 fn verify_linear_dominating_uses(ir: &ECodeSsaIr) -> Result<(), VerifyError> {
     for (operation_index, operation) in ir.operations().iter().enumerate() {
-        let operation_id = IlOpId::try_from_index(operation_index)?;
-
-        for operand in ir.operation_operands(operation) {
-            let value = ir.values()[operand.index()];
-
-            if value.definition_kind() == ECodeSsaValueKind::Operation
-                && value.definition_index() as usize >= operation_index
-            {
-                return Err(VerifyError::NonDominatingUse {
-                    value: operand.value(),
-                    user: operation_id.value(),
-                });
-            }
-        }
+        verify_operands_precede(ir, operation, operation_index)?;
     }
 
     Ok(())
@@ -381,6 +393,7 @@ fn value_dominates_operation(
     user_block: IlBlockId,
     user_operation: usize,
     dominance: &IlDominance,
+    operation_blocks: &[Option<IlBlockId>],
 ) -> Result<bool, VerifyError> {
     let value = ir.values()[value_id.index()];
 
@@ -388,7 +401,11 @@ fn value_dominates_operation(
         ECodeSsaValueKind::Operation => {
             let definition_operation = value.definition_index() as usize;
             let operation_id = IlOpId::try_from_index(definition_operation)?;
-            let Some(definition_block) = ir.block_for_operation(operation_id) else {
+            let Some(definition_block) = operation_blocks
+                .get(definition_operation)
+                .copied()
+                .flatten()
+            else {
                 return Err(VerifyError::InvalidOperationPlacement {
                     operation: operation_id.value(),
                 });
@@ -413,6 +430,7 @@ fn value_dominates_edge(
     value_id: IlValueId,
     predecessor: IlBlockId,
     dominance: &IlDominance,
+    operation_blocks: &[Option<IlBlockId>],
 ) -> Result<bool, VerifyError> {
     let value = ir.values()[value_id.index()];
 
@@ -420,7 +438,11 @@ fn value_dominates_edge(
         ECodeSsaValueKind::Operation => {
             let definition_operation = value.definition_index() as usize;
             let operation_id = IlOpId::try_from_index(definition_operation)?;
-            let Some(definition_block) = ir.block_for_operation(operation_id) else {
+            let Some(definition_block) = operation_blocks
+                .get(definition_operation)
+                .copied()
+                .flatten()
+            else {
                 return Err(VerifyError::InvalidOperationPlacement {
                     operation: operation_id.value(),
                 });

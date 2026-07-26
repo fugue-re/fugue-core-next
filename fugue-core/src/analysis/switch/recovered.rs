@@ -1,6 +1,6 @@
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, FunctionId, IncompleteCodeBlockId,
-    IncompleteFunction, Switch, SwitchCase, SwitchId, SwitchModel, SwitchProperties,
+    Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchId,
+    SwitchModel, SwitchProperties,
 };
 use crate::types::Confidence;
 
@@ -25,47 +25,9 @@ impl RecoveredSwitch {
         }
     }
 
-    pub(crate) fn with_default(mut self, default: AddressWithContext) -> Self {
-        self.default = Some(default);
-        self
-    }
-
-    pub(crate) fn infer_default_from_incoming(
-        mut self,
-        function: &IncompleteFunction,
-        branch_block: IncompleteCodeBlockId,
-    ) -> Self {
-        if self.default.is_some() {
-            return self;
-        }
-        let Some(branch) = function.block(branch_block) else {
-            return self;
-        };
-        for predecessor in branch.predecessors().iter() {
-            let Some(guard) = function.block(predecessor) else {
-                continue;
-            };
-            let mut successors = guard.successors().iter();
-            let (Some(first), Some(second), None) =
-                (successors.next(), successors.next(), successors.next())
-            else {
-                continue;
-            };
-            let default = if first == branch_block && second != branch_block {
-                second
-            } else if second == branch_block && first != branch_block {
-                first
-            } else {
-                continue;
-            };
-            let Some(block) = function.block(default) else {
-                continue;
-            };
-            self.default = Some(AddressWithContext::new(
-                block.address(),
-                block.context().clone(),
-            ));
-            break;
+    pub(crate) fn with_fallback_default(mut self, default: Option<AddressWithContext>) -> Self {
+        if self.default.is_none() {
+            self.default = default;
         }
         self
     }
@@ -86,11 +48,11 @@ impl RecoveredSwitch {
         if !self.has_same_layout(&candidate) {
             return None;
         }
-        if candidate.cases.len() > self.cases.len() {
-            Some(candidate)
+        Some(if self.should_replace_with(&candidate) {
+            candidate
         } else {
-            Some(self)
-        }
+            self
+        })
     }
 
     pub(crate) fn should_replace_with(&self, candidate: &Self) -> bool {
@@ -107,10 +69,8 @@ impl RecoveredSwitch {
     pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
         let mut switch = Switch::new(id, branch, self.model)
             .with_function(function)
+            .with_cases(self.cases)
             .with_properties(self.properties);
-        for case in self.cases {
-            switch.add_case(case);
-        }
         if let Some(default) = self.default {
             switch.set_default_case(SwitchCase::new(default));
         }
@@ -159,8 +119,27 @@ impl RecoveredSwitch {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ir::IncompleteCodeBlock;
+    use crate::ir::{IncompleteCodeBlock, IncompleteFunction};
     use crate::lifter::ContextSet;
+
+    fn recovered_with_cases(count: u64, properties: SwitchProperties) -> RecoveredSwitch {
+        let cases = (0..count)
+            .map(|address| SwitchCase::new(Address::from(address).into()))
+            .collect();
+        RecoveredSwitch::new(SwitchModel::Explicit, cases, properties)
+    }
+
+    #[test]
+    fn guarded_recovery_wins_over_larger_unguarded_recovery() {
+        let guarded = recovered_with_cases(2, SwitchProperties::GUARD_FOUND);
+        let unguarded = recovered_with_cases(3, SwitchProperties::empty());
+
+        let reconciled = guarded
+            .reconcile(unguarded)
+            .expect("explicit switch layouts are compatible");
+        assert!(reconciled.is_guarded());
+        assert_eq!(reconciled.cases().len(), 2);
+    }
 
     #[test]
     fn recovered_switch_infers_cfg_default_before_persistence() {
@@ -191,7 +170,7 @@ mod test {
 
         let recovered =
             RecoveredSwitch::new(SwitchModel::Explicit, Vec::new(), SwitchProperties::empty())
-                .infer_default_from_incoming(&function, branch_block)
+                .with_fallback_default(function.sibling_successor_from_incoming(branch_block))
                 .into_switch(SwitchId::INVALID, FunctionId::INVALID, branch);
 
         assert_eq!(

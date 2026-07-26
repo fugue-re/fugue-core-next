@@ -9,9 +9,7 @@ use thiserror::Error;
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId, IdAllocation, IdAllocator};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
-use crate::storage::entities::{
-    Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
-};
+use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::common::cursor_bound;
@@ -23,7 +21,6 @@ use persistent::SwitchTable as PersistentSwitchTable;
 use transient::SwitchTable as TransientSwitchTable;
 
 pub type SwitchRef<'a> = EntityRef<'a, Switch>;
-pub type SwitchMut<'a> = EntityMut<'a, Switch>;
 
 const SWITCH_TABLE_VERSION: u32 = 1;
 
@@ -258,10 +255,8 @@ impl SwitchTable {
     }
 
     pub fn get_by_id(&self, id: SwitchId) -> Option<SwitchRef<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
-        }
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_id(&self, id: SwitchId) -> Result<Option<SwitchRef<'_>>, EntityStorageError> {
@@ -303,26 +298,9 @@ impl SwitchTable {
         }
     }
 
-    pub fn get_by_id_mut(&mut self, id: SwitchId) -> Option<SwitchMut<'_>> {
-        self.try_get_by_id_mut(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_id_mut(
-        &mut self,
-        id: SwitchId,
-    ) -> Result<Option<SwitchMut<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(EntityMut::cached)),
-            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(EntityMut::borrowed)),
-        }
-    }
-
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
-        match self {
-            Self::Persistent(p) => p.modify_by_id(id, f),
-            Self::Transient(t) => t.modify_by_id(id, f),
-        }
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_modify_by_id<R>(
@@ -357,10 +335,8 @@ impl SwitchTable {
     }
 
     pub fn remove_by_id(&mut self, id: SwitchId) -> bool {
-        match self {
-            Self::Persistent(p) => p.remove_by_id(id),
-            Self::Transient(t) => t.remove_by_id(id),
-        }
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_id(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
@@ -403,13 +379,6 @@ impl SwitchTable {
         match self {
             Self::Persistent(p) => Box::new(p.iter().map(EntityRef::cached)),
             Self::Transient(t) => Box::new(t.iter().map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = SwitchMut<'_>> + '_> {
-        match self {
-            Self::Persistent(p) => Box::new(p.iter_mut().map(EntityMut::cached)),
-            Self::Transient(t) => Box::new(t.iter_mut().map(EntityMut::borrowed)),
         }
     }
 

@@ -13,19 +13,19 @@ use crate::ir::{
 };
 use crate::lifter::ContextSet;
 use crate::project::ProjectTransaction;
-use crate::storage::SegmentStorage;
-use crate::storage::segments::SegmentMappingCache;
+use crate::storage::{SegmentMappingCache, SegmentStorage};
 
 pub struct FunctionRecoveryState {
     cancellation: CancellationToken,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
-    function: IncompleteFunction,
+    pub(in crate::analysis) function: IncompleteFunction,
+    pub(in crate::analysis) resolver: InsnResolver,
 }
 
 struct FunctionBuilderAnalysis<'a, 'p> {
     transaction: &'a mut ProjectTransaction<'p>,
-    resolver: &'a mut InsnResolver,
+    resolver_slot: &'a mut Option<InsnResolver>,
     candidate: AddressWithContext,
     token: &'a CancellationToken,
     config: &'a FunctionRecoveryConfig,
@@ -41,6 +41,7 @@ pub struct FunctionBuilderContext {
     contexts: BTreeMap<Address, ContextSet>,
     local_targets: BTreeSet<FlowTarget>,
     global_targets: BTreeSet<AddressWithContext>,
+    mapping_cache: SegmentMappingCache,
     structurer: CodeBlockStructurer,
 }
 
@@ -89,16 +90,16 @@ impl FunctionBuilder {
         &mut self.context
     }
 
-    pub fn analyse(
+    pub(crate) fn analyse(
         &mut self,
         transaction: &mut ProjectTransaction<'_>,
-        resolver: &mut InsnResolver,
+        resolver_slot: &mut Option<InsnResolver>,
         candidate: impl Into<AddressWithContext>,
         token: &CancellationToken,
     ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
         self.context.analyse(FunctionBuilderAnalysis {
             transaction,
-            resolver,
+            resolver_slot,
             candidate: candidate.into(),
             token,
             config: &self.config,
@@ -248,9 +249,8 @@ impl FunctionBuilderContext {
         token: &CancellationToken,
         use_mapping_hints: bool,
     ) -> Result<(), Cancelled> {
-        let mut mapping_cache = SegmentMappingCache::new(segments);
-        mapping_cache
-            .view_containing(self.entry())
+        self.mapping_cache
+            .view_containing(segments, self.entry())
             .expect("function entry is valid");
 
         'outer: while let Some(candidate) = self.candidates.pop_front() {
@@ -269,7 +269,7 @@ impl FunctionBuilderContext {
             };
             let block = Address::new(block_space, block);
 
-            let Some(view) = mapping_cache.view_containing(block).cloned() else {
+            let Some(view) = self.mapping_cache.view_containing(segments, block) else {
                 tracing::trace!("skipping {block}: not mapped in any segment");
                 continue 'outer;
             };
@@ -298,7 +298,9 @@ impl FunctionBuilderContext {
             context.apply(block, resolver.context_mut());
 
             // Save the context so we can associate it with a block later.
-            self.contexts.entry(block).or_insert(context.clone());
+            self.contexts
+                .entry(block)
+                .or_insert_with(|| context.clone());
 
             let mut offset = 0usize;
 
@@ -338,15 +340,21 @@ impl FunctionBuilderContext {
                         // for this we mark instructions that appear in multiple blocks as starts
                         // so they're considered cut points when performing block structuring.
                         entry.get_mut().mark_maybe_taken();
-                        self.contexts.entry(address).or_default();
+                        self.contexts
+                            .entry(address)
+                            .or_insert_with(|| context.clone());
                         continue 'outer;
                     }
                 };
 
-                let Ok(bytes) = mapping_cache.contiguous_bytes_from(address) else {
+                let Ok(bytes_view) = self.mapping_cache.contiguous_bytes_from(segments, address)
+                else {
                     tracing::trace!("skipping {address}: not mapped in segment");
                     continue 'outer;
                 };
+                let bytes = bytes_view
+                    .as_contiguous()
+                    .expect("contiguous mapping view must contain bytes");
 
                 if self.avoids.contains(address) {
                     tracing::trace!("skipping {address}: in avoidance set");
@@ -521,11 +529,15 @@ impl FunctionBuilderContext {
 
             let arch = analysis.transaction.project().arch();
             let segments = analysis.transaction.project().segments();
+            let resolver = analysis
+                .resolver_slot
+                .as_mut()
+                .expect("function builder resolver must be initialised");
 
             if let Err(cancelled) = self.resolve_insns(
                 arch,
                 segments,
-                analysis.resolver,
+                resolver,
                 &mut incomplete,
                 analysis.token,
                 analysis.config.use_segment_mapping_hints(),
@@ -547,6 +559,10 @@ impl FunctionBuilderContext {
                 config: *analysis.config,
                 context: mem::take(self),
                 function: mem::take(&mut incomplete),
+                resolver: analysis
+                    .resolver_slot
+                    .take()
+                    .expect("function builder resolver must be initialised"),
             };
 
             // Run post-structuring passes
@@ -556,6 +572,7 @@ impl FunctionBuilderContext {
 
             *self = state.context;
             incomplete = state.function;
+            *analysis.resolver_slot = Some(state.resolver);
 
             result.map_err(FunctionRecoveryError::PostStructuringPass)?;
 

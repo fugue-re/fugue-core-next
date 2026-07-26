@@ -11,16 +11,21 @@ use crate::platform::Platform;
 use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
-pub mod aarch64;
-pub mod arm;
-pub mod mips;
-pub mod registry;
-pub mod x86;
-pub mod x86_64;
+pub(crate) mod aarch64;
+pub(crate) mod arm;
+pub(crate) mod mips;
+pub(crate) mod registry;
+pub(crate) mod x86;
+pub(crate) mod x86_64;
 
-pub use registry::ArchError;
+pub use aarch64::AArch64;
+pub use arm::Arm;
+pub use mips::Mips;
+pub use registry::{ArchError, ArchProvider, LanguageProvider, provide_arch, provide_language};
+pub use x86::X86;
+pub use x86_64::X86_64;
 
-pub mod traits;
+pub(crate) mod traits;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};
 

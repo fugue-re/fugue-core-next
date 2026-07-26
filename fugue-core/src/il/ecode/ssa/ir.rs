@@ -5,8 +5,8 @@ use crate::il::common::{
     IlSchemaVersion, IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
-    ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode,
+    ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_SSA_ID;
@@ -32,73 +32,44 @@ pub struct ECodeSsaIr {
 }
 
 impl ECodeSsaIr {
-    pub(crate) fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
-        let edge_arguments = vec![IlIndexRange::EMPTY; graph.successors().len()];
-
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        metadata: IlMetadata,
+        graph: IlGraph,
+        source_spans: Vec<IlSourceSpan>,
+        parent_spans: Vec<IlParentSpan>,
+        values: Vec<ECodeSsaValue>,
+        block_arguments: Vec<ECodeSsaBlockArg>,
+        edge_arguments: Vec<IlIndexRange>,
+        edge_argument_values: Vec<IlValueId>,
+        operations: Vec<ECodeSsaOp>,
+        value_operands: Vec<IlValueId>,
+        memory_domains: Vec<ECodeSsaMemoryDomain>,
+        constant_storage: Vec<u8>,
+    ) -> Self {
         Self {
             metadata,
             graph,
-            source_spans: Vec::new(),
-            parent_spans: Vec::new(),
-            values: Vec::new(),
-            block_arguments: Vec::new(),
+            source_spans,
+            parent_spans,
+            values,
+            block_arguments,
             edge_arguments,
-            edge_argument_values: Vec::new(),
-            operations: Vec::new(),
-            value_operands: Vec::new(),
-            memory_domains: Vec::new(),
-            constant_storage: Vec::new(),
+            edge_argument_values,
+            operations,
+            value_operands,
+            memory_domains,
+            constant_storage,
         }
     }
 
-    pub(crate) fn with_spans(
-        mut self,
-        source_spans: Vec<IlSourceSpan>,
-        parent_spans: Vec<IlParentSpan>,
-    ) -> Self {
-        self.source_spans = source_spans;
-        self.parent_spans = parent_spans;
-        self
-    }
-
-    pub(crate) fn with_values(
-        mut self,
-        values: Vec<ECodeSsaValue>,
-        block_arguments: Vec<ECodeSsaBlockArg>,
-    ) -> Self {
-        self.values = values;
-        self.block_arguments = block_arguments;
-        self
-    }
-
-    pub(crate) fn with_operations(
-        mut self,
-        operations: Vec<ECodeSsaOp>,
-        value_operands: Vec<IlValueId>,
-    ) -> Self {
-        self.operations = operations;
-        self.value_operands = value_operands;
-        self
-    }
-
-    pub(crate) fn with_memory_domains(mut self, memory_domains: Vec<ECodeSsaMemoryDomain>) -> Self {
-        self.memory_domains = memory_domains;
-        self
-    }
-
-    pub(crate) fn with_edge_argument_storage(
-        mut self,
-        edge_arguments: Vec<IlIndexRange>,
-        edge_argument_values: Vec<IlValueId>,
-    ) -> Self {
-        self.edge_arguments = edge_arguments;
-        self.edge_argument_values = edge_argument_values;
-        self
-    }
-
-    pub(crate) fn with_constant_storage(mut self, constant_storage: Vec<u8>) -> Self {
-        self.constant_storage = constant_storage;
-        self
+    pub(crate) fn rewriter(&mut self) -> ECodeSsaRewriter<'_> {
+        let mut constants = ECodeSsaConstantInterner::new(&mut self.constant_storage);
+        constants.seed(&self.operations);
+        ECodeSsaRewriter {
+            operations: &mut self.operations,
+            constants,
+        }
     }
 
     pub const fn metadata(&self) -> &IlMetadata {
@@ -167,59 +138,26 @@ impl ECodeSsaIr {
         operation.operands().slice(&self.value_operands)
     }
 
-    pub(crate) fn operations_and_constants_mut(&mut self) -> (&mut [ECodeSsaOp], &mut Vec<u8>) {
-        (&mut self.operations, &mut self.constant_storage)
-    }
-
-    pub(crate) fn replace_graph(&mut self, graph: IlGraph) {
-        self.graph = graph;
-    }
-
-    pub(crate) fn replace_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
-        self.source_spans = source_spans;
-    }
-
-    pub(crate) fn replace_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
-        self.parent_spans = parent_spans;
-    }
-
-    pub(crate) fn replace_values(
-        &mut self,
-        values: Vec<ECodeSsaValue>,
-        block_arguments: Vec<ECodeSsaBlockArg>,
-    ) {
-        self.values = values;
-        self.block_arguments = block_arguments;
-    }
-
-    pub(crate) fn replace_operation_storage(
-        &mut self,
-        operations: Vec<ECodeSsaOp>,
-        value_operands: Vec<IlValueId>,
-    ) {
-        self.operations = operations;
-        self.value_operands = value_operands;
-    }
-
-    pub(crate) fn replace_edge_argument_storage(
-        &mut self,
-        edge_arguments: Vec<IlIndexRange>,
-        edge_argument_values: Vec<IlValueId>,
-    ) {
-        self.edge_arguments = edge_arguments;
-        self.edge_argument_values = edge_argument_values;
-    }
-
-    pub(crate) fn replace_constant_storage(&mut self, constant_storage: Vec<u8>) {
-        self.constant_storage = constant_storage;
-    }
-
     pub(crate) fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
         self.graph
             .blocks()
             .iter()
             .position(|block| block.operations().contains_index(operation.index()))
             .and_then(|index| IlBlockId::try_from_index(index).ok())
+    }
+
+    pub(crate) fn operation_blocks(&self) -> Vec<Option<IlBlockId>> {
+        let mut operation_blocks = vec![None; self.operations.len()];
+        for (index, block) in self.graph.blocks().iter().enumerate() {
+            let block_id =
+                IlBlockId::try_from_index(index).expect("block count fits the block id space");
+            for operation in block.operations().start()..block.operations().end() {
+                if let Some(entry) = operation_blocks.get_mut(operation) {
+                    *entry = Some(block_id);
+                }
+            }
+        }
+        operation_blocks
     }
 
     pub(crate) fn block_address(&self, block: IlBlockId) -> Option<Address> {
@@ -276,22 +214,25 @@ impl ECodeSsaIr {
         current
     }
 
-    pub(crate) fn inserted_value_for_exact_extract(&self, value: IlValueId) -> Option<IlValueId> {
+    pub(crate) fn extract_source(&self, value: IlValueId) -> Option<IlValueId> {
         let extract = self.defining_operation(value)?;
         if extract.opcode() != ECodeSsaOpcode::Extract {
             return None;
         }
-        let extract_operands = self.operation_operands(extract);
-        let (&source, &extract_offset) = (extract_operands.first()?, extract_operands.get(1)?);
-        let extract_offset = self.constant_value(extract_offset)?.to_u64()?;
+        let operands = self.operation_operands(extract);
+        let (&source, &offset) = (operands.first()?, operands.get(1)?);
+        let offset = self.constant_value(offset)?.to_u64()?;
 
-        let insert = self.defining_operation(source)?;
-        if insert.opcode() != ECodeSsaOpcode::Insert || insert.immediate() != extract_offset {
-            return None;
+        if let Some(insert) = self.defining_operation(source)
+            && insert.opcode() == ECodeSsaOpcode::Insert
+            && insert.immediate() == offset
+            && let Some(&inserted) = self.operation_operands(insert).get(1)
+            && self.value_width(inserted) == Some(extract.width())
+        {
+            return Some(inserted);
         }
 
-        let inserted = *self.operation_operands(insert).get(1)?;
-        (self.value_width(inserted)? == extract.width()).then_some(inserted)
+        (offset == 0).then_some(source)
     }
 
     pub(crate) fn value_width(&self, value: IlValueId) -> Option<u32> {
@@ -319,7 +260,7 @@ impl ECodeSsaIr {
     pub fn operations_for_source(
         &self,
         address: Address,
-    ) -> impl Iterator<Item = (usize, &ECodeSsaOp)> + '_ {
+    ) -> impl Iterator<Item = (IlOpId, &ECodeSsaOp)> + '_ {
         self.source_spans
             .iter()
             .filter(move |run| run.address() == address)
@@ -329,7 +270,38 @@ impl ECodeSsaIr {
                     .slice(&self.operations)
                     .iter()
                     .enumerate()
-                    .map(move |(index, operation)| (start + index, operation))
+                    .map(move |(index, operation)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("operation count fits the operation id space"),
+                            operation,
+                        )
+                    })
+            })
+    }
+
+    pub fn operations_for_block(
+        &self,
+        block: IlBlockId,
+    ) -> impl DoubleEndedIterator<Item = (IlOpId, &ECodeSsaOp)> + '_ {
+        self.graph
+            .blocks()
+            .get(block.index())
+            .into_iter()
+            .flat_map(|block| {
+                let start = block.operations().start();
+                block
+                    .operations()
+                    .slice(&self.operations)
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, operation)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("operation count fits the operation id space"),
+                            operation,
+                        )
+                    })
             })
     }
 
@@ -345,6 +317,22 @@ impl ECodeSsaIr {
         self.value_operands.shrink_to_fit();
         self.memory_domains.shrink_to_fit();
         self.constant_storage.shrink_to_fit();
+    }
+}
+
+pub(crate) struct ECodeSsaRewriter<'a> {
+    operations: &'a mut Vec<ECodeSsaOp>,
+    constants: ECodeSsaConstantInterner<'a>,
+}
+
+impl ECodeSsaRewriter<'_> {
+    pub(crate) fn operations(&self) -> &[ECodeSsaOp] {
+        self.operations
+    }
+
+    pub(crate) fn replace_with_constant(&mut self, operation: IlOpId, value: &BitVec) {
+        let immediate = self.constants.intern(value);
+        self.operations[operation.index()].replace_with_constant(immediate);
     }
 }
 
@@ -374,5 +362,11 @@ impl IlArtefact for ECodeSsaIr {
 
     fn graph(&self) -> &IlGraph {
         &self.graph
+    }
+
+    #[cfg(debug_assertions)]
+    fn verify_after_rewrite(&self) {
+        self.verify()
+            .expect("ECode SSA rewrite produced invalid IR");
     }
 }

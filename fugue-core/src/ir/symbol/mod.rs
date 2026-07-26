@@ -41,7 +41,7 @@ impl Display for SymbolTableSelector {
 #[macro_export]
 macro_rules! lazy_symbol {
     ($value:literal) => {
-        ::std::sync::LazyLock::new(|| ::fugue_core::ir::symbol::symbol($value))
+        ::std::sync::LazyLock::new(|| ::fugue_core::ir::symbol($value))
     };
 }
 

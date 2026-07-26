@@ -1542,19 +1542,36 @@ impl AddressTable {
         self.address + index as u64 * self.element_size as u64
     }
 
-    pub fn range(&self) -> AddressRange {
+    pub fn range(&self) -> Option<AddressRange> {
+        let size = self.size();
+        if size == 0 {
+            return None;
+        }
         let start = self.address.raw_address();
-        AddressRange::new(
+        Some(AddressRange::new(
             self.address.space(),
             start,
-            start + self.size().saturating_sub(1),
-        )
+            start + size - 1u64,
+        ))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn empty_address_table_has_no_range() {
+        let table = AddressTable::new(Address::from(0x1000u64), 4);
+        assert_eq!(table.range(), None);
+    }
+
+    #[test]
+    fn zero_element_size_table_has_no_range() {
+        let mut table = AddressTable::new(Address::from(0x1000u64), 0);
+        table.set_element_count(4);
+        assert_eq!(table.range(), None);
+    }
 
     #[test]
     fn raw_address_aligns_in_both_directions() {

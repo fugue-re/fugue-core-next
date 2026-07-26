@@ -118,8 +118,8 @@ fn exact_insert_extract_pair_recovers_only_the_inserted_value() {
 
     let ssa = builder.build(&CancellationToken::default()).unwrap();
 
-    assert_eq!(ssa.inserted_value_for_exact_extract(exact), Some(inserted));
-    assert_eq!(ssa.inserted_value_for_exact_extract(narrow), None);
-    assert_eq!(ssa.inserted_value_for_exact_extract(shifted), None);
+    assert_eq!(ssa.extract_source(exact), Some(inserted));
+    assert_eq!(ssa.extract_source(narrow), None);
+    assert_eq!(ssa.extract_source(shifted), Some(combined));
     assert_eq!(ssa.underlying_value(exact), exact);
 }

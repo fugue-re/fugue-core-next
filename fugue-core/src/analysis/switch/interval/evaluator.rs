@@ -1,19 +1,18 @@
 use fugue_bv::BitVec;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::SwitchIntervalContext;
 use crate::il::common::IlValueId;
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, RawAddress};
-use crate::storage::segments::SegmentMappingCache;
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::AddressSpaceId;
 
 pub(crate) struct SwitchTargetEvaluator<'context, 'analysis> {
     context: &'context SwitchIntervalContext<'analysis>,
     space: AddressSpaceId,
-    mapping_cache: SegmentMappingCache<'analysis>,
     memo: FxHashMap<IlValueId, BitVec>,
+    dependent: FxHashSet<IlValueId>,
     stack: Vec<EvaluationStep>,
 }
 
@@ -24,20 +23,6 @@ enum EvaluationStep {
     Forward { value: IlValueId, input: IlValueId },
 }
 
-impl EvaluationStep {
-    const fn apply(value: IlValueId) -> Self {
-        Self::Apply(value)
-    }
-
-    const fn evaluate(value: IlValueId) -> Self {
-        Self::Evaluate(value)
-    }
-
-    const fn forward(value: IlValueId, input: IlValueId) -> Self {
-        Self::Forward { value, input }
-    }
-}
-
 impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
     pub(crate) fn new(
         context: &'context SwitchIntervalContext<'analysis>,
@@ -46,8 +31,8 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
         Self {
             context,
             space,
-            mapping_cache: SegmentMappingCache::new(context.segments),
             memo: FxHashMap::default(),
+            dependent: FxHashSet::default(),
             stack: Vec::new(),
         }
     }
@@ -57,65 +42,88 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
         target: IlValueId,
         index: IlValueId,
         assignment: &BitVec,
+        mut read_memory: impl FnMut(Address, usize) -> Option<BitVec>,
     ) -> Option<BitVec> {
-        self.memo.clear();
+        self.dependent.clear();
         self.stack.clear();
-        self.stack.push(EvaluationStep::evaluate(target));
+        self.stack.push(EvaluationStep::Evaluate(target));
         self.memo.insert(index, assignment.clone());
+        self.dependent.insert(index);
         let mut steps = 0usize;
 
-        while let Some(step) = self.stack.pop() {
-            steps += 1;
-            if steps > self.context.config.max_trace_steps() {
-                return None;
-            }
+        let result = (|| {
+            while let Some(step) = self.stack.pop() {
+                steps = steps.checked_add(1)?;
+                if steps > self.context.config.max_trace_steps() {
+                    return None;
+                }
 
-            match step {
-                EvaluationStep::Evaluate(value) => {
-                    if self.memo.contains_key(&value) {
-                        continue;
-                    }
+                match step {
+                    EvaluationStep::Evaluate(value) => {
+                        if self.memo.contains_key(&value) {
+                            continue;
+                        }
 
-                    let Some(operation) = self.context.ssa.defining_operation(value) else {
-                        if let Some(input) = self.context.common_block_argument_input(value) {
-                            self.stack.push(EvaluationStep::forward(value, input));
-                            if !self.memo.contains_key(&input) {
-                                self.stack.push(EvaluationStep::evaluate(input));
+                        let Some(operation) = self.context.ssa.defining_operation(value) else {
+                            if let Some(input) = self.context.common_block_argument_input(value) {
+                                self.stack.push(EvaluationStep::Forward { value, input });
+                                if !self.memo.contains_key(&input) {
+                                    self.stack.push(EvaluationStep::Evaluate(input));
+                                }
+                            }
+                            continue;
+                        };
+
+                        self.stack.push(EvaluationStep::Apply(value));
+                        if operation.opcode() == ECodeSsaOpcode::Load {
+                            let pointer = self.context.ssa.pointer_operand(operation)?;
+                            if !self.memo.contains_key(&pointer) {
+                                self.stack.push(EvaluationStep::Evaluate(pointer));
+                            }
+                            continue;
+                        }
+                        for &operand in self.context.ssa.operation_operands(operation) {
+                            if !self.memo.contains_key(&operand) {
+                                self.stack.push(EvaluationStep::Evaluate(operand));
                             }
                         }
-                        continue;
-                    };
-
-                    self.stack.push(EvaluationStep::apply(value));
-                    if operation.opcode() == ECodeSsaOpcode::Load {
-                        let pointer = self.context.ssa.pointer_operand(operation)?;
-                        if !self.memo.contains_key(&pointer) {
-                            self.stack.push(EvaluationStep::evaluate(pointer));
-                        }
-                        continue;
                     }
-                    for &operand in self.context.ssa.operation_operands(operation) {
-                        if !self.memo.contains_key(&operand) {
-                            self.stack.push(EvaluationStep::evaluate(operand));
+                    EvaluationStep::Apply(value) => {
+                        let operation = self.context.ssa.defining_operation(value)?;
+                        let result = self.apply(value, operation, &mut read_memory)?;
+                        if self
+                            .context
+                            .ssa
+                            .operation_operands(operation)
+                            .iter()
+                            .any(|operand| self.dependent.contains(operand))
+                        {
+                            self.dependent.insert(value);
                         }
+                        self.memo.insert(value, result);
                     }
-                }
-                EvaluationStep::Apply(value) => {
-                    let operation = self.context.ssa.defining_operation(value)?;
-                    let result = self.apply(value, operation)?;
-                    self.memo.insert(value, result);
-                }
-                EvaluationStep::Forward { value, input } => {
-                    let result = self.memo.get(&input).cloned()?;
-                    self.memo.insert(value, result);
+                    EvaluationStep::Forward { value, input } => {
+                        let result = self.memo.get(&input).cloned()?;
+                        if self.dependent.contains(&input) {
+                            self.dependent.insert(value);
+                        }
+                        self.memo.insert(value, result);
+                    }
                 }
             }
-        }
 
-        self.memo.remove(&target)
+            self.memo.get(&target).cloned()
+        })();
+        self.memo.retain(|value, _| !self.dependent.contains(value));
+        result
     }
 
-    fn apply(&mut self, value: IlValueId, operation: &ECodeSsaOp) -> Option<BitVec> {
+    fn apply(
+        &mut self,
+        value: IlValueId,
+        operation: &ECodeSsaOp,
+        read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
+    ) -> Option<BitVec> {
         match operation.opcode() {
             ECodeSsaOpcode::Constant => self.context.ssa.constant_value(value),
             ECodeSsaOpcode::Load => {
@@ -124,7 +132,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                     .ssa
                     .pointer_operand(operation)
                     .and_then(|pointer| self.memo.get(&pointer).cloned())?;
-                self.load(operation, &pointer)
+                self.load(operation, &pointer, read_memory)
             }
             opcode => {
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
@@ -136,17 +144,19 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
         }
     }
 
-    fn load(&mut self, operation: &ECodeSsaOp, pointer: &BitVec) -> Option<BitVec> {
+    fn load(
+        &mut self,
+        operation: &ECodeSsaOp,
+        pointer: &BitVec,
+        read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
+    ) -> Option<BitVec> {
         let bytes = operation.width().div_ceil(8) as usize;
         if bytes == 0 {
             return None;
         }
         let space = operation.address_space().unwrap_or(self.space);
         let address = Address::new(space, RawAddress::from(pointer.to_u64()?));
-        let value = self
-            .mapping_cache
-            .read_bitvec(address, bytes, self.context.arch.endian())
-            .ok()?;
+        let value = read_memory(address, bytes)?;
         Some(value.cast(operation.width()))
     }
 }

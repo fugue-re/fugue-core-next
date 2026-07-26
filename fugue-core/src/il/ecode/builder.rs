@@ -5,14 +5,16 @@ use crate::il::common::{
 };
 use crate::il::ecode::format::ECodeIrDisplay;
 use crate::il::ecode::{ECodeExpr, ECodeStmt};
+use crate::il::pcode::RegisterId;
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 
-pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
+pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ECodeIr {
+    call_preserved_registers: Vec<RegisterId>,
     metadata: IlMetadata,
     graph: IlGraph,
     source_spans: Vec<IlSourceSpan>,
@@ -34,8 +36,12 @@ impl ECodeIr {
         expression_operands: Vec<IlExprId>,
         statements: Vec<ECodeStmt>,
         statement_operands: Vec<IlExprId>,
+        mut call_preserved_registers: Vec<RegisterId>,
     ) -> Self {
+        call_preserved_registers.sort_unstable();
+        call_preserved_registers.dedup();
         Self {
+            call_preserved_registers,
             metadata,
             graph,
             source_spans,
@@ -87,6 +93,10 @@ impl ECodeIr {
         &self.statement_operands
     }
 
+    pub(crate) fn call_preserved_registers(&self) -> &[RegisterId] {
+        &self.call_preserved_registers
+    }
+
     pub fn expression_operands_for(&self, expression: &ECodeExpr) -> &[IlExprId] {
         expression.operands().slice(&self.expression_operands)
     }
@@ -117,6 +127,7 @@ impl ECodeIr {
     }
 
     pub fn shrink_to_fit(&mut self) {
+        self.call_preserved_registers.shrink_to_fit();
         self.graph.shrink_to_fit();
         self.source_spans.shrink_to_fit();
         self.parent_spans.shrink_to_fit();
@@ -158,6 +169,7 @@ impl IlArtefact for ECodeIr {
 
 #[derive(Debug)]
 pub(crate) struct ECodeBuilder {
+    call_preserved_registers: Vec<RegisterId>,
     metadata: IlMetadata,
     graph: IlGraph,
     source_spans: Vec<IlSourceSpan>,
@@ -171,6 +183,7 @@ pub(crate) struct ECodeBuilder {
 impl ECodeBuilder {
     pub(crate) fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
         Self {
+            call_preserved_registers: Vec::new(),
             metadata,
             graph,
             source_spans: Vec::new(),
@@ -205,11 +218,15 @@ impl ECodeBuilder {
         self.statements.len()
     }
 
-    pub(crate) fn replace_graph(&mut self, graph: IlGraph) {
+    pub(crate) fn set_graph(&mut self, graph: IlGraph) {
         self.graph = graph;
     }
 
-    pub(crate) fn replace_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
+    pub(crate) fn set_call_preserved_registers(&mut self, registers: Vec<RegisterId>) {
+        self.call_preserved_registers = registers;
+    }
+
+    pub(crate) fn set_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
         self.parent_spans = parent_spans;
     }
 
@@ -220,7 +237,7 @@ impl ECodeBuilder {
         self.statement_operands.append(operands)
     }
 
-    pub(crate) fn replace_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
+    pub(crate) fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
         self.source_spans = source_spans;
     }
 
@@ -236,6 +253,7 @@ impl ECodeBuilder {
             self.expression_operands.into_values(),
             self.statements,
             self.statement_operands.into_values(),
+            self.call_preserved_registers,
         );
 
         body.shrink_to_fit();
@@ -307,6 +325,7 @@ mod test {
                 ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
                 ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
             ],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -383,6 +402,36 @@ mod test {
         assert!(matches!(
             body.verify(),
             Err(VerifyError::Il(IlError::MissingComponent { .. }))
+        ));
+    }
+
+    #[test]
+    fn ecode_verifier_rejects_non_preceding_expression_operand() {
+        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let body = ECodeIr::new(
+            metadata,
+            IlGraph::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                ECodeExpr::new(
+                    ECodeExprOpcode::Copy,
+                    64,
+                    IlIndexRange::new(0, 1).unwrap(),
+                    0,
+                    None,
+                ),
+                ECodeExpr::new(ECodeExprOpcode::Constant, 64, IlIndexRange::EMPTY, 1, None),
+            ],
+            vec![IlExprId::try_from_index(1).unwrap()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            body.verify(),
+            Err(VerifyError::InvalidOperandOrdering { expression: 0 })
         ));
     }
 }

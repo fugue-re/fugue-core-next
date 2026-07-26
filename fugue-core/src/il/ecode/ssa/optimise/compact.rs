@@ -193,12 +193,21 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             graph.with_block_sources(ir.graph().block_sources().to_vec())
         };
 
-        ir.replace_graph(graph);
-        ir.replace_source_spans(source_spans);
-        ir.replace_parent_spans(parent_spans);
-        ir.replace_values(values, block_arguments);
-        ir.replace_operation_storage(operations, value_operands);
-        ir.replace_edge_argument_storage(edge_arguments, edge_argument_values);
-        ir.replace_constant_storage(constants);
+        let metadata = *ir.metadata();
+        let memory_domains = ir.memory_domains().to_vec();
+        *ir = ECodeSsaIr::new(
+            metadata,
+            graph,
+            source_spans,
+            parent_spans,
+            values,
+            block_arguments,
+            edge_arguments,
+            edge_argument_values,
+            operations,
+            value_operands,
+            memory_domains,
+            constants,
+        );
     }
 }

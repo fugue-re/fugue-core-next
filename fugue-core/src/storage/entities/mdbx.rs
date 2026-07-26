@@ -281,9 +281,16 @@ impl<'a> Iterator for MdbxEntityKeyBytesIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = self.prefix.as_deref()?;
 
-        let Some(Ok((key, _val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
-            self.prefix = None;
-            return None;
+        let (key, _value) = match self.inner.with_iter_mut(|iter| iter.next()) {
+            Some(Ok(entry)) => entry,
+            Some(Err(error)) => {
+                self.prefix = None;
+                return Some(Err(EntityStorageError::backing(error)));
+            }
+            None => {
+                self.prefix = None;
+                return None;
+            }
         };
 
         if key.starts_with(prefix) {
@@ -366,9 +373,16 @@ impl<'a> Iterator for MdbxEntityBytesIterator<'a> {
         let prefix = self.prefix.as_deref()?;
 
         loop {
-            let Some(Ok((key, val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
-                self.prefix = None;
-                return None;
+            let (key, val) = match self.inner.with_iter_mut(|iter| iter.next()) {
+                Some(Ok(entry)) => entry,
+                Some(Err(error)) => {
+                    self.prefix = None;
+                    return Some(Err(EntityStorageError::backing(error)));
+                }
+                None => {
+                    self.prefix = None;
+                    return None;
+                }
             };
 
             if !key.starts_with(prefix) {
@@ -433,9 +447,16 @@ impl<'a, T> Iterator for MdbxEntityBytesAsIterator<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = self.prefix.as_deref()?;
 
-        let Some(Ok((key, val))) = self.inner.with_iter_mut(|iter| iter.next()) else {
-            self.prefix = None;
-            return None;
+        let (key, val) = match self.inner.with_iter_mut(|iter| iter.next()) {
+            Some(Ok(entry)) => entry,
+            Some(Err(error)) => {
+                self.prefix = None;
+                return Some(Err(EntityStorageError::backing(error)));
+            }
+            None => {
+                self.prefix = None;
+                return None;
+            }
         };
 
         if key.starts_with(prefix) {

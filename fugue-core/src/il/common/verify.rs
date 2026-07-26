@@ -3,11 +3,11 @@ use thiserror::Error;
 use crate::il::common::{IlError, IlParentSpan, IlSourceSpan};
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum StructureError {
+pub enum StructureError {
     #[error("block source count mismatch: expected {expected}, found {found}")]
     BlockSourceCount { expected: usize, found: usize },
     #[error("block {block} has duplicate successor {successor}")]
-    DuplicateSuccessor { block: usize, successor: usize },
+    DuplicateSuccessor { block: u32, successor: u32 },
     #[error(transparent)]
     Il(#[from] IlError),
     #[error("block {block} operation range overlaps at operation {operation}")]
@@ -16,6 +16,17 @@ pub(crate) enum StructureError {
     OverlappingParentSpan { node: u32 },
     #[error("source spans overlap at destination node {node}")]
     OverlappingSourceSpan { node: u32 },
+}
+
+pub trait StructureVerifierError: From<IlError> {
+    fn structure(error: StructureError) -> Self;
+
+    fn from_structure(error: StructureError) -> Self {
+        match error {
+            StructureError::Il(error) => error.into(),
+            error => Self::structure(error),
+        }
+    }
 }
 
 pub(crate) fn verify_source_spans(
@@ -60,6 +71,7 @@ pub(crate) fn verify_parent_spans(
 
     Ok(())
 }
+
 #[cfg(test)]
 mod test {
     use super::*;

@@ -116,13 +116,6 @@ impl SwitchTable {
         self.index.contains(branch)
     }
 
-    pub fn get_by_id_mut(&mut self, id: SwitchId) -> Option<&mut Switch> {
-        self.entries
-            .get_mut(id.index())?
-            .as_mut()
-            .filter(|switch| switch.id() == id)
-    }
-
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
         let switch = self
             .entries
@@ -183,10 +176,6 @@ impl SwitchTable {
 
     pub fn iter(&self) -> impl Iterator<Item = &Switch> + '_ {
         self.entries.iter().filter_map(Option::as_ref)
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Switch> + '_ {
-        self.entries.iter_mut().filter_map(Option::as_mut)
     }
 
     pub fn is_empty(&self) -> bool {

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::il::common::verify::{StructureError, verify_parent_spans, verify_source_spans};
+use crate::il::common::verify::{StructureError, StructureVerifierError};
 use crate::il::common::{IlArtefact, IlError};
 use crate::il::ecode::{ECodeExpr, ECodeIr, ECodeStmt};
 
@@ -10,37 +10,28 @@ pub(crate) enum VerifyError {
     Il(#[from] IlError),
     #[error("ECode operation has an invalid operand count: expected {expected}, found {found}")]
     InvalidOperandCount { expected: usize, found: usize },
+    #[error("ECode expression {expression} references a non-preceding operand")]
+    InvalidOperandOrdering { expression: usize },
     #[error(transparent)]
     Structure(StructureError),
 }
 
-impl From<StructureError> for VerifyError {
-    fn from(error: StructureError) -> Self {
-        match error {
-            StructureError::Il(error) => Self::Il(error),
-            error => Self::Structure(error),
-        }
+impl StructureVerifierError for VerifyError {
+    fn structure(error: StructureError) -> Self {
+        Self::Structure(error)
     }
 }
 
 impl ECodeIr {
     pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        if self.metadata().schema() != Self::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                Self::LEVEL,
-                Self::SCHEMA.value(),
-                self.metadata().schema().value(),
-            )
-            .into());
-        }
+        self.verify_structure::<VerifyError>(
+            self.source_spans(),
+            Some(self.parent_spans()),
+            self.statements().len(),
+        )?;
 
-        self.graph().verify()?;
-        self.graph().verify_node_bounds(self.statements().len())?;
-        verify_source_spans(self.source_spans(), self.statements().len())?;
-        verify_parent_spans(self.parent_spans(), self.statements().len())?;
-
-        for expression in self.expressions() {
-            self.verify_expression(expression)?;
+        for (index, expression) in self.expressions().iter().enumerate() {
+            self.verify_expression(index, expression)?;
         }
 
         for statement in self.statements() {
@@ -50,7 +41,11 @@ impl ECodeIr {
         Ok(())
     }
 
-    fn verify_expression(&self, expression: &ECodeExpr) -> Result<(), VerifyError> {
+    fn verify_expression(
+        &self,
+        expression_index: usize,
+        expression: &ECodeExpr,
+    ) -> Result<(), VerifyError> {
         expression
             .operands()
             .verify_bounds(self.expression_operands().len())?;
@@ -69,6 +64,11 @@ impl ECodeIr {
         }
 
         for operand in self.expression_operands_for(expression) {
+            if operand.index() >= expression_index {
+                return Err(VerifyError::InvalidOperandOrdering {
+                    expression: expression_index,
+                });
+            }
             self.expressions()
                 .get(operand.index())
                 .ok_or(IlError::range_out_of_bounds(

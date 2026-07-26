@@ -194,7 +194,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 return (current, before);
             };
             match defining.op() {
-                Op::IntMul | Op::IntLeftShift => {
+                Op::IntMul => {
                     let Some((_, variable)) = defining
                         .inputs()
                         .first()
@@ -204,6 +204,18 @@ impl<'a> SwitchIdiomMatcher<'a> {
                     else {
                         return (current, before);
                     };
+                    current = variable;
+                    before = index;
+                }
+                Op::IntLeftShift => {
+                    let Some((&variable, scale)) =
+                        defining.inputs().first().zip(defining.inputs().get(1))
+                    else {
+                        return (current, before);
+                    };
+                    if !scale.is_constant() {
+                        return (current, before);
+                    }
                     current = variable;
                     before = index;
                 }
@@ -377,5 +389,96 @@ impl<'a> SwitchIdiomMatcher<'a> {
                 .unwrap_or(0),
             _ => 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use fugue_lifter::runtime::pcode::Inputs;
+
+    use super::*;
+
+    fn matcher_for_operations(operations: &[RawPCodeOp]) -> SwitchIdiomMatcher<'_> {
+        SwitchIdiomMatcher::new(operations, 4).expect("operations contain a branch")
+    }
+
+    #[test]
+    fn label_offset_rejects_constant_minus_index() {
+        let index = Varnode::new(1, 0x10, 8);
+        let adjusted = Varnode::new(1, 0x20, 8);
+        let constant = Varnode::constant(4, 8);
+        let operations = [
+            RawPCodeOp {
+                op: Op::IntSub,
+                inputs: Inputs::two(constant, index),
+                output: adjusted,
+            },
+            RawPCodeOp {
+                op: Op::IBranch,
+                inputs: Inputs::one(adjusted),
+                output: Varnode::INVALID,
+            },
+        ];
+        let matcher = matcher_for_operations(&operations);
+
+        assert_eq!(matcher.label_offset(adjusted, 1), 0);
+    }
+
+    #[test]
+    fn label_offset_accepts_index_minus_constant() {
+        let index = Varnode::new(1, 0x10, 8);
+        let adjusted = Varnode::new(1, 0x20, 8);
+        let constant = Varnode::constant(4, 8);
+        let operations = [
+            RawPCodeOp {
+                op: Op::IntSub,
+                inputs: Inputs::two(index, constant),
+                output: adjusted,
+            },
+            RawPCodeOp {
+                op: Op::IBranch,
+                inputs: Inputs::one(adjusted),
+                output: Varnode::INVALID,
+            },
+        ];
+        let matcher = matcher_for_operations(&operations);
+
+        assert_eq!(matcher.label_offset(adjusted, 1), 4);
+    }
+
+    #[test]
+    fn left_shift_only_strips_a_constant_right_operand() {
+        let index = Varnode::new(1, 0x10, 8);
+        let scaled = Varnode::new(1, 0x20, 8);
+        let constant = Varnode::constant(2, 8);
+        let valid_operations = [
+            RawPCodeOp {
+                op: Op::IntLeftShift,
+                inputs: Inputs::two(index, constant),
+                output: scaled,
+            },
+            RawPCodeOp {
+                op: Op::IBranch,
+                inputs: Inputs::one(scaled),
+                output: Varnode::INVALID,
+            },
+        ];
+        let valid = matcher_for_operations(&valid_operations);
+        assert_eq!(valid.strip_index(&scaled, 1), (index, 0));
+
+        let invalid_operations = [
+            RawPCodeOp {
+                op: Op::IntLeftShift,
+                inputs: Inputs::two(constant, index),
+                output: scaled,
+            },
+            RawPCodeOp {
+                op: Op::IBranch,
+                inputs: Inputs::one(scaled),
+                output: Varnode::INVALID,
+            },
+        ];
+        let invalid = matcher_for_operations(&invalid_operations);
+        assert_eq!(invalid.strip_index(&scaled, 1), (scaled, 1));
     }
 }

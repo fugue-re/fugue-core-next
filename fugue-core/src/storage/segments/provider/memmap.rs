@@ -276,12 +276,10 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             backing[cursor..dirty_end].fill(0);
         }
 
-        if let Err(e) = fs::remove_file(meta_path) {
-            tracing::warn!(
-                "failed to remove packed segment metadata at {}: {e}",
-                meta_path.display()
-            );
-        }
+        backing
+            .flush()
+            .map_err(MemoryMappedSegmentStorageError::FlushMapping)?;
+        fs::remove_file(meta_path).map_err(MemoryMappedSegmentStorageError::UnpackSegment)?;
 
         Ok(Self {
             backing,
@@ -381,10 +379,10 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
         range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let project = attributes
+        let project_root = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            .ok_or(MemoryMappedSegmentStorageError::NoProjectPath)?
-            .join(format!("segment-{id}"));
+            .ok_or(MemoryMappedSegmentStorageError::NoProjectPath)?;
+        let project = id.path_in(&project_root);
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
@@ -650,10 +648,12 @@ mod test {
             second.write_bytes(0, b"second")?;
         }
 
-        let first =
-            MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(dir.join("segment-0"))?;
-        let second =
-            MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(dir.join("segment-1"))?;
+        let first = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
+            SegmentStorageProviderId::new(0).path_in(&dir),
+        )?;
+        let second = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
+            SegmentStorageProviderId::new(1).path_in(&dir),
+        )?;
         let mut first_bytes = [0u8; 5];
         let mut second_bytes = [0u8; 6];
         first.read_bytes(0, &mut first_bytes)?;

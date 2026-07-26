@@ -1,8 +1,8 @@
 use super::FunctionRecoveryError;
 use crate::ir::{Address, IncompleteCodeBlockId, IncompleteFunction, Insn};
-use crate::lifter::{Disassembler, Lifter, LifterError, LiftingContext, RawPCodeOp};
+use crate::lifter::{Disassembler, Lifter, LiftingContext, RawPCodeOp};
 use crate::project::Project;
-use crate::storage::segments::SegmentMappingCache;
+use crate::storage::{SegmentMappingCache, SegmentStorage};
 
 pub struct InsnResolver {
     disassembler: Disassembler,
@@ -56,18 +56,16 @@ impl InsnResolver {
         &mut self,
         function: &IncompleteFunction,
         block: IncompleteCodeBlockId,
-        mapping_cache: &mut SegmentMappingCache<'_>,
+        segments: &SegmentStorage,
+        mapping_cache: &mut SegmentMappingCache,
         operations: &mut Vec<RawPCodeOp>,
     ) -> Result<(), FunctionRecoveryError> {
         let block = function
             .block(block)
             .ok_or_else(|| FunctionRecoveryError::invalid_block_id(block))?;
-        let start = block.address();
-        let bytes = mapping_cache
-            .contiguous_bytes_from(start)
-            .map_err(|_| LifterError::invalid_instruction(start))?;
-
-        block.context().apply(start, self.lifter.context_mut());
+        block
+            .context()
+            .apply(block.address(), self.lifter.context_mut());
 
         let operation_start = operations.len();
         for &insn_id in block.insns() {
@@ -75,19 +73,21 @@ impl InsnResolver {
                 .insn(insn_id)
                 .expect("block instruction must exist");
 
-            let Some(offset) = insn.address().checked_offset_from(start) else {
-                operations.truncate(operation_start);
-                return Err(LifterError::invalid_instruction(insn.address()).into());
+            let view = match mapping_cache.contiguous_bytes_from(segments, insn.address()) {
+                Ok(view) => view,
+                Err(error) => {
+                    operations.truncate(operation_start);
+                    return Err(error.into());
+                }
             };
-            let Some(view) = bytes.get(offset as usize..) else {
-                operations.truncate(operation_start);
-                return Err(LifterError::invalid_instruction(insn.address()).into());
-            };
+            let bytes = view
+                .as_contiguous()
+                .expect("contiguous mapping view must contain bytes");
 
             self.operations.clear();
             if let Err(error) = self
                 .lifter
-                .lift(insn.address(), view, &mut self.operations)
+                .lift(insn.address(), bytes, &mut self.operations)
                 .map_err(FunctionRecoveryError::from)
             {
                 operations.truncate(operation_start);

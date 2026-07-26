@@ -1,70 +1,85 @@
-use std::mem;
-
-use fugue_bv::BitVec;
-use fugue_bytes::Endian;
-
 use crate::ir::{Address, SegmentProperties};
 use crate::storage::segments::provider::SegmentView;
 use crate::storage::segments::view::SegmentMappingView;
-use crate::storage::segments::{SegmentStorage, SegmentStorageError};
+use crate::storage::segments::{SegmentStorage, SegmentStorageError, SegmentSubMapping};
 
-pub struct SegmentMappingCache<'a> {
-    segments: &'a SegmentStorage,
-    cached_view: Option<SegmentMappingView<'a>>,
-    cached_bytes: SegmentView<'a>,
-    buffer: Vec<u8>,
+#[derive(Default)]
+pub struct SegmentMappingCache {
+    cached: Option<CachedMapping>,
 }
 
-impl<'a> SegmentMappingCache<'a> {
-    pub fn new(segments: &'a SegmentStorage) -> Self {
-        Self {
-            segments,
-            cached_view: None,
-            cached_bytes: SegmentView::default(),
-            buffer: Vec::new(),
-        }
+struct CachedMapping {
+    submapping: SegmentSubMapping,
+    generation: u64,
+}
+
+impl SegmentMappingCache {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn view_containing(&mut self, address: Address) -> Option<&SegmentMappingView<'a>> {
-        let cached = self
-            .cached_view
-            .as_ref()
-            .is_some_and(|view| view.is_valid() && view.contains(address));
-        if !cached {
-            self.cached_view = self.segments.view_containing(address).ok();
-        }
-        self.cached_view
-            .as_ref()
-            .filter(|view| view.contains(address))
-    }
-
-    pub fn segment_properties(&mut self, address: Address) -> Option<SegmentProperties> {
-        self.view_containing(address)
-            .map(SegmentMappingView::properties)
-    }
-
-    pub fn contiguous_bytes_from(
+    pub fn view_containing<'a>(
         &mut self,
+        segments: &'a SegmentStorage,
         address: Address,
-    ) -> Result<&[u8], SegmentStorageError> {
+    ) -> Option<SegmentMappingView<'a>> {
+        if let Some(cached) = self
+            .cached
+            .as_ref()
+            .filter(|cached| cached.submapping.contains(address))
+            && segments.space_generation(address.space()) == Some(cached.generation)
+            && let Ok(view) = segments.view_for_submapping(&cached.submapping)
+        {
+            return Some(view);
+        }
+
+        let view = segments.view_containing(address).ok()?;
+        self.cached = Some(CachedMapping {
+            submapping: SegmentSubMapping::new(
+                view.mapping_ref(),
+                view.start(),
+                view.size(),
+                view.properties(),
+            ),
+            generation: segments.space_generation(address.space()).unwrap_or_default(),
+        });
+        Some(view)
+    }
+
+    pub fn segment_properties(
+        &mut self,
+        segments: &SegmentStorage,
+        address: Address,
+    ) -> Option<SegmentProperties> {
+        self.view_containing(segments, address)
+            .map(|view| view.properties())
+    }
+
+    pub fn contiguous_bytes_from<'a>(
+        &mut self,
+        segments: &'a SegmentStorage,
+        address: Address,
+    ) -> Result<SegmentView<'a>, SegmentStorageError> {
         let view = self
-            .view_containing(address)
+            .view_containing(segments, address)
             .ok_or(SegmentStorageError::InvalidAddress)?;
-        self.cached_bytes = view
+        let bytes = view
             .bytes_from(address)
             .ok_or(SegmentStorageError::InvalidAddressRange)?;
-        self.cached_bytes
-            .as_contiguous()
-            .filter(|bytes| !bytes.is_empty())
-            .ok_or(SegmentStorageError::InvalidAddressRange)
+        if bytes.as_contiguous().is_some_and(|bytes| !bytes.is_empty()) {
+            Ok(bytes)
+        } else {
+            Err(SegmentStorageError::InvalidAddressRange)
+        }
     }
 
     pub fn read_bytes(
         &mut self,
+        segments: &SegmentStorage,
         address: Address,
         buffer: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
-        match self.view_containing(address) {
+        match self.view_containing(segments, address) {
             Some(view) => view.read_bytes(address, buffer),
             None => Err(SegmentStorageError::InvalidAddress),
         }
@@ -72,34 +87,14 @@ impl<'a> SegmentMappingCache<'a> {
 
     pub fn read_bytes_exact(
         &mut self,
+        segments: &SegmentStorage,
         address: Address,
         buffer: &mut [u8],
     ) -> Result<(), SegmentStorageError> {
-        if self.read_bytes(address, buffer)? != buffer.len() {
+        if self.read_bytes(segments, address, buffer)? != buffer.len() {
             return Err(SegmentStorageError::InvalidAddressRange);
         }
         Ok(())
-    }
-
-    pub fn read_bitvec(
-        &mut self,
-        address: Address,
-        size: usize,
-        endian: Endian,
-    ) -> Result<BitVec, SegmentStorageError> {
-        let mut buffer = mem::take(&mut self.buffer);
-        buffer.resize(size, 0);
-        let result = self.read_bytes_exact(address, &mut buffer);
-        if let Err(error) = result {
-            self.buffer = buffer;
-            return Err(error);
-        }
-        let value = match endian {
-            Endian::Big => BitVec::from_be_bytes(&buffer),
-            Endian::Little => BitVec::from_le_bytes(&buffer),
-        };
-        self.buffer = buffer;
-        Ok(value)
     }
 }
 
@@ -125,31 +120,58 @@ mod test {
         )?;
         segments.add_mapping_to_space(DEFAULT_SPACE_ID, mapping)?;
 
-        let mut cache = SegmentMappingCache::new(&segments);
+        let mut cache = SegmentMappingCache::new();
         assert!(matches!(
-            cache.contiguous_bytes_from(Address::from(0x2000u64)),
+            cache.contiguous_bytes_from(&segments, Address::from(0x2000u64)),
             Err(SegmentStorageError::InvalidAddress)
         ));
         assert!(matches!(
-            cache.contiguous_bytes_from(Address::from(0x1000u64)),
+            cache.contiguous_bytes_from(&segments, Address::from(0x1000u64)),
             Err(SegmentStorageError::InvalidAddressRange)
         ));
         assert_eq!(
-            cache.contiguous_bytes_from(Address::from(0x1004u64))?,
-            &[0x12, 0x34, 0x56, 0x78]
-        );
-        assert_eq!(
             cache
-                .read_bitvec(Address::from(0x1004u64), 2, Endian::Big)?
-                .to_u64(),
-            Some(0x1234)
+                .contiguous_bytes_from(&segments, Address::from(0x1004u64))?
+                .as_contiguous(),
+            Some([0x12, 0x34, 0x56, 0x78].as_slice())
         );
-        assert_eq!(
-            cache
-                .read_bitvec(Address::from(0x1004u64), 2, Endian::Little)?
-                .to_u64(),
-            Some(0x3412)
+        let mut bytes = [0; 2];
+        cache.read_bytes_exact(&segments, Address::from(0x1004u64), &mut bytes)?;
+        assert_eq!(bytes, [0x12, 0x34]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cache_invalidates_when_a_shadowing_mapping_is_added() -> Result<(), SegmentStorageError> {
+        let mut segments = SegmentStorage::empty();
+        let lower = segments.open_provider(
+            InMemorySegmentStorage::with_size(4),
+            SegmentProperties::PERM_ALL,
         );
+        segments.write_bytes_direct(lower, 0, &[0xaa, 0xaa, 0xaa, 0xaa])?;
+        let lower_mapping = segments.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, lower).with_name("lower"),
+        )?;
+        segments.add_mapping_to_space(DEFAULT_SPACE_ID, lower_mapping)?;
+
+        let mut cache = SegmentMappingCache::new();
+        let mut bytes = [0; 4];
+        cache.read_bytes_exact(&segments, Address::from(0x1000u64), &mut bytes)?;
+        assert_eq!(bytes, [0xaa, 0xaa, 0xaa, 0xaa]);
+
+        let upper = segments.open_provider(
+            InMemorySegmentStorage::with_size(4),
+            SegmentProperties::PERM_ALL,
+        );
+        segments.write_bytes_direct(upper, 0, &[0xbb, 0xbb, 0xbb, 0xbb])?;
+        let upper_mapping = segments.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, upper).with_name("upper"),
+        )?;
+        segments.add_mapping_to_space_top(DEFAULT_SPACE_ID, upper_mapping)?;
+
+        cache.read_bytes_exact(&segments, Address::from(0x1000u64), &mut bytes)?;
+        assert_eq!(bytes, [0xbb, 0xbb, 0xbb, 0xbb]);
 
         Ok(())
     }

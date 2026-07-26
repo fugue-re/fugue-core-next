@@ -22,7 +22,7 @@ impl<'a> SegmentMappingView<'a> {
     pub(crate) fn new(
         mapping: &'a SegmentMapping,
         provider: &'a SegmentStorageDescriptor,
-        submap: &'a SegmentSubMapping,
+        submap: &SegmentSubMapping,
     ) -> Self {
         Self {
             mapping,

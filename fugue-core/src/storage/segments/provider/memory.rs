@@ -121,6 +121,7 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
             if remaining.len() > self.chunk.len() {
                 self.chunk.extend_from_slice(&remaining[in_place..]);
             }
+            self.overlay.clear_range(self.base as u64, self.chunk.len());
             return Ok(write);
         }
 
@@ -131,6 +132,7 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
             if end > chunk_end {
                 self.chunk.extend_from_slice(&data[in_place..]);
             }
+            self.overlay.clear_range(offset as u64, write);
             return Ok(write);
         }
 
@@ -295,6 +297,22 @@ mod test {
         let mut gap = [0xffu8; 8];
         store.read_bytes(0x1000, &mut gap)?;
         assert!(gap.iter().all(|byte| *byte == 0));
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_growth_replaces_covered_overlay_bytes() -> Result<(), SegmentStorageError> {
+        let mut store = InMemorySegmentStorage::with_size(0x1000);
+        store.write_bytes(0, b"AAAA")?;
+        store.write_bytes(8, b"old!")?;
+        store.write_bytes(4, b"BBBBCCCC")?;
+
+        let mut direct = [0u8; 12];
+        store.read_bytes(0, &mut direct)?;
+        let mut viewed = [0u8; 12];
+        store.view_bytes(0, 12)?.read_into(&mut viewed);
+        assert_eq!(&direct, b"AAAABBBBCCCC");
+        assert_eq!(viewed, direct);
         Ok(())
     }
 

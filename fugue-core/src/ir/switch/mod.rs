@@ -11,7 +11,7 @@ use crate::types::common::archived_bitflags;
 
 mod table;
 pub(crate) use table::SwitchTableRevert;
-pub use table::{SwitchMut, SwitchRef, SwitchTable, SwitchTableError};
+pub use table::{SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;
 
@@ -105,6 +105,15 @@ impl Switch {
 
     pub fn add_case(&mut self, case: SwitchCase) {
         self.cases.push(case);
+    }
+
+    pub fn set_cases(&mut self, cases: Vec<SwitchCase>) {
+        self.cases = cases;
+    }
+
+    pub fn with_cases(mut self, cases: Vec<SwitchCase>) -> Self {
+        self.set_cases(cases);
+        self
     }
 
     pub fn default_case(&self) -> Option<&SwitchCase> {
@@ -251,6 +260,10 @@ impl SwitchCaseLabel {
     pub fn value(&self) -> u64 {
         self.0
     }
+
+    pub fn signed_value(&self) -> i64 {
+        self.0 as i64
+    }
 }
 
 impl From<u64> for SwitchCaseLabel {
@@ -325,6 +338,13 @@ mod test {
     use super::*;
 
     #[test]
+    fn case_label_exposes_signed_interpretation() {
+        let label = SwitchCaseLabel::new(u64::MAX);
+        assert_eq!(label.value(), u64::MAX);
+        assert_eq!(label.signed_value(), -1);
+    }
+
+    #[test]
     fn switch_properties_deserialise_ignore_unknown_bits() {
         let known = SwitchProperties::GUARD_FOUND | SwitchProperties::OVERRIDE;
         let mut bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&known)
@@ -339,7 +359,7 @@ mod test {
 
     #[test]
     fn derived_references_cover_every_table() {
-        use crate::storage::segments::space::AddressSpaceId;
+        use crate::storage::AddressSpaceId;
 
         let space = AddressSpaceId::new(1);
         let branch = Address::new(space, 0x1000u64);

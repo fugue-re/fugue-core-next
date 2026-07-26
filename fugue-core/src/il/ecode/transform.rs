@@ -17,6 +17,7 @@ use crate::il::pcode::{
 };
 use crate::ir::Address;
 use crate::lifter::Varnode;
+use crate::platform::Platform;
 
 #[derive(Debug, Default)]
 pub struct PCodeToECode {
@@ -30,6 +31,7 @@ impl PCodeToECode {
         &mut self,
         source: &PCodeIr,
         arch: &Arch,
+        platform: &Platform,
         cancellation: &CancellationToken,
     ) -> Result<ECodeIr, IlError> {
         cancellation.check()?;
@@ -49,11 +51,25 @@ impl PCodeToECode {
         )?;
 
         let offsets = lifting.lift(cancellation)?;
+        let compiler = platform.compiler_spec_id();
+        let preserved_slices = arch
+            .language()
+            .call_preserved_registers(compiler)
+            .or_else(|| arch.language().call_preserved_registers("default"))
+            .unwrap_or_default()
+            .iter()
+            .map(|register| {
+                let location = PCodeLocation::from_varnode(arch.language(), register);
+                lifting.register_bank.slice(&location, arch.endian())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let call_preserved_registers = RegisterBank::preserved_roots(preserved_slices);
         drop(lifting);
 
-        builder.replace_graph(self.remap_graph(source, &offsets)?);
-        builder.replace_parent_spans(Self::remap_parent_spans(&offsets)?);
-        builder.replace_source_spans(Self::remap_source_spans(source, &offsets)?);
+        builder.set_call_preserved_registers(call_preserved_registers);
+        builder.set_graph(self.remap_graph(source, &offsets)?);
+        builder.set_parent_spans(Self::remap_parent_spans(&offsets)?);
+        builder.set_source_spans(Self::remap_source_spans(source, &offsets)?);
 
         builder.build(cancellation)
     }
@@ -397,7 +413,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
 
         for (index, operation) in self.source.operations().iter().enumerate() {
             cancellation.check()?;
-            if self
+            while self
                 .source
                 .source_spans()
                 .get(source_span)
@@ -478,11 +494,11 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         let Some(output) = operation.output() else {
             return Err(IlError::missing_component(IlLevel::PCode, "output"));
         };
-        let output_width = u32::from(self.location(output).size()) * 8;
-        let address_operand = (opcode == PCodeOpcode::Load).then_some(0);
-        self.lift_operand_values(operation, address_operand)?;
+        let output_width = self.location(output).bits();
         if opcode == PCodeOpcode::Subpiece {
+            let source = self.source.operation_operands(operation)[0];
             let offset = self.source.operation_operands(operation)[1];
+            let source = self.lift_location(source, LocationRole::Value)?;
             let location = *self.location(offset);
             if !location.is_constant() {
                 return Err(IlError::missing_component(
@@ -494,13 +510,18 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
                 .offset()
                 .checked_mul(8)
                 .ok_or(IlError::integer_overflow("subpiece offset"))?;
-            self.operands[1] = self.builder.push_expression(ECodeExpr::new(
+            let offset = self.builder.push_expression(ECodeExpr::new(
                 ECodeExprOpcode::Constant,
-                u32::from(location.size()) * 8,
+                u64::BITS,
                 IlIndexRange::EMPTY,
                 bits,
                 None,
             ))?;
+            self.operands.clear();
+            self.operands.extend([source, offset]);
+        } else {
+            let address_operand = (opcode == PCodeOpcode::Load).then_some(0);
+            self.lift_operand_values(operation, address_operand)?;
         }
         let operands = self
             .builder
@@ -569,6 +590,18 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         };
 
         self.register_reads.clear();
+        let write_start = u128::from(location.offset());
+        let write_end = write_start + u128::from(location.size());
+        for (flag_location, flag) in &self.flags {
+            if flag_location.lifter_space() != location.lifter_space() {
+                continue;
+            }
+            let flag_start = u128::from(flag_location.offset());
+            let flag_end = flag_start + u128::from(flag_location.size());
+            if write_start < flag_end && flag_start < write_end {
+                self.flag_values.remove(flag);
+            }
+        }
         self.register_values.insert(slice.root(), value);
         self.builder.push_statement(
             ECodeStmt::new(
@@ -702,7 +735,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
                     LocationRole::Address => ECodeExprOpcode::Address,
                     LocationRole::Value => ECodeExprOpcode::Constant,
                 },
-                u32::from(location.size()) * 8,
+                location.bits(),
                 IlIndexRange::EMPTY,
                 location.offset(),
                 None,
@@ -713,7 +746,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             }
             let expression = self.builder.push_expression(ECodeExpr::new(
                 ECodeExprOpcode::ReadFlag,
-                u32::from(location.size()) * 8,
+                location.bits(),
                 IlIndexRange::EMPTY,
                 flag.value(),
                 None,
@@ -725,7 +758,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         } else {
             ECodeExpr::new(
                 ECodeExprOpcode::Undefined,
-                u32::from(location.size()) * 8,
+                location.bits(),
                 IlIndexRange::EMPTY,
                 u64::from(id.value()),
                 None,
@@ -866,7 +899,9 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange};
+    use crate::il::common::{
+        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange, IlSourceSpan,
+    };
     use crate::il::ecode::ssa::ECodeToSsa;
     use crate::il::pcode::{
         LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
@@ -884,6 +919,10 @@ mod test {
         Arch::new(language())
     }
 
+    fn platform() -> Platform {
+        arch().platform()
+    }
+
     #[test]
     fn empty_pcode_lifts_to_empty_ecode() {
         let source_header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11);
@@ -894,11 +933,81 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.metadata().input_revision().value(), 11);
         assert!(lifted.statements().is_empty());
+    }
+
+    #[test]
+    fn empty_source_span_does_not_desynchronise_instruction_cache_clears() {
+        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let constant = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                7,
+                8,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .unwrap();
+        for offset in 0..3 {
+            let output = builder
+                .push_location(PCodeLocation::new(
+                    LifterSpaceHandle::new(1),
+                    offset,
+                    8,
+                    PCodeLocationProperties::UNIQUE,
+                ))
+                .unwrap();
+            let operands = builder.push_operands([constant]).unwrap();
+            builder.push_operation(PCodeOp::new(
+                PCodeOpcode::Copy,
+                Some(output),
+                operands,
+                0,
+                None,
+            ));
+        }
+        builder.set_source_spans(vec![
+            IlSourceSpan::new(
+                IlIndexRange::new(0, 1).unwrap(),
+                Address::from(0x1000u64),
+                0,
+                1,
+            ),
+            IlSourceSpan::new(
+                IlIndexRange::new(1, 1).unwrap(),
+                Address::from(0x1001u64),
+                0,
+                1,
+            ),
+            IlSourceSpan::new(
+                IlIndexRange::new(1, 2).unwrap(),
+                Address::from(0x1002u64),
+                0,
+                1,
+            ),
+            IlSourceSpan::new(
+                IlIndexRange::new(2, 3).unwrap(),
+                Address::from(0x1003u64),
+                0,
+                1,
+            ),
+        ]);
+        let source = builder.build(&CancellationToken::default()).unwrap();
+
+        let lifted = PCodeToECode::default()
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
+            .unwrap();
+        assert_eq!(
+            lifted
+                .expressions()
+                .iter()
+                .filter(|expression| expression.opcode() == ECodeExprOpcode::Constant)
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -908,7 +1017,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
@@ -926,6 +1035,55 @@ mod test {
                 IlIndexRange::new(0, 1).unwrap(),
             )]
         );
+    }
+
+    #[test]
+    fn large_subpiece_offset_is_not_truncated_to_operand_width() {
+        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let input = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                0x1234,
+                64,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .unwrap();
+        let offset = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                32,
+                1,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .unwrap();
+        let output = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(1),
+                0,
+                32,
+                PCodeLocationProperties::UNIQUE,
+            ))
+            .unwrap();
+        let operands = builder.push_operands([input, offset]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Subpiece,
+            Some(output),
+            operands,
+            0,
+            None,
+        ));
+        let source = builder.build(&CancellationToken::default()).unwrap();
+
+        let lifted = PCodeToECode::default()
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
+            .unwrap();
+
+        assert_eq!(lifted.expressions().len(), 3);
+        let offset = &lifted.expressions()[1];
+        assert_eq!(offset.opcode(), ECodeExprOpcode::Constant);
+        assert_eq!(offset.width(), u64::BITS);
+        assert_eq!(offset.immediate(), 256);
+        assert_eq!(lifted.expressions()[2].opcode(), ECodeExprOpcode::Extract);
     }
 
     #[test]
@@ -985,7 +1143,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
         let register_reads = lifted
             .expressions()
@@ -1033,17 +1191,33 @@ mod test {
     fn architectural_flags_use_flag_operations() {
         let language = language();
         let cf = language.register_by_name("CF").expect("CF should exist");
+        let wide_register = Varnode::new(cf.space(), cf.offset(), cf.size + 1);
         let mut builder = PCodeBuilder::new(language, pcode_header(), IlGraph::default());
         let flag = builder
             .push_location(PCodeLocation::from_varnode(language, &cf))
             .unwrap();
-        let read = builder
+        let read_before = builder
             .push_location(PCodeLocation::from_varnode(
                 language,
                 &Varnode::new(language.unique_space(), 0x100, cf.size),
             ))
             .unwrap();
-        let constant = builder
+        let read_after = builder
+            .push_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::new(language.unique_space(), 0x200, cf.size),
+            ))
+            .unwrap();
+        let wide_register = builder
+            .push_location(PCodeLocation::from_varnode(language, &wide_register))
+            .unwrap();
+        let wide_constant = builder
+            .push_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::constant(0, cf.size + 1),
+            ))
+            .unwrap();
+        let flag_constant = builder
             .push_location(PCodeLocation::from_varnode(
                 language,
                 &Varnode::constant(1, cf.size),
@@ -1052,12 +1226,28 @@ mod test {
         let operands = builder.push_operands([flag]).unwrap();
         builder.push_operation(PCodeOp::new(
             PCodeOpcode::Copy,
-            Some(read),
+            Some(read_before),
             operands,
             0,
             None,
         ));
-        let operands = builder.push_operands([constant]).unwrap();
+        let operands = builder.push_operands([wide_constant]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
+            Some(wide_register),
+            operands,
+            0,
+            None,
+        ));
+        let operands = builder.push_operands([flag]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
+            Some(read_after),
+            operands,
+            0,
+            None,
+        ));
+        let operands = builder.push_operands([flag_constant]).unwrap();
         builder.push_operation(PCodeOp::new(
             PCodeOpcode::Copy,
             Some(flag),
@@ -1068,13 +1258,20 @@ mod test {
         let source = builder.build(&CancellationToken::default()).unwrap();
 
         let lifted = PCodeToECode::default()
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
 
-        assert!(lifted.expressions().iter().any(|expression| {
-            expression.opcode() == ECodeExprOpcode::ReadFlag
-                && expression.immediate() == cf.offset()
-        }));
+        assert_eq!(
+            lifted
+                .expressions()
+                .iter()
+                .filter(|expression| {
+                    expression.opcode() == ECodeExprOpcode::ReadFlag
+                        && expression.immediate() == cf.offset()
+                })
+                .count(),
+            2
+        );
         assert!(lifted.statements().iter().any(|statement| {
             statement.opcode() == ECodeStmtOpcode::WriteFlag && statement.immediate() == cf.offset()
         }));
@@ -1114,7 +1311,7 @@ mod test {
         let source = builder.build(&CancellationToken::default()).unwrap();
 
         let lifted = PCodeToECode::default()
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
 
         assert_eq!(lifted.expressions()[0].opcode(), ECodeExprOpcode::Undefined);
@@ -1138,7 +1335,7 @@ mod test {
         let source = builder.build(&CancellationToken::default()).unwrap();
 
         let lifted = PCodeToECode::default()
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
 
         assert!(lifted.expressions().is_empty());
@@ -1155,7 +1352,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
@@ -1194,7 +1391,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
@@ -1213,7 +1410,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.statements().len(), 1);
@@ -1255,7 +1452,7 @@ mod test {
         let source = builder.build(&CancellationToken::default()).unwrap();
 
         let lifted = PCodeToECode::default()
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
         let operands = lifted.statement_operands_for(&lifted.statements()[0]);
 
@@ -1279,7 +1476,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.statements().len(), 1);
@@ -1307,7 +1504,7 @@ mod test {
             0,
             Some(AddressSpaceId::new(3)),
         ));
-        builder.replace_graph(IlGraph::new(
+        builder.set_graph(IlGraph::new(
             vec![
                 IlBlock::new(
                     IlIndexRange::new(0, 1).unwrap(),
@@ -1326,7 +1523,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &CancellationToken::default())
+            .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
         let entry = &lifted.graph().blocks()[0];
 
@@ -1345,7 +1542,7 @@ mod test {
         let mut transform = PCodeToECode::default();
 
         let lifted = transform
-            .transform(&source, &arch(), &cancellation)
+            .transform(&source, &arch(), &platform(), &cancellation)
             .unwrap();
 
         assert_eq!(lifted.statements().len(), 1);

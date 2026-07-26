@@ -32,11 +32,9 @@ impl SsaConstruction<'_, '_> {
         } else {
             graph.with_block_sources(self.source.graph().block_sources().to_vec())
         };
-        self.builder.replace_graph(graph);
-        self.builder
-            .replace_source_spans(self.remap_source_spans()?);
-        self.builder
-            .replace_parent_spans(self.remap_parent_spans()?);
+        self.builder.set_graph(graph);
+        self.builder.set_source_spans(self.remap_source_spans()?);
+        self.builder.set_parent_spans(self.remap_parent_spans()?);
 
         Ok(())
     }
@@ -60,8 +58,6 @@ impl SsaConstruction<'_, '_> {
             .map(|domain| (*domain, domains.widths[domain]))
             .collect();
         self.domain_widths = domains.widths;
-        self.blocks = vec![None; source_graph.blocks().len()];
-        self.edge_arguments = vec![Vec::new(); source_graph.successors().len()];
         self.build_block_tree(entry, &dominance, BTreeMap::new(), cancellation)?;
 
         for block_index in 0..source_graph.blocks().len() {
@@ -88,11 +84,9 @@ impl SsaConstruction<'_, '_> {
         } else {
             graph.with_block_sources(source_graph.block_sources().to_vec())
         };
-        self.builder.replace_graph(graph);
-        self.builder
-            .replace_source_spans(self.remap_source_spans()?);
-        self.builder
-            .replace_parent_spans(self.remap_parent_spans()?);
+        self.builder.set_graph(graph);
+        self.builder.set_source_spans(self.remap_source_spans()?);
+        self.builder.set_parent_spans(self.remap_parent_spans()?);
 
         Ok(())
     }
@@ -109,7 +103,7 @@ impl SsaConstruction<'_, '_> {
 
         while let Some((block, current)) = stack.pop() {
             let current = self.build_block(block, current, cancellation)?;
-            let children = dominance.children(block);
+            let children = dominance.children_for(block);
             let mut current = Some(current);
 
             for child_index in (0..children.len()).rev() {
@@ -151,12 +145,14 @@ impl SsaConstruction<'_, '_> {
             self.seed_input_domains(&mut current)?;
         }
 
+        self.reset_expression_cache();
+
         for statement_index in source_block.operations().start()..source_block.operations().end() {
             cancellation.check()?;
             self.build_statement_at(statement_index, &mut current)?;
         }
 
-        self.fill_successor_edges(block, &mut current, source_block)?;
+        self.fill_successor_edges(&mut current, source_block)?;
 
         let end = self.builder.operation_count();
         self.blocks[block.index()] = Some(IlBlock::new(
@@ -170,7 +166,6 @@ impl SsaConstruction<'_, '_> {
 
     fn fill_successor_edges(
         &mut self,
-        block: IlBlockId,
         current: &mut BTreeMap<SsaDomain, IlValueId>,
         source_block: IlBlock,
     ) -> Result<(), IlError> {
@@ -202,13 +197,6 @@ impl SsaConstruction<'_, '_> {
             }
 
             self.edge_arguments[edge] = arguments;
-        }
-
-        if block.index() >= self.source.graph().blocks().len() {
-            return Err(IlError::range_out_of_bounds(
-                block.value(),
-                self.source.graph().blocks().len(),
-            ));
         }
 
         Ok(())

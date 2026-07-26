@@ -44,7 +44,7 @@ use crate::storage::{
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
+    ATTRIBUTE_COMPILER_SPEC_ID, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
 };
 
 pub struct Project {
@@ -489,10 +489,12 @@ impl ProjectTransaction<'_> {
         }
 
         let (_, source) = self.ensure_pcode_ir(function, cancellation)?;
-        let mut ir =
-            self.project
-                .pcode_to_ecode
-                .transform(&source, &self.project.arch, cancellation)?;
+        let mut ir = self.project.pcode_to_ecode.transform(
+            &source,
+            &self.project.arch,
+            &self.project.platform,
+            cancellation,
+        )?;
 
         if cfg!(debug_assertions) {
             ir.verify().expect("transformed ecode fails verification");
@@ -1395,7 +1397,7 @@ impl ProjectTransaction<'_> {
         self.committed = true;
         Ok(
             ChangeSet::with_records(self.project.revision, std::mem::take(&mut self.records))
-                .attributed_to(self.source.clone()),
+                .with_provenance(self.source.clone()),
         )
     }
 
@@ -1483,7 +1485,7 @@ impl Project {
         };
 
         let language = arch.language();
-        let platform = loadable
+        let mut platform = loadable
             .map(Loadable::platform)
             .unwrap_or_else(|| arch.platform());
 
@@ -1493,6 +1495,15 @@ impl Project {
             // NOTE: we prefer the most recently set attributes, and use the persisted
             // attributes for vacant keys.
             attributes.merge_vacant(&nattributes);
+        }
+
+        if loadable.is_some() {
+            attributes.set_attr(ATTRIBUTE_COMPILER_SPEC_ID, platform.compiler_spec_id());
+        } else if let Some(compiler_spec_id) = attributes
+            .get_attr::<String>(ATTRIBUTE_COMPILER_SPEC_ID)
+            .and_then(|id| language.compiler_spec_id(&id))
+        {
+            platform = platform.with_compiler_spec_id(compiler_spec_id);
         }
 
         if let (Some(loadable), Some(resolution)) = (loadable, storage.image_resolution.as_ref())
@@ -2063,7 +2074,7 @@ mod test {
         let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
         let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1)?,
             source,
             0,
@@ -2107,7 +2118,7 @@ mod test {
         let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
         let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1)?,
             source,
             0,
@@ -2134,11 +2145,9 @@ mod test {
     }
 
     fn lift_test_ecode(source: &PCodeIr) -> Result<ECodeIr, IlError> {
-        PCodeToECode::default().transform(
-            source,
-            &Arch::new(resolve_language("x86:LE:64").expect("test language should resolve")),
-            &CancellationToken::default(),
-        )
+        let arch = Arch::new(resolve_language("x86:LE:64").expect("test language should resolve"));
+        let platform = arch.platform();
+        PCodeToECode::default().transform(source, &arch, &platform, &CancellationToken::default())
     }
 
     fn flow_resolved_load_function(
@@ -2282,7 +2291,7 @@ mod test {
             IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
             IlGraph::default(),
         );
-        builder.replace_source_spans(tagged_source_spans(payload));
+        builder.set_source_spans(tagged_source_spans(payload));
         builder
             .build(&CancellationToken::default())
             .expect("test PCode IR should verify")
@@ -2925,6 +2934,8 @@ mod test {
     #[test]
     fn project_persistent_default() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("ls.fdbz");
             let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<
                     DefaultPersistentEntityStorage,
@@ -2933,10 +2944,22 @@ mod test {
             >(
                 "tests/ls.elf",
                 attributes![
-                    ATTRIBUTE_PROJECT_PATH => "tests/ls.fdbz"
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
                 ],
             )?;
 
+            let created_spec = project.platform().compiler_spec_id();
+            assert_eq!(created_spec, "gcc");
+            drop(project);
+
+            let project = Project::from_file_with_provider::<
+                PersistentStorageProvider<
+                    DefaultPersistentEntityStorage,
+                    DefaultPersistentSegmentStorage,
+                >,
+            >(project_path)?;
+
+            assert_eq!(project.platform().compiler_spec_id(), created_spec);
             drop(project);
 
             Ok(())
@@ -2947,12 +2970,25 @@ mod test {
     #[test]
     fn project_persistent_mdbx() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("ls.mdbx.fdbz");
             let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
             >(
                 "tests/ls.elf",
                 attributes![
-                    ATTRIBUTE_PROJECT_PATH => "tests/ls.mdbx.fdbz"
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
+                ],
+            )?;
+
+            drop(project);
+
+            let project = Project::from_file_with_provider_and_attributes::<
+                PersistentStorageProvider<MdbxEntityStorage, DefaultPersistentSegmentStorage>,
+            >(
+                "tests/ls.elf",
+                attributes![
+                    ATTRIBUTE_PROJECT_PATH => project_path
                 ],
             )?;
 
@@ -2966,9 +3002,24 @@ mod test {
     #[test]
     fn project_standalone() -> Result<(), Box<dyn std::error::Error>> {
         with_logging(|| {
-            let _project = Project::from_file_with_provider::<
+            let directory = tempfile::tempdir()?;
+            let project_path = directory.path().join("standalone.fdbz");
+            let project = Project::from_file_with_provider_and_attributes::<
                 PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
-            >("tests/test-project.rdb.fdbz")?;
+            >(
+                "tests/ls.elf",
+                attributes![
+                    ATTRIBUTE_PROJECT_PATH => project_path.clone()
+                ],
+            )?;
+
+            drop(project);
+
+            let project = Project::from_file_with_provider::<
+                PersistentStorageProvider<RocksDbEntityStorage, DefaultPersistentSegmentStorage>,
+            >(project_path)?;
+
+            drop(project);
 
             Ok(())
         })
@@ -3066,7 +3117,7 @@ mod test {
 
         assert!(uses.uses_for(value).is_empty());
         assert!(dominance.dominates(entry, entry));
-        assert!(frontiers.frontier(entry).is_empty());
+        assert!(frontiers.frontier_for(entry).is_empty());
         assert!(liveness.live_in(entry).is_empty());
         assert!(liveness.live_out(entry).is_empty());
 

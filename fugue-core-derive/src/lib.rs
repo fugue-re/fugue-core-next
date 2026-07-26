@@ -1,7 +1,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, ImplItem, ItemImpl, LitBool, LitStr, Token, Type, parse_macro_input};
+use syn::{
+    Attribute, DeriveInput, Error as SynError, ImplItem, ItemImpl, LitBool, LitStr,
+    Result as SynResult, Token, Type, parse_macro_input,
+};
 
 struct ProviderAttr {
     concrete: Option<Type>,
@@ -20,7 +23,7 @@ impl Default for ProviderAttr {
 }
 
 impl ProviderAttr {
-    fn parse(attr: &syn::Attribute) -> syn::Result<ProviderAttr> {
+    fn parse(attr: &Attribute) -> SynResult<ProviderAttr> {
         let mut result = ProviderAttr::default();
 
         attr.parse_nested_meta(|meta| {
@@ -50,9 +53,9 @@ impl ProviderAttr {
 fn generate_from_storage_fn(ty: &impl quote::ToTokens) -> TokenStream2 {
     quote! {
         Some(|path: &::std::path::Path, attributes: &mut ::fugue_core::types::AttributeMap| ->
-            ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
+            ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::SegmentStorageProvider>, ::fugue_core::storage::SegmentStorageError> {
 
-            let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromStorage>::from_storage(path, attributes)?;
+            let provider = <#ty as ::fugue_core::storage::SegmentStorageProviderFromStorage>::from_storage(path, attributes)?;
             Ok(::std::boxed::Box::new(provider))
         })
     }
@@ -70,19 +73,19 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
 
     quote! {
         ::inventory::submit! {
-            ::fugue_core::storage::segments::provider::SegmentStorageProviderEntry::new_with::<#ty>(
+            ::fugue_core::storage::SegmentStorageProviderEntry::new_with::<#ty>(
                 #tag,
-                |id: ::fugue_core::storage::segments::provider::SegmentStorageProviderId, range: ::std::ops::RangeInclusive<::fugue_core::ir::Address>, attributes: &mut ::fugue_core::types::AttributeMap| ->
-                    ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
+                |id: ::fugue_core::storage::SegmentStorageProviderId, range: ::std::ops::RangeInclusive<::fugue_core::ir::Address>, attributes: &mut ::fugue_core::types::AttributeMap| ->
+                    ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::SegmentStorageProvider>, ::fugue_core::storage::SegmentStorageError> {
 
-                    let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromSegmentRange>::from_segment_range(id, range, attributes)?;
+                    let provider = <#ty as ::fugue_core::storage::SegmentStorageProviderFromSegmentRange>::from_segment_range(id, range, attributes)?;
                     Ok(::std::boxed::Box::new(provider))
                 },
                 #from_storage_fn,
             )
         }
 
-        impl ::fugue_core::storage::segments::provider::SegmentStorageProviderDescriptor for #ty {
+        impl ::fugue_core::storage::SegmentStorageProviderDescriptor for #ty {
             const STABLE_TAG: &'static str = #tag;
             const PERSISTENCE: ::fugue_core::storage::StoragePersistence = #persistence;
 
@@ -144,12 +147,20 @@ pub fn derive_segment_storage_provider(input: TokenStream) -> TokenStream {
         .partition::<Vec<_>, _>(|a| a.concrete.is_some());
 
     if !concrete_attrs.is_empty() {
+        if !simple_attrs.is_empty() {
+            return SynError::new_spanned(
+                &input.ident,
+                "provider attributes cannot mix concrete and non-concrete registrations",
+            )
+            .to_compile_error()
+            .into();
+        }
         let mut registrations = Vec::new();
 
         for attr in &concrete_attrs {
             if attr.tag.is_none() {
                 let ty = attr.concrete.as_ref().unwrap();
-                return syn::Error::new_spanned(
+                return SynError::new_spanned(
                     ty,
                     "concrete instantiation requires `tag = \"...\"`",
                 )
@@ -238,7 +249,7 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
                 let mut kept_attrs = Vec::with_capacity(func.attrs.len());
                 for attr in func.attrs.drain(..) {
                     if attr.path().is_ident("provides") {
-                        return Err(syn::Error::new_spanned(
+                        return Err(SynError::new_spanned(
                             attr,
                             "`#[provides]` is not supported by constructor-based extensions",
                         ));
@@ -253,7 +264,7 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
                 free_fns.push(func);
             }
             other => {
-                return Err(syn::Error::new_spanned(
+                return Err(SynError::new_spanned(
                     other,
                     "`#[extension]` only supports `const` and `fn` items",
                 ));

@@ -11,6 +11,7 @@ use crate::il::ecode::ssa::{
 use crate::il::ecode::{ECodeIr, PCodeToECode};
 use crate::il::pcode::{FlagId, PCodeCanonicaliser, PCodeError, RegisterId};
 use crate::ir::IncompleteFunction;
+use crate::platform::Platform;
 use crate::storage::SegmentStorage;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::common::Revision;
@@ -80,6 +81,7 @@ impl ECodeToSsa {
     pub(crate) fn build_incomplete_function(
         &mut self,
         arch: &Arch,
+        platform: &Platform,
         function: &IncompleteFunction,
         segments: &SegmentStorage,
         input_revision: Revision,
@@ -93,7 +95,9 @@ impl ECodeToSsa {
             input_revision,
             cancellation,
         )?;
-        let ecode = self.pcode_to_ecode.transform(&lifted, arch, cancellation)?;
+        let ecode = self
+            .pcode_to_ecode
+            .transform(&lifted, arch, platform, cancellation)?;
         Ok(self.transform_optimised(&ecode, cancellation)?)
     }
 }

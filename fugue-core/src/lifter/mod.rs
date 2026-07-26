@@ -13,10 +13,10 @@ use thiserror::Error;
 
 use crate::ir::Address;
 
-pub mod disassembler;
+pub(crate) mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
-pub mod dynamic;
+pub(crate) mod dynamic;
 pub use dynamic::{
     LanguageLoader, resolve_language, resolve_language_id, resolve_language_id_with,
     resolve_language_with,
@@ -25,7 +25,7 @@ pub use dynamic::{
 mod lift;
 pub use lift::{Lifter, LifterError};
 
-pub mod traits;
+pub(crate) mod traits;
 
 pub const MAX_CONTEXT_UPDATES: usize = 2;
 

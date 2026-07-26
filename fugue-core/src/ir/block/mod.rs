@@ -9,7 +9,7 @@ use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::common::archived_bitflags;
 
-pub mod incomplete;
+pub(crate) mod incomplete;
 pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
@@ -159,12 +159,9 @@ impl CodeBlock {
         self.start.space()
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.len as _
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     pub fn range(&self) -> RangeInclusive<Address> {
@@ -186,9 +183,7 @@ impl CodeBlock {
     }
 
     pub fn coverage_into(&self, covered: &mut AddressRangeSet) {
-        if !self.is_empty() {
-            covered.insert_range(self.address_range());
-        }
+        covered.insert_range(self.address_range());
     }
 
     pub fn instructions(&self) -> &InsnList {

@@ -6,9 +6,7 @@ use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::ir::ExternFunctionTemplate;
 use crate::lifter::dynamic::LanguageSource;
-use crate::lifter::{
-    Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter, Varnode,
-};
+use crate::lifter::{Language, LanguageError, LanguageId, LanguageLoader, Lifter, Varnode};
 
 #[derive(Clone)]
 struct ArchData {
@@ -39,10 +37,6 @@ pub struct Mips {
 }
 
 impl ArchT for Mips {
-    fn disassembler(&self) -> Disassembler {
-        Disassembler::new(self.lifter())
-    }
-
     fn lifter(&self) -> Lifter {
         Lifter::new(self.language)
     }

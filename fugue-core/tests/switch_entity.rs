@@ -3,8 +3,7 @@ use fugue_core::ir::{
     SwitchProperties, SwitchTable,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::storage::EntityStorage;
-use fugue_core::storage::entities::InMemoryEntityStorage;
+use fugue_core::storage::{EntityStorage, InMemoryEntityStorage};
 
 fn table_of(size: u32, shift: u8) -> AddressTable {
     AddressTable::new(Address::from(0x2000u64), size)

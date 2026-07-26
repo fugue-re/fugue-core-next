@@ -185,7 +185,11 @@ impl SwitchIntervalContext<'_> {
         }
         let operands = self.ssa.operation_operands(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
-        let (scale, index) = self.constant_and_value(a, b)?;
+        let (scale, index) = match operation.opcode() {
+            ECodeSsaOpcode::Mul => self.constant_and_value(a, b)?,
+            ECodeSsaOpcode::LeftShift => (self.ssa.constant_value(b)?, a),
+            _ => unreachable!(),
+        };
         let scale = scale.to_u64()?;
         let scale = match operation.opcode() {
             ECodeSsaOpcode::Mul => scale,

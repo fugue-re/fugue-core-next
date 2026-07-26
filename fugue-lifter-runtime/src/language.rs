@@ -216,6 +216,7 @@ pub trait LanguageImpl {
     const SPACE_NAMES: &'static [&'static str];
     const CONTEXT_VARS: &'static [(&'static str, ContextBitRange)];
     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)];
+    const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [Varnode])] = &[];
 
     const DATA: &'static LanguageData;
 }
@@ -252,6 +253,7 @@ pub struct Language {
     pub(crate) space_names: &'static [&'static str],
     pub(crate) context_vars: &'static [(&'static str, ContextBitRange)],
     pub(crate) context_defaults: &'static [(&'static str, u32)],
+    pub(crate) call_preserved_registers: &'static [(&'static str, &'static [Varnode])],
 
     pub(crate) data: &'static LanguageData,
 }
@@ -349,6 +351,7 @@ impl Language {
             space_names: L::SPACE_NAMES,
             context_vars: L::CONTEXT_VARS,
             context_defaults: L::CONTEXT_DEFAULTS,
+            call_preserved_registers: L::CALL_PRESERVED_REGISTERS,
 
             data: L::DATA,
         }
@@ -483,6 +486,18 @@ impl Language {
 
     pub fn context_defaults(&self) -> &'static [(&'static str, u32)] {
         self.context_defaults
+    }
+
+    pub fn call_preserved_registers(&self, compiler: &str) -> Option<&'static [Varnode]> {
+        self.call_preserved_registers
+            .iter()
+            .find_map(|(candidate, registers)| (*candidate == compiler).then_some(*registers))
+    }
+
+    pub fn compiler_spec_id(&self, compiler: &str) -> Option<&'static str> {
+        self.call_preserved_registers
+            .iter()
+            .find_map(|(candidate, _)| (*candidate == compiler).then_some(*candidate))
     }
 
     pub fn default_context(&self) -> ContextDatabase {

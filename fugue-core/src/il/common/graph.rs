@@ -116,6 +116,18 @@ impl IlGraph {
         &self.block_sources
     }
 
+    pub fn blocks_with_sources(&self) -> impl Iterator<Item = (IlBlockId, Address)> + '_ {
+        self.block_sources
+            .iter()
+            .enumerate()
+            .map(|(index, &source)| {
+                (
+                    IlBlockId::try_from_index(index).expect("block count fits the block id space"),
+                    source,
+                )
+            })
+    }
+
     pub fn block_source(&self, block: IlBlockId) -> Option<Address> {
         self.block_sources.get(block.index()).copied()
     }
@@ -201,8 +213,8 @@ impl IlGraph {
         for (index, successor) in successors.iter().enumerate() {
             if successors[..index].contains(successor) {
                 return Err(StructureError::DuplicateSuccessor {
-                    block: block_id.index(),
-                    successor: successor.index(),
+                    block: block_id.value(),
+                    successor: successor.value(),
                 });
             }
         }

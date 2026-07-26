@@ -11,10 +11,10 @@ use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::common::archived_bitflags;
 
-pub mod frame;
+pub(crate) mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
-pub mod incomplete;
+pub(crate) mod incomplete;
 pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
 
 mod table;

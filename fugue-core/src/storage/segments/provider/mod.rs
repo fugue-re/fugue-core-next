@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::num::TryFromIntError;
 use std::ops::{Range, RangeInclusive};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 
@@ -11,14 +11,14 @@ use crate::storage::StoragePersistence;
 use crate::storage::segments::SegmentStorageError;
 use crate::types::AttributeMap;
 
-pub mod memmap;
+pub(crate) mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;
 
-pub mod memory;
+pub(crate) mod memory;
 pub use memory::InMemorySegmentStorage;
 
-pub mod registry;
-pub use registry::*;
+pub(crate) mod registry;
+pub use registry::{SegmentStorageProviderEntry, SegmentStorageProviderRegistry};
 
 #[derive(
     Debug,
@@ -46,6 +46,10 @@ impl SegmentStorageProviderId {
 
     pub const fn index(&self) -> usize {
         self.0 as usize
+    }
+
+    pub(crate) fn path_in(&self, root: &Path) -> PathBuf {
+        root.join(format!("segment-{self}"))
     }
 }
 

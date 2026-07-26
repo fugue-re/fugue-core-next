@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
@@ -179,33 +181,33 @@ bitflags::bitflags! {
         const FUNCTION_ADDED          = 0x0000_0002;
         const FUNCTION_CHANGED        = 0x0000_0004;
         const FUNCTION_REMOVED        = 0x0000_0008;
-        const RESTORED                = 0x0000_0010;
-        const SEGMENT_MAPPED          = 0x0000_0020;
-        const SEGMENT_MAPPING_CHANGED = 0x0000_0040;
-        const SEGMENT_MAPPING_CREATED = 0x0000_0080;
-        const SEGMENT_UNMAPPED        = 0x0000_0100;
-        const SPACE_CREATED           = 0x0000_0200;
-        const SYMBOL_ADDED            = 0x0000_0400;
-        const SYMBOL_REMOVED          = 0x0000_0800;
-        const REFERENCE_ADDED         = 0x0000_1000;
-        const REFERENCE_REMOVED       = 0x0000_2000;
-        const LIFTED_MATERIALISED     = 0x0000_4000;
-        const LIFTED_REMOVED          = 0x0000_8000;
-        const SWITCH_ADDED            = 0x0001_0000;
-        const SWITCH_REMOVED          = 0x0002_0000;
+        const LIFTED_MATERIALISED     = 0x0000_0010;
+        const LIFTED_REMOVED          = 0x0000_0020;
+        const REFERENCE_ADDED         = 0x0000_0040;
+        const REFERENCE_REMOVED       = 0x0000_0080;
+        const RESTORED                = 0x0000_0100;
+        const SEGMENT_MAPPED          = 0x0000_0200;
+        const SEGMENT_MAPPING_CHANGED = 0x0000_0400;
+        const SEGMENT_MAPPING_CREATED = 0x0000_0800;
+        const SEGMENT_UNMAPPED        = 0x0000_1000;
+        const SPACE_CREATED           = 0x0000_2000;
+        const SWITCH_ADDED            = 0x0000_4000;
+        const SWITCH_REMOVED          = 0x0000_8000;
+        const SYMBOL_ADDED            = 0x0001_0000;
+        const SYMBOL_REMOVED          = 0x0002_0000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
             | Self::FUNCTION_REMOVED.bits();
-        const SYMBOLS = Self::SYMBOL_ADDED.bits() | Self::SYMBOL_REMOVED.bits();
+        const LIFTED = Self::LIFTED_MATERIALISED.bits()
+            | Self::LIFTED_REMOVED.bits();
+        const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
         const SEGMENTS = Self::SEGMENT_MAPPED.bits()
             | Self::SEGMENT_UNMAPPED.bits()
             | Self::SEGMENT_MAPPING_CREATED.bits()
             | Self::SEGMENT_MAPPING_CHANGED.bits();
-        const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
-        const LIFTED = Self::LIFTED_MATERIALISED.bits()
-            | Self::LIFTED_REMOVED.bits();
         const SWITCHES = Self::SWITCH_ADDED.bits() | Self::SWITCH_REMOVED.bits();
+        const SYMBOLS = Self::SYMBOL_ADDED.bits() | Self::SYMBOL_REMOVED.bits();
     }
 }
 
@@ -361,7 +363,7 @@ impl ChangeRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeSet {
     revision: Revision,
-    records: Vec<ChangeRecord>,
+    records: Arc<Vec<ChangeRecord>>,
     kinds: ChangeKinds,
     provenance: ChangeProvenance,
 }
@@ -370,7 +372,7 @@ impl ChangeSet {
     pub fn new(revision: Revision) -> Self {
         Self {
             revision,
-            records: Vec::new(),
+            records: Arc::new(Vec::new()),
             kinds: ChangeKinds::empty(),
             provenance: ChangeProvenance::empty(),
         }
@@ -383,14 +385,18 @@ impl ChangeSet {
             .fold(ChangeKinds::empty(), |kinds, record| kinds | record.kind());
         Self {
             revision,
-            records,
+            records: Arc::new(records),
             kinds,
             provenance: ChangeProvenance::empty(),
         }
     }
 
-    pub fn attributed_to(mut self, source: impl Into<ChangeSource>) -> Self {
+    pub fn set_provenance(&mut self, source: impl Into<ChangeSource>) {
         self.provenance = ChangeProvenance::of(source);
+    }
+
+    pub fn with_provenance(mut self, source: impl Into<ChangeSource>) -> Self {
+        self.set_provenance(source);
         self
     }
 
@@ -416,7 +422,7 @@ impl ChangeSet {
 
     pub fn push(&mut self, record: ChangeRecord) {
         self.kinds |= record.kind();
-        self.records.push(record);
+        Arc::make_mut(&mut self.records).push(record);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -430,7 +436,7 @@ impl ChangeSet {
     pub fn merge(&mut self, other: &ChangeSet) {
         self.revision = self.revision.max(other.revision);
         self.kinds |= other.kinds;
-        self.records.extend(other.records.iter().cloned());
+        Arc::make_mut(&mut self.records).extend(other.records.iter().cloned());
         self.provenance.merge(&other.provenance);
     }
 
@@ -586,20 +592,20 @@ mod test {
     #[test]
     fn test_change_set_provenance_attribution_and_merge() {
         let mut merged = ChangeSet::with_records(Revision::new(1), [function_record(0x1000)])
-            .attributed_to(ChangeSource::agent("update"));
+            .with_provenance(ChangeSource::agent("update"));
         assert!(merged.provenance().contains("update"));
         assert!(merged.provenance().includes(ChangeCategory::Agent));
         assert!(!merged.provenance().includes(ChangeCategory::Analysis));
 
         let analysis = ChangeSet::with_records(Revision::new(2), [function_record(0x2000)])
-            .attributed_to(ChangeSource::analysis("function-recovery"));
+            .with_provenance(ChangeSource::analysis("function-recovery"));
         merged.merge(&analysis);
         assert!(merged.provenance().contains("update"));
         assert!(merged.provenance().contains("function-recovery"));
         assert!(merged.provenance().includes(ChangeCategory::Analysis));
 
         let repeat = ChangeSet::with_records(Revision::new(3), [function_record(0x3000)])
-            .attributed_to(ChangeSource::agent("update"));
+            .with_provenance(ChangeSource::agent("update"));
         merged.merge(&repeat);
         assert_eq!(merged.provenance().sources().count(), 2);
         assert_eq!(
@@ -608,7 +614,7 @@ mod test {
         );
 
         let unlabelled = ChangeSet::with_records(Revision::new(4), [function_record(0x4000)])
-            .attributed_to("external tool");
+            .with_provenance("external tool");
         assert!(unlabelled.provenance().includes(ChangeCategory::Other));
         assert!(!unlabelled.provenance().includes(ChangeCategory::Agent));
     }
@@ -616,9 +622,9 @@ mod test {
     #[test]
     fn test_change_source_filter_selects_by_category_and_label() {
         let agent = ChangeSet::with_records(Revision::new(1), [function_record(0x1000)])
-            .attributed_to(ChangeSource::agent("update"));
+            .with_provenance(ChangeSource::agent("update"));
         let analysis = ChangeSet::with_records(Revision::new(2), [function_record(0x2000)])
-            .attributed_to(ChangeSource::analysis("function-recovery"));
+            .with_provenance(ChangeSource::analysis("function-recovery"));
         let mut mixed = agent.clone();
         mixed.merge(&analysis);
 
@@ -648,7 +654,7 @@ mod test {
             Revision::new(1),
             [function_record(0x1000), bytes_record(0x2000, 0x2fff)],
         )
-        .attributed_to(ChangeSource::analysis("function-recovery"));
+        .with_provenance(ChangeSource::analysis("function-recovery"));
 
         let filter = ChangeFilter::new().with_kinds(ChangeKinds::FUNCTIONS);
         let scoped = changes.scoped_to(&filter).expect("scoped set missing");

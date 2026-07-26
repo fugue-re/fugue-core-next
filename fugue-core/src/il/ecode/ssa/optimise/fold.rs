@@ -1,9 +1,9 @@
 use fugue_bv::BitVec;
 use smallvec::SmallVec;
 
-use crate::il::common::{IlArtefact, IlCsr, IlRewrite, IlValueId};
+use crate::il::common::{IlArtefact, IlCsr, IlOpId, IlRewrite, IlValueId};
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArgumentInputs, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
+    ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
 };
 
 pub(crate) struct ECodeSsaConstantFolding;
@@ -95,20 +95,21 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
             }
         }
 
-        let (operations, constant_storage) = ir.operations_and_constants_mut();
-        let mut constants = ECodeSsaConstantInterner::new(constant_storage);
-        constants.seed(operations);
-        for operation in operations {
-            let op = &*operation;
-            if matches!(op.opcode(), ECodeSsaOpcode::Constant) || op.results().len() != 1 {
+        let mut rewriter = ir.rewriter();
+        for index in 0..rewriter.operations().len() {
+            let operation = &rewriter.operations()[index];
+            if matches!(operation.opcode(), ECodeSsaOpcode::Constant)
+                || operation.results().len() != 1
+            {
                 continue;
             }
-            let result = op.results().start();
-            let Some(value) = folded[result].clone() else {
+            let result = operation.results().start();
+            let Some(value) = folded[result].as_ref() else {
                 continue;
             };
-            let immediate = constants.intern(&value);
-            operation.replace_with_constant(immediate);
+            let operation =
+                IlOpId::try_from_index(index).expect("operation count fits the operation id space");
+            rewriter.replace_with_constant(operation, value);
         }
     }
 }

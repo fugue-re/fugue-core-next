@@ -22,7 +22,7 @@ impl IlDominance {
             .flatten()
     }
 
-    pub fn children(&self, block: IlBlockId) -> &[IlBlockId] {
+    pub fn children_for(&self, block: IlBlockId) -> &[IlBlockId] {
         self.children.row(block.index())
     }
 
@@ -78,10 +78,9 @@ impl IlDominance {
     }
 
     fn add_child_frontiers(&self, block: IlBlockId, frontiers: &mut [Vec<IlBlockId>]) {
-        for child in self.children(block) {
-            let child_frontiers = frontiers[child.index()].clone();
-
-            for frontier in child_frontiers {
+        for child in self.children_for(block) {
+            for index in 0..frontiers[child.index()].len() {
+                let frontier = frontiers[child.index()][index];
                 if self.immediate_dominator(frontier) != Some(block) {
                     Self::push_frontier(frontiers, block, frontier);
                 }
@@ -117,7 +116,7 @@ impl IlDominance {
 
             stack.push((block, true));
 
-            for child in self.children(block).iter().rev() {
+            for child in self.children_for(block).iter().rev() {
                 stack.push((*child, false));
             }
         }
@@ -142,7 +141,7 @@ pub struct IlDominanceFrontier {
 }
 
 impl IlDominanceFrontier {
-    pub fn frontier(&self, block: IlBlockId) -> &[IlBlockId] {
+    pub fn frontier_for(&self, block: IlBlockId) -> &[IlBlockId] {
         self.frontiers.row(block.index())
     }
 
@@ -164,7 +163,7 @@ impl IlDominanceFrontier {
         }
 
         while let Some(block) = queue.pop() {
-            for frontier in self.frontier(block) {
+            for frontier in self.frontier_for(block) {
                 if placed[frontier.index()] {
                     continue;
                 }
@@ -344,11 +343,13 @@ impl<'a> DominanceBuilder<'a> {
 
         while first != second {
             while self.positions[first.index()] > self.positions[second.index()] {
-                first = self.immediate_dominators[first.index()].unwrap_or(self.entry);
+                first = self.immediate_dominators[first.index()]
+                    .expect("processed block has an immediate dominator");
             }
 
             while self.positions[second.index()] > self.positions[first.index()] {
-                second = self.immediate_dominators[second.index()].unwrap_or(self.entry);
+                second = self.immediate_dominators[second.index()]
+                    .expect("processed block has an immediate dominator");
             }
         }
 
@@ -421,7 +422,7 @@ mod test {
         assert!(dominance.dominates(block_id(0)?, block_id(2)?));
         assert!(dominance.dominates(block_id(1)?, block_id(2)?));
         assert!(!dominance.dominates(block_id(2)?, block_id(1)?));
-        assert_eq!(dominance.children(block_id(0)?), &[block_id(1)?]);
+        assert_eq!(dominance.children_for(block_id(0)?), &[block_id(1)?]);
 
         Ok(())
     }
@@ -456,10 +457,10 @@ mod test {
         let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
         let frontiers = dominance.frontiers(&blocks, &successors);
 
-        assert_eq!(frontiers.frontier(block_id(0)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(3)?]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[block_id(3)?]);
-        assert_eq!(frontiers.frontier(block_id(3)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(0)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[block_id(3)?]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[block_id(3)?]);
+        assert_eq!(frontiers.frontier_for(block_id(3)?), &[]);
 
         Ok(())
     }
@@ -519,10 +520,10 @@ mod test {
         let dominance = IlDominance::from_blocks(&blocks, &successors, block_id(0)?);
         let frontiers = dominance.frontiers(&blocks, &successors);
 
-        assert_eq!(frontiers.frontier(block_id(0)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(1)?), &[block_id(1)?]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[block_id(1)?]);
-        assert_eq!(frontiers.frontier(block_id(3)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(0)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[block_id(1)?]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[block_id(1)?]);
+        assert_eq!(frontiers.frontier_for(block_id(3)?), &[]);
 
         Ok(())
     }
@@ -549,8 +550,8 @@ mod test {
 
         assert!(!dominance.is_reachable(block_id(0)?));
         assert!(dominance.is_reachable(block_id(2)?));
-        assert_eq!(frontiers.frontier(block_id(1)?), &[]);
-        assert_eq!(frontiers.frontier(block_id(2)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(1)?), &[]);
+        assert_eq!(frontiers.frontier_for(block_id(2)?), &[]);
 
         Ok(())
     }

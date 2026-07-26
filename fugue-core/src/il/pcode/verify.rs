@@ -1,44 +1,42 @@
 use thiserror::Error;
 
-use crate::il::common::verify::{StructureError, verify_source_spans};
+use crate::il::common::verify::{StructureError, StructureVerifierError};
 use crate::il::common::{IlArtefact, IlError};
 use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeOp};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum VerifyError {
+    #[error("PCode operation has a forbidden effect space")]
+    ForbiddenEffectSpace,
     #[error("PCode operation has a forbidden output")]
     ForbiddenOutput,
     #[error(transparent)]
     Il(#[from] IlError),
+    #[error("PCode location has conflicting properties")]
+    InvalidLocationProperties,
     #[error("PCode operation has an invalid operand count: expected {expected}, found {found}")]
     InvalidOperandCount { expected: usize, found: usize },
     #[error(transparent)]
     Structure(StructureError),
 }
 
-impl From<StructureError> for VerifyError {
-    fn from(error: StructureError) -> Self {
-        match error {
-            StructureError::Il(error) => Self::Il(error),
-            error => Self::Structure(error),
-        }
+impl StructureVerifierError for VerifyError {
+    fn structure(error: StructureError) -> Self {
+        Self::Structure(error)
     }
 }
 
 impl PCodeIr {
     pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        if self.metadata().schema() != Self::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                Self::LEVEL,
-                Self::SCHEMA.value(),
-                self.metadata().schema().value(),
-            )
-            .into());
-        }
+        self.verify_structure::<VerifyError>(self.source_spans(), None, self.operations().len())?;
 
-        self.graph().verify()?;
-        self.graph().verify_node_bounds(self.operations().len())?;
-        verify_source_spans(self.source_spans(), self.operations().len())?;
+        if self
+            .locations()
+            .iter()
+            .any(|location| location.properties().bits().count_ones() > 1)
+        {
+            return Err(VerifyError::InvalidLocationProperties);
+        }
 
         for operation in self.operations() {
             self.verify_operation(operation)?;
@@ -88,6 +86,9 @@ impl PCodeIr {
         if operation.opcode().requires_effect_space() && operation.effect_space().is_none() {
             return Err(IlError::missing_component(Self::LEVEL, "address space").into());
         }
+        if !operation.opcode().requires_effect_space() && operation.effect_space().is_some() {
+            return Err(VerifyError::ForbiddenEffectSpace);
+        }
 
         if operation.opcode().requires_target() && operation.immediate() == 0 {
             return Err(IlError::missing_component(Self::LEVEL, "address").into());
@@ -101,15 +102,15 @@ impl PCodeIr {
             );
         }
 
-        self.verify_operation_widths(operation)
+        self.verify_operation_sizes(operation)
     }
 
-    fn verify_operation_widths(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
+    fn verify_operation_sizes(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
         let operands = self.operation_operands(operation);
         let output = operation.output().and_then(|output| self.location(output));
 
         if let Some(output) = output
-            && operation.opcode().preserves_first_operand_width()
+            && operation.opcode().preserves_first_operand_size()
             && let Some(first) = operands.first().and_then(|operand| self.location(*operand))
             && output.size() != first.size()
         {

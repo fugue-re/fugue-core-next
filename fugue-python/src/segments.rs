@@ -2,9 +2,11 @@ use fallible_iterator::FallibleIterator;
 use fugue_core::ir::{Address as CoreAddress, SegmentProperties as CoreSegmentProperties};
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
-use fugue_core::storage::segments::mapping::SegmentMappingBuilder;
-use fugue_core::storage::segments::{InMemorySegmentStorage, SegmentStorage as CoreSegmentStorage};
+use fugue_core::storage::{
+    InMemorySegmentStorage, SegmentMappingBuilder, SegmentStorage as CoreSegmentStorage,
+};
 use fugue_core::types::AttributeMap;
+use pyo3::exceptions::PyOverflowError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
@@ -65,10 +67,23 @@ pub(crate) fn loadable_segments_from_loader(
             continue;
         };
 
-        let mut bytes = vec![0u8; segment.size() as usize];
-        storage
-            .read_bytes(address, &mut bytes)
-            .map_err(storage_error)?;
+        let view = storage
+            .view_containing(address)
+            .map_err(storage_error)?
+            .bytes_from(address)
+            .ok_or_else(|| BindingError::no_mapped_bytes(address))?;
+        let chunks = view
+            .chunks()
+            .iter()
+            .filter_map(|chunk| {
+                let available = segment.size().saturating_sub(chunk.offset());
+                let len = usize::try_from(available.min(chunk.bytes().len() as u64)).ok()?;
+                (len != 0).then(|| LoadableSegmentChunk {
+                    offset: chunk.offset(),
+                    bytes: chunk.bytes()[..len].to_vec(),
+                })
+            })
+            .collect();
 
         let mapping_hints = segment
             .mapping_hints()
@@ -88,9 +103,9 @@ pub(crate) fn loadable_segments_from_loader(
         segments.push(LoadableSegment {
             name: segment.name().to_owned(),
             address: Address::from_core(address),
-            size: segment.size() as usize,
+            size: segment.size(),
             properties: SegmentProperties::from_core(segment.properties()),
-            bytes,
+            chunks,
             mapping_hints,
             function_hints,
         });
@@ -254,14 +269,20 @@ pub(crate) struct LoadableSegment {
     #[pyo3(get)]
     address: Address,
     #[pyo3(get)]
-    size: usize,
+    size: u64,
     #[pyo3(get)]
     properties: SegmentProperties,
-    bytes: Vec<u8>,
+    chunks: Vec<LoadableSegmentChunk>,
     #[pyo3(get)]
     mapping_hints: Vec<MappingHint>,
     #[pyo3(get)]
     function_hints: Vec<Address>,
+}
+
+#[derive(Clone)]
+struct LoadableSegmentChunk {
+    offset: u64,
+    bytes: Vec<u8>,
 }
 
 impl LoadableSegment {
@@ -274,9 +295,9 @@ impl LoadableSegment {
         Self {
             name: name.into(),
             address,
-            size: bytes.len(),
+            size: bytes.len() as u64,
             properties,
-            bytes,
+            chunks: vec![LoadableSegmentChunk { offset: 0, bytes }],
             mapping_hints: Vec::new(),
             function_hints: Vec::new(),
         }
@@ -286,8 +307,20 @@ impl LoadableSegment {
 #[pymethods]
 impl LoadableSegment {
     #[getter]
-    fn bytes<'py>(&self, py: Python<'py>) -> Py<PyBytes> {
-        PyBytes::new(py, &self.bytes).unbind()
+    fn bytes<'py>(&self, py: Python<'py>) -> PyResult<Py<PyBytes>> {
+        let size = usize::try_from(self.size)
+            .map_err(|_| PyOverflowError::new_err("segment size exceeds platform limits"))?;
+        let mut bytes = vec![0; size];
+        for chunk in &self.chunks {
+            let start = usize::try_from(chunk.offset)
+                .map_err(|_| PyOverflowError::new_err("segment offset exceeds platform limits"))?;
+            if start >= size {
+                continue;
+            }
+            let end = start.saturating_add(chunk.bytes.len()).min(size);
+            bytes[start..end].copy_from_slice(&chunk.bytes[..end - start]);
+        }
+        Ok(PyBytes::new(py, &bytes).unbind())
     }
 
     fn __repr__(&self) -> String {

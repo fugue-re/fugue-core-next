@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use fallible_iterator::FallibleIterator;
+use rkyv::rancor::Error as RkyvError;
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -17,31 +18,31 @@ use crate::loader::{
     LoaderError,
 };
 use crate::storage::PERSISTENT;
-use crate::storage::segments::provider::SegmentStorageProviderDescriptor;
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
-pub mod cache;
-pub mod mapping;
-pub mod overlay;
-pub mod provider;
-pub mod space;
-pub mod view;
+pub(crate) mod cache;
+pub(crate) mod mapping;
+pub(crate) mod overlay;
+pub(crate) mod provider;
+pub(crate) mod space;
+pub(crate) mod view;
 
 pub use cache::SegmentMappingCache;
-use mapping::{
+pub use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
-    SegmentMappingKind, SegmentMappingLocation, SegmentMappingMetadata, SegmentMappingProvenance,
+    SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef, SegmentSubMapping,
 };
-use provider::SegmentStorageProviderRegistry;
+use mapping::{SegmentMappingLocation, SegmentMappingMetadata};
 pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
-    SegmentStorageProvider, SegmentStorageProviderFromLoadable,
-    SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
-    SegmentStorageProviderId,
+    SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
+    SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
+    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
 };
-use space::{AddressSpace, AddressSpaceId, AddressSpaceKind, AddressSpaceRevert};
-use view::SegmentMappingView;
+use space::AddressSpaceRevert;
+pub use space::{AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind};
+pub use view::SegmentMappingView;
 
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
@@ -137,6 +138,7 @@ struct SegmentStorageMetadata {
     providers: Vec<ProviderMetadata>,
     spaces: Vec<AddressSpaceMetadata>,
     mappings: Vec<MappingMetadata>,
+    fill_byte: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,8 +667,6 @@ impl SegmentStorage {
         let mut metadata = Self::load_storage_metadata(path)?;
         let mut storage = Self::empty();
 
-        let mut provider_map = BTreeMap::new();
-
         for prov_meta in mem::take(&mut metadata.providers) {
             tracing::debug!(
                 "loading segment storage provider `{}` with tag `{}`",
@@ -675,7 +675,7 @@ impl SegmentStorage {
             );
             let provider = SegmentStorageProviderRegistry::get().from_storage(
                 &prov_meta.stable_tag,
-                &path.join(format!("segment-{}", prov_meta.id)),
+                &prov_meta.id.path_in(path),
                 attributes,
             )?;
             tracing::debug!(
@@ -684,12 +684,15 @@ impl SegmentStorage {
                 prov_meta.stable_tag
             );
 
-            let new_id =
-                storage.open_boxed_provider(provider, prov_meta.permissions, prov_meta.stable_tag);
-
-            provider_map.insert(prov_meta.id, new_id);
+            storage.open_boxed_provider(
+                prov_meta.id,
+                provider,
+                prov_meta.permissions,
+                prov_meta.stable_tag,
+            );
         }
 
+        storage.fill_byte = metadata.fill_byte;
         let mut space_map = BTreeMap::new();
         storage.spaces.clear();
 
@@ -718,12 +721,12 @@ impl SegmentStorage {
 
         let mut mapping_map = BTreeMap::new();
         for mapping_meta in &metadata.mappings {
-            let provider_id = *provider_map.get(&mapping_meta.provider_id).ok_or_else(|| {
-                SegmentStorageError::backing_with(format!(
-                    "unknown provider `{}` in metadata",
-                    mapping_meta.provider_id
-                ))
-            })?;
+            let provider_id = mapping_meta.provider_id;
+            if !storage.providers.contains_key(&provider_id) {
+                return Err(SegmentStorageError::backing_with(format!(
+                    "unknown provider `{provider_id}` in metadata"
+                )));
+            }
             let space_id = *space_map
                 .get(&mapping_meta.space_id)
                 .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
@@ -815,39 +818,23 @@ impl SegmentStorage {
             })
             .collect::<Vec<_>>();
 
-        let mut space_by_mapping = BTreeMap::<SegmentMappingId, AddressSpaceId>::new();
-        for (&space_id, space) in &self.spaces {
-            for mapping_ref in space.priority_list() {
-                space_by_mapping
-                    .entry(mapping_ref.mapping_id())
-                    .or_insert(space_id);
-            }
-        }
-
         let mappings = self
             .mappings
             .values()
-            .map(|m| {
-                let space_id = space_by_mapping
-                    .get(&m.id())
-                    .copied()
-                    .unwrap_or(DEFAULT_SPACE_ID);
-
-                MappingMetadata {
-                    id: m.id(),
-                    name: m.name().to_owned(),
-                    virtual_start: m.start().offset(),
-                    physical_offset: m.offset(),
-                    size: m.size(),
-                    properties: m.properties(),
-                    kind: m.kind(),
-                    provenance: m.provenance(),
-                    flags: m.flags(),
-                    mapping_hints: m.mapping_hint_offsets().clone(),
-                    function_hints: m.function_hint_offsets().clone(),
-                    space_id,
-                    provider_id: m.provider_id(),
-                }
+            .map(|m| MappingMetadata {
+                id: m.id(),
+                name: m.name().to_owned(),
+                virtual_start: m.start().offset(),
+                physical_offset: m.offset(),
+                size: m.size(),
+                properties: m.properties(),
+                kind: m.kind(),
+                provenance: m.provenance(),
+                flags: m.flags(),
+                mapping_hints: m.mapping_hint_offsets().clone(),
+                function_hints: m.function_hint_offsets().clone(),
+                space_id: m.start().space(),
+                provider_id: m.provider_id(),
             })
             .collect::<Vec<_>>();
 
@@ -855,6 +842,7 @@ impl SegmentStorage {
             providers,
             spaces,
             mappings,
+            fill_byte: self.fill_byte,
         };
 
         let file = File::create(&meta_path)
@@ -866,6 +854,9 @@ impl SegmentStorage {
         })?;
         io::Write::write_all(&mut writer, &bytes).map_err(|e| {
             SegmentStorageError::backing_with(format!("failed to write metadata: {e}"))
+        })?;
+        io::Write::flush(&mut writer).map_err(|e| {
+            SegmentStorageError::backing_with(format!("failed to flush metadata: {e}"))
         })?;
 
         Ok(())
@@ -886,8 +877,8 @@ impl SegmentStorage {
         io::Read::read_to_end(&mut reader, &mut bytes).map_err(|e| {
             SegmentStorageError::backing_with(format!("failed to read metadata: {e}"))
         })?;
-        let metadata = rkyv::from_bytes::<SegmentStorageMetadata, rkyv::rancor::Error>(&bytes)
-            .map_err(|e| {
+        let metadata =
+            rkyv::from_bytes::<SegmentStorageMetadata, RkyvError>(&bytes).map_err(|e| {
                 SegmentStorageError::backing_with(format!("failed to decode metadata: {e}"))
             })?;
 
@@ -900,6 +891,7 @@ impl SegmentStorage {
 
         Ok(metadata)
     }
+
 
     pub fn open_provider<S>(
         &mut self,
@@ -920,12 +912,12 @@ impl SegmentStorage {
 
     pub(crate) fn open_boxed_provider(
         &mut self,
+        id: SegmentStorageProviderId,
         provider: Box<dyn SegmentStorageProvider>,
         permissions: SegmentProperties,
         stable_tag: impl Into<Cow<'static, str>>,
     ) -> SegmentStorageProviderId {
-        let id = SegmentStorageProviderId::new(self.provider_ctr);
-        self.provider_ctr += 1;
+        self.provider_ctr = self.provider_ctr.max(id.index() + 1);
 
         let descriptor =
             SegmentStorageDescriptor::from_boxed(id, provider, permissions, stable_tag);
@@ -1280,7 +1272,10 @@ impl SegmentStorage {
             })
             .collect::<SmallVec<[_; 8]>>();
 
-        let space = self.spaces.get_mut(&space_id).unwrap();
+        let space = self
+            .spaces
+            .get_mut(&space_id)
+            .expect("space existence was checked before rebuilding its range");
         space.rebuild_range(range_start, range_end, overlapping);
 
         Ok(())
@@ -1686,6 +1681,28 @@ impl SegmentStorage {
         Ok(SegmentMappingView::new(mapping, provider, mapping_view))
     }
 
+    pub(crate) fn space_generation(&self, space_id: AddressSpaceId) -> Option<u64> {
+        self.spaces.get(&space_id).map(AddressSpace::generation)
+    }
+
+    fn view_for_submapping(
+        &self,
+        submapping: &SegmentSubMapping,
+    ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
+        let mapping_ref = submapping.mapping_ref();
+        let mapping = self
+            .mappings
+            .get(&mapping_ref.mapping_id())
+            .filter(|mapping| mapping_ref.is_valid(mapping))
+            .ok_or(SegmentStorageError::InvalidAddress)?;
+        let provider = self
+            .providers
+            .get(&mapping.provider_id())
+            .ok_or(SegmentStorageError::InvalidAddress)?;
+
+        Ok(SegmentMappingView::new(mapping, provider, submapping))
+    }
+
     pub fn views_covering(
         &self,
         addr: impl Into<Address>,
@@ -2054,14 +2071,14 @@ mod test {
         let mut storage = SegmentStorage::empty();
         let first_provider = storage.open_provider(
             MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(
-                project.path().join("segment-0"),
+                SegmentStorageProviderId::new(0).path_in(project.path()),
                 4,
             )?,
             SegmentProperties::PERM_ALL,
         );
         let second_provider = storage.open_provider(
             MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(
-                project.path().join("segment-1"),
+                SegmentStorageProviderId::new(1).path_in(project.path()),
                 4,
             )?,
             SegmentProperties::PERM_ALL,
@@ -2093,6 +2110,61 @@ mod test {
         assert_eq!(storage.view_containing(0x1000u64)?.name(), "first");
         assert_eq!(bytes, [0xAA; 4]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_provider_id_gap_survives_multiple_reloads() -> Result<(), SegmentStorageError> {
+        let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut storage = SegmentStorage::empty();
+        let removed = storage.open_provider(
+            MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(
+                SegmentStorageProviderId::new(0).path_in(project.path()),
+                4,
+            )?,
+            SegmentProperties::PERM_ALL,
+        );
+        let retained = storage.open_provider(
+            MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(
+                SegmentStorageProviderId::new(1).path_in(project.path()),
+                4,
+            )?,
+            SegmentProperties::PERM_ALL,
+        );
+        storage.close_provider(removed)?;
+        storage.write_bytes_direct(retained, 0, &[0x5a; 4])?;
+        let mapping = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 4, 0, retained)
+                .with_properties(SegmentProperties::PERM_ALL),
+        )?;
+        storage.add_mapping_to_space(DEFAULT_SPACE_ID, mapping)?;
+        storage.persist_storage(project.path())?;
+        drop(storage);
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());
+        let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+        storage.persist_storage(project.path())?;
+        drop(storage);
+
+        let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+        let mut bytes = [0u8; 4];
+        storage.read_bytes_exact(0x1000u64, &mut bytes)?;
+        assert_eq!(bytes, [0x5a; 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn fill_byte_survives_reload() -> Result<(), SegmentStorageError> {
+        let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut storage = SegmentStorage::empty();
+        storage.set_fill_byte(0xa5);
+        storage.persist_storage(project.path())?;
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());
+        let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+        assert_eq!(storage.fill_byte(), 0xa5);
         Ok(())
     }
 

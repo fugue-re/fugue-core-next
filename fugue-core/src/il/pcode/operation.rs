@@ -40,7 +40,7 @@ il_id!(PCodeLocationId, "PCode location");
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct PCodeLocation {
     offset: u64,
-    width: u16,
+    size: u16,
     properties: PCodeLocationProperties,
     lifter_space: LifterSpaceHandle,
 }
@@ -64,12 +64,12 @@ impl PCodeLocation {
     pub(crate) const fn new(
         lifter_space: LifterSpaceHandle,
         offset: u64,
-        width: u16,
+        size: u16,
         properties: PCodeLocationProperties,
     ) -> Self {
         Self {
             offset,
-            width,
+            size,
             properties,
             lifter_space,
         }
@@ -104,7 +104,11 @@ impl PCodeLocation {
     }
 
     pub const fn size(&self) -> u16 {
-        self.width
+        self.size
+    }
+
+    pub const fn bits(&self) -> u32 {
+        self.size as u32 * 8
     }
 
     pub const fn properties(&self) -> PCodeLocationProperties {
@@ -258,9 +262,7 @@ impl PCodeOpcode {
             Op::UserOp(_, _) => Self::UserOp,
         })
     }
-}
 
-impl PCodeOpcode {
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Copy => "copy",
@@ -431,7 +433,7 @@ impl PCodeOpcode {
         )
     }
 
-    pub const fn preserves_first_operand_width(&self) -> bool {
+    pub const fn preserves_first_operand_size(&self) -> bool {
         matches!(
             self,
             Self::Copy

@@ -158,8 +158,10 @@ impl CodeBlockStructurer {
                 .expect("block length must be validated"),
         );
 
-        debug_assert!(self.block_starts.insert(address, block).is_none());
-        debug_assert!(self.block_ends.insert(last_address, block).is_none());
+        let previous_start = self.block_starts.insert(address, block);
+        let previous_end = self.block_ends.insert(last_address, block);
+        debug_assert!(previous_start.is_none());
+        debug_assert!(previous_end.is_none());
     }
 
     fn connect_local_targets(

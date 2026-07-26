@@ -16,7 +16,7 @@ use self::change::{
 };
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
-use crate::il::common::{IlError, IlLevel};
+use crate::il::common::IlLevel;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
     ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
@@ -33,6 +33,7 @@ use crate::storage::segments::space::AddressSpaceId;
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 const MAX_PENDING_REGION_RANGES: usize = 4096;
+const MAX_COMPLETION_ROUNDS: usize = 256;
 const IDLE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 pub const DEFAULT_ANALYSER_MAX_FAILURES: usize = 3;
 
@@ -864,7 +865,10 @@ impl Subscriber {
         Self { rx, tx, filter }
     }
 
-    fn materialise(&self, changes: &Arc<ChangeSet>, resync: &Arc<ChangeSet>) -> bool {
+    fn materialise(&self, changes: &ChangeSet, resync: &mut Option<Arc<ChangeSet>>) -> bool {
+        if self.tx.receiver_count() == 1 {
+            return false;
+        }
         let scoped = match changes.scoped_to(&self.filter) {
             Some(scoped) => Arc::new(scoped),
             None => return true,
@@ -873,7 +877,20 @@ impl Subscriber {
         match self.tx.try_send(scoped) {
             Ok(()) => true,
             Err(TrySendError::Disconnected(_)) => false,
-            Err(TrySendError::Full(_)) => self.resync(resync.clone()),
+            Err(TrySendError::Full(_)) => {
+                let resync = resync.get_or_insert_with(|| {
+                    Arc::new(
+                        ChangeSet::with_records(
+                            changes.revision(),
+                            [ChangeRecord::Restored {
+                                to: changes.revision(),
+                            }],
+                        )
+                        .with_provenance(ChangeSource::engine("resync")),
+                    )
+                });
+                self.resync(resync.clone())
+            }
         }
     }
 
@@ -1717,30 +1734,33 @@ impl Worker {
             return Err(EngineError::Poisoned(message.clone()));
         }
 
-        let mut completion_ran = false;
+        let mut completion_pending = false;
+        let mut completion_rounds = 0usize;
 
         loop {
-            let mut ran_analyser = false;
-
             while let Some(index) = self.queue.pop_next() {
-                ran_analyser = true;
+                completion_pending = true;
                 self.run_analyser(index)?;
             }
 
-            if !ran_analyser {
-                if !completion_ran {
-                    completion_ran = true;
-                    self.run_completion_hooks()?;
-                    if !self.queue.is_empty() {
-                        continue;
+            if completion_pending {
+                completion_pending = false;
+                self.run_completion_hooks()?;
+                if !self.queue.is_empty() {
+                    completion_rounds += 1;
+                    if completion_rounds > MAX_COMPLETION_ROUNDS {
+                        return Err(
+                            self.poison_and_stop("completion hooks did not converge".to_owned())
+                        );
                     }
+                    continue;
                 }
-
-                if self.persistence_policy == PersistencePolicy::OnIdle {
-                    self.persist_dirty_debounced()?;
-                }
-                return Ok(());
             }
+
+            if self.persistence_policy == PersistencePolicy::OnIdle {
+                self.persist_dirty_debounced()?;
+            }
+            return Ok(());
         }
     }
 
@@ -1860,7 +1880,7 @@ impl Worker {
                 drop(project);
                 drop(query_write);
                 if !changes.is_empty() {
-                    self.finish_publish(changes.clone())?;
+                    self.finish_publish(&changes)?;
                 }
                 Ok(TransactionResult::Committed { value, changes })
             }
@@ -2011,20 +2031,9 @@ impl Worker {
         level: IlLevel,
     ) -> Result<ChangeSet, EngineError> {
         let cancellation = self.cancellation.child();
-        let result =
-            self.with_transaction(ChangeSource::agent("ensure IR"), |_, transaction| {
-                transaction.ensure_lifted(function, level, &cancellation)?;
-                let present = match level {
-                    IlLevel::PCode => transaction.project().pcode(function)?.is_some(),
-                    IlLevel::ECode => transaction.project().ecode(function)?.is_some(),
-                    IlLevel::ECodeSsa => transaction.project().ecode_ssa(function)?.is_some(),
-                };
-                if !present {
-                    return Err(ProjectError::from(IlError::missing_artefact(
-                        function, level,
-                    )));
-                }
-                Ok(())
+        let result = self
+            .with_transaction(ChangeSource::agent("ensure IR"), |_, transaction| {
+                transaction.ensure_lifted(function, level, &cancellation)
             })?;
 
         match result {
@@ -2076,20 +2085,11 @@ impl Worker {
         self.queries.apply_changes(changes);
     }
 
-    fn finish_publish(&mut self, changes: ChangeSet) -> Result<(), EngineError> {
-        let resync = Arc::new(
-            ChangeSet::with_records(
-                changes.revision(),
-                [ChangeRecord::Restored {
-                    to: changes.revision(),
-                }],
-            )
-            .attributed_to(ChangeSource::engine("resync")),
-        );
-        let changes = Arc::new(changes);
+    fn finish_publish(&mut self, changes: &ChangeSet) -> Result<(), EngineError> {
+        let mut resync = None;
         self.subscribers
-            .retain(|subscriber| subscriber.materialise(&changes, &resync));
-        self.route_changes(&changes);
+            .retain(|subscriber| subscriber.materialise(changes, &mut resync));
+        self.route_changes(changes);
         if self.persistence_policy == PersistencePolicy::OnCommit {
             self.persist_dirty()?;
         }
@@ -2145,9 +2145,10 @@ impl Worker {
         if let Some(revision) = restored_revision {
             let restored = Arc::new(
                 ChangeSet::with_records(revision, [ChangeRecord::Restored { to: revision }])
-                    .attributed_to(ChangeSource::engine("restore")),
+                    .with_provenance(ChangeSource::engine("restore")),
             );
-            if !subscriber.materialise(&restored, &restored) {
+            let mut resync = Some(restored.clone());
+            if !subscriber.materialise(&restored, &mut resync) {
                 return;
             }
         }
@@ -2258,20 +2259,24 @@ mod test {
                 space: AddressSpaceId::from(0u8),
             }],
         ));
-        let resync = Arc::new(ChangeSet::with_records(
-            Revision::new(2),
-            [ChangeRecord::Restored {
-                to: Revision::new(2),
-            }],
-        ));
+        let mut resync = None;
 
-        assert!(subscriber.materialise(&first, &resync));
-        assert!(subscriber.materialise(&second, &resync));
+        assert!(subscriber.materialise(&first, &mut resync));
+        assert!(subscriber.materialise(&second, &mut resync));
 
         let delivered = rx.try_recv()?;
-        assert_eq!(&*delivered, &*resync);
+        assert_eq!(&*delivered, &*resync.expect("resync must be materialised"));
         assert!(rx.try_recv().is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn dropped_subscription_is_pruned_despite_internal_receiver() {
+        let (tx, rx) = flume::bounded(1);
+        let subscriber = Subscriber::new(tx, rx.clone(), ChangeFilter::new());
+        drop(rx);
+        let changes = Arc::new(ChangeSet::new(Revision::new(1)));
+        assert!(!subscriber.materialise(&changes, &mut None));
     }
 }

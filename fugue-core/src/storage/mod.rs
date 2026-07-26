@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Cursor, Error as IoError, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,24 +16,38 @@ use crate::loader::{ImageResolution, Loadable};
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrMapping};
 
-pub mod entities;
+pub(crate) mod entities;
+#[cfg(feature = "sqlite")]
+pub use entities::SqliteEntityStorage;
 pub use entities::{
-    DefaultPersistentEntityStorage, DefaultTransientEntityStorage, EntityStorage,
-    EntityStorageError, EntityStorageProvider,
-};
-use entities::{
-    EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage, InMemoryEntityStorage,
-    WriteBackWorker,
+    BufferedEntityWriter, DefaultPersistentEntityStorage, DefaultTransientEntityStorage,
+    DummyEntityStorage, ENTITY_PROJECT_REVISION_ID, Entity, EntityBytesAsIterator,
+    EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityId,
+    EntityIterator, EntityKey, EntityKeyBytesIterator, EntityKeyId, EntityKeyIterator,
+    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
+    EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityTransactionalReader,
+    EntityTransactionalWriter, InMemoryEntityStorage, MutableEntity, ProjectEntity,
+    WriteBackAction, WriteBackWorker, make_key_with_entity_id,
 };
 
-pub mod project;
+pub(crate) mod project;
+#[cfg(feature = "sqlite")]
+pub use project::SqliteProvider;
+pub use project::{FundamentalProjectEntity, PersistableProjectEntity, ProjectEntityFromStorage};
 
-pub mod segments;
+pub(crate) mod segments;
 pub use segments::{
-    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, SegmentMappingCache,
-    SegmentStorage, SegmentStorageError, SegmentStorageProvider,
+    AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind, DEFAULT_SPACE_ID,
+    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
+    SegmentMapping, SegmentMappingBuilder, SegmentMappingCache, SegmentMappingFlags,
+    SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
+    SegmentMappingView, SegmentStorage, SegmentStorageDescriptor, SegmentStorageError,
+    SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
+    SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
+    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
+    SegmentSubMapping,
 };
-use segments::{InMemorySegmentStorage, SegmentStorageProviderFromStorage};
 
 // The magic bytes used to identify a Fugue project file.
 //
@@ -72,19 +86,18 @@ pub const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
-    #[error("failed to create or load project: {0}")]
-    CreateProject(std::io::Error),
     #[error("failed to clean-up project: {0}")]
-    CleanupProject(std::io::Error),
-    #[error("no project path specified")]
-    NoProjectPath,
-    #[error("failed to validate project magic bytes")]
-    NotAValidProject,
-    #[error("project is not a standalone project; cannot be loaded without a loadable instance")]
-    NotAStandaloneProject,
-
+    CleanupProject(IoError),
+    #[error("failed to create or load project: {0}")]
+    CreateProject(IoError),
     #[error("failed to initialise entity storage: {0}")]
     EntityStorage(#[from] EntityStorageError),
+    #[error("no project path specified")]
+    NoProjectPath,
+    #[error("project is not a standalone project; cannot be loaded without a loadable instance")]
+    NotAStandaloneProject,
+    #[error("failed to validate project magic bytes")]
+    NotAValidProject,
     #[error("failed to initialise segment storage: {0}")]
     SegmentStorage(#[from] SegmentStorageError),
 }
@@ -404,6 +417,24 @@ pub struct CompressedPersistentStorage {
     path: PathBuf,
 }
 
+impl StorageCleanupHandler for CompressedPersistentStorage {
+    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
+        let result = self.cleanup_storage_aux();
+        if result.is_err() {
+            let path = self.path.with_extension("fdbz");
+            if path.exists()
+                && let Err(e) = fs::remove_file(&path)
+            {
+                tracing::error!(
+                    "failed to remove packed project file `{}`: {e}",
+                    path.display()
+                );
+            }
+        }
+        result
+    }
+}
+
 impl CompressedPersistentStorage {
     fn cleanup_storage_aux(&mut self) -> Result<(), StorageProviderError> {
         let packed = self.path.with_extension("fdbz");
@@ -411,11 +442,8 @@ impl CompressedPersistentStorage {
 
         let file = File::create(&packed).map_err(StorageProviderError::CleanupProject)?;
         let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Zstd);
-
         let mut writer = BufWriter::new(file);
-
         self.write_header(&mut writer)?;
-
         let mut zip = ZipWriter::new(writer);
 
         for tracked in WalkDir::new(&unpacked)
@@ -429,7 +457,6 @@ impl CompressedPersistentStorage {
                 .expect("file/directory path should be relative to unpacked directory");
 
             if relative_path == Path::new("") {
-                // skip the root directory
                 continue;
             }
 
@@ -450,18 +477,14 @@ impl CompressedPersistentStorage {
             }
 
             let mut data = File::open(path).map_err(StorageProviderError::CleanupProject)?;
-
             let size = data.seek(SeekFrom::End(0)).map_err(|_| {
                 StorageProviderError::cleanup_project_invalid_data("failed to obtain file size")
             })?;
-
             data.seek(SeekFrom::Start(0)).map_err(|_| {
                 StorageProviderError::cleanup_project_invalid_data(
                     "failed to seek to start of file",
                 )
             })?;
-
-            // if not less than 4 GiB, use large file options
             let options = if size > u32::MAX as u64 {
                 options.large_file(true)
             } else {
@@ -470,38 +493,19 @@ impl CompressedPersistentStorage {
 
             zip.start_file_from_path(relative_path, options)
                 .map_err(StorageProviderError::cleanup_project)?;
-
             std::io::copy(&mut data, &mut zip).map_err(StorageProviderError::CleanupProject)?;
         }
 
-        zip.finish()
+        let mut writer = zip
+            .finish()
             .map_err(StorageProviderError::cleanup_project)?;
-
+        writer
+            .flush()
+            .map_err(StorageProviderError::cleanup_project)?;
         fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
-
         Ok(())
     }
-}
 
-impl StorageCleanupHandler for CompressedPersistentStorage {
-    fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
-        let result = self.cleanup_storage_aux();
-        if result.is_err() {
-            let path = self.path.with_extension("fdbz");
-            if path.exists()
-                && let Err(e) = fs::remove_file(&path)
-            {
-                tracing::error!(
-                    "failed to remove packed project file `{}`: {e}",
-                    path.display()
-                );
-            }
-        }
-        result
-    }
-}
-
-impl CompressedPersistentStorage {
     pub fn new(attributes: &mut AttributeMap) -> Result<Self, StorageProviderError> {
         let path = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)

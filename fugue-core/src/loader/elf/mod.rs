@@ -34,6 +34,7 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
+use crate::platform::Platform;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
@@ -1777,11 +1778,6 @@ where
                 .checked_add(span.wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(address))?;
 
-            if last_address < address {
-                tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
-                continue;
-            }
-
             tracing::trace!("processing section {address}-{last_address}");
 
             let data = sect.data().unwrap_or_default();
@@ -1857,11 +1853,6 @@ where
                 .checked_add(size.wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(address))?;
 
-            if last_address < address {
-                tracing::debug!("section bounds {address}-{last_address} overflow; skipping");
-                continue;
-            }
-
             let vrange = address..=last_address;
             let bank = self
                 .region_bank
@@ -1924,11 +1915,6 @@ where
             let last_address = address
                 .checked_add(size.wrapping_sub(1))
                 .ok_or_else(|| LoaderError::address_overflow(address))?;
-
-            if last_address < address {
-                tracing::debug!("segment bounds {address}-{last_address} overflow; skipping");
-                continue;
-            }
 
             let vrange = address..=last_address;
             let bank = self
@@ -1998,9 +1984,7 @@ where
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let sects_bound = self.sects.size_hint().0;
-        let segms_bound = self.segms.size_hint().0;
-        (sects_bound + segms_bound, None)
+        (0, None)
     }
 }
 
@@ -2055,6 +2039,10 @@ impl Loadable for Elf<'_> {
 
     fn architecture(&self) -> Arch {
         self.architecture.clone()
+    }
+
+    fn platform(&self) -> Platform {
+        self.architecture.platform().with_compiler_spec_id("gcc")
     }
 
     fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {

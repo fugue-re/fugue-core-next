@@ -110,7 +110,7 @@ where
             | R_X86_64_GOTPCREL
             | R_X86_64_GOTPCRELX
             | R_X86_64_REX_GOTPCRELX => {
-                let target = bytes.address().offset() + offset;
+                let target = bytes.address().offset().wrapping_add(offset);
 
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");

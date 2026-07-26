@@ -13,8 +13,13 @@ impl SsaConstruction<'_, '_> {
         index: usize,
         current: &mut BTreeMap<SsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
-        for expression in self.built_expressions.drain(..) {
-            self.values[expression.index()] = None;
+        let spans = self.source.source_spans();
+        let span = spans.partition_point(|span| span.destination().start() < index);
+        if spans
+            .get(span)
+            .is_some_and(|span| span.destination().start() == index)
+        {
+            self.reset_expression_cache();
         }
         let start = self.builder.operation_count();
         let statement = &self.source.statements()[index];
@@ -25,6 +30,12 @@ impl SsaConstruction<'_, '_> {
         self.statement_ranges[index] = IlIndexRange::new(start, end)?;
 
         Ok(())
+    }
+
+    pub(crate) fn reset_expression_cache(&mut self) {
+        for expression in self.built_expressions.drain(..) {
+            self.values[expression.index()] = None;
+        }
     }
 
     fn build_statement(
@@ -66,10 +77,6 @@ impl SsaConstruction<'_, '_> {
                 current.insert(SsaDomain::Memory(address_space), memory);
             }
             opcode => {
-                let invalidates_state = matches!(
-                    statement.opcode(),
-                    ECodeStmtOpcode::Call | ECodeStmtOpcode::CallIndirect
-                );
                 self.build_statement_operands(statement, current)?;
                 let operands = self
                     .builder
@@ -92,8 +99,12 @@ impl SsaConstruction<'_, '_> {
                 }
 
                 self.builder.push_operation(operation)?;
-                if invalidates_state {
-                    current.clear();
+                if matches!(opcode, ECodeSsaOpcode::Call | ECodeSsaOpcode::CallIndirect) {
+                    let preserved = self.source.call_preserved_registers();
+                    current.retain(|domain, _| match domain {
+                        SsaDomain::Register(register) => preserved.binary_search(register).is_ok(),
+                        SsaDomain::Flag(_) | SsaDomain::Memory(_) => false,
+                    });
                 }
             }
         }

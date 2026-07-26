@@ -1,9 +1,23 @@
+use std::collections::BTreeMap;
+
 use crate::il::common::{IlError, IlLevel};
 use crate::il::pcode::{PCodeIr, PCodeLocation};
 use crate::ir::Endian;
 use crate::lifter::Language;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub(crate) struct RegisterId(u64);
 
 impl RegisterId {
@@ -130,8 +144,36 @@ impl RegisterBank {
             root: RegisterId::new(root.start),
             root_bits,
             offset,
-            bits: u32::from(location.size()) * 8,
+            bits: location.bits(),
         })
+    }
+
+    pub(crate) fn preserved_roots(
+        slices: impl IntoIterator<Item = RegisterSlice>,
+    ) -> Vec<RegisterId> {
+        let mut roots: BTreeMap<RegisterId, (u32, Vec<(u32, u32)>)> = BTreeMap::new();
+        for slice in slices {
+            let start = slice.offset() * 8;
+            let entry = roots
+                .entry(slice.root())
+                .or_insert_with(|| (slice.root_bits(), Vec::new()));
+            entry.1.push((start, start + slice.bits()));
+        }
+
+        roots
+            .into_iter()
+            .filter_map(|(root, (root_bits, mut ranges))| {
+                ranges.sort_unstable();
+                let mut covered = 0;
+                for (start, end) in ranges {
+                    if start > covered {
+                        return None;
+                    }
+                    covered = covered.max(end);
+                }
+                (covered >= root_bits).then_some(root)
+            })
+            .collect()
     }
 
     fn push_range(ranges: &mut Vec<RegisterRange>, start: u64, size: usize) -> Result<(), IlError> {
@@ -171,5 +213,32 @@ mod test {
         assert_eq!(big.offset(), 6);
         assert_eq!(little.root_bits(), 64);
         assert_eq!(big.root_bits(), 64);
+    }
+
+    fn slice(root: u64, root_bits: u32, offset: u32, bits: u32) -> RegisterSlice {
+        RegisterSlice {
+            root: RegisterId::new(root),
+            root_bits,
+            offset,
+            bits,
+        }
+    }
+
+    #[test]
+    fn preserved_roots_keeps_only_fully_covered_roots() {
+        let full = slice(0, 64, 0, 64);
+        let halves = [slice(64, 128, 0, 64), slice(64, 128, 8, 64)];
+        let partial = slice(256, 512, 0, 128);
+        let gapped = [slice(512, 128, 0, 64), slice(512, 128, 12, 32)];
+
+        let roots = RegisterBank::preserved_roots(
+            [full]
+                .into_iter()
+                .chain(halves)
+                .chain([partial])
+                .chain(gapped),
+        );
+
+        assert_eq!(roots, vec![RegisterId::new(0), RegisterId::new(64)]);
     }
 }

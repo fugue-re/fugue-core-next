@@ -27,7 +27,8 @@ pub struct PCodeCanonicaliser {
 struct PCodeFunctionBuilder<'a> {
     language: &'static Language,
     builder: PCodeBuilder,
-    mapping_cache: SegmentMappingCache<'a>,
+    mapping_cache: SegmentMappingCache,
+    segments: &'a SegmentStorage,
     lifter: Lifter,
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
@@ -139,7 +140,8 @@ impl<'a> PCodeFunctionBuilder<'a> {
         Self {
             language,
             builder: PCodeBuilder::new(language, metadata, IlGraph::default()),
-            mapping_cache: SegmentMappingCache::new(segments),
+            mapping_cache: SegmentMappingCache::new(),
+            segments,
             lifter: Lifter::new(language),
             blocks: Vec::new(),
             successors: Vec::new(),
@@ -190,7 +192,12 @@ impl<'a> PCodeFunctionBuilder<'a> {
         for insn in instructions {
             self.operations.clear();
 
-            let bytes = self.mapping_cache.contiguous_bytes_from(insn.address())?;
+            let view = self
+                .mapping_cache
+                .contiguous_bytes_from(self.segments, insn.address())?;
+            let bytes = view
+                .as_contiguous()
+                .expect("contiguous mapping view must contain bytes");
 
             let lifted_len = self
                 .lifter
@@ -308,10 +315,10 @@ impl<'a> PCodeFunctionBuilder<'a> {
     }
 
     fn build(mut self, cancellation: &CancellationToken) -> Result<PCodeIr, PCodeError> {
-        self.builder.replace_graph(
+        self.builder.set_graph(
             IlGraph::new(self.blocks, self.successors).with_block_sources(self.block_sources),
         );
-        self.builder.replace_source_spans(self.source_spans);
+        self.builder.set_source_spans(self.source_spans);
 
         Ok(self.builder.build(cancellation)?)
     }

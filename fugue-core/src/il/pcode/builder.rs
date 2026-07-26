@@ -265,11 +265,11 @@ impl PCodeBuilder {
         self.operations.len()
     }
 
-    pub(crate) fn replace_graph(&mut self, graph: IlGraph) {
+    pub(crate) fn set_graph(&mut self, graph: IlGraph) {
         self.graph = graph;
     }
 
-    pub(crate) fn replace_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
+    pub(crate) fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
         self.source_spans = source_spans;
     }
 
@@ -482,6 +482,61 @@ mod test {
     }
 
     #[test]
+    fn pcode_verify_rejects_multi_flag_location_properties() {
+        let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
+        let location = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                1,
+                8,
+                PCodeLocationProperties::CONSTANT | PCodeLocationProperties::REGISTER,
+            ))
+            .unwrap();
+        let operands = builder.push_operands([location]).unwrap();
+
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
+            Some(location),
+            operands,
+            0,
+            None,
+        ));
+
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+
+        assert!(matches!(
+            ir.verify(),
+            Err(VerifyError::InvalidLocationProperties)
+        ));
+    }
+
+    #[test]
+    fn pcode_verify_rejects_effect_space_on_non_requiring_opcode() {
+        let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
+        let location = builder
+            .push_location(PCodeLocation::new(
+                LifterSpaceHandle::new(0),
+                1,
+                8,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .unwrap();
+        let operands = builder.push_operands([location]).unwrap();
+
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
+            Some(location),
+            operands,
+            0,
+            Some(AddressSpaceId::new(1)),
+        ));
+
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+
+        assert!(matches!(ir.verify(), Err(VerifyError::ForbiddenEffectSpace)));
+    }
+
+    #[test]
     fn pcode_builder_finish_shrinks_spare_capacity() {
         let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
 
@@ -531,7 +586,7 @@ mod test {
         let data = 0x4000u64;
         let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 2).unwrap(),
             source,
             0,
@@ -595,7 +650,7 @@ mod test {
         let data_space = AddressSpaceId::new(2);
         let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
 
-        builder.replace_source_spans(vec![IlSourceSpan::new(
+        builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1).unwrap(),
             source,
             0,

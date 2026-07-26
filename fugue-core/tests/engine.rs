@@ -11,7 +11,7 @@ use std::{io, iter, thread};
 use bytes::Bytes;
 use fallible_iterator::{FallibleIterator, convert};
 use fugue_core::analysis::control::Cancelled;
-use fugue_core::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
+use fugue_core::analysis::function::{FunctionRecovery, FunctionRecoveryExtension};
 use fugue_core::analysis::switch::SwitchRecovery;
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::Arch;
@@ -33,30 +33,23 @@ use fugue_core::loader::{
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
 use fugue_core::project::{Project, ProjectError, ProjectTransaction};
-use fugue_core::queries::{CallEdge, MappingRecord, QueryError, QueryPage, SymbolRecord};
+use fugue_core::queries::{CallEdge, MappingRow, QueryError, QueryPage, SymbolRow};
 use fugue_core::registry;
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::PersistentStorageProvider;
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::entities::SqliteEntityStorage;
-use fugue_core::storage::entities::schema::{self, ENTITY_PROJECT_REVISION_ID};
-use fugue_core::storage::entities::{
-    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorageProvider, EntityStorageProviderFromLoadable, InMemoryEntityStorage, ProjectEntity,
-};
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
-use fugue_core::storage::segments::mapping::{
-    SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind, SegmentMappingProvenance,
-};
-use fugue_core::storage::segments::{DEFAULT_SPACE_ID, InMemorySegmentStorage};
 use fugue_core::storage::{
-    EntityStorage, EntityStorageError, PERSISTENT, SegmentStorage, StorageContainer,
-    StoragePersistence, StorageProvider, StorageProviderError, TransientStorageProvider,
+    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesAsIterator,
+    EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter,
+    EntityKeyBytesIterator, EntityStorage, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
+    ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind,
+    SegmentMappingProvenance, SegmentStorage, StorageContainer, StoragePersistence,
+    StorageProvider, StorageProviderError, TransientStorageProvider, make_key_with_entity_id,
 };
 #[cfg(feature = "sqlite")]
-use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::storage::{
+    DefaultPersistentSegmentStorage, PersistentStorageProvider, SqliteEntityStorage,
+};
+#[cfg(feature = "sqlite")]
+use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
 use fugue_core::types::{AttributeMap, BytesOrSlice};
 
 mod common;
@@ -77,9 +70,8 @@ static FAILING_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static FAILING_ANALYSER_TEST_LOCK: Mutex<()> = Mutex::new(());
 static FAIL_ENTITY_INSERTS: AtomicBool = AtomicBool::new(false);
 static FAIL_ENTITY_REMOVES: AtomicBool = AtomicBool::new(false);
-static PROJECT_REVISION_KEY: LazyLock<Bytes> = LazyLock::new(|| {
-    schema::make_key_with_entity_id(&ProjectEntity::Revision, ENTITY_PROJECT_REVISION_ID)
-});
+static PROJECT_REVISION_KEY: LazyLock<Bytes> =
+    LazyLock::new(|| make_key_with_entity_id(&ProjectEntity::Revision, ENTITY_PROJECT_REVISION_ID));
 static PROJECT_REVISION_INSERTS: AtomicUsize = AtomicUsize::new(0);
 static SAVE_FAILURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 static STORM_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -870,7 +862,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn Error>> 
         .map(|target| target.to())
         .collect::<BTreeSet<_>>();
     let callees = reader
-        .callees_of(entry, None, 4096)?
+        .callee_page(entry, None, 4096)?
         .entries()
         .iter()
         .copied()
@@ -910,10 +902,10 @@ fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn Error>> {
     assert!(!functions.is_empty());
 
     let symbols =
-        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
     assert!(!symbols.is_empty());
 
-    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     assert!(!mappings.is_empty());
@@ -948,17 +940,17 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Er
     let reader = engine.query_reader()?;
     let mut expected = inserted
         .iter()
-        .map(|entry| SymbolRecord::new(entry.address(), entry.symbol(), entry.properties()))
+        .map(|entry| SymbolRow::new(entry.address(), entry.symbol(), entry.properties()))
         .collect::<Vec<_>>();
     expected.sort();
 
-    let symbols_at = assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| {
+    let symbols_at = assert_strict_cursor_pages::<SymbolRow, _>(|cursor| {
         reader.symbol_page_at(address, cursor, 1)
     })?;
     assert_eq!(symbols_at, expected);
 
     let symbol_page =
-        assert_strict_cursor_pages::<SymbolRecord, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
     let shared_address = symbol_page
         .into_iter()
         .filter(|record| record.address() == address)
@@ -1020,7 +1012,7 @@ fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn E
     let _ = (first, second);
     let reader = engine.query_reader()?;
 
-    let mappings = assert_strict_cursor_pages::<MappingRecord, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     let shared_start_records = mappings
@@ -1148,29 +1140,6 @@ fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn E
     drop(engine);
 
     assert!(matches!(reader.revision(), Err(QueryError::Stopped)));
-
-    Ok(())
-}
-
-#[test]
-fn test_query_reader_reports_would_block_with_project_handle() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let project = Project::new_transient(&loader)?;
-    let engine = AnalysisEngine::new(project)?;
-    let reader = engine.query_reader()?;
-    engine.wait_until_idle()?;
-    let handle = reader.project()?;
-    let function = handle
-        .functions()
-        .iter()
-        .next()
-        .map(|function| function.id())
-        .expect("fixture contains a function");
-
-    assert!(matches!(
-        reader.ecode_ssa(function),
-        Err(QueryError::WouldBlock)
-    ));
 
     Ok(())
 }
@@ -1690,7 +1659,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
             .entries()
             .contains(&entry)
     );
-    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+    assert!(reader.callee_page(entry, None, 4096)?.entries().is_empty());
     assert!(
         !reader
             .call_edge_page(None, 4096)?
@@ -1713,7 +1682,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
             .entries()
             .contains(&entry)
     );
-    assert!(reader.callees_of(entry, None, 4096)?.entries().is_empty());
+    assert!(reader.callee_page(entry, None, 4096)?.entries().is_empty());
 
     Ok(())
 }
@@ -1766,7 +1735,7 @@ fn test_removing_callee_preserves_dangling_caller_edge() -> Result<(), Box<dyn E
     .into_iter()
     .collect::<BTreeSet<_>>();
     let callers_after =
-        assert_strict_cursor_pages(|cursor| reader.callers_of(edge.target(), cursor, 1))?;
+        assert_strict_cursor_pages(|cursor| reader.caller_page(edge.target(), cursor, 1))?;
     let edges_after =
         assert_strict_cursor_pages::<CallEdge, _>(|cursor| reader.call_edge_page(cursor, 1))?;
 
@@ -2559,7 +2528,7 @@ fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn E
 
 #[test]
 fn test_engine_storm_regions_coalesce_to_single_analyser_task() -> Result<(), Box<dyn Error>> {
-    let run_scenario = |storm: bool| -> Result<(usize, Vec<SymbolRecord>), Box<dyn Error>> {
+    let run_scenario = |storm: bool| -> Result<(usize, Vec<SymbolRow>), Box<dyn Error>> {
         STORM_ANALYSER_RUNS.store(0, Ordering::SeqCst);
 
         let project = project_with_test_analyser("storm-test")?;
@@ -3149,13 +3118,14 @@ fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
 
     let reader = engine.query_reader()?;
     let switches = reader.switches().collect::<Result<Vec<_>, _>>()?;
+    let switch_addresses = switches
+        .iter()
+        .map(|record| record.branch().raw_address())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        switches
-            .iter()
-            .map(|record| record.branch().raw_address())
-            .collect::<BTreeSet<_>>()
-            .len(),
-        94
+        switch_addresses.len(),
+        94,
+        "unexpected ARM switch branches: {switch_addresses:#x?}"
     );
 
     let branch = Address::from(0x3bec0u64);
@@ -3197,7 +3167,12 @@ fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
         Some(Address::from(0x3bf78u64)),
     );
 
-    for (address, count) in [(0x46df4u64, 33usize), (0x489c8, 6), (0x53d98, 8)] {
+    for (address, count) in [
+        (0x46df4u64, 33usize),
+        (0x489c8, 6),
+        (0x53d98, 8),
+        (0xe1e5c, 4),
+    ] {
         let recovered = switches
             .iter()
             .find(|record| record.branch() == Address::from(address))

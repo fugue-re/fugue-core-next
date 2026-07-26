@@ -3,7 +3,8 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::il::common::{IlAnalysis, IlGraph, IlRewrite};
+use crate::il::common::verify::{StructureVerifierError, verify_parent_spans, verify_source_spans};
+use crate::il::common::{IlAnalysis, IlError, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
 use crate::ir::FunctionId;
 use crate::storage::entities::MutableEntity;
 use crate::types::common::Revision;
@@ -144,13 +145,47 @@ pub trait IlArtefact: MutableEntity<Key = FunctionId> {
     fn metadata_mut(&mut self) -> &mut IlMetadata;
     fn graph(&self) -> &IlGraph;
 
+    fn verify_structure<E>(
+        &self,
+        source_spans: &[IlSourceSpan],
+        parent_spans: Option<&[IlParentSpan]>,
+        node_count: usize,
+    ) -> Result<(), E>
+    where
+        E: StructureVerifierError,
+    {
+        if self.metadata().schema() != Self::SCHEMA {
+            return Err(IlError::schema_mismatch(
+                Self::LEVEL,
+                Self::SCHEMA.value(),
+                self.metadata().schema().value(),
+            )
+            .into());
+        }
+
+        self.graph().verify().map_err(E::from_structure)?;
+        self.graph()
+            .verify_node_bounds(node_count)
+            .map_err(E::from_structure)?;
+        verify_source_spans(source_spans, node_count).map_err(E::from_structure)?;
+        if let Some(parent_spans) = parent_spans {
+            verify_parent_spans(parent_spans, node_count).map_err(E::from_structure)?;
+        }
+        Ok(())
+    }
+
     fn analyse<A: IlAnalysis<Self>>(&self) -> A {
         A::analyse(self)
     }
 
     fn rewrite<R: IlRewrite<Self>>(&mut self, mut rewrite: R) {
         rewrite.rewrite(self);
+        #[cfg(debug_assertions)]
+        self.verify_after_rewrite();
     }
+
+    #[cfg(debug_assertions)]
+    fn verify_after_rewrite(&self) {}
 }
 
 #[cfg(test)]

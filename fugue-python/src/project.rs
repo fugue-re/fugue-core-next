@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use fugue_core::analysis::AnalysisPass;
 use fugue_core::analysis::control::CancellationToken;
-use fugue_core::analysis::function::recovery::FunctionRecovery;
+use fugue_core::analysis::function::FunctionRecovery;
 use fugue_core::il::common::{
     IlArtefact as CoreIlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
     IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlGraph as CoreIlGraph,
-    IlLevel as CoreIlLevel, IlMetadata as CoreIlHeader, IlParentSpan as CoreIlParentSpan,
+    IlLevel as CoreIlLevel, IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
     IlSourceSpan as CoreIlSourceSpan, IlValueId as CoreIlValueId,
 };
 use fugue_core::il::ecode::ssa::{
@@ -159,16 +159,7 @@ impl Project {
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let uses = ir.analyse::<CoreECodeSsaUses>();
-        let uses = ir
-            .values()
-            .iter()
-            .enumerate()
-            .map(|(value, _)| ECodeSsaValueUses::from_core(&uses, value))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(uses))
+        ECodeSsaIr::from_core(ir).value_uses().map(Some)
     }
 
     fn ecode_ssa_uses_for_value(
@@ -176,51 +167,24 @@ impl Project {
         function: &Function,
         value: usize,
     ) -> PyResult<Option<Vec<ECodeSsaUse>>> {
-        let value = CoreIlValueId::try_from_index(value).map_err(project_error)?;
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let uses = ir.analyse::<CoreECodeSsaUses>();
-        let uses = uses
-            .uses_for(value)
-            .iter()
-            .copied()
-            .map(ECodeSsaUse::from_core)
-            .collect();
-
-        Ok(Some(uses))
+        ECodeSsaIr::from_core(ir).uses_for_value(value).map(Some)
     }
 
     fn ecode_ssa_liveness(&self, function: &Function) -> PyResult<Option<Vec<ECodeSsaLiveness>>> {
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let liveness = ir.analyse::<CoreECodeSsaLiveness>();
-        let live = ir
-            .graph()
-            .blocks()
-            .iter()
-            .enumerate()
-            .map(|(block, _)| ECodeSsaLiveness::from_core(&liveness, block))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(live))
+        ECodeSsaIr::from_core(ir).liveness().map(Some)
     }
 
     fn ecode_ssa_live_in(&self, function: &Function, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let liveness = ir.analyse::<CoreECodeSsaLiveness>();
-        let values = liveness
-            .live_in(block)
-            .iter()
-            .map(|value| value.index())
-            .collect();
-
-        Ok(Some(values))
+        ECodeSsaIr::from_core(ir).live_in(block).map(Some)
     }
 
     fn ecode_ssa_live_out(
@@ -228,36 +192,17 @@ impl Project {
         function: &Function,
         block: usize,
     ) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let liveness = ir.analyse::<CoreECodeSsaLiveness>();
-        let values = liveness
-            .live_out(block)
-            .iter()
-            .map(|value| value.index())
-            .collect();
-
-        Ok(Some(values))
+        ECodeSsaIr::from_core(ir).live_out(block).map(Some)
     }
 
     fn ecode_ssa_dominance(&self, function: &Function) -> PyResult<Option<Vec<IlDominance>>> {
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let dominance = ir.analyse::<CoreDominance>();
-        let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
-        let rows = ir
-            .graph()
-            .blocks()
-            .iter()
-            .enumerate()
-            .map(|(block, _)| IlDominance::from_core(&dominance, &frontiers, block))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(project_error)?;
-
-        Ok(Some(rows))
+        ECodeSsaIr::from_core(ir).dominance().map(Some)
     }
 
     fn ecode_ssa_dominance_frontier(
@@ -265,18 +210,12 @@ impl Project {
         function: &Function,
         block: usize,
     ) -> PyResult<Option<Vec<usize>>> {
-        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        let frontiers = ir.analyse::<CoreDominanceFrontier>();
-        let values = frontiers
-            .frontier(block)
-            .iter()
-            .map(|frontier| frontier.index())
-            .collect();
-
-        Ok(Some(values))
+        ECodeSsaIr::from_core(ir)
+            .dominance_frontier(block)
+            .map(Some)
     }
 
     fn ecode_ssa_dominates(
@@ -285,15 +224,12 @@ impl Project {
         dominator: usize,
         block: usize,
     ) -> PyResult<Option<bool>> {
-        let dominator = CoreIlBlockId::try_from_index(dominator).map_err(project_error)?;
-        let block = CoreIlBlockId::try_from_index(block).map_err(project_error)?;
         let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-
-        Ok(Some(
-            ir.analyse::<CoreDominance>().dominates(dominator, block),
-        ))
+        ECodeSsaIr::from_core(ir)
+            .dominates(dominator, block)
+            .map(Some)
     }
 }
 
@@ -336,12 +272,12 @@ impl Function {
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct IlMetadata {
-    inner: CoreIlHeader,
+    inner: CoreIlMetadata,
 }
 
 impl IlMetadata {
-    fn from_core(header: CoreIlHeader) -> Self {
-        Self { inner: header }
+    fn from_core(metadata: CoreIlMetadata) -> Self {
+        Self { inner: metadata }
     }
 }
 
@@ -439,7 +375,7 @@ impl PCodeIr {
         CoreIlLevel::PCode.name()
     }
 
-    fn header(&self) -> IlMetadata {
+    fn metadata(&self) -> IlMetadata {
         IlMetadata::from_core(*self.inner.metadata())
     }
 
@@ -525,7 +461,7 @@ impl ECodeIr {
         CoreIlLevel::ECode.name()
     }
 
-    fn header(&self) -> IlMetadata {
+    fn metadata(&self) -> IlMetadata {
         IlMetadata::from_core(*self.inner.metadata())
     }
 
@@ -615,7 +551,7 @@ impl ECodeSsaIr {
         CoreIlLevel::ECodeSsa.name()
     }
 
-    fn header(&self) -> IlMetadata {
+    fn metadata(&self) -> IlMetadata {
         IlMetadata::from_core(*self.inner.metadata())
     }
 
@@ -739,7 +675,7 @@ impl ECodeSsaIr {
         let frontiers = self.inner.analyse::<CoreDominanceFrontier>();
 
         Ok(frontiers
-            .frontier(block)
+            .frontier_for(block)
             .iter()
             .map(|frontier| frontier.index())
             .collect())
@@ -804,7 +740,7 @@ impl ECodeSsaIr {
     fn operations_for_source(&self, address: &Address) -> PyResult<Vec<ECodeSsaOp>> {
         self.inner
             .operations_for_source(address.inner())
-            .map(|(index, operation)| ECodeSsaOp::from_core(&self.inner, index, operation))
+            .map(|(index, operation)| ECodeSsaOp::from_core(&self.inner, index.index(), operation))
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
     }
@@ -1491,12 +1427,12 @@ impl IlDominance {
             .immediate_dominator(block_id)
             .map(|dominator| dominator.index());
         let children = dominance
-            .children(block_id)
+            .children_for(block_id)
             .iter()
             .map(|child| child.index())
             .collect();
         let frontier = frontiers
-            .frontier(block_id)
+            .frontier_for(block_id)
             .iter()
             .map(|frontier| frontier.index())
             .collect();

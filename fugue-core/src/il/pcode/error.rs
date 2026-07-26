@@ -71,12 +71,12 @@ impl PCodeError {
         }
     }
 
-    pub const fn invalid_opcode(ordinal: u32) -> Self {
-        Self::InvalidOpcode { ordinal }
-    }
-
     pub const fn invalid_local_target(ordinal: u32, position: u16) -> Self {
         Self::InvalidLocalTarget { ordinal, position }
+    }
+
+    pub const fn invalid_opcode(ordinal: u32) -> Self {
+        Self::InvalidOpcode { ordinal }
     }
 
     pub const fn misplaced_arg(ordinal: u32) -> Self {

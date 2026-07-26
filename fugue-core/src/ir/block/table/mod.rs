@@ -150,10 +150,8 @@ impl CodeBlockTable {
     }
 
     pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
-        }
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_id(
@@ -189,10 +187,8 @@ impl CodeBlockTable {
         id: Id<CodeBlock>,
         f: impl FnOnce(&mut CodeBlock) -> R,
     ) -> Option<R> {
-        match self {
-            Self::Persistent(p) => p.modify_by_id(id, f),
-            Self::Transient(t) => t.modify_by_id(id, f),
-        }
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_modify_by_id<R>(
@@ -207,10 +203,8 @@ impl CodeBlockTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<CodeBlockMut<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_id_mut(id).map(EntityMut::cached),
-            Self::Transient(t) => t.get_by_id_mut(id).map(EntityMut::borrowed),
-        }
+        self.try_get_by_id_mut(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_id_mut(
@@ -224,10 +218,8 @@ impl CodeBlockTable {
     }
 
     pub fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
-        match self {
-            Self::Persistent(p) => p.remove_by_id(id),
-            Self::Transient(t) => t.remove_by_id(id),
-        }
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_id(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
@@ -238,10 +230,8 @@ impl CodeBlockTable {
     }
 
     pub fn remove_by_address(&mut self, addr: Address) -> usize {
-        match self {
-            Self::Persistent(p) => p.remove_by_address(addr),
-            Self::Transient(t) => t.remove_by_address(addr),
-        }
+        self.try_remove_by_address(addr)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_address(&mut self, addr: Address) -> Result<usize, EntityStorageError> {
@@ -252,10 +242,8 @@ impl CodeBlockTable {
     }
 
     pub fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
-        match self {
-            Self::Persistent(p) => p.remove_by_address_and_context(addr, context),
-            Self::Transient(t) => t.remove_by_address_and_context(addr, context),
-        }
+        self.try_remove_by_address_and_context(addr, context)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_address_and_context(

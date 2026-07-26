@@ -140,7 +140,11 @@ impl FunctionTable {
     }
 
     pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
-        let Some(function) = self.entries.get_mut(id.index()).and_then(Option::take) else {
+        let Some(function) = self
+            .entries
+            .get_mut(id.index())
+            .and_then(|slot| slot.take_if(|function| function.id() == id))
+        else {
             return false;
         };
 

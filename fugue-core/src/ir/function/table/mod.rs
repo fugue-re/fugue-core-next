@@ -228,10 +228,8 @@ impl FunctionTable {
     }
 
     pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_id(id).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_id(id).map(EntityRef::borrowed),
-        }
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_id(
@@ -245,10 +243,8 @@ impl FunctionTable {
     }
 
     pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_address(addr).map(EntityRef::cached),
-            Self::Transient(t) => t.get_by_address(addr).map(EntityRef::borrowed),
-        }
+        self.try_get_by_address(addr)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_address(
@@ -262,10 +258,8 @@ impl FunctionTable {
     }
 
     pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_id_mut(id).map(EntityMut::cached),
-            Self::Transient(t) => t.get_by_id_mut(id).map(EntityMut::borrowed),
-        }
+        self.try_get_by_id_mut(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_id_mut(
@@ -279,10 +273,8 @@ impl FunctionTable {
     }
 
     pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
-        match self {
-            Self::Persistent(p) => p.get_by_address_mut(addr).map(EntityMut::cached),
-            Self::Transient(t) => t.get_by_address_mut(addr).map(EntityMut::borrowed),
-        }
+        self.try_get_by_address_mut(addr)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_get_by_address_mut(
@@ -300,10 +292,8 @@ impl FunctionTable {
         id: Id<Function>,
         f: impl FnOnce(&mut Function) -> R,
     ) -> Option<R> {
-        match self {
-            Self::Persistent(p) => p.modify_by_id(id, f),
-            Self::Transient(t) => t.modify_by_id(id, f),
-        }
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_modify_by_id<R>(
@@ -322,10 +312,8 @@ impl FunctionTable {
         addr: Address,
         f: impl FnOnce(&mut Function) -> R,
     ) -> Option<R> {
-        match self {
-            Self::Persistent(p) => p.modify_by_address(addr, f),
-            Self::Transient(t) => t.modify_by_address(addr, f),
-        }
+        self.try_modify_by_address(addr, f)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_modify_by_address<R>(
@@ -340,10 +328,8 @@ impl FunctionTable {
     }
 
     pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
-        match self {
-            Self::Persistent(p) => p.remove_by_id(id),
-            Self::Transient(t) => t.remove_by_id(id),
-        }
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_id(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
@@ -354,10 +340,8 @@ impl FunctionTable {
     }
 
     pub fn remove_by_address(&mut self, addr: Address) -> bool {
-        match self {
-            Self::Persistent(p) => p.remove_by_address(addr),
-            Self::Transient(t) => t.remove_by_address(addr),
-        }
+        self.try_remove_by_address(addr)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_remove_by_address(&mut self, addr: Address) -> Result<bool, EntityStorageError> {
@@ -675,6 +659,29 @@ mod test {
         assert!(table.remove_by_id(func_id));
         assert_eq!(table.len(), 0);
         assert!(table.get_by_address(addr).is_none());
+    }
+
+    #[test]
+    fn stale_id_does_not_remove_reused_slot() {
+        let mut table = FunctionTable::new_transient();
+        let first_entry = Address::from(0x1000u64);
+        let second_entry = Address::from(0x2000u64);
+        let first = table
+            .insert(first_entry, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        assert!(table.remove_by_id(first));
+
+        let second = table
+            .insert(second_entry, |id, entry| Ok(Function::new(id, entry)))
+            .unwrap();
+        assert_eq!(first.index(), second.index());
+        assert_ne!(first, second);
+        assert!(!table.remove_by_id(first));
+        assert_eq!(
+            table.get_by_id(second).map(|function| function.entry()),
+            Some(second_entry)
+        );
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

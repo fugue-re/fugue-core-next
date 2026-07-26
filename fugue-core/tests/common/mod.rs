@@ -4,7 +4,7 @@ use std::io;
 use fugue_core::ir::{Address, IncompleteCodeBlock, IncompleteFunction};
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::Project;
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
+use fugue_core::storage::DEFAULT_SPACE_ID;
 
 pub fn one_block_function(entry: Address, len: usize) -> IncompleteFunction {
     let mut function = IncompleteFunction::new(entry);

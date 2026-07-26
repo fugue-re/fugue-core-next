@@ -946,6 +946,37 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 (#nm, #ident)
             }
         });
+        let mut compiler_ids = self
+            .language
+            .compiler_conventions()
+            .keys()
+            .collect::<Vec<_>>();
+        compiler_ids.sort_unstable();
+        let call_preserved_registers = compiler_ids
+            .into_iter()
+            .map(|compiler| {
+                let registers = self
+                    .language
+                    .call_preserved_registers(compiler)
+                    .expect("compiler convention comes from the language")
+                    .into_iter()
+                    .map(|varnode| {
+                        let space = u8::try_from(varnode.space().index())
+                            .expect("address-space identifier fits in u8");
+                        let offset = varnode.offset();
+                        let size = u16::try_from(varnode.size())
+                            .expect("call-preserved register size fits in u16");
+                        quote! {
+                            fugue_lifter_runtime::pcode::Varnode::new(#space, #offset, #size)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                quote! {
+                    (#compiler, &[#(#registers,)*])
+                }
+            })
+            .collect::<Vec<_>>();
+        let n_call_preserved_registers = call_preserved_registers.len();
 
         let language_id = self.language.architecture().to_string();
         let processor = self.language.architecture().processor();
@@ -1015,6 +1046,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                     const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
+                    const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
 
                     const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                 }
@@ -1077,6 +1109,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                         const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
+                        const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
 
                         const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                     }
@@ -1189,6 +1222,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
             static SPACES: [fugue_lifter_runtime::space::AddressSpace; #n_spaces] = [
                 #(#spaces,)*
+            ];
+
+            static CALL_PRESERVED_REGISTERS: [(&str, &[fugue_lifter_runtime::pcode::Varnode]); #n_call_preserved_registers] = [
+                #(#call_preserved_registers,)*
             ];
 
             pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =

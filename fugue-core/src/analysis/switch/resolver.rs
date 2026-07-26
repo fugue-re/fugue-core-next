@@ -1,16 +1,17 @@
 use fugue_bv::BitVec;
+use fugue_bytes::Endian;
 
 use crate::analysis::function::recovery::InsnResolver;
 use crate::arch::Arch;
 use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchProperties};
 use crate::lifter::{ContextSet, LiftingContext};
-use crate::storage::SegmentStorage;
-use crate::storage::segments::SegmentMappingCache;
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentStorage};
 
 pub(crate) struct SwitchTargetResolver<'a> {
     arch: &'a Arch,
-    mapping_cache: SegmentMappingCache<'a>,
+    mapping_cache: SegmentMappingCache,
+    read_buffer: Vec<u8>,
+    segments: &'a SegmentStorage,
     space: AddressSpaceId,
 }
 
@@ -18,7 +19,9 @@ impl<'a> SwitchTargetResolver<'a> {
     pub(crate) fn new(arch: &'a Arch, segments: &'a SegmentStorage, space: AddressSpaceId) -> Self {
         Self {
             arch,
-            mapping_cache: SegmentMappingCache::new(segments),
+            mapping_cache: SegmentMappingCache::new(),
+            read_buffer: Vec::new(),
+            segments,
             space,
         }
     }
@@ -28,14 +31,35 @@ impl<'a> SwitchTargetResolver<'a> {
         value: &BitVec,
         context: &LiftingContext,
     ) -> Option<AddressWithContext> {
-        let (canonical, context) = self
-            .arch
-            .canonicalise_address_with(RawAddress::from(value.to_u64()?), context)?;
-        self.resolve_canonical_address(canonical, context)
+        self.resolve_address(RawAddress::from(value.to_u64()?), context)
     }
 
     pub(crate) fn set_space(&mut self, space: AddressSpaceId) {
         self.space = space;
+    }
+
+    pub(crate) fn mapping_cache_mut(&mut self) -> &mut SegmentMappingCache {
+        &mut self.mapping_cache
+    }
+
+    pub(crate) fn segments(&self) -> &'a SegmentStorage {
+        self.segments
+    }
+
+    pub(crate) fn read_bitvec(&mut self, address: Address, size: usize) -> Option<BitVec> {
+        self.read_buffer.resize(size, 0);
+        if self
+            .mapping_cache
+            .read_bytes_exact(self.segments, address, &mut self.read_buffer)
+            .is_err()
+        {
+            return None;
+        }
+        let value = match self.arch.endian() {
+            Endian::Big => BitVec::from_be_bytes(&self.read_buffer),
+            Endian::Little => BitVec::from_le_bytes(&self.read_buffer),
+        };
+        Some(value)
     }
 
     pub(crate) fn resolve_address(
@@ -54,7 +78,11 @@ impl<'a> SwitchTargetResolver<'a> {
         context: &ContextSet,
         resolver: &mut InsnResolver,
     ) -> Option<AddressWithContext> {
-        let bytes = self.mapping_cache.contiguous_bytes_from(address).ok()?;
+        let view = self
+            .mapping_cache
+            .contiguous_bytes_from(self.segments, address)
+            .ok()?;
+        let bytes = view.as_contiguous()?;
         context.apply(address, resolver.context_mut());
         let instruction = resolver.resolve(address, bytes).ok()?;
         if expected_length.is_some_and(|length| instruction.len() != length)
@@ -82,7 +110,7 @@ impl<'a> SwitchTargetResolver<'a> {
         let mut properties = self.properties_for_targets(cases);
         if self
             .mapping_cache
-            .segment_properties(table)
+            .segment_properties(self.segments, table)
             .is_some_and(|properties| properties.is_readable() && !properties.is_writable())
         {
             properties |= SwitchProperties::TABLE_IN_READ_ONLY;
@@ -111,7 +139,7 @@ impl<'a> SwitchTargetResolver<'a> {
         let address = Address::new(self.space, canonical);
         let executable = self
             .mapping_cache
-            .segment_properties(address)
+            .segment_properties(self.segments, address)
             .is_some_and(|properties| properties.is_executable());
         executable.then(|| AddressWithContext::new(address, context))
     }

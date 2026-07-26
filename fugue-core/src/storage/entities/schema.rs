@@ -85,7 +85,6 @@ pub const ENTITY_CODE_BLOCK_TABLE_ID: EntityId = EntityId::new(4);
 
 pub const ENTITY_FUNCTION_ID: EntityId = EntityId::new(5);
 pub const ENTITY_CODE_BLOCK_ID: EntityId = EntityId::new(6);
-pub const ENTITY_INSN_ID: EntityId = EntityId::new(7);
 pub const ENTITY_SYMBOL_ID: EntityId = EntityId::new(8);
 pub const ENTITY_CALL_GRAPH_EDGE_ID: EntityId = EntityId::new(9);
 pub const ENTITY_INDEX_HEADER_ID: EntityId = EntityId::new(11);

@@ -123,20 +123,11 @@ impl FunctionTable {
         Ok(id)
     }
 
-    pub(crate) fn get_by_id(&self, id: Id<Function>) -> Option<Ref<'_>> {
-        self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
-    }
-
     pub(crate) fn try_get_by_id(
         &self,
         id: Id<Function>,
     ) -> Result<Option<Ref<'_>>, EntityStorageError> {
         self.entries.try_get(&id)
-    }
-
-    pub(crate) fn get_by_address(&self, addr: Address) -> Option<Ref<'_>> {
-        self.try_get_by_address(addr)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_get_by_address(
@@ -150,30 +141,12 @@ impl FunctionTable {
         self.entries.try_get(&id)
     }
 
-    pub(crate) fn modify_by_id<R>(
-        &mut self,
-        id: Id<Function>,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_id(id, f)
-            .unwrap_or_else(|e| e.into_fatal())
-    }
-
     pub(crate) fn try_modify_by_id<R>(
         &mut self,
         id: Id<Function>,
         f: impl FnOnce(&mut Function) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         self.entries.try_modify(&id, f)
-    }
-
-    pub(crate) fn modify_by_address<R>(
-        &mut self,
-        addr: Address,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_address(addr, f)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_modify_by_address<R>(
@@ -188,20 +161,11 @@ impl FunctionTable {
         self.entries.try_modify(&id, f)
     }
 
-    pub(crate) fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<RefMut<'_>> {
-        self.entries.get_mut(&id)
-    }
-
     pub(crate) fn try_get_by_id_mut(
         &mut self,
         id: Id<Function>,
     ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
         self.entries.try_get_mut(&id)
-    }
-
-    pub(crate) fn get_by_address_mut(&mut self, addr: Address) -> Option<RefMut<'_>> {
-        let id = *self.index.addresses.get(&addr)?;
-        self.entries.get_mut(&id)
     }
 
     pub(crate) fn try_get_by_address_mut(
@@ -213,10 +177,6 @@ impl FunctionTable {
         };
 
         self.entries.try_get_mut(&id)
-    }
-
-    pub(crate) fn remove_by_id(&mut self, id: Id<Function>) -> bool {
-        self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_id(
@@ -233,11 +193,6 @@ impl FunctionTable {
         self.index.allocator.release(id);
 
         Ok(true)
-    }
-
-    pub(crate) fn remove_by_address(&mut self, addr: Address) -> bool {
-        self.try_remove_by_address(addr)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_address(
@@ -342,7 +297,7 @@ mod test {
             .unwrap();
         assert_eq!(reused.index(), id1.index());
         assert_eq!(reused.generation(), id1.generation() + 1);
-        assert!(table.get_by_id(id1).is_none());
+        assert!(table.try_get_by_id(id1).unwrap().is_none());
         assert_eq!(table.index.allocator.free_len(), 0);
 
         let fresh = table

@@ -68,8 +68,6 @@ pub enum QueryError {
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
-    #[error("query would block")]
-    WouldBlock,
 }
 
 impl From<EngineError> for QueryError {
@@ -166,13 +164,13 @@ impl CallEdge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolRecord {
+pub struct SymbolRow {
     address: Address,
     properties: SymbolProperties,
     symbol: Symbol,
 }
 
-impl SymbolRecord {
+impl SymbolRow {
     pub fn new(
         address: impl Into<Address>,
         symbol: impl Into<Symbol>,
@@ -203,11 +201,11 @@ impl SymbolRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchRecord {
+pub struct SwitchRow {
     switch: Switch,
 }
 
-impl SwitchRecord {
+impl SwitchRow {
     pub fn branch(&self) -> Address {
         self.switch.branch()
     }
@@ -229,7 +227,7 @@ impl SwitchRecord {
     }
 }
 
-impl From<&Switch> for SwitchRecord {
+impl From<&Switch> for SwitchRow {
     fn from(switch: &Switch) -> Self {
         Self {
             switch: switch.clone(),
@@ -238,14 +236,14 @@ impl From<&Switch> for SwitchRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MappingRecord {
+pub struct MappingRow {
     mapping: SegmentMappingId,
     start: Address,
     size: u64,
     properties: SegmentProperties,
 }
 
-impl MappingRecord {
+impl MappingRow {
     pub fn new(
         mapping: SegmentMappingId,
         start: impl Into<Address>,
@@ -286,13 +284,13 @@ impl MappingRecord {
     }
 }
 
-impl PartialOrd for MappingRecord {
+impl PartialOrd for MappingRow {
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for MappingRecord {
+impl Ord for MappingRow {
     fn cmp(&self, other: &Self) -> CmpOrdering {
         self.start
             .cmp(&other.start)
@@ -313,7 +311,7 @@ pub struct QueryReader {
 }
 
 impl QueryReader {
-    pub(crate) fn new(
+    fn new(
         active: Arc<AtomicBool>,
         gate: Arc<RwLock<()>>,
         project: Arc<RwLock<Project>>,
@@ -431,10 +429,6 @@ impl QueryReader {
         let Some(intake) = &self.intake else {
             return Ok(false);
         };
-        let Some(gate) = self.gate.try_write_arc() else {
-            return Err(QueryError::WouldBlock);
-        };
-        drop(gate);
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         intake
@@ -471,13 +465,13 @@ impl QueryReader {
         self.with_project(|read| read.call_edge_page(after, limit))
     }
 
-    pub fn callees_of(
+    pub fn callee_page(
         &self,
         entry: Address,
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.callees_of(entry, after, limit))
+        self.with_project(|read| read.callee_page(entry, after, limit))
     }
 
     pub fn function_id_at(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
@@ -493,13 +487,13 @@ impl QueryReader {
         self.with_project(|read| read.function_page(space, after, limit))
     }
 
-    pub fn callers_of(
+    pub fn caller_page(
         &self,
         entry: Address,
         after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.callers_of(entry, after, limit))
+        self.with_project(|read| read.caller_page(entry, after, limit))
     }
 
     pub fn outgoing_reference_page(
@@ -525,30 +519,30 @@ impl QueryReader {
     pub fn mapping_page(
         &self,
         space: AddressSpaceId,
-        after: Option<MappingRecord>,
+        after: Option<MappingRow>,
         limit: usize,
-    ) -> Result<QueryPage<MappingRecord>, QueryError> {
+    ) -> Result<QueryPage<MappingRow>, QueryError> {
         self.with_project(|read| read.mapping_page(space, after, limit))
     }
 
     pub fn symbol_page(
         &self,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> Result<QueryPage<SymbolRecord>, QueryError> {
+    ) -> Result<QueryPage<SymbolRow>, QueryError> {
         self.with_project(|read| read.symbol_page(after, limit))
     }
 
     pub fn symbol_page_at(
         &self,
         address: Address,
-        after: Option<SymbolRecord>,
+        after: Option<SymbolRow>,
         limit: usize,
-    ) -> Result<QueryPage<SymbolRecord>, QueryError> {
+    ) -> Result<QueryPage<SymbolRow>, QueryError> {
         self.with_project(|read| read.symbol_page_at(address, after, limit))
     }
 
-    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchRecord>, QueryError> {
+    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchRow>, QueryError> {
         self.with_project(|read| read.switch_at(branch))
     }
 
@@ -556,11 +550,11 @@ impl QueryReader {
         &self,
         after: Option<Address>,
         limit: usize,
-    ) -> Result<QueryPage<SwitchRecord, Address>, QueryError> {
+    ) -> Result<QueryPage<SwitchRow, Address>, QueryError> {
         self.with_project(|read| read.switch_page(after, limit))
     }
 
-    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchRecord, QueryError>> {
+    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchRow, QueryError>> {
         let reader = self.clone();
         Paged::new(move |cursor| reader.switch_page(cursor, WALK_PAGE_COUNT))
     }
@@ -579,7 +573,7 @@ impl QueryReader {
         })
     }
 
-    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRecord, QueryError>> {
+    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRow, QueryError>> {
         let reader = self.clone();
         Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_COUNT))
     }
@@ -587,7 +581,7 @@ impl QueryReader {
     pub fn mappings(
         &self,
         space: AddressSpaceId,
-    ) -> impl Iterator<Item = Result<MappingRecord, QueryError>> {
+    ) -> impl Iterator<Item = Result<MappingRow, QueryError>> {
         let reader = self.clone();
         Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_COUNT))
     }
@@ -599,12 +593,12 @@ impl QueryReader {
 
     pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.callers_of(entry, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.caller_page(entry, cursor, WALK_PAGE_COUNT))
     }
 
     pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.callees_of(entry, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.callee_page(entry, cursor, WALK_PAGE_COUNT))
     }
 
     pub fn outgoing_references(
@@ -852,7 +846,7 @@ mod test {
                 IlGraph::default(),
             );
 
-            builder.replace_source_spans(vec![IlSourceSpan::new(
+            builder.set_source_spans(vec![IlSourceSpan::new(
                 IlIndexRange::EMPTY,
                 Address::new(AddressSpaceId::new(1), u64::from(tag)),
                 u32::from(tag),
@@ -1017,7 +1011,7 @@ mod test {
 
         assert!(uses.uses_for(value).is_empty());
         assert!(!dominance.is_reachable(block));
-        assert!(frontiers.frontier(block).is_empty());
+        assert!(frontiers.frontier_for(block).is_empty());
         assert!(liveness.live_in(block).is_empty());
         assert!(liveness.live_out(block).is_empty());
         Ok(())

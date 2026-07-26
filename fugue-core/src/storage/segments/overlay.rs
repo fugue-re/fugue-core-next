@@ -49,14 +49,30 @@ impl OverlayTree {
         }
 
         let addr = addr.into();
-        let write_end = addr + data.len();
+        self.clear_range(addr, data.len());
+        self.chunks.insert(addr, OverlayChunk::new(data));
+        self.merge_adjacent(addr);
+    }
 
+    pub fn clear_range(&mut self, addr: impl Into<RawAddress>, len: usize) {
+        if len == 0 {
+            return;
+        }
+
+        let addr = addr.into();
+        let write_end = u128::from(addr.offset()) + len as u128;
+        let first = self
+            .chunks
+            .range(..=addr)
+            .next_back()
+            .map_or(addr, |(&start, _)| start);
         let overlapping = self
             .chunks
-            .range(..write_end)
+            .range(first..)
+            .take_while(|(start, _)| u128::from(start.offset()) < write_end)
             .filter_map(|(&start, chunk)| {
-                let chunk_end = start + chunk.len();
-                (chunk_end > addr && start < write_end).then_some(start)
+                let chunk_end = u128::from(start.offset()) + chunk.len() as u128;
+                (chunk_end > u128::from(addr.offset())).then_some(start)
             })
             .collect::<SmallVec<[_; 4]>>();
 
@@ -65,20 +81,21 @@ impl OverlayTree {
                 .chunks
                 .remove(&start)
                 .expect("overlapping overlay chunk exists");
-            let chunk_end = start + chunk.len();
+            let chunk_end = u128::from(start.offset()) + chunk.len() as u128;
 
             if chunk_end > write_end {
-                let right = chunk.data.split_off(usize::from(write_end - start));
-                self.chunks.insert(write_end, OverlayChunk::new(right));
+                let right_offset = usize::try_from(write_end - u128::from(start.offset()))
+                    .expect("overlay split offset fits the chunk length");
+                let right = chunk.data.split_off(right_offset);
+                let right_start =
+                    RawAddress::from(u64::try_from(write_end).expect("overlay address is valid"));
+                self.chunks.insert(right_start, OverlayChunk::new(right));
             }
             if start < addr {
                 chunk.data.truncate(usize::from(addr - start));
                 self.chunks.insert(start, chunk);
             }
         }
-
-        self.chunks.insert(addr, OverlayChunk::new(data));
-        self.merge_adjacent(addr);
     }
 
     fn merge_adjacent(&mut self, addr: RawAddress) {
@@ -129,10 +146,16 @@ impl OverlayTree {
         }
 
         let addr = addr.into();
-        let read_end = addr + buf.len();
+        let read_end = RawAddress::from(addr.offset().saturating_add(buf.len() as u64));
         let mut bytes_applied = 0;
 
-        for (&chunk_start, chunk) in self.chunks.range(..read_end) {
+        let first = self
+            .chunks
+            .range(..=addr)
+            .next_back()
+            .map_or(addr, |(&start, _)| start);
+
+        for (&chunk_start, chunk) in self.chunks.range(first..read_end) {
             let chunk_end = chunk_start + chunk.len();
 
             if chunk_end <= addr {

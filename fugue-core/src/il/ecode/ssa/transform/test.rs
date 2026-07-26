@@ -1,9 +1,12 @@
 use super::*;
-use crate::il::common::{IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlParentSpan};
+use crate::il::common::{
+    IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlParentSpan, IlSourceSpan,
+};
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::il::ecode::{
     ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode,
 };
+use crate::il::pcode::RegisterId;
 use crate::ir::{Address, FunctionId};
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -69,7 +72,7 @@ fn register_read_after_write_uses_current_value() {
             None,
         ))
         .unwrap();
-    builder.replace_parent_spans(vec![IlParentSpan::new(
+    builder.set_parent_spans(vec![IlParentSpan::new(
         IlIndexRange::new(0, 2).unwrap(),
         IlIndexRange::new(4, 6).unwrap(),
     )]);
@@ -93,6 +96,206 @@ fn register_read_after_write_uses_current_value() {
             IlIndexRange::new(4, 6).unwrap(),
         )]
     );
+}
+
+#[test]
+fn call_preserves_only_declared_register_state() {
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    builder.set_call_preserved_registers(vec![RegisterId::new(7)]);
+    let preserved = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            0x2a,
+            None,
+        ))
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(preserved),
+                None,
+                None,
+            )
+            .with_immediate(7),
+        )
+        .unwrap();
+    let clobbered = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            0x2b,
+            None,
+        ))
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(clobbered),
+                None,
+                None,
+            )
+            .with_immediate(8),
+        )
+        .unwrap();
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Call,
+            IlIndexRange::EMPTY,
+            None,
+            Some(Address::from(0x2000u64)),
+            None,
+        ))
+        .unwrap();
+    let read_preserved = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            64,
+            IlIndexRange::EMPTY,
+            7,
+            None,
+        ))
+        .unwrap();
+    let read_clobbered = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            64,
+            IlIndexRange::EMPTY,
+            8,
+            None,
+        ))
+        .unwrap();
+    let operands = builder
+        .push_statement_operands([read_preserved, read_clobbered])
+        .unwrap();
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Return,
+            operands,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let source = builder.build(&CancellationToken::default()).unwrap();
+    let ssa = ECodeToSsa::default()
+        .transform(&source, &CancellationToken::default())
+        .unwrap();
+
+    assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
+    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::Constant);
+    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Call);
+    assert_eq!(ssa.operations()[3].opcode(), ECodeSsaOpcode::Undefined);
+    assert_eq!(ssa.operations()[4].opcode(), ECodeSsaOpcode::Return);
+    assert_eq!(
+        ssa.operation_operands(&ssa.operations()[4]),
+        &[
+            IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap(),
+            IlValueId::try_from_index(ssa.operations()[3].results().start()).unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn instruction_wide_expression_is_not_rebuilt_after_register_write() {
+    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let register = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            64,
+            IlIndexRange::EMPTY,
+            7,
+            None,
+        ))
+        .unwrap();
+    let decrement = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            8,
+            None,
+        ))
+        .unwrap();
+    let subtract_operands = builder
+        .push_expression_operands([register, decrement])
+        .unwrap();
+    let address = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Sub,
+            64,
+            subtract_operands,
+            0,
+            None,
+        ))
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(address),
+                None,
+                None,
+            )
+            .with_immediate(7),
+        )
+        .unwrap();
+
+    let value = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            0x2a,
+            None,
+        ))
+        .unwrap();
+    let store_operands = builder.push_statement_operands([address, value]).unwrap();
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Store,
+            store_operands,
+            None,
+            None,
+            Some(AddressSpaceId::new(1)),
+        ))
+        .unwrap();
+    builder.set_source_spans(vec![IlSourceSpan::new(
+        IlIndexRange::new(0, 2).unwrap(),
+        Address::from(0x1000u64),
+        0,
+        1,
+    )]);
+
+    let source = builder.build(&CancellationToken::default()).unwrap();
+    let ssa = ECodeToSsa::default()
+        .transform(&source, &CancellationToken::default())
+        .unwrap();
+    let subtracts = ssa
+        .operations()
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| operation.opcode() == ECodeSsaOpcode::Sub)
+        .collect::<Vec<_>>();
+    assert_eq!(subtracts.len(), 1);
+    let address_value =
+        IlValueId::try_from_index(subtracts[0].1.results().start()).expect("result must exist");
+    let store = ssa
+        .operations()
+        .iter()
+        .find(|operation| operation.opcode() == ECodeSsaOpcode::Store)
+        .expect("store must exist");
+    assert_eq!(ssa.operation_operands(store)[0], address_value);
 }
 
 #[test]

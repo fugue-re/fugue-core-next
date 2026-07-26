@@ -10,10 +10,8 @@ use fugue_core::ir::{
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{Project, ProjectError};
-use fugue_core::storage::TransientStorageProvider;
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
-use fugue_core::types::AttributeMap;
-use fugue_core::types::attributes::ATTRIBUTE_LOADER_FORMAT;
+use fugue_core::storage::{DEFAULT_SPACE_ID, TransientStorageProvider};
+use fugue_core::types::{ATTRIBUTE_LOADER_FORMAT, AttributeMap};
 
 mod common;
 

@@ -4,11 +4,10 @@ use std::sync::Arc;
 use super::{SwitchIndex, SwitchTableAllocation, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId};
-use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
+use crate::storage::entities::{CachedRef, EntityCache, WriteBackWorker};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 type Ref<'a> = CachedRef<'a, Switch>;
-type RefMut<'a> = CachedMut<'a, Switch>;
 
 pub struct SwitchTable {
     index: SwitchIndex,
@@ -125,10 +124,6 @@ impl SwitchTable {
         Ok(id)
     }
 
-    pub(crate) fn get_by_id(&self, id: SwitchId) -> Option<Ref<'_>> {
-        self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
-    }
-
     pub(crate) fn try_get_by_id(
         &self,
         id: SwitchId,
@@ -148,22 +143,6 @@ impl SwitchTable {
 
     pub(crate) fn contains(&self, branch: Address) -> bool {
         self.index.contains(branch)
-    }
-
-    pub(crate) fn try_get_by_id_mut(
-        &mut self,
-        id: SwitchId,
-    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
-        self.entries.try_get_mut(&id)
-    }
-
-    pub(crate) fn modify_by_id<R>(
-        &mut self,
-        id: SwitchId,
-        f: impl FnOnce(&mut Switch) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_id(id, f)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -197,10 +176,6 @@ impl SwitchTable {
             return Ok(None);
         };
         self.try_modify_by_id(id, f)
-    }
-
-    pub(crate) fn remove_by_id(&mut self, id: SwitchId) -> bool {
-        self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_id(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
@@ -244,10 +219,6 @@ impl SwitchTable {
             .try_iter()
             .unwrap_or_else(|e| e.into_fatal())
             .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<'_>> + '_ {
-        self.entries.iter_mut()
     }
 
     pub(crate) fn is_empty(&self) -> bool {

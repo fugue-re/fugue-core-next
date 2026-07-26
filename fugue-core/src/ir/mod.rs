@@ -9,59 +9,61 @@ use tinyset::SetU64;
 use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
 use crate::storage::entities::{Entity, EntityId};
 
-pub mod address;
+pub(crate) mod address;
 pub use address::{
     Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressTable, AddressWithContext,
     RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
 };
 
-pub mod block;
+pub(crate) mod block;
 pub use block::{
     CodeBlock, CodeBlockId, CodeBlockMut, CodeBlockProperties, CodeBlockRef, CodeBlockTable,
     CodeBlockTableError, IncompleteCodeBlock, IncompleteCodeBlockId,
 };
 
-pub mod call_graph;
+pub(crate) mod call_graph;
 pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
-pub mod cfg;
+pub(crate) mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
 pub use fugue_bytes::Endian;
 
-pub mod function;
+pub(crate) mod function;
 pub use function::{
     Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
-    FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry,
+    FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
 };
 
-pub mod insn;
+pub(crate) mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
 
-pub mod module;
+pub(crate) mod module;
 pub use module::{Module, ModuleId};
 
-pub mod location;
+pub(crate) mod location;
 pub use location::Location;
 
-pub mod reference;
+pub(crate) mod reference;
 pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
 };
+mod revisioned_index;
 
-pub mod segment;
+pub(crate) mod segment;
 pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
 
-pub mod switch;
+pub(crate) mod switch;
 pub use switch::{
-    Switch, SwitchCase, SwitchCaseLabel, SwitchId, SwitchModel, SwitchMut, SwitchProperties,
-    SwitchRef, SwitchTable, SwitchTableError,
+    Switch, SwitchCase, SwitchCaseLabel, SwitchId, SwitchModel, SwitchProperties, SwitchRef,
+    SwitchTable, SwitchTableError,
 };
 
-pub mod symbol;
+pub(crate) mod symbol;
 pub use symbol::{
     LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolInsertion, SymbolMap,
     SymbolProperties, SymbolRef, SymbolTable, SymbolTableSelector, TransientSymbolTable,
+    existing_symbol, symbol,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

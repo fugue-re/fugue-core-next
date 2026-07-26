@@ -18,15 +18,15 @@ use fugue_core::ir::{
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
 use fugue_core::queries::{Cached, Dependency, QueryReader};
+use fugue_core::storage::DEFAULT_SPACE_ID;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::DefaultPersistentEntityStorage;
+#[cfg(feature = "sqlite")]
+use fugue_core::storage::DefaultPersistentSegmentStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
 #[cfg(feature = "sqlite")]
-use fugue_core::storage::entities::DefaultPersistentEntityStorage;
-use fugue_core::storage::segments::DEFAULT_SPACE_ID;
-#[cfg(feature = "sqlite")]
-use fugue_core::storage::segments::DefaultPersistentSegmentStorage;
-#[cfg(feature = "sqlite")]
-use fugue_core::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const PAGE_LIMIT: usize = 64;
@@ -332,7 +332,7 @@ fn bench_call_graph_pages(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     results.push(edges);
 
     let (callees, _) = measure_repeated("call_graph_callees_page", || {
-        let page = reader.callees_of(entry, None, PAGE_LIMIT)?;
+        let page = reader.callee_page(entry, None, PAGE_LIMIT)?;
         Ok(((), page.entries().len()))
     })?;
     results.push(callees);
@@ -345,7 +345,7 @@ fn bench_call_graph_pages(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
             .copied()
             .ok_or_else(|| std::io::Error::other("call edge disappeared"))?;
         let (callers, _) = measure_repeated("call_graph_callers_page", || {
-            let page = reader.callers_of(first.target(), None, PAGE_LIMIT)?;
+            let page = reader.caller_page(first.target(), None, PAGE_LIMIT)?;
             Ok(((), page.entries().len()))
         })?;
         results.push(callers);

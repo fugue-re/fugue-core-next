@@ -5,25 +5,25 @@ use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId};
 use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
-pub mod analysis;
-pub use analysis::{FunctionRecovery, FunctionRecoveryExtension};
+pub(crate) mod analysis;
+pub use analysis::{FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension};
 
-pub mod builder;
+pub(crate) mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
 
-pub mod hooks;
+pub(crate) mod hooks;
 pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
-pub mod patterns;
+pub(crate) mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
-pub mod resolver;
+pub(crate) mod resolver;
 pub use resolver::InsnResolver;
 
 mod structuring;
 
-pub const DEFAULT_MAX_BLOCK_SIZE: usize = u16::MAX as usize;
-pub const DEFAULT_MAX_FUNCTION_SIZE: usize = u16::MAX as usize;
+pub const DEFAULT_MAX_BLOCK_INSNS: usize = u16::MAX as usize;
+pub const DEFAULT_MAX_FUNCTION_BLOCKS: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
@@ -130,8 +130,8 @@ impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
         FunctionRecoveryConfig {
             commit_pending_functions: true,
-            max_function_blocks: DEFAULT_MAX_FUNCTION_SIZE,
-            max_block_insns: DEFAULT_MAX_BLOCK_SIZE,
+            max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
+            max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
             use_fine_grained_block_coverage: false,
             use_segment_function_hints: true,
             use_segment_mapping_hints: true,
@@ -159,7 +159,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_function_blocks(&mut self, max: usize) {
-        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_SIZE);
+        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_BLOCKS);
     }
 
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
@@ -172,7 +172,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_block_insns(&mut self, max: usize) {
-        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_SIZE);
+        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_INSNS);
     }
 
     pub fn with_max_block_insns(mut self, max: usize) -> Self {

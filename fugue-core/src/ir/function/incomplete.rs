@@ -7,9 +7,9 @@ use std::num::NonZeroUsize;
 use thiserror::Error;
 
 use crate::ir::{
-    Address, CodeBlock, CodeBlockProperties, CodeBlockTable, Function, FunctionId,
-    FunctionProperties, FunctionTable, IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnId,
-    InsnList, Switch, Symbol,
+    Address, AddressWithContext, CodeBlock, CodeBlockProperties, CodeBlockTable, Function,
+    FunctionId, FunctionProperties, FunctionTable, IncompleteCodeBlock, IncompleteCodeBlockId,
+    Insn, InsnId, InsnList, Switch, Symbol,
 };
 
 #[derive(Debug, Error)]
@@ -151,6 +151,37 @@ impl IncompleteFunction {
         } else {
             self.pending_switches.push(switch);
         }
+    }
+
+    pub fn sibling_successor_from_incoming(
+        &self,
+        block: IncompleteCodeBlockId,
+    ) -> Option<AddressWithContext> {
+        let branch = self.block(block)?;
+        for predecessor in branch.predecessors().iter() {
+            let Some(guard) = self.block(predecessor) else {
+                continue;
+            };
+            let mut successors = guard.successors().iter();
+            let (Some(first), Some(second), None) =
+                (successors.next(), successors.next(), successors.next())
+            else {
+                continue;
+            };
+            let sibling = match (first == block, second == block) {
+                (true, false) => second,
+                (false, true) => first,
+                _ => continue,
+            };
+            let Some(sibling) = self.block(sibling) else {
+                continue;
+            };
+            return Some(AddressWithContext::new(
+                sibling.address(),
+                sibling.context().clone(),
+            ));
+        }
+        None
     }
 
     pub(crate) fn has_pending_switch(&self, branch: Address) -> bool {

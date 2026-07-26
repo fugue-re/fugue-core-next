@@ -15,13 +15,86 @@ use crate::il::ecode::ssa::{
 use crate::ir::FunctionId;
 use crate::storage::segments::space::AddressSpaceId;
 
+#[derive(Default)]
+struct SsaFixture {
+    values: Vec<ECodeSsaValue>,
+    block_arguments: Vec<ECodeSsaBlockArg>,
+    edge_arguments: Vec<IlIndexRange>,
+    edge_argument_values: Vec<IlValueId>,
+    operations: Vec<ECodeSsaOp>,
+    value_operands: Vec<IlValueId>,
+    memory_domains: Vec<ECodeSsaMemoryDomain>,
+    constant_storage: Vec<u8>,
+}
+
+impl SsaFixture {
+    fn with_values(
+        mut self,
+        values: Vec<ECodeSsaValue>,
+        block_arguments: Vec<ECodeSsaBlockArg>,
+    ) -> Self {
+        self.values = values;
+        self.block_arguments = block_arguments;
+        self
+    }
+
+    fn with_operations(
+        mut self,
+        operations: Vec<ECodeSsaOp>,
+        value_operands: Vec<IlValueId>,
+    ) -> Self {
+        self.operations = operations;
+        self.value_operands = value_operands;
+        self
+    }
+
+    fn with_edge_argument_storage(
+        mut self,
+        edge_arguments: Vec<IlIndexRange>,
+        edge_argument_values: Vec<IlValueId>,
+    ) -> Self {
+        self.edge_arguments = edge_arguments;
+        self.edge_argument_values = edge_argument_values;
+        self
+    }
+
+    fn with_memory_domains(mut self, memory_domains: Vec<ECodeSsaMemoryDomain>) -> Self {
+        self.memory_domains = memory_domains;
+        self
+    }
+
+    fn with_constant_storage(mut self, constant_storage: Vec<u8>) -> Self {
+        self.constant_storage = constant_storage;
+        self
+    }
+
+    fn build(self, metadata: IlMetadata, graph: IlGraph) -> ECodeSsaIr {
+        ECodeSsaIr::new(
+            metadata,
+            graph,
+            Vec::new(),
+            Vec::new(),
+            self.values,
+            self.block_arguments,
+            self.edge_arguments,
+            self.edge_argument_values,
+            self.operations,
+            self.value_operands,
+            self.memory_domains,
+            self.constant_storage,
+        )
+    }
+}
+
 #[test]
 fn ssa_verifier_rejects_invalid_value_definition() {
     let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-    let body = ECodeSsaIr::new(metadata, IlGraph::default()).with_values(
-        vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
-        Vec::new(),
-    );
+    let body = SsaFixture::default()
+        .with_values(
+            vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
+            Vec::new(),
+        )
+        .build(metadata, IlGraph::default());
 
     assert!(matches!(
         body.verify(),
@@ -33,10 +106,12 @@ fn ssa_verifier_rejects_invalid_value_definition() {
 fn ssa_verifier_rejects_duplicate_memory_domains() {
     let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
     let space = AddressSpaceId::new(7);
-    let body = ECodeSsaIr::new(metadata, IlGraph::default()).with_memory_domains(vec![
-        ECodeSsaMemoryDomain::new(space),
-        ECodeSsaMemoryDomain::new(space),
-    ]);
+    let body = SsaFixture::default()
+        .with_memory_domains(vec![
+            ECodeSsaMemoryDomain::new(space),
+            ECodeSsaMemoryDomain::new(space),
+        ])
+        .build(metadata, IlGraph::default());
 
     assert!(matches!(
         body.verify(),
@@ -235,7 +310,7 @@ fn ssa_verifier_accepts_wide_constant_within_pool() {
 fn ssa_verifier_bounds_wide_constant_at_pool_edge() {
     let wide_constant = |pool_len: usize| {
         let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-        ECodeSsaIr::new(metadata, IlGraph::default())
+        SsaFixture::default()
             .with_values(
                 vec![ECodeSsaValue::operation_result(
                     128,
@@ -256,6 +331,7 @@ fn ssa_verifier_bounds_wide_constant_at_pool_edge() {
                 Vec::new(),
             )
             .with_constant_storage(vec![0u8; pool_len])
+            .build(metadata, IlGraph::default())
     };
 
     wide_constant(16).verify().unwrap();
@@ -272,7 +348,7 @@ fn ssa_verifier_rejects_non_dominating_linear_use() {
     let value = IlValueId::try_from_index(0).unwrap();
     let result = IlIndexRange::new(0, 1).unwrap();
     let operands = IlIndexRange::new(0, 1).unwrap();
-    let body = ECodeSsaIr::new(metadata, IlGraph::default())
+    let body = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -286,12 +362,14 @@ fn ssa_verifier_rejects_non_dominating_linear_use() {
                 ECodeSsaOp::new(ECodeSsaOpcode::Constant, result, IlIndexRange::EMPTY, 32),
             ],
             vec![value],
-        );
+        )
+        .build(metadata, IlGraph::default());
 
-    assert!(matches!(
-        body.verify(),
-        Err(VerifyError::NonDominatingUse { .. })
-    ));
+    let result = body.verify();
+    assert!(
+        matches!(result, Err(VerifyError::NonDominatingUse { .. })),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -320,7 +398,7 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
         ],
         vec![left, right],
     );
-    let body = ECodeSsaIr::new(metadata, graph)
+    let body = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -344,12 +422,15 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
                 ),
             ],
             vec![value],
-        );
+        )
+        .with_edge_argument_storage(vec![IlIndexRange::EMPTY; 2], Vec::new())
+        .build(metadata, graph);
 
-    assert!(matches!(
-        body.verify(),
-        Err(VerifyError::NonDominatingUse { .. })
-    ));
+    let result = body.verify();
+    assert!(
+        matches!(result, Err(VerifyError::NonDominatingUse { .. })),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -372,12 +453,13 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
         ],
         vec![successor],
     );
-    let body = ECodeSsaIr::new(metadata, graph)
+    let body = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::block_argument(32, 0)],
             vec![ECodeSsaBlockArg::new(successor, argument_value, 32)],
         )
-        .with_edge_argument_storage(vec![IlIndexRange::EMPTY], Vec::new());
+        .with_edge_argument_storage(vec![IlIndexRange::EMPTY], Vec::new())
+        .build(metadata, graph);
 
     assert!(matches!(
         body.verify(),
@@ -412,7 +494,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
         ],
         vec![left, right],
     );
-    let body = ECodeSsaIr::new(metadata, graph)
+    let body = SsaFixture::default()
         .with_values(
             vec![
                 ECodeSsaValue::operation_result(32, IlOpId::try_from_index(0).unwrap()),
@@ -432,7 +514,8 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
         .with_edge_argument_storage(
             vec![IlIndexRange::EMPTY, IlIndexRange::new(0, 1).unwrap()],
             vec![value],
-        );
+        )
+        .build(metadata, graph);
 
     assert!(matches!(
         body.verify(),
@@ -458,7 +541,7 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
         ],
         Vec::new(),
     );
-    let body = ECodeSsaIr::new(metadata, graph)
+    let body = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -474,7 +557,8 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
                 32,
             )],
             Vec::new(),
-        );
+        )
+        .build(metadata, graph);
 
     assert!(matches!(
         body.verify(),

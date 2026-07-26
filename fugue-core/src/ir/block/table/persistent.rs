@@ -163,24 +163,11 @@ impl CodeBlockTable {
         Ok(id)
     }
 
-    pub(crate) fn get_by_id(&self, id: Id<CodeBlock>) -> Option<Ref<'_>> {
-        self.try_get_by_id(id).unwrap_or_else(|e| e.into_fatal())
-    }
-
     pub(crate) fn try_get_by_id(
         &self,
         id: Id<CodeBlock>,
     ) -> Result<Option<Ref<'_>>, EntityStorageError> {
         self.entries.try_get(&id)
-    }
-
-    pub(crate) fn modify_by_id<R>(
-        &mut self,
-        id: Id<CodeBlock>,
-        f: impl FnOnce(&mut CodeBlock) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_id(id, f)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -191,19 +178,11 @@ impl CodeBlockTable {
         self.entries.try_modify(&id, f)
     }
 
-    pub(crate) fn get_by_id_mut(&mut self, id: Id<CodeBlock>) -> Option<RefMut<'_>> {
-        self.entries.get_mut(&id)
-    }
-
     pub(crate) fn try_get_by_id_mut(
         &mut self,
         id: Id<CodeBlock>,
     ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
         self.entries.try_get_mut(&id)
-    }
-
-    pub(crate) fn remove_by_id(&mut self, id: Id<CodeBlock>) -> bool {
-        self.try_remove_by_id(id).unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_id(
@@ -235,11 +214,6 @@ impl CodeBlockTable {
         self.index.live -= 1;
 
         Ok(true)
-    }
-
-    pub(crate) fn remove_by_address(&mut self, addr: Address) -> usize {
-        self.try_remove_by_address(addr)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_address(
@@ -293,15 +267,6 @@ impl CodeBlockTable {
         }
 
         Ok(removed)
-    }
-
-    pub(crate) fn remove_by_address_and_context(
-        &mut self,
-        addr: Address,
-        context: &ContextSet,
-    ) -> usize {
-        self.try_remove_by_address_and_context(addr, context)
-            .unwrap_or_else(|e| e.into_fatal())
     }
 
     pub(crate) fn try_remove_by_address_and_context(
@@ -535,7 +500,7 @@ mod test {
             .unwrap();
         assert_eq!(reused.index(), ids[1].index());
         assert_eq!(reused.generation(), ids[1].generation() + 1);
-        assert!(table.get_by_id(ids[1]).is_none());
+        assert!(table.try_get_by_id(ids[1]).unwrap().is_none());
         assert_eq!(table.index.allocator.free_len(), 0);
 
         let fresh = table

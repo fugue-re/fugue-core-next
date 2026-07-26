@@ -239,7 +239,7 @@ mod test {
         let block2 = IlBlockId::try_from_index(2).unwrap();
         let mut builder = builder();
 
-        builder.replace_graph(IlGraph::new(
+        builder.set_graph(IlGraph::new(
             vec![
                 IlBlock::new(
                     IlIndexRange::new(0, 1).unwrap(),

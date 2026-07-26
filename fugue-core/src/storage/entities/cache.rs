@@ -9,7 +9,7 @@ use quick_cache::sync::Cache;
 
 use super::{
     Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
-    WriteBackWorker, schema,
+    WriteBackWorker, decode_entity, schema,
 };
 use crate::types::BytesOrSlice;
 
@@ -306,8 +306,7 @@ where
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
                     WriteBackAction::Insert(bytes) => {
-                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
-                            .map_err(EntityStorageError::decode)?;
+                        let entity = decode_entity(&bytes)?;
                         Ok(Some(self.admit(
                             key.clone(),
                             Arc::new(entity),
@@ -377,9 +376,9 @@ where
 
         let entities = self.entities.clone();
         let iter = self.storage.iter::<K, E>()?.map(move |result| {
-            result.map(|(key, value)| match entities.get(&key) {
-                Some(cached) => (key, CachedRef::from_arc(cached.value)),
-                None => (key, CachedRef::new(value)),
+            result.map(|(key, value)| {
+                let value = Self::reference_for(&entities, &key, value);
+                (key, value)
             })
         });
 
@@ -450,8 +449,7 @@ where
 
     fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
         self.storage.get_as::<K, E, _, _>(key, |bytes| {
-            let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(bytes)
-                .map_err(EntityStorageError::decode)?;
+            let entity = decode_entity(bytes)?;
             Ok((entity, ByteWeighter::entry_weight(bytes.len())))
         })
     }
@@ -463,10 +461,7 @@ where
         let entities = self.entities.clone();
         let iter = self.storage.iter_range::<K, E>(start)?.map(move |result| {
             result.map(|(key, value)| {
-                let value = match entities.get(&key) {
-                    Some(cached) => CachedRef::from_arc(cached.value),
-                    None => CachedRef::new(value),
-                };
+                let value = Self::reference_for(&entities, &key, value);
                 (key, value)
             })
         });
@@ -493,10 +488,8 @@ where
                     .ok_or(EntityStorageError::InvalidKeyFormat)?;
                 let value = match action {
                     WriteBackAction::Insert(bytes) => {
-                        let weight = ByteWeighter::entry_weight(bytes.len());
-                        let entity = rkyv::from_bytes::<E, rkyv::rancor::Error>(&bytes)
-                            .map_err(EntityStorageError::decode)?;
-                        Some(self.admit(key.clone(), Arc::new(entity), weight))
+                        let entity = decode_entity(&bytes)?;
+                        Some(Self::reference_for(&self.entities, &key, entity))
                     }
                     WriteBackAction::Remove => None,
                 };
@@ -569,13 +562,17 @@ where
     ) -> Option<Result<(K, CachedRef<'a, E>), EntityStorageError>> {
         buffered.take().map(|result| {
             result.map(|(key, value)| {
-                let value = match entities.get(&key) {
-                    Some(cached) => CachedRef::from_arc(cached.value),
-                    None => CachedRef::new(value),
-                };
+                let value = Self::reference_for(entities, &key, value);
                 (key, value)
             })
         })
+    }
+
+    fn reference_for<'a>(entities: &EntityLru<K, E>, key: &K, value: E) -> CachedRef<'a, E> {
+        match entities.get(key) {
+            Some(cached) => CachedRef::from_arc(cached.value),
+            None => CachedRef::new(value),
+        }
     }
 
     fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
@@ -630,11 +627,6 @@ where
             entity: current.into_arc(),
             dirty: false,
         }))
-    }
-
-    pub fn get_mut(&mut self, key: &K) -> Option<CachedMut<'_, E>> {
-        self.try_get_mut(key)
-            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = CachedMut<'_, E>> + '_ {
@@ -859,7 +851,10 @@ mod test {
         cache.put(key, cache_entity(13, "before"));
 
         {
-            let mut guard = cache.get_mut(&key).expect("entry exists");
+            let mut guard = cache
+                .try_get_mut(&key)
+                .unwrap()
+                .expect("entry exists");
             guard.name = "after".to_owned();
         }
 

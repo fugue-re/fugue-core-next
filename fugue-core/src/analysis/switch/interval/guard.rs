@@ -5,7 +5,7 @@ use super::SwitchIntervalContext;
 use crate::analysis::function::recovery::InsnResolver;
 use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
-use crate::il::common::{IlBlockId, IlOpId, IlValueId};
+use crate::il::common::{IlBlockId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
@@ -98,68 +98,64 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         let switch_block = self.block_for_source(branch)?;
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
-        for (operation_index, operation) in self.ssa.operations().iter().enumerate() {
-            if operation.opcode() != ECodeSsaOpcode::ConditionalBranch {
-                continue;
-            }
-            let Some(&condition) = self.ssa.operation_operands(operation).first() else {
-                continue;
-            };
-            let operation_id =
-                IlOpId::try_from_index(operation_index).expect("operation count fits the id space");
-            let Some(guard_block) = self.ssa.block_for_operation(operation_id) else {
-                continue;
-            };
-            if !self.dominance.dominates(guard_block, switch_block) {
-                continue;
-            }
-            let Some(taken) = operation
-                .address()
-                .and_then(|taken| self.block_for_source(taken))
-            else {
-                continue;
-            };
-            let Some(fallthrough) = self
-                .ssa
-                .graph()
-                .successors_for(guard_block)
-                .iter()
-                .copied()
-                .find(|&successor| successor != taken)
-            else {
-                continue;
-            };
+        let mut guard_block = Some(switch_block);
+        while let Some(block) = guard_block {
+            for (_, operation) in self.ssa.operations_for_block(block).rev() {
+                if operation.opcode() != ECodeSsaOpcode::ConditionalBranch {
+                    continue;
+                }
+                let Some(&condition) = self.ssa.operation_operands(operation).first() else {
+                    continue;
+                };
+                let Some(taken) = operation
+                    .address()
+                    .and_then(|taken| self.block_for_source(taken))
+                else {
+                    continue;
+                };
+                let Some(fallthrough) = self
+                    .ssa
+                    .graph()
+                    .successors_for(block)
+                    .iter()
+                    .copied()
+                    .find(|&successor| successor != taken)
+                else {
+                    continue;
+                };
 
-            let taken_is_switch = self.dominance.dominates(taken, switch_block);
-            let fallthrough_is_switch = self.dominance.dominates(fallthrough, switch_block);
-            let (switch_taken, default_block) = if taken_is_switch && !fallthrough_is_switch {
-                (true, fallthrough)
-            } else if fallthrough_is_switch && !taken_is_switch {
-                (false, taken)
-            } else {
-                continue;
-            };
-            let Some(interval) = self.index_interval_from_condition(
-                condition,
-                index,
-                switch_taken,
-                self.config.max_trace_depth(),
-            ) else {
-                continue;
-            };
-            let Some(upper) = interval.upper() else {
-                continue;
-            };
-            if *upper >= ceiling {
-                continue;
+                let taken_is_switch = self.dominance.dominates(taken, switch_block);
+                let fallthrough_is_switch = self.dominance.dominates(fallthrough, switch_block);
+                let (switch_taken, default_block) = if taken_is_switch && !fallthrough_is_switch {
+                    (true, fallthrough)
+                } else if fallthrough_is_switch && !taken_is_switch {
+                    (false, taken)
+                } else {
+                    continue;
+                };
+                let Some(interval) = self.index_interval_from_condition(
+                    condition,
+                    index,
+                    switch_taken,
+                    self.config.max_trace_depth(),
+                ) else {
+                    continue;
+                };
+                let Some(upper) = interval.upper() else {
+                    continue;
+                };
+                if *upper >= ceiling {
+                    continue;
+                }
+                tracing::trace!(
+                    "switch at {branch}: using guard in block {block:?} with default block {default_block:?}"
+                );
+                return Some(SwitchGuard {
+                    interval,
+                    default_block: Some(default_block),
+                });
             }
-            tracing::trace!(
-                "switch at {branch}: using guard in block {guard_block:?} with default block {default_block:?}"
-            );
-            return Some(SwitchGuard {
-                interval,
-                default_block: Some(default_block),
-            });
+            guard_block = self.dominance.immediate_dominator(block);
         }
         None
     }
@@ -320,7 +316,12 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                     self.ssa.constant_value(a)?,
                 )
             };
-        let constant = constant.unsigned_cast(width);
+
+        let narrowed = constant.unsigned_cast(width);
+        if narrowed.unsigned_cast(constant.bits()) != constant.clone().unsigned() {
+            return None;
+        }
+        let constant = narrowed;
 
         let bound = match relation {
             Relation::Equal | Relation::NotEqual => &constant - &offset,
@@ -425,10 +426,10 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
     fn comparison_value(&self, value: IlValueId) -> IlValueId {
         let mut current = self.canonical_value(value);
         for _ in 0..self.config.max_trace_depth() {
-            let Some(inserted) = self.ssa.inserted_value_for_exact_extract(current) else {
+            let Some(inner) = self.ssa.extract_source(current) else {
                 break;
             };
-            let next = self.canonical_value(inserted);
+            let next = self.canonical_value(inner);
             if next == current {
                 break;
             }
@@ -453,7 +454,12 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                 "switch at {branch}: resolving intra-instruction default branch at {address}"
             );
             target_resolver.set_space(address.space());
-            return target_resolver.resolve_branch_target(address, None, context, insn_resolver);
+            return target_resolver
+                .resolve_branch_target(address, None, context, insn_resolver)
+                .or_else(|| {
+                    context.apply(address, insn_resolver.context_mut());
+                    target_resolver.resolve_address(address.raw_address(), insn_resolver.context())
+                });
         }
 
         let block = guard?.default_block?;

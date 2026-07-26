@@ -84,7 +84,7 @@ impl<'a> PCodeLocationDisplay<'a> {
 impl fmt::Display for PCodeLocationDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.id.index();
-        let width = self.location.size();
+        let size = self.location.size();
         let lifter_space = self.location.lifter_space().value();
         let offset = self.location.offset();
         let kind = if self.location.is_constant() {
@@ -99,7 +99,7 @@ impl fmt::Display for PCodeLocationDisplay<'_> {
 
         write!(
             f,
-            "%l{index}:bytes<{width}>@lifter_space<{lifter_space}>[0x{offset:x}]{{{kind}}}"
+            "%l{index}:bytes<{size}>@lifter_space<{lifter_space}>[0x{offset:x}]{{{kind}}}"
         )
     }
 }
@@ -275,7 +275,7 @@ mod test {
         let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
         let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
 
-        builder.replace_source_spans(vec![
+        builder.set_source_spans(vec![
             IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), first, 0, 1),
             IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), second, 0, 1),
         ]);
