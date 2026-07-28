@@ -5,8 +5,8 @@ use fugue_core::analysis::control::CancellationToken;
 use fugue_core::engine::change::{ChangeRecord, FunctionChangeKind};
 use fugue_core::il::common::{IlError, IlLevel};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, IncompleteCodeBlock, IncompleteFunction,
-    SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, FunctionId, FunctionProperties, IncompleteCodeBlock,
+    IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{Project, ProjectError};
@@ -468,6 +468,107 @@ fn test_replacing_function_removes_old_blocks() -> Result<(), Box<dyn std::error
     );
     assert!(project.blocks().get_by_id(old_block).is_none());
     assert_eq!(project.blocks().len(), 1);
+
+    Ok(())
+}
+
+#[test]
+fn test_setting_function_properties_records_a_property_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let entry = Address::from(0x4000u64);
+
+    let mut function = IncompleteFunction::new(entry);
+    function.push_block(IncompleteCodeBlock::new(
+        entry,
+        2,
+        Vec::new(),
+        ContextSet::default(),
+    ));
+
+    let mut transaction = project.transaction("test");
+    transaction.add_function(function)?;
+    transaction.commit()?;
+
+    let mut transaction = project.transaction("test");
+    assert!(transaction.set_function_properties(entry, FunctionProperties::NON_RETURNING)?);
+    assert!(!transaction.set_function_properties(entry, FunctionProperties::NON_RETURNING)?);
+    let changes = transaction.commit()?;
+
+    let mut covered = AddressRangeSet::new();
+    covered.insert_raw_range(
+        entry.space(),
+        entry.raw_address()..=(entry + 1u64).raw_address(),
+    );
+    assert_eq!(
+        changes.records(),
+        &[ChangeRecord::FunctionChanged {
+            entry,
+            kind: FunctionChangeKind::Properties,
+            coverage: covered,
+        }]
+    );
+    assert!(
+        project
+            .functions()
+            .get_by_address(entry)
+            .expect("function should exist")
+            .is_non_returning()
+    );
+
+    let mut transaction = project.transaction("test");
+    transaction.set_function_properties(entry, FunctionProperties::empty())?;
+    transaction.rollback()?;
+
+    assert!(
+        project
+            .functions()
+            .get_by_address(entry)
+            .expect("function should exist")
+            .is_non_returning()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_setting_symbol_properties_records_a_symbol_change() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let (id, address, properties) = project
+        .symbols()
+        .iter()
+        .find(|(_, entry)| entry.is_function())
+        .map(|(id, entry)| (id, entry.address(), entry.properties()))
+        .expect("ls.elf should have a function symbol");
+
+    let mut transaction = project.transaction("test");
+    assert!(transaction.set_symbol_properties(id, properties | SymbolProperties::NON_RETURNING)?);
+    let changes = transaction.commit()?;
+
+    assert!(matches!(
+        changes.records(),
+        [ChangeRecord::SymbolChanged { address: at, .. }] if *at == address
+    ));
+    assert!(
+        project
+            .symbols()
+            .get_by_id(id)
+            .expect("symbol should exist")
+            .is_non_returning()
+    );
+
+    let mut transaction = project.transaction("test");
+    transaction.set_symbol_properties(id, properties)?;
+    transaction.rollback()?;
+
+    assert!(
+        project
+            .symbols()
+            .get_by_id(id)
+            .expect("symbol should exist")
+            .is_non_returning()
+    );
 
     Ok(())
 }

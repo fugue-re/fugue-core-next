@@ -177,41 +177,38 @@ where
         true
     }
 
-    pub(super) fn touched_by_insert(
+    pub(super) fn get_ids_replaced_by_insert(
         &self,
         index: SymbolIndex,
         entry: &SymbolEntry<A>,
-    ) -> Vec<SymbolId> {
-        let mut touched = Vec::new();
+    ) -> SmallVec<[SymbolId; 2]> {
+        let mut replaced = SmallVec::new();
         if let Some(id) = self.indices.get(&index).copied() {
-            touched.push(id);
+            replaced.push(id);
         }
 
         if let Some(id) = self.addresses.get(&entry.address()).and_then(|ids| {
             SymbolEntryIter::new(ids, &self.symbols)
                 .find_map(|(id, existing)| existing.has_same_referent(entry).then_some(id))
         }) {
-            touched.push(id);
+            replaced.push(id);
         }
 
-        touched
+        replaced
     }
 
-    pub(super) fn ids_by_symbol(&self, symbol: impl AsRef<str>) -> Vec<SymbolId> {
-        Symbol::from_existing(symbol.as_ref())
-            .and_then(|symbol| self.names.get(&symbol))
-            .map(|ids| ids.to_vec())
-            .unwrap_or_default()
+    pub(super) fn get_ids_by_symbol(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Option<&SmallVec<[SymbolId; 2]>> {
+        Symbol::from_existing(symbol.as_ref()).and_then(|symbol| self.names.get(&symbol))
     }
 
-    pub(super) fn ids_by_address(&self, address: A) -> Vec<SymbolId> {
-        self.addresses
-            .get(&address)
-            .map(|ids| ids.to_vec())
-            .unwrap_or_default()
+    pub(super) fn get_ids_by_address(&self, address: A) -> Option<&SmallVec<[SymbolId; 2]>> {
+        self.addresses.get(&address)
     }
 
-    pub(super) fn id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+    pub(super) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         self.indices.get(&index).copied()
     }
 
@@ -265,6 +262,14 @@ where
     pub fn get_by_index(&self, index: SymbolIndex) -> Option<(SymbolId, &SymbolEntry<A>)> {
         let id = self.indices.get(&index)?;
         self.get_by_id(*id).map(|sym_entry| (*id, sym_entry))
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry<A>) -> R,
+    ) -> Option<R> {
+        self.get_by_id_mut(id).map(f)
     }
 
     pub fn get_by_index_mut(

@@ -29,6 +29,29 @@ pub(crate) mod traits;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};
 
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct BytesProperties: u8 {
+        const ENTRY_MARKER = 0b0000_0100;
+        const NONSENSE     = 0b0000_0001;
+        const PADDING      = 0b0000_0010;
+    }
+}
+
+impl BytesProperties {
+    pub fn is_nonsense(&self) -> bool {
+        self.contains(Self::NONSENSE)
+    }
+
+    pub fn is_padding(&self) -> bool {
+        self.contains(Self::PADDING)
+    }
+
+    pub fn is_entry_marker(&self) -> bool {
+        self.contains(Self::ENTRY_MARKER)
+    }
+}
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Arch(Box<dyn ArchT>);
@@ -192,8 +215,20 @@ impl Arch {
         self.0.is_halt_intrinsic(op, args)
     }
 
+    pub fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        self.0.classify_bytes(bytes)
+    }
+
     pub fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        self.0.is_nonsense_pattern(bytes)
+        self.classify_bytes(bytes).is_nonsense()
+    }
+
+    pub fn is_padding_pattern(&self, bytes: &[u8]) -> bool {
+        self.classify_bytes(bytes).is_padding()
+    }
+
+    pub fn is_entry_marker_pattern(&self, bytes: &[u8]) -> bool {
+        self.classify_bytes(bytes).is_entry_marker()
     }
 
     pub fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {

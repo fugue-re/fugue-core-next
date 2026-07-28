@@ -113,7 +113,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                 else {
                     continue;
                 };
-                let Some(fallthrough) = self
+                let Some(fall_through) = self
                     .ssa
                     .graph()
                     .successors_for(block)
@@ -125,10 +125,10 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                 };
 
                 let taken_is_switch = self.dominance.dominates(taken, switch_block);
-                let fallthrough_is_switch = self.dominance.dominates(fallthrough, switch_block);
-                let (switch_taken, default_block) = if taken_is_switch && !fallthrough_is_switch {
-                    (true, fallthrough)
-                } else if fallthrough_is_switch && !taken_is_switch {
+                let fall_through_is_switch = self.dominance.dominates(fall_through, switch_block);
+                let (switch_taken, default_block) = if taken_is_switch && !fall_through_is_switch {
+                    (true, fall_through)
+                } else if fall_through_is_switch && !taken_is_switch {
                     (false, taken)
                 } else {
                     continue;

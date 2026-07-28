@@ -131,7 +131,7 @@ impl CodeBlockStructurer {
         }
 
         self.connect_local_targets(function, local_targets);
-        self.connect_fallthroughs(function);
+        self.connect_fall_throughs(function);
 
         Ok(())
     }
@@ -200,7 +200,7 @@ impl CodeBlockStructurer {
         }
     }
 
-    fn connect_fallthroughs(&self, function: &mut IncompleteFunction) {
+    fn connect_fall_throughs(&self, function: &mut IncompleteFunction) {
         for index in 0..function.blocks().len() {
             let block = &function.blocks()[index];
             let from = self.block_starts[&block.address()];
@@ -208,7 +208,7 @@ impl CodeBlockStructurer {
                 continue;
             };
             let insn = function.insn(last).expect("instruction must exist");
-            if !insn.has_fall() {
+            if !insn.has_fall_through() {
                 continue;
             }
             let Some(&next) = self.block_starts.get(&insn.next_address()) else {
@@ -217,7 +217,7 @@ impl CodeBlockStructurer {
 
             function
                 .add_block_edge(from, next)
-                .expect("fallthrough blocks must exist");
+                .expect("fall-through blocks must exist");
         }
     }
 }

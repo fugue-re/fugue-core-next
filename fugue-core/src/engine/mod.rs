@@ -66,6 +66,7 @@ pub enum Trigger {
     SegmentMapped,
     SegmentUnmapped,
     SymbolAdded,
+    SymbolChanged,
     SymbolRemoved,
 }
 
@@ -1839,6 +1840,9 @@ impl Worker {
             ChangeRecord::SpaceCreated { .. } => {}
             ChangeRecord::SymbolAdded { address, .. } => {
                 self.route_range(Trigger::SymbolAdded, AddressRange::point(*address));
+            }
+            ChangeRecord::SymbolChanged { address, .. } => {
+                self.route_range(Trigger::SymbolChanged, AddressRange::point(*address));
             }
             ChangeRecord::SymbolRemoved { address, .. } => {
                 self.route_range(Trigger::SymbolRemoved, AddressRange::point(*address));

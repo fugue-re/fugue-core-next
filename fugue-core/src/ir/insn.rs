@@ -111,7 +111,7 @@ impl Insn {
         let next_address = address + length;
 
         let is_local = |location: &Location| -> bool { location.address() == address };
-        let is_fall = |location: &Location| -> bool { location.address() == next_address };
+        let is_fall_through = |location: &Location| -> bool { location.address() == next_address };
 
         let next_location = |index: u16| -> Location {
             if index >= op_count {
@@ -147,27 +147,27 @@ impl Insn {
 
                 if is_local(&location) {
                     targets.push((index, InsnTarget::IntraIns(location, false)));
-                } else if is_fall(&location) {
+                } else if is_fall_through(&location) {
                     targets.push((index, InsnTarget::IntraBlk(location, false)));
                 } else {
                     targets.push((index, InsnTarget::InterBlk(location.address())));
                 }
             };
 
-        let push_fall =
-            |index: u16, fall: Location, targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+        let push_fall_through =
+            |index: u16, fall_through: Location, targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
                 targets.push((
                     index,
-                    if is_local(&fall) {
-                        InsnTarget::IntraIns(fall, true)
+                    if is_local(&fall_through) {
+                        InsnTarget::IntraIns(fall_through, true)
                     } else {
-                        InsnTarget::IntraBlk(fall, true)
+                        InsnTarget::IntraBlk(fall_through, true)
                     },
                 ));
             };
 
         if op_count == 0 {
-            push_fall(0, next_location(1), targets);
+            push_fall_through(0, next_location(1), targets);
             return;
         }
 
@@ -184,7 +184,7 @@ impl Insn {
                 Op::CBranch => {
                     let location = Location::absolute_from(language, address, inputs[0], index);
                     push_branch(index, location, targets);
-                    push_fall(index, next, targets);
+                    push_fall_through(index, next, targets);
                 }
                 Op::IBranch => {
                     push_branch(index, None, targets);
@@ -192,11 +192,11 @@ impl Insn {
                 Op::Call => {
                     let location = Location::absolute_from(language, address, inputs[0], index);
                     push_call(index, location, targets);
-                    push_fall(index, next, targets);
+                    push_fall_through(index, next, targets);
                 }
                 Op::ICall => {
                     push_call(index, None, targets);
-                    push_fall(index, next, targets);
+                    push_fall_through(index, next, targets);
                 }
                 Op::Return => {
                     let return_address = inputs[0]
@@ -209,11 +209,11 @@ impl Insn {
                 }
                 Op::UserOp(_, _) => {
                     targets.push((index, InsnTarget::Intrinsic));
-                    push_fall(index, next, targets);
+                    push_fall_through(index, next, targets);
                 }
                 _ => {
                     if index + 1 == op_count {
-                        push_fall(index, next, targets);
+                        push_fall_through(index, next, targets);
                     }
                 }
             }
@@ -230,6 +230,23 @@ impl Insn {
 
     pub fn properties(&self) -> InsnProperties {
         self.properties
+    }
+
+    pub fn set_call_target(&mut self, target: Address) {
+        for (_, existing) in self.targets.iter_mut() {
+            if matches!(existing, InsnTarget::InterSub(None)) {
+                *existing = InsnTarget::InterSub(Some(target));
+            }
+        }
+
+        self.properties = InsnProperties::from_targets(&self.targets)
+            | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
+    }
+
+    pub fn remove_fall_through(&mut self) {
+        self.targets.retain(|(_, target)| !target.is_fall_through());
+        self.properties = InsnProperties::from_targets(&self.targets)
+            | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
     }
 
     pub fn mark_branch_dest(&mut self) {
@@ -348,8 +365,8 @@ impl Insn {
         self.properties().intersects(InsnProperties::FLOW)
     }
 
-    pub fn has_fall(&self) -> bool {
-        self.properties().contains(InsnProperties::FALL)
+    pub fn has_fall_through(&self) -> bool {
+        self.properties().contains(InsnProperties::FALL_THROUGH)
     }
 
     pub fn has_resolved_flow(&self) -> bool {
@@ -424,7 +441,7 @@ impl Insn {
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct InsnProperties: u16 {
-        const FALL          = 0b0000_0000_0000_0001;
+        const FALL_THROUGH          = 0b0000_0000_0000_0001;
         const BRANCH        = 0b0000_0000_0000_0010;
         const CALL          = 0b0000_0000_0000_0100;
         const RETURN        = 0b0000_0000_0000_1000;
@@ -436,8 +453,8 @@ bitflags::bitflags! {
 
         // 1. instruction's address referenced as an immediate
         //    on the rhs of an assignment
-        // 2. the instruction is a fall from padding
-        // 3. the instruction is an implicit fall target of two
+        // 2. the instruction is a fall-through from padding
+        // 3. the instruction is an implicit fall-through target of two
         //    or more overlapping blocks
         const MAYBE_TAKEN   = 0b0000_0000_1000_0000;
 
@@ -471,7 +488,7 @@ bitflags::bitflags! {
 
 impl Default for InsnProperties {
     fn default() -> Self {
-        Self::FALL
+        Self::FALL_THROUGH
     }
 }
 
@@ -483,7 +500,7 @@ impl InsnProperties {
 
         for (_, target) in targets.iter() {
             match target {
-                InsnTarget::IntraBlk(_, true) => prop |= Self::FALL,
+                InsnTarget::IntraBlk(_, true) => prop |= Self::FALL_THROUGH,
                 InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
                 InsnTarget::Unresolved => prop |= Self::BRANCH | Self::INDIRECT,
                 InsnTarget::InterSub(Some(_)) => prop |= Self::CALL,
@@ -549,6 +566,29 @@ pub enum InsnTarget {
 }
 
 impl InsnTarget {
+    pub fn is_call(&self) -> bool {
+        matches!(self, Self::InterSub(_))
+    }
+
+    pub fn is_fall_through(&self) -> bool {
+        matches!(self, Self::IntraIns(_, true) | Self::IntraBlk(_, true))
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        matches!(
+            self,
+            Self::InterSub(None) | Self::InterRet(None, _) | Self::Unresolved
+        )
+    }
+
+    pub fn is_intrinsic(&self) -> bool {
+        matches!(self, Self::Intrinsic)
+    }
+
+    pub fn is_return(&self) -> bool {
+        matches!(self, Self::InterRet(..))
+    }
+
     pub fn address(&self) -> Option<Address> {
         match self {
             Self::IntraIns(location, _) | Self::IntraBlk(location, _) => Some(location.address()),

@@ -107,7 +107,7 @@ impl FunctionRecoveryPatternMatcher {
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
             let Ok(view) = mapping_cache
-                .contiguous_bytes_from(segments, Address::new(space_id, *range.start()))
+                .contiguous_view_from(segments, Address::new(space_id, *range.start()))
             else {
                 if let Some(next_start) = next_start {
                     current_start = next_start;

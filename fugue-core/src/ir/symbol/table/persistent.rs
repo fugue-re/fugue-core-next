@@ -143,39 +143,35 @@ impl SymbolTable {
         Ok(true)
     }
 
-    pub(super) fn touched_by_insert(
+    pub(super) fn get_ids_replaced_by_insert(
         &self,
         index: SymbolIndex,
         entry: &SymbolEntry,
-    ) -> Result<Vec<SymbolId>, EntityStorageError> {
-        let mut touched = Vec::new();
+    ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
+        let mut replaced = SmallVec::new();
         if let Some(id) = self.index.indices.get(&index).copied() {
-            touched.push(id);
+            replaced.push(id);
         }
 
         if let Some(id) = self.referent_of(entry)? {
-            touched.push(id);
+            replaced.push(id);
         }
 
-        Ok(touched)
+        Ok(replaced)
     }
 
-    pub(super) fn ids_by_symbol(&self, symbol: impl AsRef<str>) -> Vec<SymbolId> {
-        Symbol::from_existing(symbol.as_ref())
-            .and_then(|symbol| self.index.names.get(&symbol))
-            .map(|ids| ids.to_vec())
-            .unwrap_or_default()
+    pub(super) fn get_ids_by_symbol(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Option<&SmallVec<[SymbolId; 2]>> {
+        Symbol::from_existing(symbol.as_ref()).and_then(|symbol| self.index.names.get(&symbol))
     }
 
-    pub(super) fn ids_by_address(&self, address: Address) -> Vec<SymbolId> {
-        self.index
-            .addresses
-            .get(&address)
-            .map(|ids| ids.to_vec())
-            .unwrap_or_default()
+    pub(super) fn get_ids_by_address(&self, address: Address) -> Option<&SmallVec<[SymbolId; 2]>> {
+        self.index.addresses.get(&address)
     }
 
-    pub(super) fn id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+    pub(super) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         self.index.indices.get(&index).copied()
     }
 
@@ -266,6 +262,24 @@ impl SymbolTable {
         drop(existing);
         self.remove_by_id(existing_id)?;
         self.insert(index, address, symbol, properties)
+    }
+
+    pub(crate) fn try_modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        let Some(existing) = self.entries.try_get(&id)? else {
+            return Ok(None);
+        };
+
+        let mut updated = existing.as_ref().clone();
+        drop(existing);
+
+        let result = f(&mut updated);
+        self.entries.try_put(id, updated)?;
+
+        Ok(Some(result))
     }
 
     pub(crate) fn get(
@@ -421,8 +435,7 @@ impl SymbolTable {
 
     pub(crate) fn remove(&mut self, symbol: impl AsRef<str>) -> Result<usize, EntityStorageError> {
         let Some(ids) = Symbol::from_existing(symbol.as_ref())
-            .and_then(|symbol| self.index.names.get(&symbol))
-            .cloned()
+            .and_then(|symbol| self.index.names.remove(&symbol))
         else {
             return Ok(0);
         };
@@ -439,7 +452,7 @@ impl SymbolTable {
         &mut self,
         address: Address,
     ) -> Result<usize, EntityStorageError> {
-        let Some(ids) = self.index.addresses.get(&address).cloned() else {
+        let Some(ids) = self.index.addresses.remove(&address) else {
             return Ok(0);
         };
 

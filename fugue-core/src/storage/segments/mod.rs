@@ -174,6 +174,57 @@ enum SegmentMappingRestore {
 }
 
 impl SegmentStorageRevert {
+    pub(crate) fn capture_empty(segments: &SegmentStorage) -> SegmentStorageRevert {
+        Self::new(segments)
+    }
+
+    pub(crate) fn capture_mapping_remap(
+        segments: &SegmentStorage,
+        mapping: SegmentMappingId,
+        new_start: Address,
+    ) -> SegmentStorageRevert {
+        let mut revert = Self::new(segments);
+        if let Some(current) = segments.mappings.get(&mapping) {
+            revert.mappings.push(SegmentMappingRestore::Location(
+                mapping,
+                SegmentMappingLocation::capture(current),
+            ));
+            let old_range = (current.start().raw_address(), current.end().raw_address());
+            let new_end = new_start + current.size();
+            let new_range = (new_start.raw_address(), new_end.raw_address());
+            revert.capture_mapping_spaces(segments, mapping, [old_range, new_range]);
+        }
+        revert
+    }
+
+    pub(crate) fn capture_mapping_resize(
+        segments: &SegmentStorage,
+        mapping: SegmentMappingId,
+        new_size: u64,
+    ) -> SegmentStorageRevert {
+        let mut revert = Self::new(segments);
+        if let Some(current) = segments.mappings.get(&mapping) {
+            revert.mappings.push(SegmentMappingRestore::Location(
+                mapping,
+                SegmentMappingLocation::capture(current),
+            ));
+            let old_range = (current.start().raw_address(), current.end().raw_address());
+            let new_end = current.start() + new_size;
+            let new_range = (current.start().raw_address(), new_end.raw_address());
+            revert.capture_mapping_spaces(segments, mapping, [old_range, new_range]);
+        }
+        revert
+    }
+
+    pub(crate) fn capture_mapping_metadata(
+        segments: &SegmentStorage,
+        mapping: SegmentMappingId,
+    ) -> SegmentStorageRevert {
+        let mut revert = Self::new(segments);
+        revert.capture_metadata(segments, mapping);
+        revert
+    }
+
     fn new(storage: &SegmentStorage) -> Self {
         Self {
             mapping_ctr: storage.mapping_ctr,
@@ -398,57 +449,6 @@ impl SegmentStorage {
             mapping_ctr: 0,
             space_ctr: 1,
         }
-    }
-
-    pub(crate) fn empty_revert(&self) -> SegmentStorageRevert {
-        SegmentStorageRevert::new(self)
-    }
-
-    pub(crate) fn mapping_remap_revert(
-        &self,
-        mapping: SegmentMappingId,
-        new_start: Address,
-    ) -> SegmentStorageRevert {
-        let mut revert = SegmentStorageRevert::new(self);
-        if let Some(current) = self.mappings.get(&mapping) {
-            revert.mappings.push(SegmentMappingRestore::Location(
-                mapping,
-                SegmentMappingLocation::capture(current),
-            ));
-            let old_range = (current.start().raw_address(), current.end().raw_address());
-            let new_end = new_start + current.size();
-            let new_range = (new_start.raw_address(), new_end.raw_address());
-            revert.capture_mapping_spaces(self, mapping, [old_range, new_range]);
-        }
-        revert
-    }
-
-    pub(crate) fn mapping_resize_revert(
-        &self,
-        mapping: SegmentMappingId,
-        new_size: u64,
-    ) -> SegmentStorageRevert {
-        let mut revert = SegmentStorageRevert::new(self);
-        if let Some(current) = self.mappings.get(&mapping) {
-            revert.mappings.push(SegmentMappingRestore::Location(
-                mapping,
-                SegmentMappingLocation::capture(current),
-            ));
-            let old_range = (current.start().raw_address(), current.end().raw_address());
-            let new_end = current.start() + new_size;
-            let new_range = (current.start().raw_address(), new_end.raw_address());
-            revert.capture_mapping_spaces(self, mapping, [old_range, new_range]);
-        }
-        revert
-    }
-
-    pub(crate) fn mapping_metadata_revert(
-        &self,
-        mapping: SegmentMappingId,
-    ) -> SegmentStorageRevert {
-        let mut revert = SegmentStorageRevert::new(self);
-        revert.capture_metadata(self, mapping);
-        revert
     }
 
     pub(crate) fn space_mapping_revert(
@@ -891,7 +891,6 @@ impl SegmentStorage {
 
         Ok(metadata)
     }
-
 
     pub fn open_provider<S>(
         &mut self,

@@ -1,6 +1,8 @@
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use super::{SymbolEntry, SymbolId, SymbolIndex, SymbolProperties, SymbolTableSelector};
 use crate::ir::Address;
 use crate::ir::symbol::Symbol;
@@ -89,6 +91,61 @@ impl SymbolTableRevert {
             entries,
             touched,
         })
+    }
+
+    pub(crate) fn capture_insert(
+        table: &SymbolTable,
+        index: SymbolIndex,
+        entry: &SymbolEntry,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        let touched = table.get_ids_replaced_by_insert(index, entry)?;
+        Self::new(table, touched, 1)
+    }
+
+    pub(crate) fn capture_remove_symbol(
+        table: &SymbolTable,
+        symbol: impl AsRef<str>,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        let ids = table
+            .get_ids_by_symbol(symbol)
+            .into_iter()
+            .flatten()
+            .copied();
+        Self::new(table, ids, 0)
+    }
+
+    pub(crate) fn capture_remove_address(
+        table: &SymbolTable,
+        address: Address,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        let ids = table
+            .get_ids_by_address(address)
+            .into_iter()
+            .flatten()
+            .copied();
+        Self::new(table, ids, 0)
+    }
+
+    pub(crate) fn capture_remove_id(
+        table: &SymbolTable,
+        id: SymbolId,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        Self::new(table, [id], 0)
+    }
+
+    pub(crate) fn capture_modify_id(
+        table: &SymbolTable,
+        id: SymbolId,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        Self::new(table, [id], 0)
+    }
+
+    pub(crate) fn capture_remove_index(
+        table: &SymbolTable,
+        index: SymbolIndex,
+    ) -> Result<SymbolTableRevert, EntityStorageError> {
+        let id = table.get_id_by_index(index);
+        Self::new(table, id, 0)
     }
 
     pub(crate) fn touch(&mut self, id: SymbolId) {
@@ -191,58 +248,6 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn insert_revert(
-        &self,
-        index: SymbolIndex,
-        entry: &SymbolEntry,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let touched = match self {
-            Self::Persistent(p) => p.touched_by_insert(index, entry)?,
-            Self::Transient(t) => t.touched_by_insert(index, entry),
-        };
-        SymbolTableRevert::new(self, touched, 1)
-    }
-
-    pub(crate) fn remove_symbol_revert(
-        &self,
-        symbol: impl AsRef<str>,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let ids = match self {
-            Self::Persistent(p) => p.ids_by_symbol(symbol),
-            Self::Transient(t) => t.ids_by_symbol(symbol),
-        };
-        SymbolTableRevert::new(self, ids, 0)
-    }
-
-    pub(crate) fn remove_address_revert(
-        &self,
-        address: Address,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let ids = match self {
-            Self::Persistent(p) => p.ids_by_address(address),
-            Self::Transient(t) => t.ids_by_address(address),
-        };
-        SymbolTableRevert::new(self, ids, 0)
-    }
-
-    pub(crate) fn remove_id_revert(
-        &self,
-        id: SymbolId,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        SymbolTableRevert::new(self, [id], 0)
-    }
-
-    pub(crate) fn remove_index_revert(
-        &self,
-        index: SymbolIndex,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let id = match self {
-            Self::Persistent(p) => p.id_by_index(index),
-            Self::Transient(t) => t.id_by_index(index),
-        };
-        SymbolTableRevert::new(self, id, 0)
-    }
-
     pub fn insert(
         &mut self,
         index: SymbolIndex,
@@ -302,6 +307,61 @@ impl SymbolTable {
         match self {
             Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
             Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub(crate) fn get_ids_by_symbol(
+        &self,
+        symbol: impl AsRef<str>,
+    ) -> Option<&SmallVec<[SymbolId; 2]>> {
+        match self {
+            Self::Persistent(p) => p.get_ids_by_symbol(symbol),
+            Self::Transient(t) => t.get_ids_by_symbol(symbol),
+        }
+    }
+
+    pub(crate) fn get_ids_by_address(&self, address: Address) -> Option<&SmallVec<[SymbolId; 2]>> {
+        match self {
+            Self::Persistent(p) => p.get_ids_by_address(address),
+            Self::Transient(t) => t.get_ids_by_address(address),
+        }
+    }
+
+    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+        match self {
+            Self::Persistent(p) => p.get_id_by_index(index),
+            Self::Transient(t) => t.get_id_by_index(index),
+        }
+    }
+
+    pub(crate) fn get_ids_replaced_by_insert(
+        &self,
+        index: SymbolIndex,
+        entry: &SymbolEntry,
+    ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.get_ids_replaced_by_insert(index, entry),
+            Self::Transient(t) => Ok(t.get_ids_replaced_by_insert(index, entry)),
+        }
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.try_modify_by_id(id, f),
+            Self::Transient(t) => Ok(t.modify_by_id(id, f)),
         }
     }
 
@@ -704,7 +764,7 @@ mod test {
             .unwrap()
             .id();
 
-        let revert = table.remove_id_revert(id).unwrap();
+        let revert = SymbolTableRevert::capture_remove_id(&table, id).unwrap();
         assert!(table.remove_by_id(id));
         assert_eq!(table.len(), 0);
 

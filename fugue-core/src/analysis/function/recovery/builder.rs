@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 use super::structuring::CodeBlockStructurer;
 use super::{FunctionRecoveryConfig, FunctionRecoveryError, InsnResolver};
 use crate::analysis::control::{CancellationToken, Cancelled};
+use crate::analysis::non_returning::NonReturningTargets;
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::ir::{
@@ -12,7 +13,7 @@ use crate::ir::{
     InsnEntry, RawAddressRangeSet,
 };
 use crate::lifter::ContextSet;
-use crate::project::ProjectTransaction;
+use crate::project::{Project, ProjectTransaction};
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 
 pub struct FunctionRecoveryState {
@@ -240,15 +241,49 @@ impl FunctionBuilderContext {
         self.structurer.clear();
     }
 
+    pub(crate) fn skip_padding(
+        &mut self,
+        segments: &SegmentStorage,
+        arch: &Arch,
+        resolver: &mut InsnResolver,
+        address: Address,
+    ) -> Address {
+        let mut address = address;
+
+        loop {
+            let Ok(bytes_view) = self.mapping_cache.contiguous_view_from(segments, address) else {
+                return address;
+            };
+            let bytes = bytes_view
+                .as_contiguous()
+                .expect("contiguous mapping view must contain bytes");
+            let Ok(insn) = resolver.resolve(address, bytes) else {
+                return address;
+            };
+            let Some(bytes) = bytes.get(..insn.len()) else {
+                return address;
+            };
+
+            if !arch.is_padding_pattern(bytes) {
+                return address;
+            }
+
+            address += insn.len();
+        }
+    }
+
     fn resolve_insns(
         &mut self,
-        arch: &Arch,
-        segments: &SegmentStorage,
+        project: &Project,
+        config: &FunctionRecoveryConfig,
         resolver: &mut InsnResolver,
         f: &mut IncompleteFunction,
         token: &CancellationToken,
-        use_mapping_hints: bool,
     ) -> Result<(), Cancelled> {
+        let arch = project.arch();
+        let segments = project.segments();
+        let use_mapping_hints = config.use_segment_mapping_hints();
+
         self.mapping_cache
             .view_containing(segments, self.entry())
             .expect("function entry is valid");
@@ -347,7 +382,7 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                let Ok(bytes_view) = self.mapping_cache.contiguous_bytes_from(segments, address)
+                let Ok(bytes_view) = self.mapping_cache.contiguous_view_from(segments, address)
                 else {
                     tracing::trace!("skipping {address}: not mapped in segment");
                     continue 'outer;
@@ -367,8 +402,54 @@ impl FunctionBuilderContext {
 
                 match resolver.resolve(address, bytes) {
                     Ok(insn) => {
-                        let insn = entry.insert(insn);
-                        let insn = f.insn(insn).expect("inserted instruction must exist");
+                        let insn_id = entry.insert(insn);
+                        let insn = f.insn(insn_id).expect("inserted instruction must exist");
+
+                        let indirect = insn
+                            .is_call()
+                            .then(|| resolver.resolve_indirect_target(segments, insn))
+                            .flatten();
+
+                        if let Some(target) = indirect {
+                            f.insn_mut(insn_id)
+                                .expect("inserted instruction must exist")
+                                .set_call_target(target);
+                        }
+
+                        let insn = f.insn(insn_id).expect("inserted instruction must exist");
+
+                        let orphaned_fall_through = if config.use_non_returning_analysis()
+                            && NonReturningTargets::new(project).calls_non_returning(insn)
+                        {
+                            tracing::trace!(
+                                "suppressing fall-through of non-returning call at {address}"
+                            );
+
+                            let fall_through = insn.iter_targets().find_map(|(target, _, addr)| {
+                                target.is_fall_through().then_some(addr)
+                            });
+
+                            f.insn_mut(insn_id)
+                                .expect("inserted instruction must exist")
+                                .remove_fall_through();
+
+                            fall_through
+                        } else {
+                            None
+                        };
+
+                        if let Some(fall_through) = orphaned_fall_through
+                            && let Some((fall_through, context)) =
+                                arch.canonicalise_address(fall_through)
+                        {
+                            let fall_through = Address::new(address.space(), fall_through);
+                            if !self.avoids.contains(fall_through) {
+                                self.global_targets
+                                    .insert(AddressWithContext::new(fall_through, context));
+                            }
+                        }
+
+                        let insn = f.insn(insn_id).expect("inserted instruction must exist");
 
                         // Explicit control-flow
                         if insn.is_flow() {
@@ -410,7 +491,7 @@ impl FunctionBuilderContext {
                         }
 
                         // Implicit control-flow (it is a halt, etc.)
-                        if !insn.has_fall() {
+                        if !insn.has_fall_through() {
                             // We're done with this block
                             continue 'outer;
                         }
@@ -527,20 +608,17 @@ impl FunctionBuilderContext {
                 return Ok(ControlFlow::Break(cancelled));
             }
 
-            let arch = analysis.transaction.project().arch();
-            let segments = analysis.transaction.project().segments();
             let resolver = analysis
                 .resolver_slot
                 .as_mut()
                 .expect("function builder resolver must be initialised");
 
             if let Err(cancelled) = self.resolve_insns(
-                arch,
-                segments,
+                analysis.transaction.project(),
+                analysis.config,
                 resolver,
                 &mut incomplete,
                 analysis.token,
-                analysis.config.use_segment_mapping_hints(),
             ) {
                 return Ok(ControlFlow::Break(cancelled));
             }

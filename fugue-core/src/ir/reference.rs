@@ -84,7 +84,7 @@ bitflags::bitflags! {
         const CONDITIONAL   = 0x0004;
         const COMPUTED      = 0x0008;
         const TERMINAL      = 0x0010;
-        const FALLS_THROUGH = 0x0020;
+        const FALL_THROUGH = 0x0020;
         const OVERRIDE      = 0x0040;
         const READ          = 0x0080;
         const WRITE         = 0x0100;
@@ -100,7 +100,7 @@ impl ReferenceProperties {
             FlowKind::Branch => Self::JUMP,
             FlowKind::CBranch => Self::JUMP | Self::CONDITIONAL,
             FlowKind::IBranch => Self::JUMP | Self::COMPUTED,
-            FlowKind::Fall => Self::FALLS_THROUGH,
+            FlowKind::Fall => Self::FALL_THROUGH,
             FlowKind::Call => Self::CALL,
             FlowKind::ICall => Self::CALL | Self::COMPUTED,
             FlowKind::ServiceCall => Self::CALL,
@@ -273,7 +273,7 @@ impl Reference {
     }
 
     pub fn has_fall_through(&self) -> bool {
-        self.properties.contains(ReferenceProperties::FALLS_THROUGH)
+        self.properties.contains(ReferenceProperties::FALL_THROUGH)
     }
 
     pub fn is_read(&self) -> bool {

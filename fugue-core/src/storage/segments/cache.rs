@@ -41,7 +41,9 @@ impl SegmentMappingCache {
                 view.size(),
                 view.properties(),
             ),
-            generation: segments.space_generation(address.space()).unwrap_or_default(),
+            generation: segments
+                .space_generation(address.space())
+                .unwrap_or_default(),
         });
         Some(view)
     }
@@ -55,7 +57,7 @@ impl SegmentMappingCache {
             .map(|view| view.properties())
     }
 
-    pub fn contiguous_bytes_from<'a>(
+    pub fn contiguous_view_from<'a>(
         &mut self,
         segments: &'a SegmentStorage,
         address: Address,
@@ -122,16 +124,16 @@ mod test {
 
         let mut cache = SegmentMappingCache::new();
         assert!(matches!(
-            cache.contiguous_bytes_from(&segments, Address::from(0x2000u64)),
+            cache.contiguous_view_from(&segments, Address::from(0x2000u64)),
             Err(SegmentStorageError::InvalidAddress)
         ));
         assert!(matches!(
-            cache.contiguous_bytes_from(&segments, Address::from(0x1000u64)),
+            cache.contiguous_view_from(&segments, Address::from(0x1000u64)),
             Err(SegmentStorageError::InvalidAddressRange)
         ));
         assert_eq!(
             cache
-                .contiguous_bytes_from(&segments, Address::from(0x1004u64))?
+                .contiguous_view_from(&segments, Address::from(0x1004u64))?
                 .as_contiguous(),
             Some([0x12, 0x34, 0x56, 0x78].as_slice())
         );

@@ -19,9 +19,10 @@ use crate::ir::switch::SwitchTableRevert;
 use crate::ir::symbol::SymbolTableRevert;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphIndex, CodeBlockTable, FunctionId,
-    FunctionTable, IncompleteFunction, IncompleteFunctionError, RawAddress, Reference,
-    ReferenceIndex, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SwitchId, SwitchTable,
-    SwitchTableError, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolTable,
+    FunctionProperties, FunctionTable, IncompleteFunction, IncompleteFunctionError, RawAddress,
+    Reference, ReferenceIndex, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SwitchId,
+    SwitchTable, SwitchTableError, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolProperties,
+    SymbolTable,
 };
 use crate::lifter::{Language, Lifter, LifterError};
 use crate::loader::{Loadable, LoadableFromBytes, LoadableFromFile, Loader, LoaderError};
@@ -641,6 +642,44 @@ impl ProjectTransaction<'_> {
         Ok(id)
     }
 
+    pub fn set_function_properties(
+        &mut self,
+        entry: Address,
+        properties: FunctionProperties,
+    ) -> Result<bool, ProjectError> {
+        let Some(function) = self.project.functions.get_by_address(entry) else {
+            return Ok(false);
+        };
+
+        if function.properties() == properties {
+            return Ok(false);
+        }
+
+        let id = function.id();
+        let blocks = function
+            .blocks()
+            .map(|(_, id)| id)
+            .collect::<SmallVec<[_; 8]>>();
+        drop(function);
+
+        let coverage = self.project.blocks.coverage(blocks);
+        let revert =
+            FunctionTableRevert::capture(&self.project.functions, &self.project.blocks, entry, 0);
+
+        self.project
+            .functions
+            .try_modify_by_id(id, |function| function.set_properties(properties))?;
+        self.function_reverts.push(revert);
+
+        self.records.push(ChangeRecord::FunctionChanged {
+            entry,
+            kind: FunctionChangeKind::Properties,
+            coverage,
+        });
+
+        Ok(true)
+    }
+
     pub fn remove_function(&mut self, entry: Address) -> Result<bool, ProjectError> {
         let Some(function) = self.project.functions.get_by_address(entry) else {
             return Ok(false);
@@ -911,7 +950,7 @@ impl ProjectTransaction<'_> {
                 (*existing != entry && existing.indices().len() == 1)
                     .then(|| (existing.address(), existing.symbol()))
             });
-        let revert = self.project.symbols.insert_revert(index, &entry)?;
+        let revert = SymbolTableRevert::capture_insert(&self.project.symbols, index, &entry)?;
         self.symbol_reverts.push(revert);
         let insertion = self
             .project
@@ -934,6 +973,35 @@ impl ProjectTransaction<'_> {
         Ok(insertion.id())
     }
 
+    pub fn set_symbol_properties(
+        &mut self,
+        id: SymbolId,
+        properties: SymbolProperties,
+    ) -> Result<bool, ProjectError> {
+        let Some(entry) = self.project.symbols.try_get_by_id(id)? else {
+            return Ok(false);
+        };
+
+        if entry.properties() == properties {
+            return Ok(false);
+        }
+
+        let address = entry.address();
+        let symbol = entry.symbol();
+        drop(entry);
+
+        let revert = SymbolTableRevert::capture_modify_id(&self.project.symbols, id)?;
+        self.project
+            .symbols
+            .try_modify_by_id(id, |entry| entry.set_properties(properties))?;
+        self.symbol_reverts.push(revert);
+
+        self.records
+            .push(ChangeRecord::SymbolChanged { address, symbol });
+
+        Ok(true)
+    }
+
     pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> Result<usize, ProjectError> {
         let symbol = symbol.as_ref();
         let removed = self
@@ -950,7 +1018,7 @@ impl ProjectTransaction<'_> {
             return Ok(0);
         }
 
-        let revert = self.project.symbols.remove_symbol_revert(symbol)?;
+        let revert = SymbolTableRevert::capture_remove_symbol(&self.project.symbols, symbol)?;
         self.symbol_reverts.push(revert);
         let count = self.project.symbols.try_remove(symbol)?;
         self.record_symbols_removed(removed);
@@ -968,7 +1036,7 @@ impl ProjectTransaction<'_> {
             return Ok(0);
         }
 
-        let revert = self.project.symbols.remove_address_revert(address)?;
+        let revert = SymbolTableRevert::capture_remove_address(&self.project.symbols, address)?;
         self.symbol_reverts.push(revert);
         let count = self.project.symbols.try_remove_by_address(address)?;
         self.record_symbols_removed(removed);
@@ -986,7 +1054,7 @@ impl ProjectTransaction<'_> {
             return Ok(false);
         };
 
-        let revert = self.project.symbols.remove_id_revert(id)?;
+        let revert = SymbolTableRevert::capture_remove_id(&self.project.symbols, id)?;
         self.symbol_reverts.push(revert);
         self.project.symbols.try_remove_by_id(id)?;
         self.record_symbol_removed(address, symbol);
@@ -1005,7 +1073,7 @@ impl ProjectTransaction<'_> {
             return Ok(false);
         };
 
-        let revert = self.project.symbols.remove_index_revert(index)?;
+        let revert = SymbolTableRevert::capture_remove_index(&self.project.symbols, index)?;
         self.symbol_reverts.push(revert);
         self.project.symbols.try_remove_by_index(index)?;
         self.record_symbol_removed(address, symbol);
@@ -1017,7 +1085,7 @@ impl ProjectTransaction<'_> {
         &mut self,
         builder: SegmentMappingBuilder,
     ) -> Result<SegmentMappingId, ProjectError> {
-        let mut revert = self.project.storage.segments.empty_revert();
+        let mut revert = SegmentStorageRevert::capture_empty(&self.project.storage.segments);
         let mapping = self
             .project
             .storage
@@ -1031,7 +1099,7 @@ impl ProjectTransaction<'_> {
     }
 
     pub fn create_space(&mut self) -> Result<AddressSpaceId, ProjectError> {
-        let mut revert = self.project.storage.segments.empty_revert();
+        let mut revert = SegmentStorageRevert::capture_empty(&self.project.storage.segments);
         let space = self.project.storage.segments.create_space()?;
         revert.touch_space(space);
         self.segment_reverts.push(revert);
@@ -1124,11 +1192,11 @@ impl ProjectTransaction<'_> {
         new_start: impl Into<Address>,
     ) -> Result<(), ProjectError> {
         let new_start = new_start.into();
-        let revert = self
-            .project
-            .storage
-            .segments
-            .mapping_remap_revert(id, new_start);
+        let revert = SegmentStorageRevert::capture_mapping_remap(
+            &self.project.storage.segments,
+            id,
+            new_start,
+        );
         let removed = self
             .project
             .storage
@@ -1151,11 +1219,11 @@ impl ProjectTransaction<'_> {
         id: SegmentMappingId,
         new_size: u64,
     ) -> Result<(), ProjectError> {
-        let revert = self
-            .project
-            .storage
-            .segments
-            .mapping_resize_revert(id, new_size);
+        let revert = SegmentStorageRevert::capture_mapping_resize(
+            &self.project.storage.segments,
+            id,
+            new_size,
+        );
         let removed = self
             .project
             .storage
@@ -1180,7 +1248,8 @@ impl ProjectTransaction<'_> {
         provenance: SegmentMappingProvenance,
         flags: SegmentMappingFlags,
     ) -> Result<(), ProjectError> {
-        let revert = self.project.storage.segments.mapping_metadata_revert(id);
+        let revert =
+            SegmentStorageRevert::capture_mapping_metadata(&self.project.storage.segments, id);
         self.project
             .storage
             .segments

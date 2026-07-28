@@ -7,9 +7,9 @@ use std::sync::OnceLock;
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
 use object::elf::{
-    FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_WRITE,
-    STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS, STT_NOTYPE, STT_OBJECT,
-    STT_TLS,
+    ELFOSABI_FREEBSD, FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR,
+    SHF_TLS, SHF_WRITE, STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS,
+    STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
 use object::read::elf::{
     self, ElfFile, ElfSection, ElfSectionIterator, ElfSegmentIterator, FileHeader,
@@ -34,7 +34,7 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
-use crate::platform::Platform;
+use crate::platform::{OperatingSystem, Platform};
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
@@ -305,6 +305,18 @@ impl<'a> Elf<'a> {
     pub fn entry(&self) -> Option<RawAddress> {
         let addr = with_elf!(self.object.borrow_view(), elf | elf.entry());
         (addr != 0).then(|| (self.base - self.preferred_base) + addr)
+    }
+
+    pub fn operating_system(&self) -> OperatingSystem {
+        let os_abi = with_elf!(
+            self.object.borrow_view(),
+            elf | elf.elf_header().e_ident().os_abi
+        );
+
+        match os_abi {
+            ELFOSABI_FREEBSD => OperatingSystem::FreeBsd,
+            _ => OperatingSystem::Linux,
+        }
     }
 
     pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
@@ -1279,10 +1291,10 @@ impl ElfSymbolData {
             );
         }
 
-        let syms = if is_object {
-            elf.symbols()
+        let (syms, selector) = if is_object {
+            (elf.symbols(), ELF_SYMTAB_SELECTOR)
         } else {
-            elf.dynamic_symbols()
+            (elf.dynamic_symbols(), ELF_DYNSYM_SELECTOR)
         };
 
         // NOTE: this template is used to create a stub for the external symbols, such that
@@ -1295,7 +1307,9 @@ impl ElfSymbolData {
             arch.external_thunk_template(),
         );
 
-        for (index, sym, properties) in syms.enumerate().filter_map(|(index, sym)| {
+        for (index, sym, properties) in syms.filter_map(|sym| {
+            let index = sym.index().0;
+
             let SymbolFlags::Elf { st_info, .. } = sym.flags() else {
                 return None;
             };
@@ -1351,7 +1365,7 @@ impl ElfSymbolData {
             let symbol = sym.name().ok().unwrap_or_default().into();
 
             symbols.insert(
-                SymbolIndex::new(ELF_DYNSYM_SELECTOR, index),
+                SymbolIndex::new(selector, index),
                 RawElfSymbol {
                     address,
                     symbol,
@@ -2042,7 +2056,10 @@ impl Loadable for Elf<'_> {
     }
 
     fn platform(&self) -> Platform {
-        self.architecture.platform().with_compiler_spec_id("gcc")
+        self.architecture
+            .platform()
+            .with_compiler_spec_id("gcc")
+            .with_os(self.operating_system())
     }
 
     fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
@@ -2104,7 +2121,7 @@ mod test {
 
     use fallible_iterator::FallibleIterator;
     use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
-    use object::{Object, RelocationFlags, RelocationTarget};
+    use object::{Object, ObjectSymbol, RelocationFlags, RelocationTarget};
 
     use super::{ATTRIBUTE_LOAD_HEADERS, ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
     use crate::attributes;
@@ -2523,13 +2540,45 @@ mod test {
             }
         }
 
-        assert!(
-            code_hints > 0,
-            "libipmi.so reaches thumb functions via relocations",
+        assert_eq!(
+            code_hints, 0,
+            "libipmi.so has no relocation that targets a thumb function: its 16 odd-valued \
+             dynamic symbols are all STT_OBJECT, reached by 13 R_ARM_GLOB_DAT relocations, so \
+             they are data hints; a non-zero count means dynamic symbols are misindexed again",
         );
         assert!(
             data_hints > 0,
             "libipmi.so references data objects via GLOB_DAT relocations",
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires binary test fixtures"]
+    fn test_elf_dynamic_symbol_indices_match_the_file() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/ls.elf")?)?;
+
+        let mismatched = with_elf!(
+            elf.loaded_view(),
+            file | file
+                .dynamic_symbols()
+                .filter_map(|symbol| {
+                    let name = symbol.name().ok().filter(|name| !name.is_empty())?;
+                    let index = SymbolIndex::new(ELF_DYNSYM_SELECTOR, symbol.index().0);
+                    let (_, entry) = elf.image_symbols().get_by_index(index)?;
+
+                    (entry.symbol() != name)
+                        .then(|| format!("{index:?} is {name} in the file, {}", entry.symbol()))
+                })
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            mismatched.is_empty(),
+            "{} dynamic symbols are stored under the wrong index, e.g. {:?}",
+            mismatched.len(),
+            mismatched.first()
         );
 
         Ok(())

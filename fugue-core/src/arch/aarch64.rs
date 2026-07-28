@@ -3,9 +3,9 @@ pub use fugue_lifter::aarch64::*;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
-use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
+use crate::arch::{Arch, BytesProperties};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
 use crate::lazy_symbol;
 use crate::lifter::dynamic::LanguageSource;
@@ -59,8 +59,12 @@ impl ArchT for AArch64 {
         ExternFunctionTemplate::new([0xc0, 0x03, 0x5f, 0xd6])
     }
 
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        bytes == [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        if bytes == [0x00u8, 0x00u8, 0x00u8, 0x00u8] {
+            BytesProperties::NONSENSE
+        } else {
+            BytesProperties::empty()
+        }
     }
 
     fn gprs(&self) -> &[Varnode] {
@@ -241,7 +245,7 @@ impl DisassemblerT for AArch64Disassembler {
                     if self.should_lift(&insn) {
                         InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
-                        InsnProperties::FALL
+                        InsnProperties::FALL_THROUGH
                     },
                 )?
             }

@@ -33,7 +33,7 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
-use crate::platform::Platform;
+use crate::platform::{OperatingSystem, Platform};
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
@@ -119,6 +119,18 @@ macro_rules! with_pe {
 impl<'this, 'data> PeFileRepr<'this, 'data> {
     pub(crate) fn is_64(&self) -> bool {
         with_pe!(self, pe | pe.is_64())
+    }
+
+    pub fn operating_system(&self) -> OperatingSystem {
+        const EFI_SUBSYSTEMS: std::ops::RangeInclusive<u16> = 10..=13;
+
+        let subsystem = with_pe!(self, pe | pe.nt_headers().optional_header().subsystem());
+
+        if EFI_SUBSYSTEMS.contains(&subsystem) {
+            OperatingSystem::Uefi
+        } else {
+            OperatingSystem::Windows
+        }
     }
 
     pub(crate) fn machine(&self) -> u16 {
@@ -1256,6 +1268,7 @@ impl Loadable for Pe<'_> {
         self.architecture()
             .platform()
             .with_compiler_spec_id("windows")
+            .with_os(self.object.borrow_loaded().view.operating_system())
     }
 
     fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {

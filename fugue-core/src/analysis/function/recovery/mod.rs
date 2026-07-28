@@ -6,7 +6,10 @@ use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
 pub(crate) mod analysis;
-pub use analysis::{FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension};
+pub use analysis::{
+    FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension,
+    FunctionStructuringContext,
+};
 
 pub(crate) mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
@@ -118,6 +121,9 @@ pub struct FunctionRecoveryConfig {
     // to track the coverage of a function based on block bounds or by the minimum and maximum
     // addresses of the function's blocks.
     use_fine_grained_block_coverage: bool,
+    // This flag controls whether to identify non-returning functions during recovery, and to
+    // suppress the fall-through of calls that target them.
+    use_non_returning_analysis: bool,
     // This flag controls whether to use segment function hints when recovering functions.
     use_segment_function_hints: bool,
     // This flag controls whether to use segment mapping hints when recovering functions.
@@ -133,6 +139,7 @@ impl Default for FunctionRecoveryConfig {
             max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
             max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
             use_fine_grained_block_coverage: false,
+            use_non_returning_analysis: false,
             use_segment_function_hints: true,
             use_segment_mapping_hints: true,
             use_symbol_table_function_hints: true,
@@ -216,6 +223,19 @@ impl FunctionRecoveryConfig {
 
     pub fn with_segment_mapping_hints(mut self, enabled: bool) -> Self {
         self.enable_segment_mapping_hints(enabled);
+        self
+    }
+
+    pub fn use_non_returning_analysis(&self) -> bool {
+        self.use_non_returning_analysis
+    }
+
+    pub fn enable_non_returning_analysis(&mut self, enabled: bool) {
+        self.use_non_returning_analysis = enabled;
+    }
+
+    pub fn with_non_returning_analysis(mut self, enabled: bool) -> Self {
+        self.enable_non_returning_analysis(enabled);
         self
     }
 

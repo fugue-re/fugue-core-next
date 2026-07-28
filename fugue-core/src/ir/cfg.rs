@@ -38,7 +38,7 @@ impl FlowKind {
 
         let kind = match target {
             IntraBlk(target, false) if target.position() == 0 => {
-                if insn.has_fall() {
+                if insn.has_fall_through() {
                     Self::CBranch
                 } else {
                     Self::Branch
@@ -46,7 +46,7 @@ impl FlowKind {
             }
             IntraBlk(target, true) if target.position() == 0 => Self::Fall,
             InterBlk(_) => {
-                if insn.has_fall() {
+                if insn.has_fall_through() {
                     Self::CBranch
                 } else {
                     Self::Branch
@@ -83,7 +83,7 @@ impl FlowKind {
         matches!(self, Self::CBranch)
     }
 
-    pub fn is_fall(&self) -> bool {
+    pub fn is_fall_through(&self) -> bool {
         matches!(self, Self::Fall)
     }
 

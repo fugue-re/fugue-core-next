@@ -194,7 +194,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
 
             let view = self
                 .mapping_cache
-                .contiguous_bytes_from(self.segments, insn.address())?;
+                .contiguous_view_from(self.segments, insn.address())?;
             let bytes = view
                 .as_contiguous()
                 .expect("contiguous mapping view must contain bytes");

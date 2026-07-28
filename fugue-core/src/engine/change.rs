@@ -180,6 +180,7 @@ bitflags::bitflags! {
         const BYTES_WRITTEN           = 0x0000_0001;
         const FUNCTION_ADDED          = 0x0000_0002;
         const FUNCTION_CHANGED        = 0x0000_0004;
+        const FUNCTION_PROPERTIES     = 0x0004_0000;
         const FUNCTION_REMOVED        = 0x0000_0008;
         const LIFTED_MATERIALISED     = 0x0000_0010;
         const LIFTED_REMOVED          = 0x0000_0020;
@@ -194,10 +195,12 @@ bitflags::bitflags! {
         const SWITCH_ADDED            = 0x0000_4000;
         const SWITCH_REMOVED          = 0x0000_8000;
         const SYMBOL_ADDED            = 0x0001_0000;
+        const SYMBOL_CHANGED          = 0x0008_0000;
         const SYMBOL_REMOVED          = 0x0002_0000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
+            | Self::FUNCTION_PROPERTIES.bits()
             | Self::FUNCTION_REMOVED.bits();
         const LIFTED = Self::LIFTED_MATERIALISED.bits()
             | Self::LIFTED_REMOVED.bits();
@@ -207,7 +210,9 @@ bitflags::bitflags! {
             | Self::SEGMENT_MAPPING_CREATED.bits()
             | Self::SEGMENT_MAPPING_CHANGED.bits();
         const SWITCHES = Self::SWITCH_ADDED.bits() | Self::SWITCH_REMOVED.bits();
-        const SYMBOLS = Self::SYMBOL_ADDED.bits() | Self::SYMBOL_REMOVED.bits();
+        const SYMBOLS = Self::SYMBOL_ADDED.bits()
+            | Self::SYMBOL_CHANGED.bits()
+            | Self::SYMBOL_REMOVED.bits();
     }
 }
 
@@ -280,6 +285,10 @@ pub enum ChangeRecord {
         address: Address,
         symbol: Symbol,
     },
+    SymbolChanged {
+        address: Address,
+        symbol: Symbol,
+    },
     SymbolRemoved {
         address: Address,
         symbol: Symbol,
@@ -291,6 +300,10 @@ impl ChangeRecord {
         match self {
             Self::BytesWritten { .. } => ChangeKinds::BYTES_WRITTEN,
             Self::FunctionAdded { .. } => ChangeKinds::FUNCTION_ADDED,
+            Self::FunctionChanged {
+                kind: FunctionChangeKind::Properties,
+                ..
+            } => ChangeKinds::FUNCTION_PROPERTIES,
             Self::FunctionChanged { .. } => ChangeKinds::FUNCTION_CHANGED,
             Self::FunctionRemoved { .. } => ChangeKinds::FUNCTION_REMOVED,
             Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
@@ -307,6 +320,7 @@ impl ChangeRecord {
             Self::SwitchAdded { .. } => ChangeKinds::SWITCH_ADDED,
             Self::SwitchRemoved { .. } => ChangeKinds::SWITCH_REMOVED,
             Self::SymbolAdded { .. } => ChangeKinds::SYMBOL_ADDED,
+            Self::SymbolChanged { .. } => ChangeKinds::SYMBOL_CHANGED,
             Self::SymbolRemoved { .. } => ChangeKinds::SYMBOL_REMOVED,
         }
     }
@@ -320,9 +334,14 @@ impl ChangeRecord {
                 | Self::ReferenceAdded { .. }
                 | Self::ReferenceRemoved { .. }
                 | Self::SymbolAdded { .. }
+                | Self::SymbolChanged { .. }
                 | Self::SymbolRemoved { .. }
                 | Self::SwitchAdded { .. }
                 | Self::SwitchRemoved { .. }
+                | Self::FunctionChanged {
+                    kind: FunctionChangeKind::Properties,
+                    ..
+                }
         )
     }
 
@@ -334,7 +353,9 @@ impl ChangeRecord {
             Self::FunctionAdded { coverage, .. }
             | Self::FunctionChanged { coverage, .. }
             | Self::FunctionRemoved { coverage, .. } => coverage.ranges().collect(),
-            Self::SymbolAdded { address, .. } | Self::SymbolRemoved { address, .. } => {
+            Self::SymbolAdded { address, .. }
+            | Self::SymbolChanged { address, .. }
+            | Self::SymbolRemoved { address, .. } => {
                 [AddressRange::point(*address)].into_iter().collect()
             }
             Self::SwitchAdded { branch } | Self::SwitchRemoved { branch } => {
@@ -558,16 +579,50 @@ mod test {
     }
 
     #[test]
+    fn test_property_changes_do_not_stale_lifted_artefacts() {
+        let entry = Address::from(0x1000u64);
+        let mut coverage = AddressRangeSet::new();
+        coverage.insert_range(AddressRange::point(entry));
+
+        let properties = ChangeRecord::FunctionChanged {
+            entry,
+            kind: FunctionChangeKind::Properties,
+            coverage: coverage.clone(),
+        };
+        let body = ChangeRecord::FunctionChanged {
+            entry,
+            kind: FunctionChangeKind::Body,
+            coverage,
+        };
+
+        assert_eq!(properties.kind(), ChangeKinds::FUNCTION_PROPERTIES);
+        assert_eq!(body.kind(), ChangeKinds::FUNCTION_CHANGED);
+        assert!(ChangeKinds::FUNCTIONS.contains(properties.kind()));
+        assert!(!properties.affects_lifted_inputs());
+        assert!(body.affects_lifted_inputs());
+
+        let symbol = ChangeRecord::SymbolChanged {
+            address: entry,
+            symbol: "abort".into(),
+        };
+
+        assert_eq!(symbol.kind(), ChangeKinds::SYMBOL_CHANGED);
+        assert!(ChangeKinds::SYMBOLS.contains(symbol.kind()));
+        assert!(!symbol.affects_lifted_inputs());
+    }
+
+    #[test]
     fn test_change_kinds_composites_equal_union() {
         assert_eq!(
             ChangeKinds::FUNCTIONS,
             ChangeKinds::FUNCTION_ADDED
                 | ChangeKinds::FUNCTION_CHANGED
+                | ChangeKinds::FUNCTION_PROPERTIES
                 | ChangeKinds::FUNCTION_REMOVED
         );
         assert_eq!(
             ChangeKinds::SYMBOLS,
-            ChangeKinds::SYMBOL_ADDED | ChangeKinds::SYMBOL_REMOVED
+            ChangeKinds::SYMBOL_ADDED | ChangeKinds::SYMBOL_CHANGED | ChangeKinds::SYMBOL_REMOVED
         );
     }
 

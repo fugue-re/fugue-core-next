@@ -328,7 +328,7 @@ impl DisassemblerT for ArmDisassembler {
                 } else {
                     let naddress = address + size;
                     context.set_variable_by_bits(self.t_mode, naddress.offset(), in_thumb);
-                    InsnProperties::FALL
+                    InsnProperties::FALL_THROUGH
                 };
 
                 Insn::from_disassembly(address, size, properties)?

@@ -5,7 +5,7 @@ use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::arch::{Arch, Flag};
+use crate::arch::{Arch, BytesProperties, Flag};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
@@ -13,6 +13,40 @@ use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
     LiftingContext, Varnode,
 };
+
+fn classify_bytes(bytes: &[u8]) -> BytesProperties {
+    const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
+    const ENTRY_MARKERS: &[&[u8]] = &[
+        &[0xf3u8, 0x0fu8, 0x1eu8, 0xfau8],
+        &[0xf3u8, 0x0fu8, 0x1eu8, 0xfbu8],
+    ];
+
+    let mut properties = BytesProperties::empty();
+
+    if bytes.is_empty() {
+        return properties;
+    }
+
+    if ENTRY_MARKERS.contains(&bytes) {
+        properties |= BytesProperties::ENTRY_MARKER;
+    }
+
+    if NONSENSE.contains(&bytes) {
+        properties |= BytesProperties::NONSENSE;
+    }
+
+    let padded = bytes.iter().all(|&byte| byte == 0xcc)
+        || bytes
+            .iter()
+            .position(|byte| !matches!(byte, 0x66 | 0x2e))
+            .is_some_and(|opcode| matches!(&bytes[opcode..], [0x90] | [0x0f, 0x1f, ..]));
+
+    if padded {
+        properties |= BytesProperties::PADDING;
+    }
+
+    properties
+}
 
 #[derive(Clone)]
 struct ArchData {
@@ -90,9 +124,8 @@ impl ArchT for X86_64 {
         &self.data.gprs
     }
 
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
-        NONSENSE.contains(&bytes)
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        classify_bytes(bytes)
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
@@ -248,7 +281,7 @@ impl DisassemblerT for X86_64Disassembler {
                     if self.should_lift(&insn) {
                         InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
-                        InsnProperties::FALL
+                        InsnProperties::FALL_THROUGH
                     },
                 )?
             }
@@ -260,5 +293,42 @@ impl DisassemblerT for X86_64Disassembler {
             }
         };
         Ok(insn)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_byte_patterns_are_classified() {
+        for padding in [
+            [0x90u8].as_slice(),
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0xcc],
+        ] {
+            assert!(
+                classify_bytes(padding).is_padding(),
+                "{padding:02x?} should be padding"
+            );
+        }
+
+        for marker in [
+            [0xf3u8, 0x0f, 0x1e, 0xfa].as_slice(),
+            &[0xf3, 0x0f, 0x1e, 0xfb],
+        ] {
+            let properties = classify_bytes(marker);
+            assert!(properties.is_entry_marker(), "{marker:02x?} marks an entry");
+            assert!(!properties.is_padding(), "{marker:02x?} is not padding");
+        }
+
+        for nonsense in [[0x00u8].as_slice(), &[0x00, 0x00], &[0xf0]] {
+            assert!(classify_bytes(nonsense).is_nonsense());
+        }
+
+        assert!(classify_bytes(&[0x55, 0x48, 0x89, 0xe5]).is_empty());
+        assert!(classify_bytes(&[]).is_empty());
     }
 }

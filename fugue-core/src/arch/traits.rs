@@ -3,6 +3,7 @@ use std::borrow::Borrow;
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
+use crate::arch::BytesProperties;
 use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
@@ -138,8 +139,8 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        false
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        BytesProperties::empty()
     }
 
     #[allow(unused)]

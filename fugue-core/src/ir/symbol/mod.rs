@@ -3,7 +3,8 @@ use std::sync::LazyLock;
 
 use smallvec::SmallVec;
 pub use ustr::{
-    Ustr as Symbol, UstrMap as SymbolMap, existing_ustr as existing_symbol, ustr as symbol,
+    Ustr as Symbol, UstrMap as SymbolMap, UstrSet as SymbolSet, existing_ustr as existing_symbol,
+    ustr as symbol,
 };
 
 use crate::ir::{Address, Id};
@@ -122,6 +123,10 @@ where
         self.properties
     }
 
+    pub fn set_properties(&mut self, properties: SymbolProperties) {
+        self.properties = properties;
+    }
+
     fn add_index(&mut self, index: SymbolIndex) {
         if !self.indices.contains(&index) {
             self.indices.push(index);
@@ -182,6 +187,14 @@ where
         self.properties.is_data()
     }
 
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.is_non_returning()
+    }
+
+    pub fn mark_non_returning(&mut self) {
+        self.properties |= SymbolProperties::NON_RETURNING;
+    }
+
     fn is_valid(&self) -> bool {
         self.properties != SymbolProperties::INVALID
     }
@@ -218,12 +231,13 @@ impl Entity for SymbolEntry {
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SymbolProperties: u8 {
-        const NONE     = 0b0000_0000;
-        const EXTERN   = 0b0000_0001;
-        const EXPORT   = 0b0000_0010;
-        const LOCAL    = 0b0000_0100;
-        const FUNCTION = 0b0000_1000;
-        const DATA     = 0b0001_0000;
+        const NONE          = 0b0000_0000;
+        const EXTERN        = 0b0000_0001;
+        const EXPORT        = 0b0000_0010;
+        const LOCAL         = 0b0000_0100;
+        const FUNCTION      = 0b0000_1000;
+        const DATA          = 0b0001_0000;
+        const NON_RETURNING = 0b0010_0000;
 
         // aliases
         const IMPORT = Self::EXTERN.bits();
@@ -290,6 +304,10 @@ impl SymbolProperties {
 
     pub fn is_data(self) -> bool {
         self.contains(SymbolProperties::DATA)
+    }
+
+    pub fn is_non_returning(self) -> bool {
+        self.contains(SymbolProperties::NON_RETURNING)
     }
 }
 

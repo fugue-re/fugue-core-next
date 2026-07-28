@@ -1,12 +1,13 @@
 use super::FunctionRecoveryError;
 use crate::ir::{Address, IncompleteCodeBlockId, IncompleteFunction, Insn};
-use crate::lifter::{Disassembler, Lifter, LiftingContext, RawPCodeOp};
+use crate::lifter::{Disassembler, Lifter, LiftingContext, Op, RawPCodeOp};
 use crate::project::Project;
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 
 pub struct InsnResolver {
     disassembler: Disassembler,
     lifter: Lifter,
+    mapping_cache: SegmentMappingCache,
     operations: Vec<RawPCodeOp>,
 }
 
@@ -18,6 +19,7 @@ impl InsnResolver {
         Self {
             disassembler,
             lifter,
+            mapping_cache: SegmentMappingCache::new(),
             operations: Vec::new(),
         }
     }
@@ -73,7 +75,7 @@ impl InsnResolver {
                 .insn(insn_id)
                 .expect("block instruction must exist");
 
-            let view = match mapping_cache.contiguous_bytes_from(segments, insn.address()) {
+            let view = match mapping_cache.contiguous_view_from(segments, insn.address()) {
                 Ok(view) => view,
                 Err(error) => {
                     operations.truncate(operation_start);
@@ -97,6 +99,71 @@ impl InsnResolver {
         }
 
         Ok(())
+    }
+
+    fn resolve_indirect_target_pointer(&self, insn: &Insn) -> Option<Address> {
+        let language = self.lifter.language();
+        let (position, target) =
+            self.operations
+                .iter()
+                .enumerate()
+                .find_map(|(index, operation)| {
+                    if !matches!(operation.op(), Op::IBranch | Op::ICall) {
+                        return None;
+                    }
+                    operation.inputs().first().map(|target| (index, *target))
+                })?;
+
+        if language.in_default_space(&target) {
+            return Some(Address::new(insn.address().space(), target.offset()));
+        }
+
+        let definition = self.operations[..position]
+            .iter()
+            .rev()
+            .find(|operation| operation.output() == Some(&target))?;
+
+        if !matches!(definition.op(), Op::Copy) {
+            return None;
+        }
+
+        definition
+            .inputs()
+            .first()
+            .filter(|source| language.in_default_space(source))
+            .map(|source| Address::new(insn.address().space(), source.offset()))
+    }
+
+    pub fn resolve_indirect_target(
+        &mut self,
+        segments: &SegmentStorage,
+        insn: &Insn,
+    ) -> Option<Address> {
+        let pointer = self.resolve_indirect_target_pointer(insn)?;
+        let size = self.lifter.language().address_size();
+        let mut buffer = [0u8; size_of::<u64>()];
+        let bytes = buffer.get_mut(..size)?;
+
+        self.mapping_cache
+            .read_bytes_exact(segments, pointer, bytes)
+            .ok()?;
+
+        let offset = if self.lifter.language().is_big_endian() {
+            bytes
+                .iter()
+                .fold(0u64, |value, &byte| (value << 8) | u64::from(byte))
+        } else {
+            bytes
+                .iter()
+                .rev()
+                .fold(0u64, |value, &byte| (value << 8) | u64::from(byte))
+        };
+
+        Some(Address::new(pointer.space(), offset))
+    }
+
+    pub fn operations(&self) -> &[RawPCodeOp] {
+        &self.operations
     }
 
     pub fn context(&self) -> &LiftingContext {

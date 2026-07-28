@@ -1,5 +1,9 @@
 use std::fmt::{self, Display, Formatter};
 
+pub mod non_returning;
+pub mod posix;
+pub mod windows;
+
 use crate::arch::Arch;
 use crate::ir::Endian;
 
@@ -9,6 +13,7 @@ pub enum OperatingSystem {
     Linux,
     Macos,
     None,
+    Uefi,
     #[default]
     Unknown,
     Windows,

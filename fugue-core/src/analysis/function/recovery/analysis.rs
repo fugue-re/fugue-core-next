@@ -15,8 +15,8 @@ use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{Analyser, AnalyserProvider, AnalysisContext, Priority, Trigger};
 use crate::ir::{
-    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionTable,
-    IncompleteFunction, RawAddress, RawAddressRangeSet,
+    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionProperties,
+    FunctionTable, IncompleteFunction, RawAddress, RawAddressRangeSet,
 };
 use crate::project::{Project, ProjectTransaction};
 use crate::registry::{self, Registration, submit};
@@ -83,11 +83,13 @@ pub struct FunctionDiscoveryContext {
 pub struct FunctionStructuringContext {
     config: FunctionRecoveryConfig,
     avoids: RawAddressRangeSet,
+    candidates: VecDeque<AddressWithContext>,
     failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
     committed_functions: BTreeSet<Address>,
+    changed_functions: BTreeMap<Address, FunctionProperties>,
     removed_functions: BTreeSet<Address>,
 }
 
@@ -254,6 +256,10 @@ impl FunctionStructuringContext {
         &self.config
     }
 
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
+    }
+
     pub fn avoids(&self) -> &RawAddressRangeSet {
         &self.avoids
     }
@@ -297,22 +303,21 @@ impl FunctionStructuringContext {
         confidence: Confidence,
     ) -> bool {
         let address = address.into();
-        let mut existing = false;
+        let mut inserted = false;
 
-        existing |=
+        inserted |=
             FunctionDiscoveryContext::insert_function(&mut self.functions, address, confidence);
-        existing |=
+        inserted |=
             FunctionDiscoveryContext::insert_function(&mut self.new_functions, address, confidence);
 
-        if !existing {
-            // in case we have previously marked this function as committed or for removal
+        if inserted {
             self.committed_functions.remove(&address);
             self.removed_functions.remove(&address);
         }
 
         self.pending_functions.insert(address, function);
 
-        existing
+        inserted
     }
 
     pub fn modify_pending_function<F>(
@@ -330,16 +335,37 @@ impl FunctionStructuringContext {
         f(function)
     }
 
+    pub fn set_function_properties(
+        &mut self,
+        address: impl Into<Address>,
+        properties: FunctionProperties,
+    ) {
+        let address = address.into();
+
+        if self.removed_functions.contains(&address) {
+            return;
+        }
+
+        self.changed_functions.insert(address, properties);
+    }
+
     pub fn remove_function(&mut self, address: impl Into<Address>) {
         let address = address.into();
         self.functions.remove(&address);
         self.new_functions.remove(&address);
+        self.changed_functions.remove(&address);
 
         if self.pending_functions.remove(&address).is_none() {
             self.removed_functions.insert(address);
         } else {
             self.committed_functions.remove(&address);
         }
+    }
+
+    pub fn reanalyse_function(&mut self, candidate: impl Into<AddressWithContext>) {
+        let candidate = candidate.into();
+        self.remove_function(candidate.address());
+        self.add_candidate(candidate);
     }
 
     pub fn commit_function(&mut self, address: impl Into<Address>) {
@@ -676,6 +702,21 @@ impl FunctionRecovery {
                 self.progress.advance(1);
                 chunk_candidates += 1;
 
+                let candidate = match resolver_slot.as_mut() {
+                    Some(resolver) => {
+                        let project = transaction.project();
+                        let (address, context) = candidate.into_parts();
+                        let address = self.builder.context_mut().skip_padding(
+                            project.segments(),
+                            project.arch(),
+                            resolver,
+                            address,
+                        );
+                        AddressWithContext::new(address, context)
+                    }
+                    None => candidate,
+                };
+
                 let address = candidate.address();
                 let confidence = Confidence::certain();
 
@@ -835,11 +876,13 @@ impl FunctionRecovery {
             let mut context = FunctionStructuringContext {
                 config: *self.builder.config(),
                 avoids: mem::take(self.builder.avoids_mut()),
+                candidates: VecDeque::new(),
                 failures: mem::take(&mut failures),
                 functions: mem::take(&mut functions),
                 new_functions: mem::take(&mut new_functions),
                 pending_functions: mem::take(&mut self.pending_functions),
                 committed_functions: BTreeSet::new(),
+                changed_functions: BTreeMap::new(),
                 removed_functions: BTreeSet::new(),
             };
 
@@ -853,6 +896,8 @@ impl FunctionRecovery {
                 return Err(e);
             }
 
+            self.candidates.append(&mut context.candidates);
+
             // remove any functions that were removed during restructuring
             for f in context.removed_functions {
                 if context.pending_functions.remove(&f).is_some() {
@@ -861,6 +906,12 @@ impl FunctionRecovery {
 
                 transaction
                     .remove_function(f)
+                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+            }
+
+            for (f, properties) in context.changed_functions {
+                transaction
+                    .set_function_properties(f, properties)
                     .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
             }
 
@@ -1004,7 +1055,7 @@ impl Analyser for FunctionRecovery {
     }
 
     fn triggers(&self) -> &'static [Trigger] {
-        &[Trigger::BytesMapped]
+        &[Trigger::BytesMapped, Trigger::SymbolChanged]
     }
 
     fn priority(&self) -> Priority {
@@ -1036,4 +1087,57 @@ impl Analyser for FunctionRecovery {
 
 submit! {
     AnalyserProvider::new("function-recovery", FunctionRecovery::build_analyser)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn incomplete(entry: Address) -> IncompleteFunction {
+        IncompleteFunction::new(entry)
+    }
+
+    #[test]
+    fn test_adding_a_removed_function_clears_its_removal() {
+        let entry = Address::from(0x4000u64);
+        let mut context = FunctionStructuringContext::default();
+
+        context.remove_function(entry);
+
+        assert!(context.removed_functions.contains(&entry));
+
+        assert!(context.add_function(entry, incomplete(entry), Confidence::default()));
+
+        assert!(!context.removed_functions.contains(&entry));
+        assert!(context.pending_functions.contains_key(&entry));
+    }
+
+    #[test]
+    fn test_adding_a_known_function_keeps_its_commit() {
+        let entry = Address::from(0x4000u64);
+        let mut context = FunctionStructuringContext::default();
+
+        context.add_function(entry, incomplete(entry), Confidence::default());
+        context.commit_function(entry);
+
+        assert!(!context.add_function(entry, incomplete(entry), Confidence::default()));
+        assert!(context.committed_functions.contains(&entry));
+    }
+
+    #[test]
+    fn test_reanalysing_a_function_removes_it_and_queues_it() {
+        let entry = Address::from(0x4000u64);
+        let mut context = FunctionStructuringContext::default();
+
+        context.add_function(entry, incomplete(entry), Confidence::default());
+        context.set_function_properties(entry, FunctionProperties::NON_RETURNING);
+        context.reanalyse_function(entry);
+
+        assert!(!context.pending_functions.contains_key(&entry));
+        assert!(!context.changed_functions.contains_key(&entry));
+        assert_eq!(
+            context.candidates.front().map(AddressWithContext::address),
+            Some(entry)
+        );
+    }
 }

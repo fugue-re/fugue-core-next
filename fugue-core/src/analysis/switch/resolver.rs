@@ -80,7 +80,7 @@ impl<'a> SwitchTargetResolver<'a> {
     ) -> Option<AddressWithContext> {
         let view = self
             .mapping_cache
-            .contiguous_bytes_from(self.segments, address)
+            .contiguous_view_from(self.segments, address)
             .ok()?;
         let bytes = view.as_contiguous()?;
         context.apply(address, resolver.context_mut());
@@ -90,7 +90,7 @@ impl<'a> SwitchTargetResolver<'a> {
             || instruction.is_call()
             || instruction.is_return()
             || instruction.is_indirect()
-            || instruction.has_fall()
+            || instruction.has_fall_through()
         {
             return None;
         }
