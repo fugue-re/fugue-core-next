@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
+use crate::types::Revision;
 
 #[derive(Debug, Error)]
 pub enum AddressSpaceError {
@@ -98,7 +99,7 @@ pub struct AddressSpace {
     kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
-    generation: u64,
+    generation: Revision,
 }
 
 pub(crate) struct AddressSpaceRevert {
@@ -258,7 +259,7 @@ impl AddressSpace {
             kind,
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
-            generation: 0,
+            generation: Revision::default(),
         }
     }
 
@@ -266,12 +267,12 @@ impl AddressSpace {
         self.id
     }
 
-    pub(crate) fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> Revision {
         self.generation
     }
 
     fn touch(&mut self) {
-        self.generation += 1;
+        self.generation = self.generation.next();
     }
 
     pub fn base(&self) -> Option<AddressSpaceId> {
@@ -523,9 +524,19 @@ impl AddressSpace {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::storage::segments::mapping::SegmentMapping;
+    use crate::storage::segments::provider::SegmentStorageProviderId;
 
     fn make_ref(id: usize) -> SegmentMappingRef {
-        SegmentMappingRef::new(SegmentMappingId::new(id), 1)
+        SegmentMapping::new(
+            SegmentMappingId::new(id),
+            0u64,
+            0,
+            0,
+            SegmentStorageProviderId::new(0),
+            SegmentProperties::default(),
+        )
+        .make_ref()
     }
 
     #[test]

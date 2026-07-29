@@ -18,8 +18,8 @@ use crate::loader::{
     LoaderError,
 };
 use crate::storage::PERSISTENT;
-use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
+use crate::types::{AttributeMap, Revision};
 
 pub(crate) mod cache;
 pub(crate) mod mapping;
@@ -155,6 +155,9 @@ pub struct SegmentStorage {
     provider_ctr: usize,
     mapping_ctr: usize,
     space_ctr: usize,
+    revision: Revision,
+    persisted_revision: Revision,
+    path: Option<PathBuf>,
 }
 
 pub(crate) struct SegmentStorageRevert {
@@ -366,6 +369,8 @@ impl SegmentStorageRevert {
                 space.restore(current);
             }
         }
+
+        storage.touch();
     }
 }
 
@@ -400,6 +405,18 @@ impl SegmentWriteRevert {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for SegmentStorage {
+    fn drop(&mut self) {
+        if self.is_transient() {
+            return;
+        }
+
+        if let Err(e) = self.persist_storage() {
+            tracing::error!("failed to persist segment storage metadata: {e}");
+        }
     }
 }
 
@@ -448,7 +465,14 @@ impl SegmentStorage {
             provider_ctr: 0,
             mapping_ctr: 0,
             space_ctr: 1,
+            revision: Revision::default(),
+            persisted_revision: Revision::default(),
+            path: None,
         }
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.next();
     }
 
     pub(crate) fn space_mapping_revert(
@@ -637,7 +661,8 @@ impl SegmentStorage {
         if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             && storage.is_persistable()
         {
-            storage.persist_storage(&project_path)?;
+            storage.path = Some(project_path);
+            storage.persist_storage()?;
         }
 
         Ok(LoadedSegmentStorage::new(storage, resolution))
@@ -765,6 +790,9 @@ impl SegmentStorage {
             }
         }
 
+        storage.path = Some(path.to_owned());
+        storage.persisted_revision = storage.revision;
+
         Ok(storage)
     }
 
@@ -780,14 +808,25 @@ impl SegmentStorage {
         !self.is_persistable()
     }
 
-    fn persist_storage(&self, path: impl AsRef<Path>) -> Result<(), SegmentStorageError> {
+    fn persist_storage(&mut self) -> Result<(), SegmentStorageError> {
         if self.is_transient() {
             return Err(SegmentStorageError::backing_with(
                 "storage contains non-persistable providers",
             ));
         }
 
-        let meta_path = path.as_ref().join(SEGMENT_STORAGE_FILE);
+        let Some(meta_path) = self.path.as_ref().map(|p| p.join(SEGMENT_STORAGE_FILE)) else {
+            tracing::debug!("segment storage has no project path; skipping persistence");
+            return Ok(());
+        };
+
+        if self.persisted_revision == self.revision {
+            tracing::debug!(
+                "segment storage metadata unchanged at revision {}; skipping persistence",
+                self.revision.value()
+            );
+            return Ok(());
+        }
 
         tracing::debug!("persisting segment storage to {}", meta_path.display());
 
@@ -845,19 +884,28 @@ impl SegmentStorage {
             fill_byte: self.fill_byte,
         };
 
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).map_err(|e| {
+            SegmentStorageError::backing_with(format!("failed to encode metadata: {e}"))
+        })?;
+
         let file = File::create(&meta_path)
             .map_err(|e| SegmentStorageError::project_data(&meta_path, e.kind()))?;
         let mut writer = BufWriter::new(file);
 
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).map_err(|e| {
-            SegmentStorageError::backing_with(format!("failed to encode metadata: {e}"))
-        })?;
         io::Write::write_all(&mut writer, &bytes).map_err(|e| {
             SegmentStorageError::backing_with(format!("failed to write metadata: {e}"))
         })?;
-        io::Write::flush(&mut writer).map_err(|e| {
-            SegmentStorageError::backing_with(format!("failed to flush metadata: {e}"))
-        })?;
+        writer
+            .into_inner()
+            .map_err(|e| {
+                SegmentStorageError::backing_with(format!("failed to flush metadata: {e}"))
+            })?
+            .sync_all()
+            .map_err(|e| {
+                SegmentStorageError::backing_with(format!("failed to synchronise metadata: {e}"))
+            })?;
+
+        self.persisted_revision = self.revision;
 
         Ok(())
     }
@@ -905,6 +953,7 @@ impl SegmentStorage {
 
         let descriptor = SegmentStorageDescriptor::new(id, provider, permissions);
         self.providers.insert(id, descriptor);
+        self.touch();
 
         id
     }
@@ -921,6 +970,7 @@ impl SegmentStorage {
         let descriptor =
             SegmentStorageDescriptor::from_boxed(id, provider, permissions, stable_tag);
         self.providers.insert(id, descriptor);
+        self.touch();
 
         id
     }
@@ -943,6 +993,7 @@ impl SegmentStorage {
         self.providers
             .remove(&id)
             .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
+        self.touch();
 
         Ok(())
     }
@@ -964,6 +1015,7 @@ impl SegmentStorage {
 
         let mapping = SegmentMapping::new(id, start, size, offset, provider_id, properties);
         self.mappings.insert(id, mapping);
+        self.touch();
 
         Ok(id)
     }
@@ -981,6 +1033,7 @@ impl SegmentStorage {
 
         self.mappings
             .insert(id, SegmentMapping::from_builder(id, builder));
+        self.touch();
 
         Ok(id)
     }
@@ -993,6 +1046,7 @@ impl SegmentStorage {
         self.mappings
             .remove(&id)
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+        self.touch();
 
         Ok(())
     }
@@ -1031,6 +1085,8 @@ impl SegmentStorage {
             .remove(&id)
             .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
         revert.push_removed_mapping(id, mapping);
+
+        self.touch();
 
         Ok(revert)
     }
@@ -1094,6 +1150,7 @@ impl SegmentStorage {
                 space.add_mapping_top(mapping_ref, new_start, old_size, mapping.properties());
             }
         }
+        self.touch();
 
         Ok(())
     }
@@ -1119,6 +1176,7 @@ impl SegmentStorage {
                 space.add_mapping_top(mapping_ref, start, new_size, mapping.properties());
             }
         }
+        self.touch();
 
         Ok(())
     }
@@ -1138,6 +1196,7 @@ impl SegmentStorage {
         mapping.set_kind(kind);
         mapping.set_provenance(provenance);
         mapping.set_flags(flags);
+        self.touch();
 
         Ok(())
     }
@@ -1146,6 +1205,7 @@ impl SegmentStorage {
         let id = AddressSpaceId::try_from(self.space_ctr)?;
         self.space_ctr += 1;
         self.spaces.insert(id, AddressSpace::new(id));
+        self.touch();
         Ok(id)
     }
 
@@ -1210,6 +1270,7 @@ impl SegmentStorage {
             SpacePriority::Top => space.add_mapping_top(mapping_ref, start, size, properties),
             SpacePriority::Bottom => space.add_mapping_bottom(mapping_ref, start, size, properties),
         }
+        self.touch();
 
         Ok(())
     }
@@ -1233,6 +1294,7 @@ impl SegmentStorage {
             .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
 
         space.deprioritise(mapping_id);
+        self.touch();
 
         self.rebuild_submaps_for_mapping(space_id, mapping_id)
     }
@@ -1559,6 +1621,7 @@ impl SegmentStorage {
 
     pub fn set_fill_byte(&mut self, byte: u8) {
         self.fill_byte = byte;
+        self.touch();
     }
 
     pub fn fill_byte(&self) -> u8 {
@@ -1680,7 +1743,7 @@ impl SegmentStorage {
         Ok(SegmentMappingView::new(mapping, provider, mapping_view))
     }
 
-    pub(crate) fn space_generation(&self, space_id: AddressSpaceId) -> Option<u64> {
+    pub(crate) fn space_generation(&self, space_id: AddressSpaceId) -> Option<Revision> {
         self.spaces.get(&space_id).map(AddressSpace::generation)
     }
 
@@ -2097,7 +2160,8 @@ mod test {
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, first)?;
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, second)?;
         storage.prioritise_mapping(DEFAULT_SPACE_ID, first)?;
-        storage.persist_storage(project.path())?;
+        storage.path = Some(project.path().to_owned());
+        storage.persist_storage()?;
         drop(storage);
 
         let mut attributes = AttributeMap::new();
@@ -2137,13 +2201,15 @@ mod test {
                 .with_properties(SegmentProperties::PERM_ALL),
         )?;
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, mapping)?;
-        storage.persist_storage(project.path())?;
+        storage.path = Some(project.path().to_owned());
+        storage.persist_storage()?;
         drop(storage);
 
         let mut attributes = AttributeMap::new();
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());
-        let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
-        storage.persist_storage(project.path())?;
+        let mut storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+        storage.path = Some(project.path().to_owned());
+        storage.persist_storage()?;
         drop(storage);
 
         let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
@@ -2158,7 +2224,8 @@ mod test {
         let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let mut storage = SegmentStorage::empty();
         storage.set_fill_byte(0xa5);
-        storage.persist_storage(project.path())?;
+        storage.path = Some(project.path().to_owned());
+        storage.persist_storage()?;
 
         let mut attributes = AttributeMap::new();
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());

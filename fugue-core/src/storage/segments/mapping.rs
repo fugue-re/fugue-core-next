@@ -10,6 +10,7 @@ use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
+use crate::types::Revision;
 use crate::types::common::archived_bitflags;
 
 #[derive(
@@ -130,7 +131,7 @@ pub struct SegmentMapping {
     provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     overlay: OverlayTree,
-    version: u64,
+    version: Revision,
     name: String,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
@@ -139,7 +140,7 @@ pub struct SegmentMapping {
 pub(crate) struct SegmentMappingLocation {
     size: u64,
     start: Address,
-    version: u64,
+    version: Revision,
 }
 
 impl SegmentMappingLocation {
@@ -156,7 +157,7 @@ pub(crate) struct SegmentMappingMetadata {
     flags: SegmentMappingFlags,
     kind: SegmentMappingKind,
     provenance: SegmentMappingProvenance,
-    version: u64,
+    version: Revision,
 }
 
 impl SegmentMappingMetadata {
@@ -190,7 +191,7 @@ impl SegmentMapping {
             provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::NONE,
             overlay: OverlayTree::new(),
-            version: 0,
+            version: Revision::default(),
             name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
@@ -209,7 +210,7 @@ impl SegmentMapping {
             provenance: builder.provenance,
             flags: builder.flags,
             overlay: OverlayTree::new(),
-            version: 0,
+            version: Revision::default(),
             name: builder.name,
             mapping_hints: builder.mapping_hints,
             function_hints: builder.function_hints,
@@ -296,12 +297,12 @@ impl SegmentMapping {
         &mut self.overlay
     }
 
-    pub fn version(&self) -> u64 {
+    pub fn version(&self) -> Revision {
         self.version
     }
 
     fn touch(&mut self) {
-        self.version += 1;
+        self.version = self.version.next();
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
@@ -392,22 +393,15 @@ impl SegmentMapping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentMappingRef {
     mapping_id: SegmentMappingId,
-    version: u64,
+    version: Revision,
 }
 
 impl SegmentMappingRef {
-    pub fn new(mapping_id: SegmentMappingId, version: u64) -> Self {
-        Self {
-            mapping_id,
-            version,
-        }
-    }
-
     pub fn mapping_id(&self) -> SegmentMappingId {
         self.mapping_id
     }
 
-    pub fn version(&self) -> u64 {
+    pub fn version(&self) -> Revision {
         self.version
     }
 

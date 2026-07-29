@@ -8,6 +8,7 @@ use tinyset::SetU64;
 
 use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
 use crate::storage::entities::{Entity, EntityId};
+use crate::types::Revision;
 
 pub(crate) mod address;
 pub use address::{
@@ -67,15 +68,15 @@ pub use symbol::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct IndexHeader {
-    revision: u64,
+    revision: Revision,
 }
 
 impl IndexHeader {
-    fn new(revision: u64) -> Self {
+    fn new(revision: Revision) -> Self {
         Self { revision }
     }
 
-    fn revision(&self) -> u64 {
+    fn revision(&self) -> Revision {
         self.revision
     }
 }
