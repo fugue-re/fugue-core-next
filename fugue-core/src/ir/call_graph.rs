@@ -13,6 +13,7 @@ use crate::storage::entities::{
     CachedRef, Entity, EntityCache, EntityId, EntityIterator, EntityKey, EntityKeyId,
     EntityStorageError, ProjectEntity, WriteBackWorker,
 };
+use crate::types::Revision;
 use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -170,7 +171,7 @@ impl CallGraphIndex {
         &self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
         blocks: &CodeBlockTable,
-        revision: u64,
+        revision: Revision,
     ) -> Result<(), EntityStorageError> {
         let header = self
             .storage
@@ -185,7 +186,7 @@ impl CallGraphIndex {
         self.mark_current(revision)
     }
 
-    pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
+    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
         self.storage
             .insert(&ProjectEntity::CallGraphIndex, &IndexHeader::new(revision))
     }
@@ -604,9 +605,9 @@ mod test {
             &[expected_callee],
         )?;
         graph.set_function_edges(caller, [stale_callee])?;
-        graph.mark_current(6)?;
+        graph.mark_current(Revision::new(6))?;
 
-        graph.ensure_current(functions.iter(), &blocks, 7)?;
+        graph.ensure_current(functions.iter(), &blocks, Revision::new(7))?;
 
         assert_consistent(&graph, functions.iter(), &blocks)?;
         assert_eq!(
@@ -638,9 +639,9 @@ mod test {
             &[expected_callee],
         )?;
         graph.set_function_edges(caller, [indexed_callee])?;
-        graph.mark_current(7)?;
+        graph.mark_current(Revision::new(7))?;
 
-        graph.ensure_current(functions.iter(), &blocks, 7)?;
+        graph.ensure_current(functions.iter(), &blocks, Revision::new(7))?;
 
         assert_eq!(
             graph

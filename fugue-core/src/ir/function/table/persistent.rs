@@ -286,7 +286,7 @@ mod test {
 
         assert_eq!([id0.index(), id1.index(), id2.index()], [0, 1, 2]);
 
-        assert!(table.remove_by_address(Address::from(0x2000)));
+        assert!(table.try_remove_by_address(Address::from(0x2000)).unwrap());
         assert_eq!(table.index.allocator.free_len(), 1);
         assert_eq!(table.index.allocator.next_id(), id1.next_generation());
 

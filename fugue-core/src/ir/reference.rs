@@ -16,6 +16,7 @@ use crate::storage::entities::{
     Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, ProjectEntity,
     WriteBackWorker,
 };
+use crate::types::Revision;
 use crate::types::common::{archived_bitflags, cursor_bound, cursor_bound_or_minimum};
 
 #[derive(
@@ -553,7 +554,7 @@ impl ReferenceIndex {
         &self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
         blocks: &CodeBlockTable,
-        revision: u64,
+        revision: Revision,
     ) -> Result<(), EntityStorageError> {
         let header = self
             .storage
@@ -568,7 +569,7 @@ impl ReferenceIndex {
         self.mark_current(revision)
     }
 
-    pub(crate) fn mark_current(&self, revision: u64) -> Result<(), EntityStorageError> {
+    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
         self.storage
             .insert(&ProjectEntity::ReferenceIndex, &IndexHeader::new(revision))
     }
@@ -1142,7 +1143,7 @@ mod test {
 
         insert_function(&mut functions, &mut blocks, language, entry, &[callee])?;
 
-        index.ensure_current(functions.iter(), &blocks, 1)?;
+        index.ensure_current(functions.iter(), &blocks, Revision::new(1))?;
 
         let derived = index
             .references_from(entry, None)?
@@ -1361,7 +1362,7 @@ mod test {
                 .with_origin(ReferenceOrigin::Asserted),
         )?;
 
-        index.ensure_current(functions.iter(), &blocks, 7)?;
+        index.ensure_current(functions.iter(), &blocks, Revision::new(7))?;
 
         let survived = index.get(asserted_from, asserted_to.into())?;
         assert!(survived.is_some_and(|reference| reference.origin().is_asserted()));

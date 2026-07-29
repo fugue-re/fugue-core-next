@@ -2,6 +2,7 @@ use crate::ir::{Address, SegmentProperties};
 use crate::storage::segments::provider::SegmentView;
 use crate::storage::segments::view::SegmentMappingView;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError, SegmentSubMapping};
+use crate::types::Revision;
 
 #[derive(Default)]
 pub struct SegmentMappingCache {
@@ -10,7 +11,7 @@ pub struct SegmentMappingCache {
 
 struct CachedMapping {
     submapping: SegmentSubMapping,
-    generation: u64,
+    generation: Revision,
 }
 
 impl SegmentMappingCache {

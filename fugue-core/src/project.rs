@@ -1670,11 +1670,11 @@ impl Project {
 
         let call_graph =
             CallGraphIndex::new(storage.entities.clone(), storage.write_back().cloned())?;
-        call_graph.ensure_current(functions.iter(), &blocks, revision.value())?;
+        call_graph.ensure_current(functions.iter(), &blocks, revision)?;
 
         let references =
             ReferenceIndex::new(storage.entities.clone(), storage.write_back().cloned())?;
-        references.ensure_current(functions.iter(), &blocks, revision.value())?;
+        references.ensure_current(functions.iter(), &blocks, revision)?;
 
         Ok(Self {
             arch,
@@ -2066,10 +2066,10 @@ impl Project {
         }
 
         tracing::debug!("persisting call graph marker");
-        self.call_graph.mark_current(self.revision.value())?;
+        self.call_graph.mark_current(self.revision)?;
 
         tracing::debug!("persisting reference index marker");
-        self.references.mark_current(self.revision.value())?;
+        self.references.mark_current(self.revision)?;
 
         tracing::debug!("persisting project revision");
         self.storage.entities.insert(

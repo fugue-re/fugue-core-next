@@ -489,7 +489,7 @@ mod test {
             );
         }
 
-        assert!(table.remove_by_id(ids[1]));
+        assert!(table.try_remove_by_id(ids[1]).unwrap());
         assert_eq!(table.index.allocator.free_len(), 1);
         assert_eq!(table.index.allocator.next_id(), ids[1].next_generation());
 

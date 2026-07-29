@@ -7,6 +7,7 @@ use crate::storage::segments::mapping::{
 };
 use crate::storage::segments::provider::{SegmentStorageDescriptor, SegmentView};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::Revision;
 
 #[derive(Clone)]
 pub struct SegmentMappingView<'a> {
@@ -15,7 +16,7 @@ pub struct SegmentMappingView<'a> {
     mapping_ref: SegmentMappingRef,
     start: Address,
     size: u64,
-    mapping_version: u64,
+    mapping_version: Revision,
 }
 
 impl<'a> SegmentMappingView<'a> {
