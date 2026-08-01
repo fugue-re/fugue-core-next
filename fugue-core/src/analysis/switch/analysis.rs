@@ -5,11 +5,11 @@ use crate::analysis::switch::idiom::SwitchIdiomRecovery;
 use crate::analysis::switch::interval::SwitchIntervalContext;
 use crate::analysis::switch::resolver::SwitchTargetResolver;
 use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::engine::ProjectView;
 use crate::il::common::IlError;
 use crate::il::ecode::ssa::ECodeToSsa;
 use crate::il::pcode::PCodeError;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
-use crate::project::Project;
 use crate::types::common::Revision;
 
 #[derive(Default)]
@@ -34,14 +34,14 @@ impl SwitchRecovery {
 impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
     fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         state: &mut FunctionRecoveryState,
     ) -> Result<(), AnalysisError> {
         let mut resolved = Vec::new();
         {
             let cancellation = state.cancellation().clone();
-            let function = &state.function;
-            let resolver = &mut state.resolver;
+            let arch = project.arch();
+            let (function, resolver) = state.function_and_resolver(arch);
             let mut branches = function
                 .indirect_branches()
                 .filter(|(_, branch)| !function.has_pending_switch(*branch))
@@ -50,7 +50,6 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                 return Ok(());
             }
 
-            let arch = project.arch();
             let segments = project.segments();
             let mut idiom_recovery = SwitchIdiomRecovery::new(self.config);
             let mut target_resolver =
@@ -169,7 +168,7 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
         }
 
         for (block, site, recovered) in resolved {
-            if let Some(existing) = project.switches().get_by_branch(site)
+            if let Some(existing) = project.switch_at(site)
                 && (existing.is_override()
                     || (existing
                         .properties()

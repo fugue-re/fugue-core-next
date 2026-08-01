@@ -8,6 +8,7 @@ use fugue_core::analysis::function::{
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{AArch64, Arch, Arm, X86, X86_64};
+use fugue_core::engine::ProjectView;
 use fugue_core::ir::{
     Address, AddressWithContext, ExternSegment, FlowKind, RawAddress, SegmentProperties,
     SymbolIndex, SymbolProperties, SymbolTableSelector, TransientSymbolTable,
@@ -521,7 +522,7 @@ impl IDAFunctionDiscovery {
 impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
     fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
@@ -575,7 +576,7 @@ impl IDAFunctionBuilder {
 impl AnalysisPass<FunctionBuilderContext> for IDAFunctionBuilder {
     fn analyse_with(
         &mut self,
-        _project: &mut Project,
+        _project: &ProjectView<'_>,
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
         let entry = builder.entry();

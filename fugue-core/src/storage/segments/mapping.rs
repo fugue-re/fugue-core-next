@@ -137,40 +137,6 @@ pub struct SegmentMapping {
     function_hints: BTreeSet<RawAddress>,
 }
 
-pub(crate) struct SegmentMappingLocation {
-    size: u64,
-    start: Address,
-    version: Revision,
-}
-
-impl SegmentMappingLocation {
-    pub(crate) fn capture(mapping: &SegmentMapping) -> Self {
-        Self {
-            size: mapping.size,
-            start: mapping.start,
-            version: mapping.version,
-        }
-    }
-}
-
-pub(crate) struct SegmentMappingMetadata {
-    flags: SegmentMappingFlags,
-    kind: SegmentMappingKind,
-    provenance: SegmentMappingProvenance,
-    version: Revision,
-}
-
-impl SegmentMappingMetadata {
-    pub(crate) fn capture(mapping: &SegmentMapping) -> Self {
-        Self {
-            flags: mapping.flags,
-            kind: mapping.kind,
-            provenance: mapping.provenance,
-            version: mapping.version,
-        }
-    }
-}
-
 impl SegmentMapping {
     pub fn new(
         id: SegmentMappingId,
@@ -331,19 +297,6 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub(crate) fn restore_location(&mut self, location: SegmentMappingLocation) {
-        self.start = location.start;
-        self.size = location.size;
-        self.version = location.version;
-    }
-
-    pub(crate) fn restore_metadata(&mut self, metadata: SegmentMappingMetadata) {
-        self.flags = metadata.flags;
-        self.kind = metadata.kind;
-        self.provenance = metadata.provenance;
-        self.version = metadata.version;
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -357,6 +310,16 @@ impl SegmentMapping {
         let space = self.space();
         self.mapping_hints
             .iter()
+            .map(move |(&offset, hint)| (Address::new(space, offset), hint))
+    }
+
+    pub(crate) fn mapping_hints_from(
+        &self,
+        offset: RawAddress,
+    ) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
+        let space = self.space();
+        self.mapping_hints
+            .range(offset..)
             .map(move |(&offset, hint)| (Address::new(space, offset), hint))
     }
 

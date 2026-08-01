@@ -1,126 +1,340 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use super::{FunctionIndex, FunctionTableAllocation, FunctionTableError};
-use crate::ir::{Address, Function, Id, IdAllocator, RawAddress};
-use crate::storage::entities::{CachedMut, CachedRef, EntityCache, WriteBackWorker};
+use bytes::Bytes;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+
+use super::{FunctionTableError, PreparedFunctionEntry};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentTable, append_insert, append_remove};
+use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, RawAddress};
+use crate::storage::entities::schema::{
+    ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_FUNCTION_OWNER_INDEX_ID, ENTITY_KEY_FUNCTION_OWNER_ID,
+};
+use crate::storage::entities::{
+    CachedMut, CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorage,
+    EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker, schema,
+};
 use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::{EntityStorage, EntityStorageError};
+
+const INDEX_REBUILD_BATCH: usize = 512;
 
 type Ref<'a> = CachedRef<'a, Function>;
 type RefMut<'a> = CachedMut<'a, Function>;
 
+#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FunctionEntryRecord {
+    id: FunctionId,
+}
+
+impl Entity for FunctionEntryRecord {
+    const ID: EntityId = ENTITY_FUNCTION_ENTRY_INDEX_ID;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FunctionOwnerKey {
+    block: CodeBlockId,
+    function: FunctionId,
+}
+
+impl FunctionOwnerKey {
+    fn first(block: CodeBlockId) -> Self {
+        Self {
+            block,
+            function: FunctionId::with_generation(0, 0),
+        }
+    }
+}
+
+impl EntityKey for FunctionOwnerKey {
+    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_OWNER_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        const ID_SIZE: usize = size_of::<u64>();
+        if buf.len() != ID_SIZE * 2 {
+            return None;
+        }
+        Some(Self {
+            block: CodeBlockId::decode_as_key(&buf[..ID_SIZE])?,
+            function: FunctionId::decode_as_key(&buf[ID_SIZE..])?,
+        })
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        self.block.encode(output);
+        self.function.encode(output);
+    }
+}
+
+#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FunctionOwnerRecord;
+
+impl Entity for FunctionOwnerRecord {
+    const ID: EntityId = ENTITY_FUNCTION_OWNER_INDEX_ID;
+}
+
 pub struct FunctionTable {
-    index: FunctionIndex,
+    allocator: PersistentIdAllocator<Function>,
     entries: EntityCache<Id<Function>, Function>,
+    storage: EntityStorage,
 }
 
 impl FunctionTable {
     pub(crate) fn new(
-        entities: EntityStorage,
+        storage: EntityStorage,
         cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::new(entities, cache_bytes)?)
+        let entries = EntityCache::new(storage.clone(), cache_bytes)?;
+        Self::from_entries(storage, entries)
     }
 
     pub(crate) fn with_worker(
-        entities: EntityStorage,
+        storage: EntityStorage,
         worker: Arc<WriteBackWorker>,
         cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::with_worker(entities, worker, cache_bytes))
+        let entries = EntityCache::with_worker(storage.clone(), worker, cache_bytes);
+        Self::from_entries(storage, entries)
     }
 
     fn from_entries(
+        storage: EntityStorage,
         entries: EntityCache<Id<Function>, Function>,
     ) -> Result<Self, EntityStorageError> {
-        let mut addresses = BTreeMap::new();
-        let mut allocator = IdAllocator::new();
-
-        for entry in entries.try_iter_range(Bound::Unbounded)? {
-            let (id, function) = entry?;
-            addresses.insert(function.entry(), id);
-            allocator.mark_allocated(id);
-        }
-
+        let allocator =
+            match PersistentIdAllocator::load(storage.clone(), PersistentTable::Functions)? {
+                Some(allocator) => allocator,
+                None => Self::rebuild_indexes(&storage, &entries)?,
+            };
         Ok(Self {
-            index: FunctionIndex {
-                allocator,
-                addresses,
-            },
+            allocator,
             entries,
+            storage,
         })
+    }
+
+    fn rebuild_indexes(
+        storage: &EntityStorage,
+        entries: &EntityCache<Id<Function>, Function>,
+    ) -> Result<PersistentIdAllocator<Function>, EntityStorageError> {
+        let mut live = 0usize;
+        let mut next_index = 0usize;
+        let mut writes = EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH);
+
+        for entry in entries.try_iter()? {
+            let (id, function) = entry?;
+            append_insert(&mut writes, &function.entry(), &FunctionEntryRecord { id })?;
+            for (_, block) in function.blocks() {
+                append_insert(
+                    &mut writes,
+                    &FunctionOwnerKey {
+                        block,
+                        function: id,
+                    },
+                    &FunctionOwnerRecord,
+                )?;
+            }
+            live += 1;
+            next_index = next_index.max(id.index() + 1);
+            if writes.len() >= INDEX_REBUILD_BATCH {
+                storage.apply_batch(&writes)?;
+                writes.clear();
+            }
+        }
+        storage.apply_batch(&writes)?;
+        PersistentIdAllocator::initialise(
+            storage.clone(),
+            PersistentTable::Functions,
+            next_index,
+            live,
+        )
     }
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
     }
 
-    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> FunctionTableAllocation {
-        self.index.allocator.checkpoint(max_pops)
+    pub(super) fn preview_id(&self, offset: usize) -> FunctionId {
+        self.allocator
+            .preview_id(offset)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub(super) fn restore_allocation(&mut self, allocation: FunctionTableAllocation) {
-        self.index.allocator.restore(allocation);
-    }
-
-    pub(super) fn restore_entry(&mut self, function: Function) -> Result<(), EntityStorageError> {
-        let id = function.id();
-        self.clear_entry(id)?;
-
-        let entry = function.entry();
-        self.entries.try_put(id, function)?;
-        self.index.addresses.insert(entry, id);
-        self.index.allocator.mark_allocated(id);
-        Ok(())
-    }
-
-    pub(super) fn clear_entry(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
-        let Some(function) = self.entries.try_get(&id)? else {
-            return Ok(false);
-        };
-        let entry = function.entry();
-        drop(function);
-
-        self.entries.try_remove(&id)?;
-        self.index.addresses.remove(&entry);
-        Ok(true)
-    }
-
-    pub(crate) fn insert<F>(
-        &mut self,
-        addr: Address,
-        f: F,
-    ) -> Result<Id<Function>, FunctionTableError>
-    where
-        F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
-    {
-        if let Some(&existing) = self.index.addresses.get(&addr) {
-            let function = f(existing, addr)?;
-
-            if function.entry() != addr {
-                return Err(FunctionTableError::AddressMismatch);
+    pub(super) fn append_stage_writes(
+        &self,
+        entries: &[PreparedFunctionEntry],
+        reservations: &[FunctionId],
+        cancelled: &BTreeSet<FunctionId>,
+        owners: &FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+        original_owners: &FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        for entry in entries {
+            if let Some(previous) = entry.previous
+                && (entry.function.is_none()
+                    || entry
+                        .function
+                        .as_ref()
+                        .is_some_and(|function| function.entry() != previous))
+            {
+                append_remove::<_, FunctionEntryRecord>(writes, &previous);
             }
-
-            self.entries.try_put(existing, function)?;
-
-            return Ok(existing);
+            match &entry.function {
+                Some(function) => {
+                    append_insert(
+                        writes,
+                        &function.entry(),
+                        &FunctionEntryRecord { id: entry.id },
+                    )?;
+                    if entry.previous.is_none() {
+                        added += 1;
+                    }
+                }
+                None => removed += 1,
+            }
         }
 
-        let entries = &self.entries;
-        let (id, ()) = self.index.allocator.try_allocate(|id| {
-            let function = f(id, addr)?;
-            if function.entry() != addr {
-                return Err(FunctionTableError::AddressMismatch);
+        for (&block, final_owners) in owners {
+            let previous = original_owners
+                .get(&block)
+                .map_or(&[] as &[FunctionId], SmallVec::as_slice);
+            for owner in previous
+                .iter()
+                .filter(|owner| !final_owners.contains(owner))
+            {
+                append_remove::<_, FunctionOwnerRecord>(
+                    writes,
+                    &FunctionOwnerKey {
+                        block,
+                        function: *owner,
+                    },
+                );
             }
-            entries.try_put(id, function)?;
-            Ok(())
-        })?;
+            for owner in final_owners
+                .iter()
+                .filter(|owner| !previous.contains(owner))
+            {
+                append_insert(
+                    writes,
+                    &FunctionOwnerKey {
+                        block,
+                        function: *owner,
+                    },
+                    &FunctionOwnerRecord,
+                )?;
+            }
+        }
 
-        self.index.addresses.insert(addr, id);
+        let releases = cancelled
+            .iter()
+            .copied()
+            .chain(entries.iter().filter_map(|entry| {
+                (entry.function.is_none() && entry.previous.is_some()).then_some(entry.id)
+            }))
+            .collect::<SmallVec<[_; 8]>>();
+        self.allocator
+            .append_transition(reservations, &releases, added, removed, writes)
+    }
 
-        Ok(id)
+    pub(super) fn publish_transition(
+        &mut self,
+        reservations: &[FunctionId],
+        added: usize,
+        removed: usize,
+    ) {
+        self.allocator
+            .publish_transition(reservations, added, removed);
+    }
+
+    pub(super) fn publish_upsert(&self, function: Function, encoded_len: usize) {
+        self.entries
+            .publish_put(function.id(), function, encoded_len);
+    }
+
+    pub(super) fn publish_remove(&self, id: FunctionId) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn insert_with<R, F>(
+        &mut self,
+        address: Address,
+        f: F,
+    ) -> Result<(FunctionId, R), FunctionTableError>
+    where
+        F: FnOnce(Id<Function>, Address) -> Result<(Function, R), FunctionTableError>,
+    {
+        let previous = self.try_get_by_address(address)?;
+        let id = previous
+            .as_ref()
+            .map_or_else(|| self.preview_id(0), |function| function.id());
+        let (function, value) = f(id, address)?;
+        if function.entry() != address {
+            return Err(FunctionTableError::AddressMismatch);
+        }
+
+        let previous_blocks = previous
+            .as_ref()
+            .map(|function| {
+                function
+                    .blocks()
+                    .map(|(_, block)| block)
+                    .collect::<SmallVec<[_; 8]>>()
+            })
+            .unwrap_or_default();
+        let blocks = function
+            .blocks()
+            .map(|(_, block)| block)
+            .collect::<SmallVec<[_; 8]>>();
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&function).map_err(EntityStorageError::encode)?;
+        let encoded_len = encoded.len();
+        let mut writes = EntityWriteBatch::new();
+        writes.push(EntityWrite::insert_archive(
+            schema::make_key::<FunctionId, Function>(&id),
+            encoded,
+        ));
+        append_insert(&mut writes, &address, &FunctionEntryRecord { id })?;
+        for block in previous_blocks
+            .iter()
+            .filter(|block| !blocks.contains(block))
+        {
+            append_remove::<_, FunctionOwnerRecord>(
+                &mut writes,
+                &FunctionOwnerKey {
+                    block: *block,
+                    function: id,
+                },
+            );
+        }
+        for block in blocks
+            .iter()
+            .filter(|block| !previous_blocks.contains(block))
+        {
+            append_insert(
+                &mut writes,
+                &FunctionOwnerKey {
+                    block: *block,
+                    function: id,
+                },
+                &FunctionOwnerRecord,
+            )?;
+        }
+        let is_new = previous.is_none();
+        let added = if is_new { 1 } else { 0 };
+        let reservations = is_new
+            .then_some(id)
+            .into_iter()
+            .collect::<SmallVec<[_; 1]>>();
+        self.allocator
+            .append_transition(&reservations, &[], added, 0, &mut writes)?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_put(id, function, encoded_len);
+        self.allocator.publish_transition(&reservations, added, 0);
+        Ok((id, value))
     }
 
     pub(crate) fn try_get_by_id(
@@ -132,13 +346,12 @@ impl FunctionTable {
 
     pub(crate) fn try_get_by_address(
         &self,
-        addr: Address,
+        address: Address,
     ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        let Some(&id) = self.index.addresses.get(&addr) else {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
             return Ok(None);
         };
-
-        self.entries.try_get(&id)
+        self.entries.try_get(&record.id)
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -151,14 +364,13 @@ impl FunctionTable {
 
     pub(crate) fn try_modify_by_address<R>(
         &mut self,
-        addr: Address,
+        address: Address,
         f: impl FnOnce(&mut Function) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
-        let Some(&id) = self.index.addresses.get(&addr) else {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
             return Ok(None);
         };
-
-        self.entries.try_modify(&id, f)
+        self.entries.try_modify(&record.id, f)
     }
 
     pub(crate) fn try_get_by_id_mut(
@@ -170,48 +382,70 @@ impl FunctionTable {
 
     pub(crate) fn try_get_by_address_mut(
         &mut self,
-        addr: Address,
+        address: Address,
     ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
-        let Some(&id) = self.index.addresses.get(&addr) else {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
             return Ok(None);
         };
-
-        self.entries.try_get_mut(&id)
+        self.entries.try_get_mut(&record.id)
     }
 
     pub(crate) fn try_remove_by_id(
         &mut self,
         id: Id<Function>,
     ) -> Result<bool, EntityStorageError> {
-        let addr = match self.entries.try_get(&id)? {
-            Some(function) => function.entry(),
-            None => return Ok(false),
+        let Some(function) = self.entries.try_get(&id)? else {
+            return Ok(false);
         };
+        let address = function.entry();
+        let blocks = function
+            .blocks()
+            .map(|(_, block)| block)
+            .collect::<SmallVec<[_; 8]>>();
+        drop(function);
 
-        self.entries.try_remove(&id)?;
-        self.index.addresses.remove(&addr);
-        self.index.allocator.release(id);
-
+        let mut writes = EntityWriteBatch::new();
+        append_remove::<_, Function>(&mut writes, &id);
+        append_remove::<_, FunctionEntryRecord>(&mut writes, &address);
+        for block in blocks {
+            append_remove::<_, FunctionOwnerRecord>(
+                &mut writes,
+                &FunctionOwnerKey {
+                    block,
+                    function: id,
+                },
+            );
+        }
+        self.allocator
+            .append_transition(&[], &[id], 0, 1, &mut writes)?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_remove(&id);
+        self.allocator.publish_transition(&[], 0, 1);
         Ok(true)
     }
 
     pub(crate) fn try_remove_by_address(
         &mut self,
-        addr: Address,
+        address: Address,
     ) -> Result<bool, EntityStorageError> {
-        let Some(&id) = self.index.addresses.get(&addr) else {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
             return Ok(false);
         };
+        self.try_remove_by_id(record.id)
+    }
 
-        self.entries.try_remove(&id)?;
-        self.index.addresses.remove(&addr);
-        self.index.allocator.release(id);
-
-        Ok(true)
+    pub(crate) fn contains(&self, address: Address) -> bool {
+        self.storage
+            .contains::<Address, FunctionEntryRecord>(&address)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub(crate) fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.addresses.keys().copied()
+        self.storage
+            .iter::<Address, FunctionEntryRecord>()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
     }
 
     pub(crate) fn addresses_in_range<R>(
@@ -223,16 +457,34 @@ impl FunctionTable {
         R: RangeBounds<RawAddress>,
     {
         let (start, end) = Address::bounds_in_space(space, &range);
-        self.index
-            .addresses
-            .range((start, end))
-            .map(|(address, _)| *address)
+        self.storage
+            .iter_range::<Address, FunctionEntryRecord>(start.as_ref())
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
+            .take_while(move |address| match end {
+                Bound::Included(end) => *address <= end,
+                Bound::Excluded(end) => *address < end,
+                Bound::Unbounded => true,
+            })
+    }
+
+    pub(super) fn block_owners(&self, block: CodeBlockId) -> SmallVec<[FunctionId; 2]> {
+        self.storage
+            .iter_range::<FunctionOwnerKey, FunctionOwnerRecord>(Bound::Included(
+                &FunctionOwnerKey::first(block),
+            ))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map_while(|entry| {
+                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
+                (key.block == block).then_some(key.function)
+            })
+            .collect()
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
         self.try_iter()
-            .unwrap_or_else(|e| e.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()))
     }
 
     pub(crate) fn try_iter(
@@ -249,62 +501,10 @@ impl FunctionTable {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.index.addresses.is_empty()
+        self.allocator.len() == 0
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.index.addresses.len()
-    }
-}
-
-#[cfg(all(test, feature = "sqlite"))]
-mod test {
-    use super::*;
-    use crate::storage::TRANSIENT;
-    use crate::storage::entities::SqliteEntityStorage;
-
-    #[test]
-    fn test_free_id_reuse_sqlite() {
-        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap());
-        let mut table = FunctionTable::new(storage, 64 * 1024).unwrap();
-
-        let id0 = table
-            .insert(Address::from(0x1000), |id, entry| {
-                Ok(Function::new(id, entry))
-            })
-            .unwrap();
-        let id1 = table
-            .insert(Address::from(0x2000), |id, entry| {
-                Ok(Function::new(id, entry))
-            })
-            .unwrap();
-        let id2 = table
-            .insert(Address::from(0x3000), |id, entry| {
-                Ok(Function::new(id, entry))
-            })
-            .unwrap();
-
-        assert_eq!([id0.index(), id1.index(), id2.index()], [0, 1, 2]);
-
-        assert!(table.try_remove_by_address(Address::from(0x2000)).unwrap());
-        assert_eq!(table.index.allocator.free_len(), 1);
-        assert_eq!(table.index.allocator.next_id(), id1.next_generation());
-
-        let reused = table
-            .insert(Address::from(0x4000), |id, entry| {
-                Ok(Function::new(id, entry))
-            })
-            .unwrap();
-        assert_eq!(reused.index(), id1.index());
-        assert_eq!(reused.generation(), id1.generation() + 1);
-        assert!(table.try_get_by_id(id1).unwrap().is_none());
-        assert_eq!(table.index.allocator.free_len(), 0);
-
-        let fresh = table
-            .insert(Address::from(0x5000), |id, entry| {
-                Ok(Function::new(id, entry))
-            })
-            .unwrap();
-        assert_eq!(fresh.index(), 3);
+        self.allocator.len()
     }
 }

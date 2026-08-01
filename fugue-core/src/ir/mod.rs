@@ -3,7 +3,6 @@ use std::fmt::{self, Debug, Formatter, LowerHex, UpperHex};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use bytes::{BufMut, BytesMut};
 use tinyset::SetU64;
 
 use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
@@ -21,8 +20,10 @@ pub use block::{
     CodeBlock, CodeBlockId, CodeBlockMut, CodeBlockProperties, CodeBlockRef, CodeBlockTable,
     CodeBlockTableError, IncompleteCodeBlock, IncompleteCodeBlockId,
 };
+pub(crate) use block::PreparedBlockMutation;
 
 pub(crate) mod call_graph;
+pub(crate) use call_graph::CallGraphStage;
 pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
 pub(crate) mod cfg;
@@ -34,6 +35,7 @@ pub use function::{
     Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
     FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
 };
+pub(crate) use function::{FunctionMaterialisation, FunctionTableStage};
 
 pub(crate) mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
@@ -43,6 +45,14 @@ pub use module::{Module, ModuleId};
 
 pub(crate) mod location;
 pub use location::Location;
+
+pub(crate) mod problem;
+pub use problem::{
+    Problem, ProblemClass, ProblemId, ProblemKey, ProblemKind, ProblemRef, ProblemScope,
+    ProblemTable, ProblemTableError,
+};
+
+pub(crate) mod persistent;
 
 pub(crate) mod reference;
 pub use reference::{
@@ -60,6 +70,7 @@ pub use switch::{
 };
 
 pub(crate) mod symbol;
+pub(crate) use symbol::SymbolIndexState;
 pub use symbol::{
     LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolInsertion, SymbolMap,
     SymbolProperties, SymbolRef, SymbolTable, SymbolTableSelector, TransientSymbolTable,
@@ -209,8 +220,8 @@ impl<T> Id<T> {
     }
 
     #[inline(always)]
-    pub(crate) fn encode_as_key(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.key());
+    pub(crate) fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend(self.key().to_be_bytes());
     }
 
     #[inline(always)]
@@ -222,13 +233,6 @@ impl<T> Id<T> {
     const fn from_key(key: u64) -> Self {
         Self::with_generation(key as u32, (key >> 32) as u32)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IdAllocation<T> {
-    free_ids_len: usize,
-    free_ids_tail: Vec<Id<T>>,
-    next_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +260,14 @@ impl<T> IdAllocator<T> {
             .last()
             .copied()
             .unwrap_or_else(|| Id::from_index(self.next_index))
+    }
+
+    pub(crate) fn preview_id(&self, offset: usize) -> Id<T> {
+        if offset < self.free_ids.len() {
+            self.free_ids[self.free_ids.len() - offset - 1]
+        } else {
+            Id::from_index(self.next_index + offset - self.free_ids.len())
+        }
     }
 
     pub(crate) fn allocate(&mut self) -> Id<T> {
@@ -288,22 +300,6 @@ impl<T> IdAllocator<T> {
         self.next_index = self.next_index.max(id.index() + 1);
         self.free_ids
             .retain(|free_id| free_id.index() != id.index());
-    }
-
-    pub(crate) fn checkpoint(&self, max_pops: usize) -> IdAllocation<T> {
-        let tail_start = self.free_ids.len().saturating_sub(max_pops);
-        IdAllocation {
-            free_ids_len: self.free_ids.len(),
-            free_ids_tail: self.free_ids[tail_start..].to_vec(),
-            next_index: self.next_index,
-        }
-    }
-
-    pub(crate) fn restore(&mut self, allocation: IdAllocation<T>) {
-        let tail_start = allocation.free_ids_len - allocation.free_ids_tail.len();
-        self.free_ids.truncate(tail_start);
-        self.free_ids.extend(allocation.free_ids_tail);
-        self.next_index = allocation.next_index;
     }
 
     pub(crate) fn free_len(&self) -> usize {
@@ -468,31 +464,6 @@ mod test {
     use super::*;
 
     struct Marker;
-
-    #[test]
-    fn id_allocator_restores_reuse_and_fresh_allocations() {
-        let mut allocator = IdAllocator::<Marker>::new();
-        let first = allocator.allocate();
-        let second = allocator.allocate();
-        let third = allocator.allocate();
-        allocator.release(first);
-        allocator.release(second);
-
-        let allocation = allocator.checkpoint(1);
-        assert_eq!(allocator.allocate(), second.next_generation());
-        allocator.release(third);
-        allocator.restore(allocation);
-
-        assert_eq!(allocator.free_len(), 2);
-        assert_eq!(allocator.next_id(), second.next_generation());
-
-        let mut fresh = IdAllocator::<Marker>::new();
-        assert_eq!(fresh.allocate().index(), 0);
-        let allocation = fresh.checkpoint(0);
-        assert_eq!(fresh.allocate().index(), 1);
-        fresh.restore(allocation);
-        assert_eq!(fresh.next_id().index(), 1);
-    }
 
     #[test]
     fn id_allocator_does_not_commit_failed_allocation() {

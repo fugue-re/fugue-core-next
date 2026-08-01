@@ -5,11 +5,14 @@ use smol_str::SmolStr;
 
 use crate::il::common::IlLevel;
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, ReferenceKind, ReferenceTarget, Symbol,
+    Address, AddressRange, AddressRangeSet, FunctionId, ProblemKind, ProblemScope, ReferenceKind,
+    ReferenceTarget, Symbol,
 };
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 pub use crate::types::common::Revision;
+
+pub(crate) const MAX_DETAILED_CHANGE_RECORDS: usize = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChangeCategory {
@@ -184,9 +187,11 @@ bitflags::bitflags! {
         const FUNCTION_REMOVED        = 0x0000_0008;
         const LIFTED_MATERIALISED     = 0x0000_0010;
         const LIFTED_REMOVED          = 0x0000_0020;
+        const PROBLEM_RECORDED        = 0x0010_0000;
+        const PROBLEM_RESOLVED        = 0x0020_0000;
         const REFERENCE_ADDED         = 0x0000_0040;
         const REFERENCE_REMOVED       = 0x0000_0080;
-        const RESTORED                = 0x0000_0100;
+        const RESYNCHRONISE           = 0x0000_0100;
         const SEGMENT_MAPPED          = 0x0000_0200;
         const SEGMENT_MAPPING_CHANGED = 0x0000_0400;
         const SEGMENT_MAPPING_CREATED = 0x0000_0800;
@@ -204,6 +209,7 @@ bitflags::bitflags! {
             | Self::FUNCTION_REMOVED.bits();
         const LIFTED = Self::LIFTED_MATERIALISED.bits()
             | Self::LIFTED_REMOVED.bits();
+        const PROBLEMS = Self::PROBLEM_RECORDED.bits() | Self::PROBLEM_RESOLVED.bits();
         const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
         const SEGMENTS = Self::SEGMENT_MAPPED.bits()
             | Self::SEGMENT_UNMAPPED.bits()
@@ -242,6 +248,14 @@ pub enum ChangeRecord {
         function: FunctionId,
         level: IlLevel,
     },
+    ProblemRecorded {
+        scope: ProblemScope,
+        kind: ProblemKind,
+    },
+    ProblemResolved {
+        scope: ProblemScope,
+        kind: ProblemKind,
+    },
     ReferenceAdded {
         from: Address,
         target: ReferenceTarget,
@@ -255,7 +269,7 @@ pub enum ChangeRecord {
     ReferencesChanged {
         coverage: AddressRangeSet,
     },
-    Restored {
+    Resynchronise {
         to: Revision,
     },
     SegmentMapped {
@@ -308,10 +322,12 @@ impl ChangeRecord {
             Self::FunctionRemoved { .. } => ChangeKinds::FUNCTION_REMOVED,
             Self::LiftedMaterialised { .. } => ChangeKinds::LIFTED_MATERIALISED,
             Self::LiftedRemoved { .. } => ChangeKinds::LIFTED_REMOVED,
+            Self::ProblemRecorded { .. } => ChangeKinds::PROBLEM_RECORDED,
+            Self::ProblemResolved { .. } => ChangeKinds::PROBLEM_RESOLVED,
             Self::ReferenceAdded { .. } => ChangeKinds::REFERENCE_ADDED,
             Self::ReferenceRemoved { .. } => ChangeKinds::REFERENCE_REMOVED,
             Self::ReferencesChanged { .. } => ChangeKinds::REFERENCES,
-            Self::Restored { .. } => ChangeKinds::RESTORED,
+            Self::Resynchronise { .. } => ChangeKinds::RESYNCHRONISE,
             Self::SegmentMapped { .. } => ChangeKinds::SEGMENT_MAPPED,
             Self::SegmentMappingChanged { .. } => ChangeKinds::SEGMENT_MAPPING_CHANGED,
             Self::SegmentMappingCreated { .. } => ChangeKinds::SEGMENT_MAPPING_CREATED,
@@ -338,6 +354,8 @@ impl ChangeRecord {
                 | Self::SymbolRemoved { .. }
                 | Self::SwitchAdded { .. }
                 | Self::SwitchRemoved { .. }
+                | Self::ProblemRecorded { .. }
+                | Self::ProblemResolved { .. }
                 | Self::FunctionChanged {
                     kind: FunctionChangeKind::Properties,
                     ..
@@ -361,6 +379,9 @@ impl ChangeRecord {
             Self::SwitchAdded { branch } | Self::SwitchRemoved { branch } => {
                 [AddressRange::point(*branch)].into_iter().collect()
             }
+            Self::ProblemRecorded { scope, .. } | Self::ProblemResolved { scope, .. } => {
+                scope.range().into_iter().collect()
+            }
             Self::ReferenceAdded { from, target, .. }
             | Self::ReferenceRemoved { from, target, .. } => {
                 let mut ranges = SmallVec::new();
@@ -371,7 +392,7 @@ impl ChangeRecord {
                 ranges
             }
             Self::ReferencesChanged { coverage } => coverage.ranges().collect(),
-            Self::Restored { .. }
+            Self::Resynchronise { .. }
             | Self::LiftedMaterialised { .. }
             | Self::LiftedRemoved { .. }
             | Self::SegmentMappingChanged { .. }
@@ -609,6 +630,23 @@ mod test {
         assert_eq!(symbol.kind(), ChangeKinds::SYMBOL_CHANGED);
         assert!(ChangeKinds::SYMBOLS.contains(symbol.kind()));
         assert!(!symbol.affects_lifted_inputs());
+
+        let recorded = ChangeRecord::ProblemRecorded {
+            scope: ProblemScope::Address(entry),
+            kind: ProblemKind::DecodeFailed,
+        };
+        let resolved = ChangeRecord::ProblemResolved {
+            scope: ProblemScope::Address(entry),
+            kind: ProblemKind::DecodeFailed,
+        };
+
+        assert_eq!(recorded.kind(), ChangeKinds::PROBLEM_RECORDED);
+        assert_eq!(resolved.kind(), ChangeKinds::PROBLEM_RESOLVED);
+        assert!(ChangeKinds::PROBLEMS.contains(recorded.kind()));
+        assert!(ChangeKinds::PROBLEMS.contains(resolved.kind()));
+        assert!(!recorded.affects_lifted_inputs());
+        assert!(!resolved.affects_lifted_inputs());
+        assert_eq!(recorded.ranges().len(), 1);
     }
 
     #[test]
@@ -755,7 +793,7 @@ mod test {
             &[AddressRange::point(Address::from(0x1000u64))]
         );
         assert!(
-            ChangeRecord::Restored {
+            ChangeRecord::Resynchronise {
                 to: Revision::new(1)
             }
             .ranges()

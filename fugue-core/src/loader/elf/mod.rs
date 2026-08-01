@@ -34,11 +34,9 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
-use crate::platform::{OperatingSystem, Platform};
+use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::mapping::SegmentMappingProvenance;
-use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
-};
+use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -296,8 +294,6 @@ impl<'a> Elf<'a> {
         if let Some(entry) = slf.entry() {
             slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
         }
-
-        slf.attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "elf");
 
         Ok(slf)
     }
@@ -2059,6 +2055,7 @@ impl Loadable for Elf<'_> {
         self.architecture
             .platform()
             .with_compiler_spec_id("gcc")
+            .with_format(Format::Elf)
             .with_os(self.operating_system())
     }
 

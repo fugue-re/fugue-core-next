@@ -1,4 +1,5 @@
-use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::analysis::AnalysisError;
+use crate::engine::ProjectView;
 use crate::ir::SymbolProperties;
 use crate::ir::symbol::existing_symbol;
 use crate::platform::OperatingSystem;
@@ -20,12 +21,10 @@ impl NonReturningFromExterns {
     }
 }
 
-impl AnalysisPass for NonReturningFromExterns {
-    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
-        let mut transaction = project.transaction("non-returning externs");
-
-        let marked = transaction
-            .project()
+impl NonReturningFromExterns {
+    pub fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+        let view = ProjectView::new(project);
+        let marked = view
             .symbols()
             .iter()
             .filter(|(_, entry)| entry.is_function() && !entry.is_non_returning())
@@ -39,26 +38,20 @@ impl AnalysisPass for NonReturningFromExterns {
             })
             .map(|(id, entry)| (id, entry.properties() | SymbolProperties::NON_RETURNING))
             .collect::<Vec<_>>();
+        let reads = view.into_reads();
+        let mut transaction = project.transaction("non-returning externs");
+        transaction.absorb_reads(&reads);
 
-        let result = marked.into_iter().try_for_each(|(id, properties)| {
+        marked.into_iter().try_for_each(|(id, properties)| {
             transaction
                 .set_symbol_properties(id, properties)
                 .map(|_| ())
                 .map_err(|error| AnalysisError::pass_failed("non-returning-externs", error))
-        });
-
-        match result {
-            Ok(()) => transaction
-                .commit()
-                .map(|_| ())
-                .map_err(|error| AnalysisError::pass_failed("non-returning-externs", error)),
-            Err(error) => {
-                transaction.rollback().map_err(|rollback| {
-                    AnalysisError::pass_failed("non-returning-externs", rollback)
-                })?;
-                Err(error)
-            }
-        }
+        })?;
+        transaction
+            .commit()
+            .map(|_| ())
+            .map_err(|error| AnalysisError::pass_failed("non-returning-externs", error))
     }
 }
 

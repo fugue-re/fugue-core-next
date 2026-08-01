@@ -1,9 +1,12 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use super::{CallEdge, MappingRow, QueryPage, SwitchRow, SymbolRow};
+use super::{CallEdge, MappingRow, ProblemRow, QueryPage, SwitchRow, SymbolRow};
 use crate::ir::cfg::FlowTargets;
-use crate::ir::{Address, CallGraphEdgeKey, FunctionRef, RawAddress, Reference, ReferenceTarget};
+use crate::ir::{
+    Address, CallGraphEdgeKey, FunctionRef, ProblemKey, ProblemKind, RawAddress, Reference,
+    ReferenceTarget,
+};
 use crate::project::Project;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -167,6 +170,27 @@ impl<'p> ProjectRead<'p> {
         Self::page(rows, limit)
     }
 
+    pub(crate) fn problem_at(&self, address: Address, kind: ProblemKind) -> Option<ProblemRow> {
+        self.project
+            .problems()
+            .get(address, kind)
+            .map(|problem| ProblemRow::from(&*problem))
+    }
+
+    pub(crate) fn problem_page(
+        &self,
+        after: Option<ProblemKey>,
+        limit: usize,
+    ) -> QueryPage<ProblemRow, ProblemKey> {
+        let rows = self
+            .project
+            .problems()
+            .entries_after(after)
+            .map(|problem| ProblemRow::from(&*problem));
+
+        Self::page_by(rows, limit, ProblemRow::key)
+    }
+
     pub(crate) fn switch_at(&self, branch: Address) -> Option<SwitchRow> {
         self.project
             .switches()
@@ -258,12 +282,8 @@ impl<'p> ProjectRead<'p> {
         limit.clamp(1, super::MAX_QUERY_PAGE_COUNT)
     }
 
-    fn push_ordered_group<T>(
-        rows: &mut Vec<T>,
-        group: &mut Vec<T>,
-        after: Option<T>,
-        limit: usize,
-    ) where
+    fn push_ordered_group<T>(rows: &mut Vec<T>, group: &mut Vec<T>, after: Option<T>, limit: usize)
+    where
         T: Copy + Ord,
     {
         group.sort();

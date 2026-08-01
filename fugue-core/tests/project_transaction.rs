@@ -1,17 +1,15 @@
 use std::io;
 use std::path::PathBuf;
 
-use fugue_core::analysis::control::CancellationToken;
-use fugue_core::engine::change::{ChangeRecord, FunctionChangeKind};
-use fugue_core::il::common::{IlError, IlLevel};
+use fugue_core::engine::change::{ChangeKinds, ChangeRecord, FunctionChangeKind};
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, FunctionProperties, IncompleteCodeBlock,
+    Address, AddressRange, AddressRangeSet, FunctionProperties, IncompleteCodeBlock,
     IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::project::{Project, ProjectError};
+use fugue_core::project::Project;
 use fugue_core::storage::{DEFAULT_SPACE_ID, TransientStorageProvider};
-use fugue_core::types::{ATTRIBUTE_LOADER_FORMAT, AttributeMap};
+use fugue_core::types::AttributeMap;
 
 mod common;
 
@@ -23,17 +21,11 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn cancelled_token() -> CancellationToken {
-    let cancellation = CancellationToken::default();
-    cancellation.cancel();
-    cancellation
-}
-
 #[test]
 fn test_loadable_fallback_preserves_caller_attributes() -> Result<(), Box<dyn std::error::Error>> {
     let mut attributes = AttributeMap::new();
     attributes.set_attr("caller.custom", "preserved");
-    attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "caller-format");
+    attributes.set_attr("caller.other", 7u64);
 
     let project = Project::from_file_with_provider_and_attributes::<TransientStorageProvider>(
         fixture_path("ls.elf"),
@@ -48,97 +40,32 @@ fn test_loadable_fallback_preserves_caller_attributes() -> Result<(), Box<dyn st
         Some("preserved")
     );
     assert_eq!(
-        project
-            .attributes()
-            .get_attr::<String>(ATTRIBUTE_LOADER_FORMAT)
-            .as_deref(),
-        Some("caller-format")
+        project.attributes().get_attr::<u64>("caller.other"),
+        Some(7u64)
     );
 
     Ok(())
 }
 
 #[test]
-fn test_ensure_lifted_rebuilds_deterministic_content() -> Result<(), Box<dyn std::error::Error>> {
+fn repeated_function_replacement_publishes_one_change() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
-    let entry = writable_address(&project, 1)?;
-    let function = {
-        let mut transaction = project.transaction("test");
-        let function = transaction.add_function(one_block_function(entry, 1))?;
-        transaction.commit()?;
-        function
-    };
-
-    {
-        let mut transaction = project.transaction("test");
-        assert!(transaction.ensure_ecode_ssa(function, &CancellationToken::default())?);
-        transaction.commit()?;
-    }
-
-    let first_pcode = project
-        .pcode(function)?
-        .expect("PCode IR should be present");
-    let first_ecode = project.ecode(function)?.expect("LIR should be present");
-    let first_ssa = project
-        .ecode_ssa(function)?
-        .expect("LIR SSA should be present");
-
-    {
-        let mut transaction = project.transaction("test");
-        assert_eq!(transaction.remove_lifted_from(function, IlLevel::PCode)?, 3);
-        transaction.commit()?;
-    }
-
-    {
-        let mut transaction = project.transaction("test");
-        assert!(transaction.ensure_ecode_ssa(function, &CancellationToken::default())?);
-        transaction.commit()?;
-    }
-
-    assert_eq!(project.pcode(function)?, Some(first_pcode));
-    assert_eq!(project.ecode(function)?, Some(first_ecode));
-    assert_eq!(project.ecode_ssa(function)?, Some(first_ssa));
-
-    Ok(())
-}
-
-#[test]
-fn test_ensure_lifted_reports_missing_parent_artefact() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
-    let function = FunctionId::default();
-
+    let entry = Address::from(0x7000_0000u64);
     let mut transaction = project.transaction("test");
-    assert!(matches!(
-        transaction.ensure_ecode(function, &CancellationToken::default()),
-        Err(ProjectError::Il(IlError::MissingArtefact {
-            level: IlLevel::PCode,
-            ..
-        }))
-    ));
-    transaction.rollback()?;
 
-    Ok(())
-}
-
-#[test]
-fn test_ensure_lifted_cancelled_materialises_nothing() -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
-    let function = FunctionId::default();
-    let revision = project.revision();
-
-    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
-        let mut transaction = project.transaction("test");
-        assert!(matches!(
-            transaction.ensure_lifted(function, level, &cancelled_token()),
-            Err(ProjectError::Il(IlError::Cancelled))
-        ));
-        transaction.rollback()?;
+    for _ in 0..=8192 {
+        transaction.add_function(one_block_function(entry, 1))?;
     }
+    let changes = transaction.commit()?;
 
-    assert_eq!(project.revision(), revision);
-    assert!(project.pcode(function)?.is_none());
-    assert!(project.ecode(function)?.is_none());
-    assert!(project.ecode_ssa(function)?.is_none());
+    assert_eq!(changes.records().len(), 1);
+    assert!(matches!(
+        changes.records(),
+        [ChangeRecord::FunctionAdded {
+            entry: changed,
+            ..
+        }] if *changed == entry
+    ));
 
     Ok(())
 }
@@ -222,7 +149,7 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_removing_mapping_rollback_restores_placement() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_mapping_removal_preserves_placement() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
@@ -242,7 +169,7 @@ fn test_removing_mapping_rollback_restores_placement() -> Result<(), Box<dyn std
 
     let mut transaction = project.transaction("test");
     transaction.remove_mapping(mapping)?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert_eq!(
         project
@@ -256,7 +183,7 @@ fn test_removing_mapping_rollback_restores_placement() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn test_remapping_mapping_rollback_restores_old_range() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_mapping_remap_preserves_old_range() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
         .segments()
@@ -282,7 +209,7 @@ fn test_remapping_mapping_rollback_restores_old_range() -> Result<(), Box<dyn st
 
     let mut transaction = project.transaction("test");
     transaction.remap_mapping(mapping, new_start)?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert_eq!(
         project
@@ -296,12 +223,12 @@ fn test_remapping_mapping_rollback_restores_old_range() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn test_create_space_rollback_removes_space() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_space_creation_discards_space() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
 
     let mut transaction = project.transaction("test");
     let space = transaction.create_space()?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert!(!project.segments().spaces().any(|s| s.id() == space));
 
@@ -315,7 +242,7 @@ fn test_create_space_rollback_removes_space() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn test_write_bytes_rollback_restores_old_bytes() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_byte_write_restores_old_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let address = writable_address(&project, 1)?;
     let mut old = [0u8; 1];
@@ -326,11 +253,11 @@ fn test_write_bytes_rollback_restores_old_bytes() -> Result<(), Box<dyn std::err
     transaction.write_bytes(address, &patch)?;
     let mut patched = [0u8; 1];
     transaction
-        .project()
+        .project(ChangeKinds::all())
         .segments()
         .read_bytes_exact(address, &mut patched)?;
     assert_eq!(patched, patch);
-    transaction.rollback()?;
+    drop(transaction);
 
     let mut restored = [0u8; 1];
     project
@@ -362,11 +289,11 @@ fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::e
     );
     let mut restored = [0u8; 1];
     transaction
-        .project()
+        .project(ChangeKinds::all())
         .segments()
         .read_bytes_exact(address, &mut restored)?;
     assert_eq!(restored, old);
-    transaction.rollback()?;
+    drop(transaction);
 
     Ok(())
 }
@@ -377,10 +304,12 @@ fn test_adding_function_preserves_incomplete_metadata() -> Result<(), Box<dyn st
     let entry = Address::from(0x4000u64);
     let mut function = IncompleteFunction::new_with(Some("named".into()), entry);
     function.mark_non_returning();
-    let mut block = IncompleteCodeBlock::new(entry, 1, Vec::new(), ContextSet::default());
-    block.mark_entry();
-    block.mark_exit();
-    function.push_block(block);
+    function.push_block(IncompleteCodeBlock::new(
+        entry,
+        1,
+        Vec::new(),
+        ContextSet::default(),
+    ));
 
     let mut transaction = project.transaction("test");
     let function_id = transaction.add_function(function)?;
@@ -397,12 +326,9 @@ fn test_adding_function_preserves_incomplete_metadata() -> Result<(), Box<dyn st
         .next()
         .map(|(_, block)| block)
         .expect("function should have one block");
-    let block = project
-        .blocks()
-        .get_by_id(block_id)
-        .expect("block should exist");
-    assert!(block.is_entry());
-    assert!(block.is_exit());
+    assert!(project.blocks().get_by_id(block_id).is_some());
+    assert!(function.is_entry_block(block_id));
+    assert!(function.is_exit_block(block_id));
 
     Ok(())
 }
@@ -518,7 +444,7 @@ fn test_setting_function_properties_records_a_property_change()
 
     let mut transaction = project.transaction("test");
     transaction.set_function_properties(entry, FunctionProperties::empty())?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert!(
         project
@@ -560,7 +486,7 @@ fn test_setting_symbol_properties_records_a_symbol_change() -> Result<(), Box<dy
 
     let mut transaction = project.transaction("test");
     transaction.set_symbol_properties(id, properties)?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert!(
         project
@@ -574,7 +500,8 @@ fn test_setting_symbol_properties_records_a_symbol_change() -> Result<(), Box<dy
 }
 
 #[test]
-fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_function_replacement_preserves_previous_body()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
@@ -606,7 +533,7 @@ fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::er
 
     let mut transaction = project.transaction("test");
     transaction.add_function(second)?;
-    transaction.rollback()?;
+    drop(transaction);
 
     let function = project
         .functions()
@@ -621,7 +548,7 @@ fn test_function_rollback_restores_previous_body() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_function_insertion_discards_new_body() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
@@ -635,7 +562,7 @@ fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::E
 
     let mut transaction = project.transaction("test");
     transaction.add_function(function)?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert!(project.functions().get_by_address(entry).is_none());
     assert_eq!(project.blocks().len(), 0);
@@ -644,7 +571,8 @@ fn test_function_rollback_removes_new_body() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_function_insertion_releases_allocated_ids()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let entry = Address::from(0x4000u64);
 
@@ -659,12 +587,10 @@ fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::er
     let mut transaction = project.transaction("test");
     let rolled_back_function = transaction.add_function(first)?;
     let rolled_back_block = transaction
-        .project()
-        .functions()
-        .get_by_id(rolled_back_function)
+        .function_at(entry)?
         .and_then(|function| function.blocks().next().map(|(_, id)| id))
         .expect("function should have one block");
-    transaction.rollback()?;
+    drop(transaction);
 
     let mut second = IncompleteFunction::new(entry);
     second.push_block(IncompleteCodeBlock::new(
@@ -690,16 +616,16 @@ fn test_function_rollback_restores_allocated_ids() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn test_symbol_rollback_removes_new_symbol() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_symbol_insertion_discards_new_symbol() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let selector = SymbolTableSelector::new(253);
     let index = SymbolIndex::new(selector, 0);
     let entry = Address::from(0x4010u64);
-    let symbol = SymbolEntry::new(entry, "rollback_new_symbol", SymbolProperties::FUNCTION);
+    let symbol = SymbolEntry::new(entry, "rejected_new_symbol", SymbolProperties::FUNCTION);
 
     let mut transaction = project.transaction("test");
     let rolled_back_id = transaction.add_symbol(index, symbol.clone())?;
-    transaction.rollback()?;
+    drop(transaction);
 
     assert!(project.symbols().get_by_index(index).is_none());
     assert!(project.symbols().get_by_address(entry).next().is_none());
@@ -714,7 +640,8 @@ fn test_symbol_rollback_removes_new_symbol() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn test_symbol_rollback_restores_replaced_index() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_symbol_replacement_preserves_old_index() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let index = SymbolIndex::new(SymbolTableSelector::new(253), 1);
     let old_entry = Address::from(0x4020u64);
@@ -723,16 +650,20 @@ fn test_symbol_rollback_restores_replaced_index() -> Result<(), Box<dyn std::err
     let mut transaction = project.transaction("test");
     let old_id = transaction.add_symbol(
         index,
-        SymbolEntry::new(old_entry, "rollback_old_symbol", SymbolProperties::FUNCTION),
+        SymbolEntry::new(
+            old_entry,
+            "preserved_old_symbol",
+            SymbolProperties::FUNCTION,
+        ),
     )?;
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
     transaction.add_symbol(
         index,
-        SymbolEntry::new(new_entry, "rollback_new_symbol", SymbolProperties::DATA),
+        SymbolEntry::new(new_entry, "rejected_new_symbol", SymbolProperties::DATA),
     )?;
-    transaction.rollback()?;
+    drop(transaction);
 
     let (restored_id, restored) = project
         .symbols()
@@ -740,14 +671,14 @@ fn test_symbol_rollback_restores_replaced_index() -> Result<(), Box<dyn std::err
         .expect("symbol index should be restored");
     assert_eq!(restored_id, old_id);
     assert_eq!(restored.address(), old_entry);
-    assert_eq!(restored.symbol().as_str(), "rollback_old_symbol");
+    assert_eq!(restored.symbol().as_str(), "preserved_old_symbol");
     assert!(project.symbols().get_by_address(new_entry).next().is_none());
 
     Ok(())
 }
 
 #[test]
-fn test_symbol_rollback_restores_removed_symbol() -> Result<(), Box<dyn std::error::Error>> {
+fn test_rejecting_symbol_removal_preserves_symbol() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let index = SymbolIndex::new(SymbolTableSelector::new(253), 2);
     let entry = Address::from(0x4040u64);
@@ -755,13 +686,13 @@ fn test_symbol_rollback_restores_removed_symbol() -> Result<(), Box<dyn std::err
     let mut transaction = project.transaction("test");
     let id = transaction.add_symbol(
         index,
-        SymbolEntry::new(entry, "rollback_removed_symbol", SymbolProperties::FUNCTION),
+        SymbolEntry::new(entry, "preserved_symbol", SymbolProperties::FUNCTION),
     )?;
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
     assert!(transaction.remove_symbol_by_index(index)?);
-    transaction.rollback()?;
+    drop(transaction);
 
     let (restored_id, restored) = project
         .symbols()
@@ -769,7 +700,7 @@ fn test_symbol_rollback_restores_removed_symbol() -> Result<(), Box<dyn std::err
         .expect("symbol index should be restored");
     assert_eq!(restored_id, id);
     assert_eq!(restored.address(), entry);
-    assert_eq!(restored.symbol().as_str(), "rollback_removed_symbol");
+    assert_eq!(restored.symbol().as_str(), "preserved_symbol");
 
     Ok(())
 }

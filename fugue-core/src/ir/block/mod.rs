@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
 use crate::ir::insn::InsnFlowCursor;
-use crate::ir::{Address, AddressRange, AddressRangeSet, FlowTarget, Id, IdSet, Insn, InsnList};
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowTarget, Id, Insn, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
@@ -13,8 +13,8 @@ pub(crate) mod incomplete;
 pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
-pub(crate) use table::CodeBlockTableAllocation;
 pub use table::{CodeBlockMut, CodeBlockRef, CodeBlockTable, CodeBlockTableError};
+pub(crate) use table::PreparedBlockMutation;
 
 pub type CodeBlockId = Id<CodeBlock>;
 
@@ -26,8 +26,6 @@ pub struct CodeBlock {
     start: Address,
     len: u16,
     instructions: InsnList,
-    successors: IdSet<CodeBlock>,
-    predecessors: IdSet<CodeBlock>,
     properties: CodeBlockProperties,
     context: ContextSet,
 }
@@ -65,19 +63,11 @@ impl MutableEntity for CodeBlock {
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CodeBlockProperties: u32 {
-        const NONE          = 0x0000_0000;
-        /// The block is a function entry point.
-        const ENTRY         = 0x0000_0001;
-        /// The block is a function exit point.
-        const EXIT          = 0x0000_0002;
-        /// The block causes the function to not return.
-        const NON_RETURNING = 0x0000_0004;
+        const NONE       = 0x0000_0000;
         /// The block ends in a call to another function.
-        const CALL          = 0x0000_0008;
-        /// The block ends in a tail call to another function.
-        const TAIL_CALL     = 0x0000_0010;
+        const CALL       = 0x0000_0001;
         /// The block has unresolved control flow.
-        const UNRESOLVED    = 0x0000_0020;
+        const UNRESOLVED = 0x0000_0002;
     }
 }
 
@@ -104,8 +94,6 @@ impl CodeBlock {
                 .expect("basic block length must not exceed 65535 bytes"),
             instructions,
             properties: CodeBlockProperties::NONE,
-            successors: IdSet::new(),
-            predecessors: IdSet::new(),
             context,
         }
     }
@@ -207,49 +195,16 @@ impl CodeBlock {
         None
     }
 
-    pub fn mark_entry(&mut self) {
-        self.properties.insert(CodeBlockProperties::ENTRY);
-    }
-
-    pub fn mark_exit(&mut self) {
-        self.properties.insert(CodeBlockProperties::EXIT);
-    }
-
-    pub fn mark_non_returning(&mut self) {
-        self.properties.insert(CodeBlockProperties::NON_RETURNING);
-    }
-
     pub fn mark_call(&mut self) {
         self.properties.insert(CodeBlockProperties::CALL);
-    }
-
-    pub fn mark_tail_call(&mut self) {
-        self.properties
-            .insert(CodeBlockProperties::TAIL_CALL | CodeBlockProperties::CALL);
     }
 
     pub fn mark_unresolved(&mut self) {
         self.properties.insert(CodeBlockProperties::UNRESOLVED);
     }
 
-    pub fn is_entry(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::ENTRY)
-    }
-
-    pub fn is_exit(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::EXIT)
-    }
-
-    pub fn is_non_returning(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::NON_RETURNING)
-    }
-
     pub fn is_call(&self) -> bool {
         self.properties.contains(CodeBlockProperties::CALL)
-    }
-
-    pub fn is_tail_call(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::TAIL_CALL)
     }
 
     pub fn has_unresolved(&self) -> bool {
@@ -258,21 +213,5 @@ impl CodeBlock {
 
     pub fn context(&self) -> &ContextSet {
         &self.context
-    }
-
-    pub fn add_successor(&mut self, target: CodeBlockId) {
-        self.successors.insert(target);
-    }
-
-    pub fn add_predecessor(&mut self, source: CodeBlockId) {
-        self.predecessors.insert(source);
-    }
-
-    pub fn successors(&self) -> &IdSet<CodeBlock> {
-        &self.successors
-    }
-
-    pub fn predecessors(&self) -> &IdSet<CodeBlock> {
-        &self.predecessors
     }
 }

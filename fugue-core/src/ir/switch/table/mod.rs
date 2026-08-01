@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error as StdError;
-use std::fmt::{Debug as FmtDebug, Display};
+use std::error::Error;
+use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, IdAllocation, IdAllocator};
+use crate::ir::{Address, FunctionId, IdAllocator};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;
@@ -110,47 +110,6 @@ impl SwitchIndex {
     }
 }
 
-pub(crate) type SwitchTableAllocation = IdAllocation<Switch>;
-
-pub(crate) struct SwitchTableRevert {
-    branch: Address,
-    allocation: SwitchTableAllocation,
-    previous_switch: Option<Switch>,
-}
-
-impl SwitchTableRevert {
-    pub(crate) fn capture(
-        table: &SwitchTable,
-        branch: Address,
-    ) -> Result<Self, EntityStorageError> {
-        let previous_switch = table
-            .try_get_by_branch(branch)?
-            .map(|switch| switch.as_ref().clone());
-
-        Ok(Self {
-            branch,
-            allocation: table.allocation_checkpoint(1),
-            previous_switch,
-        })
-    }
-
-    pub(crate) fn restore(self, table: &mut SwitchTable) -> Result<(), EntityStorageError> {
-        if let Some(id) = table
-            .try_get_by_branch(self.branch)?
-            .map(|switch| switch.id())
-        {
-            table.clear_entry(id)?;
-        }
-
-        if let Some(switch) = self.previous_switch {
-            table.restore_entry(switch)?;
-        }
-
-        table.restore_allocation(self.allocation);
-        Ok(())
-    }
-}
-
 pub enum SwitchTable {
     Persistent(PersistentSwitchTable),
     Transient(TransientSwitchTable),
@@ -169,14 +128,14 @@ pub enum SwitchTableError {
 impl SwitchTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: StdError + Send + Sync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: FmtDebug + Display + Send + Sync + 'static,
+        M: fmt::Debug + fmt::Display + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::msg(msg))
     }
@@ -206,41 +165,56 @@ impl SwitchTable {
         Self::Transient(TransientSwitchTable::new())
     }
 
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn preview_id(&self, offset: usize) -> SwitchId {
         match self {
-            Self::Persistent(p) => p.flush(),
-            Self::Transient(t) => t.flush(),
+            Self::Persistent(table) => table.preview_id(offset),
+            Self::Transient(table) => table.preview_id(offset),
         }
     }
 
-    fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
-        match self {
-            Self::Persistent(p) => p.allocation_checkpoint(max_pops),
-            Self::Transient(t) => t.allocation_checkpoint(max_pops),
-        }
-    }
-
-    fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
-        match self {
-            Self::Persistent(p) => p.restore_allocation(allocation),
-            Self::Transient(t) => t.restore_allocation(allocation),
-        }
-    }
-
-    fn restore_entry(&mut self, switch: Switch) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(p) => p.restore_entry(switch),
-            Self::Transient(t) => {
-                t.restore_entry(switch);
-                Ok(())
+    pub(crate) fn publish_reservations(&mut self, reservations: &[SwitchId]) {
+        for &id in reservations {
+            match self {
+                Self::Persistent(table) => table.publish_reservation(id),
+                Self::Transient(table) => table.publish_reservation(id),
             }
         }
     }
 
-    fn clear_entry(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
+    pub(crate) fn publish_release(&mut self, id: SwitchId) {
         match self {
-            Self::Persistent(p) => p.clear_entry(id),
-            Self::Transient(t) => Ok(t.clear_entry(id)),
+            Self::Persistent(table) => table.publish_release(id),
+            Self::Transient(table) => table.publish_release(id),
+        }
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        previous_function: Option<FunctionId>,
+        encoded_len: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_upsert(switch, previous_function, encoded_len),
+            Self::Transient(table) => table.publish_upsert(switch, previous_function),
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        match self {
+            Self::Persistent(table) => table.publish_remove(id, function, branch),
+            Self::Transient(table) => table.publish_remove(id, function, branch),
+        }
+    }
+
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(p) => p.flush(),
+            Self::Transient(t) => t.flush(),
         }
     }
 

@@ -77,9 +77,8 @@ impl PCodeCanonicaliser {
 
             successors.clear();
             successors.extend(
-                code_block
-                    .successors()
-                    .iter()
+                function_body
+                    .successors(code_block_id)
                     .filter_map(|successor| self.block_id_by_code_block.get(&successor).copied()),
             );
             builder.append_block(
@@ -236,7 +235,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
         starting_ordinal: usize,
         annotations: &mut Vec<AddressAnnotation>,
     ) -> Result<usize, PCodeError> {
-        let mut targets = SmallVec::<[(u16, InsnTarget); 2]>::new();
+        let mut targets = SmallVec::<[(u16, InsnTarget); 1]>::new();
         Insn::push_targets_for_operations(language, address, length, operations, &mut targets);
         let mut semantic_count = 0usize;
         let mut index = 0usize;

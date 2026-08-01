@@ -144,6 +144,19 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
+    fn classify_contiguous_bytes(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let _ = address;
+        let _ = context;
+        let _ = bytes;
+        (0, BytesProperties::empty())
+    }
+
+    #[allow(unused)]
     fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {
         false
     }

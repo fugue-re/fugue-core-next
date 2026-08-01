@@ -11,6 +11,7 @@ pub(crate) const CENSUS_INTERVAL: usize = 256;
 enum RegionGroupKind {
     Bytes,
     Functions,
+    Problems,
     References,
     Segments,
     Switches,
@@ -18,9 +19,10 @@ enum RegionGroupKind {
 }
 
 impl RegionGroupKind {
-    const ALL: [RegionGroupKind; 6] = [
+    const ALL: [RegionGroupKind; 7] = [
         RegionGroupKind::Bytes,
         RegionGroupKind::Functions,
+        RegionGroupKind::Problems,
         RegionGroupKind::References,
         RegionGroupKind::Segments,
         RegionGroupKind::Switches,
@@ -31,10 +33,11 @@ impl RegionGroupKind {
         match self {
             RegionGroupKind::Bytes => 0,
             RegionGroupKind::Functions => 1,
-            RegionGroupKind::References => 2,
-            RegionGroupKind::Segments => 3,
-            RegionGroupKind::Switches => 4,
-            RegionGroupKind::Symbols => 5,
+            RegionGroupKind::Problems => 2,
+            RegionGroupKind::References => 3,
+            RegionGroupKind::Segments => 4,
+            RegionGroupKind::Switches => 5,
+            RegionGroupKind::Symbols => 6,
         }
     }
 
@@ -46,6 +49,7 @@ impl RegionGroupKind {
             RegionGroupKind::Segments => {
                 ChangeKinds::SEGMENT_MAPPED | ChangeKinds::SEGMENT_UNMAPPED
             }
+            RegionGroupKind::Problems => ChangeKinds::PROBLEMS,
             RegionGroupKind::References => ChangeKinds::REFERENCES,
             RegionGroupKind::Switches => ChangeKinds::SWITCHES,
         }
@@ -75,7 +79,7 @@ impl RegionGroup {
         }
     }
 
-    fn touch(&mut self, range: AddressRange, revision: Revision) {
+    fn touch(&mut self, range: AddressRange, revision: Revision) -> bool {
         self.spaces
             .entry(range.space())
             .or_default()
@@ -85,8 +89,10 @@ impl RegionGroup {
         self.inserts_since_census += 1;
         if self.inserts_since_census >= CENSUS_INTERVAL {
             self.inserts_since_census = 0;
-            self.compact();
+            return self.compact();
         }
+
+        false
     }
 
     fn run_count(&self) -> usize {
@@ -96,11 +102,14 @@ impl RegionGroup {
             .sum::<usize>()
     }
 
-    fn compact(&mut self) {
-        if self.run_count() > MAX_CHANGE_RUNS {
-            self.floor = self.max;
-            self.spaces.clear();
+    fn compact(&mut self) -> bool {
+        if self.run_count() <= MAX_CHANGE_RUNS {
+            return false;
         }
+
+        self.floor = self.max;
+        self.spaces.clear();
+        true
     }
 
     fn latest_over(&self, region: &AddressRangeSet) -> Revision {
@@ -119,7 +128,7 @@ impl RegionGroup {
         latest
     }
 
-    fn restore(&mut self, revision: Revision) {
+    fn resynchronise(&mut self, revision: Revision) {
         self.floor = self.floor.max(revision);
         self.max = self.max.max(revision);
         self.spaces.clear();
@@ -129,7 +138,7 @@ impl RegionGroup {
 
 struct GlobalWatermarks {
     lifted: Revision,
-    restored: Revision,
+    resynchronised: Revision,
     space_created: Revision,
     mapping_created: Revision,
     mapping_changed: Revision,
@@ -139,7 +148,7 @@ impl GlobalWatermarks {
     fn new(revision: Revision) -> Self {
         Self {
             lifted: revision,
-            restored: revision,
+            resynchronised: revision,
             space_created: revision,
             mapping_created: revision,
             mapping_changed: revision,
@@ -166,8 +175,8 @@ impl GlobalWatermarks {
         if kinds.intersects(ChangeKinds::LIFTED) {
             latest = latest.max(self.lifted);
         }
-        if kinds.intersects(ChangeKinds::RESTORED) {
-            latest = latest.max(self.restored);
+        if kinds.intersects(ChangeKinds::RESYNCHRONISE) {
+            latest = latest.max(self.resynchronised);
         }
         if kinds.intersects(ChangeKinds::SPACE_CREATED) {
             latest = latest.max(self.space_created);
@@ -181,9 +190,9 @@ impl GlobalWatermarks {
         latest
     }
 
-    fn restore(&mut self, revision: Revision) {
+    fn resynchronise(&mut self, revision: Revision) {
         self.lifted = self.lifted.max(revision);
-        self.restored = self.restored.max(revision);
+        self.resynchronised = self.resynchronised.max(revision);
         self.space_created = self.space_created.max(revision);
         self.mapping_created = self.mapping_created.max(revision);
         self.mapping_changed = self.mapping_changed.max(revision);
@@ -203,26 +212,29 @@ impl ChangeIndex {
         }
     }
 
-    pub(crate) fn apply(&mut self, changes: &ChangeSet) {
+    pub(crate) fn apply(&mut self, changes: &ChangeSet) -> bool {
         let revision = changes.revision();
+        let mut collapsed = false;
 
         for record in changes.records() {
             let kind = record.kind();
 
-            if kind == ChangeKinds::RESTORED {
-                self.restore(revision);
+            if kind == ChangeKinds::RESYNCHRONISE {
+                self.resynchronise(revision);
                 continue;
             }
 
             if let Some(group) = RegionGroupKind::of_record(kind) {
                 let group = &mut self.groups[group.index()];
                 for range in record.ranges() {
-                    group.touch(range, revision);
+                    collapsed |= group.touch(range, revision);
                 }
             } else {
                 self.global.bump(kind, revision);
             }
         }
+
+        collapsed
     }
 
     pub(crate) fn latest_change(&self, kinds: ChangeKinds, region: &AddressRangeSet) -> Revision {
@@ -246,11 +258,11 @@ impl ChangeIndex {
         self.latest_change(kinds, region) > since
     }
 
-    fn restore(&mut self, revision: Revision) {
+    fn resynchronise(&mut self, revision: Revision) {
         for group in &mut self.groups {
-            group.restore(revision);
+            group.resynchronise(revision);
         }
-        self.global.restore(revision);
+        self.global.resynchronise(revision);
     }
 }
 
@@ -307,16 +319,16 @@ mod test {
     }
 
     #[test]
-    fn restored_changes_advance_global_watermark() {
+    fn resynchronisation_advances_global_watermark() {
         let mut index = ChangeIndex::new(Revision::new(0));
         index.apply(&ChangeSet::with_records(
             Revision::new(7),
-            [ChangeRecord::Restored {
+            [ChangeRecord::Resynchronise {
                 to: Revision::new(7),
             }],
         ));
         assert_eq!(
-            index.latest_change(ChangeKinds::RESTORED, &AddressRangeSet::new()),
+            index.latest_change(ChangeKinds::RESYNCHRONISE, &AddressRangeSet::new()),
             Revision::new(7)
         );
     }

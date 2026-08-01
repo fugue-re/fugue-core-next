@@ -38,7 +38,7 @@ impl InsnError {
 pub struct Insn {
     address: Address,
     properties: InsnProperties,
-    targets: SmallVec<[(u16, InsnTarget); 2]>,
+    targets: SmallVec<[(u16, InsnTarget); 1]>,
     length: u8,
 }
 
@@ -48,6 +48,71 @@ pub(crate) struct InsnFlowCursor {
 }
 
 impl Insn {
+    pub(crate) fn from_direct_branch(
+        address: Address,
+        length: usize,
+        target: Address,
+        conditional: bool,
+    ) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, length, InsnTarget::InterBlk(target), conditional)
+    }
+
+    pub(crate) fn from_direct_call(
+        address: Address,
+        length: usize,
+        target: Address,
+    ) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, length, InsnTarget::InterSub(Some(target)), true)
+    }
+
+    pub(crate) fn from_indirect_branch(address: Address, length: usize) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, InsnTarget::Unresolved));
+        Self::from_flow_targets(address, length, targets)
+    }
+
+    pub(crate) fn from_indirect_call(address: Address, length: usize) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, length, InsnTarget::InterSub(None), true)
+    }
+
+    pub(crate) fn from_return(address: Address, length: usize) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, InsnTarget::InterRet(None, true)));
+        Self::from_flow_targets(address, length, targets)
+    }
+
+    fn from_direct_flow(
+        address: Address,
+        length: usize,
+        target: InsnTarget,
+        fall_through: bool,
+    ) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, target));
+        if fall_through {
+            targets.push((
+                0,
+                InsnTarget::IntraBlk(Location::new(address + length, 0), true),
+            ));
+        }
+        Self::from_flow_targets(address, length, targets)
+    }
+
+    fn from_flow_targets(
+        address: Address,
+        length: usize,
+        targets: SmallVec<[(u16, InsnTarget); 1]>,
+    ) -> Result<Self, InsnError> {
+        let properties = InsnProperties::from_targets(&targets) | InsnProperties::FLOW_RESOLVED;
+
+        Ok(Self {
+            address,
+            properties,
+            targets,
+            length: Self::checked_length(length)?,
+        })
+    }
+
     pub(crate) fn from_resolved_flow(
         language: &'static Language,
         address: Address,
@@ -105,7 +170,7 @@ impl Insn {
         address: Address,
         length: usize,
         operations: &[RawPCodeOp],
-        targets: &mut SmallVec<[(u16, InsnTarget); 2]>,
+        targets: &mut SmallVec<[(u16, InsnTarget); 1]>,
     ) {
         let op_count = operations.len() as u16;
         let next_address = address + length;
@@ -123,7 +188,7 @@ impl Insn {
 
         let push_call = |index: u16,
                          location: Option<Location>,
-                         targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+                         targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
             let Some(location) = location else {
                 targets.push((index, InsnTarget::InterSub(None)));
                 return;
@@ -139,7 +204,7 @@ impl Insn {
         let push_branch =
             |index: u16,
              location: Option<Location>,
-             targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+             targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
                 let Some(location) = location else {
                     targets.push((index, InsnTarget::Unresolved));
                     return;
@@ -155,7 +220,7 @@ impl Insn {
             };
 
         let push_fall_through =
-            |index: u16, fall_through: Location, targets: &mut SmallVec<[(u16, InsnTarget); 2]>| {
+            |index: u16, fall_through: Location, targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
                 targets.push((
                     index,
                     if is_local(&fall_through) {
@@ -397,6 +462,11 @@ impl Insn {
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
         self.iter_targets()
             .filter_map(move |(target, _, to)| FlowTarget::from_insn_target(self, target, to))
+    }
+
+    pub fn direct_call_target(&self) -> Option<Address> {
+        self.flow_targets()
+            .find_map(|target| target.kind().is_call().then_some(target.to()))
     }
 
     pub(crate) fn next_flow_target(&self, cursor: &mut InsnFlowCursor) -> Option<FlowTarget> {

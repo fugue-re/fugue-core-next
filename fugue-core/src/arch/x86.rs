@@ -6,7 +6,7 @@ use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode}
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, Flag};
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, RawAddress};
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
@@ -46,6 +46,35 @@ fn classify_bytes(bytes: &[u8]) -> BytesProperties {
     }
 
     properties
+}
+
+fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
+    let decoder = InstDecoder::default();
+    let mut length = 0usize;
+    let mut properties = BytesProperties::empty();
+
+    while let Some(remaining) = bytes.get(length..) {
+        let mut reader = U8Reader::new(remaining);
+        let Ok(insn) = decoder.decode(&mut reader) else {
+            break;
+        };
+        let insn_length = insn.len().to_const() as usize;
+        if insn_length == 0 {
+            break;
+        }
+        let Some(insn_bytes) = remaining.get(..insn_length) else {
+            break;
+        };
+        let insn_properties = classify_bytes(insn_bytes);
+        if insn_properties.is_empty() || (!properties.is_empty() && insn_properties != properties) {
+            break;
+        }
+
+        properties = insn_properties;
+        length += insn_length;
+    }
+
+    (length, properties)
 }
 #[derive(Clone)]
 struct ArchData {
@@ -122,6 +151,15 @@ impl ArchT for X86 {
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
         classify_bytes(bytes)
+    }
+
+    fn classify_contiguous_bytes(
+        &self,
+        _address: RawAddress,
+        _context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        classify_contiguous_bytes(bytes)
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
@@ -265,7 +303,7 @@ impl DisassemblerT for X86Disassembler {
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let mut reader = U8Reader::new(bytes);
         let insn = match self.decoder.decode(&mut reader) {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;

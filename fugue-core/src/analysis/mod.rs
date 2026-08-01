@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::engine::ProjectView;
 use crate::project::Project;
 
 pub mod control;
@@ -158,7 +159,7 @@ where
 
     pub fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         pass_name: impl Borrow<str>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
@@ -173,24 +174,17 @@ where
 
 impl AnalysisManager {
     pub fn analyse(&mut self, project: &mut Project, pass_name: &str) -> Result<(), AnalysisError> {
-        self.analyse_with(project, pass_name, &mut Default::default())
+        let view = ProjectView::new(project);
+        self.analyse_with(&view, pass_name, &mut ())
     }
 }
 
 pub trait AnalysisPass<S = NoState>: Downcast + Send {
-    fn analyse(&mut self, #[allow(unused)] project: &mut Project) -> Result<(), AnalysisError> {
-        unimplemented!(
-            "either `AnalysisPass::analyse` or `AnalysisPass::analyse_with` must be implemented"
-        )
-    }
-
     fn analyse_with(
         &mut self,
-        project: &mut Project,
-        #[allow(unused)] state: &mut S,
-    ) -> Result<(), AnalysisError> {
-        self.analyse(project)
-    }
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError>;
 
     fn as_group(&self) -> Option<&AnalysisGroup<S>> {
         None
@@ -205,10 +199,14 @@ impl_downcast!(AnalysisPass<S>);
 
 impl<S, F> AnalysisPass<S> for F
 where
-    F: FnMut(&mut Project, &mut S) -> Result<(), AnalysisError> + Send + 'static,
+    F: FnMut(&ProjectView<'_>, &mut S) -> Result<(), AnalysisError> + Send + 'static,
     S: 'static,
 {
-    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
         self(project, state)
     }
 }
@@ -329,7 +327,7 @@ where
 
     pub fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
         for pass in self.passes.values_mut() {
@@ -392,7 +390,11 @@ impl<S> AnalysisPass<S> for AnalysisGroup<S>
 where
     S: 'static,
 {
-    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
         AnalysisGroup::analyse_with(self, project, state)
     }
 
@@ -459,7 +461,11 @@ impl<S> AnalysisPass<S> for IteratedAnalysis<S>
 where
     S: 'static,
 {
-    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
         while self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
         }
@@ -529,7 +535,11 @@ impl<S> AnalysisPass<S> for ConditionalAnalysis<S>
 where
     S: 'static,
 {
-    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
         if self.condition.evaluate(state) {
             self.pass.analyse_with(project, state)?;
         }
@@ -599,7 +609,11 @@ impl<S> AnalysisPass for StatefulAnalysis<S>
 where
     S: Send + 'static,
 {
-    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        _state: &mut NoState,
+    ) -> Result<(), AnalysisError> {
         self.pass.analyse_with(project, &mut self.state)
     }
 }
@@ -651,7 +665,11 @@ impl<S> AnalysisPass<S> for OneShotAnalysis<S>
 where
     S: 'static,
 {
-    fn analyse_with(&mut self, project: &mut Project, state: &mut S) -> Result<(), AnalysisError> {
+    fn analyse_with(
+        &mut self,
+        project: &ProjectView<'_>,
+        state: &mut S,
+    ) -> Result<(), AnalysisError> {
         if !self.executed {
             self.executed = true;
             self.pass.analyse_with(project, state)?;
@@ -712,8 +730,9 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::storage::TransientStorageProvider;
 
-    fn no_op(_project: &mut Project, _state: &mut NoState) -> Result<(), AnalysisError> {
+    fn no_op(_project: &ProjectView<'_>, _state: &mut NoState) -> Result<(), AnalysisError> {
         Ok(())
     }
 
@@ -754,13 +773,14 @@ mod test {
     #[test]
     #[ignore = "requires local language data and binary fixtures"]
     fn test_analysis_passes() -> Result<(), Box<dyn std::error::Error>> {
-        let mut project = Project::from_file("tests/ls.elf")?;
+        let mut project =
+            Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
 
         let mut analyses = AnalysisManager::new();
 
         analyses.add_pass(
             "hello-world",
-            |_project: &mut Project, _state: &mut NoState| {
+            |_project: &ProjectView<'_>, _state: &mut NoState| {
                 println!("Hello, world!");
                 Ok(())
             },
@@ -770,7 +790,7 @@ mod test {
 
         group.add_pass(
             "bloop-step",
-            |_project: &mut Project, _state: &mut NoState| {
+            |_project: &ProjectView<'_>, _state: &mut NoState| {
                 println!("Hello, world (step 1)!");
                 Ok(())
             },
@@ -779,11 +799,11 @@ mod test {
         group.add_passes(
             "prefix",
             [
-                |_project: &mut Project, state: &mut NoState| {
+                |_project: &ProjectView<'_>, state: &mut NoState| {
                     println!("Hello, world (step 2); state is {state:?}!");
                     Ok(())
                 },
-                |_project: &mut Project, state: &mut NoState| {
+                |_project: &ProjectView<'_>, state: &mut NoState| {
                     println!("Hello, world (step 3); state is {state:?}!");
                     Ok(())
                 },
@@ -795,19 +815,19 @@ mod test {
         analyses.add_pass(
             "cond-hello-world",
             AnalysisGroup::from_iter([
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 1); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 1);
                     Ok(())
                 },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 2); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 2);
                     Ok(())
                 },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 3); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 3);
@@ -846,19 +866,19 @@ mod test {
         analyses.add_pass(
             "cond-hello-world",
             AnalysisGroup::from_iter([
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 1); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 1);
                     Ok(())
                 },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 2); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 2);
                     Ok(())
                 },
-                |_project: &mut Project, state: &mut Vec<usize>| {
+                |_project: &ProjectView<'_>, state: &mut Vec<usize>| {
                     println!("Hello, world (step 3); state is {state:?}!");
                     let val = state.last().copied().unwrap_or(0);
                     state.push(val + 3);
@@ -868,7 +888,8 @@ mod test {
             .iterated(5),
         );
 
-        analyses.analyse_with(&mut project, "cond-hello-world", &mut Vec::new())?;
+        let view = ProjectView::new(&project);
+        analyses.analyse_with(&view, "cond-hello-world", &mut Vec::new())?;
 
         let g1 = analyses
             .get_boxed_pass("cond-hello-world")

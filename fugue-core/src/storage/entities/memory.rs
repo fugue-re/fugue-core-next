@@ -8,9 +8,9 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
-    EntityStorageProvider, EntityStorageProviderFromLoadable,
+    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityKeyPrefix, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
@@ -234,9 +234,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
     fn transactional_writer(
         &self,
     ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
-        Err(EntityStorageError::unsupported_with(
-            "transactions are not supported by the in-memory storage provider",
-        ))
+        Ok(Box::new(BufferedEntityWriter::new(self)))
     }
 
     fn persistence(&self) -> StoragePersistence {

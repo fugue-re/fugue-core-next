@@ -490,6 +490,10 @@ impl ContextDatabase {
         value: u32,
     ) {
         let bits = bits.as_ref();
+        if self.get_variable_by_bits(bits, address) == value & bits.mask() {
+            return;
+        }
+
         let num = bits.word();
         let mask = bits.mask().checked_shl(bits.shift()).unwrap_or(0);
 

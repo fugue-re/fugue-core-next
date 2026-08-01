@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use fugue_core::engine::{AnalysisEngine, PersistencePolicy};
+use fugue_core::engine::AnalysisEngine;
 use fugue_core::project::Project;
 use fugue_core::storage::{
     DefaultPersistentSegmentStorage, PERSISTENT, PersistentStorageProvider, SqliteEntityStorage,
@@ -25,10 +25,9 @@ fn created_space_survives_reopen() -> Result<(), Box<dyn Error>> {
     )?;
     let spaces_at_load = project.segments().spaces().count();
 
-    let engine = AnalysisEngine::with_policy(project, PersistencePolicy::OnIdle)?;
-    engine.wait_until_idle()?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
     let created = engine.create_space()?.space();
-    engine.save()?;
     drop(engine);
 
     let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
@@ -48,6 +47,35 @@ fn created_space_survives_reopen() -> Result<(), Box<dyn Error>> {
             .any(|space| space.id() == created),
         "the created space must be present after reopen"
     );
+
+    Ok(())
+}
+
+#[test]
+fn rejected_space_creation_is_not_persisted_on_drop() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("rejected-segments.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path);
+
+    let mut project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let spaces_at_load = project.segments().spaces().count();
+
+    {
+        let mut transaction = project.transaction("test");
+        transaction.create_space()?;
+    }
+    assert_eq!(project.segments().spaces().count(), spaces_at_load);
+    drop(project);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.segments().spaces().count(), spaces_at_load);
 
     Ok(())
 }

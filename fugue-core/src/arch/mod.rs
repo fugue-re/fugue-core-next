@@ -219,6 +219,15 @@ impl Arch {
         self.0.classify_bytes(bytes)
     }
 
+    pub fn classify_contiguous_bytes(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        self.0.classify_contiguous_bytes(address, context, bytes)
+    }
+
     pub fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
         self.classify_bytes(bytes).is_nonsense()
     }

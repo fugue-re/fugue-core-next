@@ -7,7 +7,9 @@ use super::{SymbolEntry, SymbolId, SymbolIndex, SymbolProperties, SymbolTableSel
 use crate::ir::Address;
 use crate::ir::symbol::Symbol;
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityId, EntityRef, EntityWriteBatch, ProjectEntity, WriteBackWorker,
+};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
@@ -18,6 +20,34 @@ use persistent::SymbolTable as PersistentSymbolTable;
 pub use transient::SymbolTable as TransientSymbolTable;
 
 pub type SymbolRef<'a> = EntityRef<'a, SymbolEntry>;
+
+pub(crate) struct SymbolIndexState {
+    address: Address,
+    indices: SmallVec<[SymbolIndex; 2]>,
+    symbol: Symbol,
+}
+
+impl SymbolIndexState {
+    pub(crate) fn new(entry: &SymbolEntry) -> Self {
+        Self {
+            address: entry.address(),
+            indices: entry.indices().into(),
+            symbol: entry.symbol(),
+        }
+    }
+
+    pub(crate) fn address(&self) -> Address {
+        self.address
+    }
+
+    pub(crate) fn symbol(&self) -> Symbol {
+        self.symbol
+    }
+
+    fn indices(&self) -> &[SymbolIndex] {
+        &self.indices
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SymbolInsertion {
@@ -55,120 +85,6 @@ pub enum SymbolTable {
     Transient(TransientSymbolTable),
 }
 
-enum SymbolTableAllocation {
-    Persistent(persistent::Allocation),
-    Transient(transient::Allocation),
-}
-
-pub(crate) struct SymbolTableRevert {
-    allocation: SymbolTableAllocation,
-    entries: Vec<(SymbolId, SymbolEntry)>,
-    touched: Vec<SymbolId>,
-}
-
-impl SymbolTableRevert {
-    fn new(
-        table: &SymbolTable,
-        ids: impl IntoIterator<Item = SymbolId>,
-        max_pops: usize,
-    ) -> Result<Self, EntityStorageError> {
-        let mut touched = Vec::new();
-        let mut entries = Vec::new();
-
-        for id in ids {
-            if touched.contains(&id) {
-                continue;
-            }
-
-            if let Some(entry) = table.try_get_by_id(id)? {
-                entries.push((id, entry.clone()));
-            }
-            touched.push(id);
-        }
-
-        Ok(Self {
-            allocation: table.allocation_checkpoint(max_pops),
-            entries,
-            touched,
-        })
-    }
-
-    pub(crate) fn capture_insert(
-        table: &SymbolTable,
-        index: SymbolIndex,
-        entry: &SymbolEntry,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let touched = table.get_ids_replaced_by_insert(index, entry)?;
-        Self::new(table, touched, 1)
-    }
-
-    pub(crate) fn capture_remove_symbol(
-        table: &SymbolTable,
-        symbol: impl AsRef<str>,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let ids = table
-            .get_ids_by_symbol(symbol)
-            .into_iter()
-            .flatten()
-            .copied();
-        Self::new(table, ids, 0)
-    }
-
-    pub(crate) fn capture_remove_address(
-        table: &SymbolTable,
-        address: Address,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let ids = table
-            .get_ids_by_address(address)
-            .into_iter()
-            .flatten()
-            .copied();
-        Self::new(table, ids, 0)
-    }
-
-    pub(crate) fn capture_remove_id(
-        table: &SymbolTable,
-        id: SymbolId,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        Self::new(table, [id], 0)
-    }
-
-    pub(crate) fn capture_modify_id(
-        table: &SymbolTable,
-        id: SymbolId,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        Self::new(table, [id], 0)
-    }
-
-    pub(crate) fn capture_remove_index(
-        table: &SymbolTable,
-        index: SymbolIndex,
-    ) -> Result<SymbolTableRevert, EntityStorageError> {
-        let id = table.get_id_by_index(index);
-        Self::new(table, id, 0)
-    }
-
-    pub(crate) fn touch(&mut self, id: SymbolId) {
-        if !self.touched.contains(&id) {
-            self.touched.push(id);
-        }
-    }
-
-    pub(crate) fn restore(self, table: &mut SymbolTable) -> Result<(), EntityStorageError> {
-        for id in self.touched {
-            table.clear_entry(id)?;
-        }
-
-        for (id, entry) in self.entries {
-            table.restore_entry(id, entry)?;
-        }
-
-        table.restore_allocation(self.allocation);
-
-        Ok(())
-    }
-}
-
 impl SymbolTable {
     pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
         Ok(Self::Persistent(PersistentSymbolTable::new(
@@ -193,6 +109,98 @@ impl SymbolTable {
         Self::Transient(TransientSymbolTable::new())
     }
 
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn initialise(
+        &mut self,
+        symbols: TransientSymbolTable,
+    ) -> Result<(), EntityStorageError> {
+        assert!(self.is_empty(), "initial symbol table must be empty");
+        match self {
+            Self::Persistent(table) => table.initialise(symbols),
+            Self::Transient(table) => {
+                *table = symbols;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn preview_id(&self, offset: usize) -> SymbolId {
+        match self {
+            Self::Persistent(table) => table.preview_id(offset),
+            Self::Transient(table) => table.preview_id(offset),
+        }
+    }
+
+    pub(crate) fn append_index_writes(
+        &self,
+        id: SymbolId,
+        entry: Option<&SymbolEntry>,
+        previous: Option<&SymbolIndexState>,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if let Self::Persistent(table) = self {
+            table.append_mutation_writes(id, entry, previous, writes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_allocator_writes(
+        &self,
+        reservations: &[SymbolId],
+        releases: &[SymbolId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if let Self::Persistent(table) = self {
+            table.append_allocator_writes(reservations, releases, added, removed, writes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_prepared(
+        &mut self,
+        reservations: &[SymbolId],
+        cancelled: &[SymbolId],
+        added: usize,
+        removed: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
+            Self::Transient(table) => {
+                for &id in reservations {
+                    table.publish_reservation(id);
+                }
+                for &id in cancelled {
+                    table.publish_release(id);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        id: SymbolId,
+        entry: SymbolEntry,
+        previous: Option<&SymbolIndexState>,
+        encoded_len: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_upsert(id, entry, encoded_len),
+            Self::Transient(table) => table.publish_upsert(id, entry, previous),
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SymbolId, previous: &SymbolIndexState) {
+        match self {
+            Self::Persistent(table) => table.publish_remove(id),
+            Self::Transient(table) => table.publish_remove(id, previous),
+        }
+    }
+
     pub fn persisted(storage: &EntityStorage) -> Result<bool, EntityStorageError> {
         storage.contains::<ProjectEntity, SymbolTableHeader>(&ProjectEntity::SymbolTable)
     }
@@ -201,50 +209,6 @@ impl SymbolTable {
         match self {
             Self::Persistent(p) => p.flush(),
             Self::Transient(_) => Ok(()),
-        }
-    }
-
-    fn allocation_checkpoint(&self, max_pops: usize) -> SymbolTableAllocation {
-        match self {
-            Self::Persistent(p) => {
-                SymbolTableAllocation::Persistent(p.allocation_checkpoint(max_pops))
-            }
-            Self::Transient(t) => {
-                SymbolTableAllocation::Transient(t.allocation_checkpoint(max_pops))
-            }
-        }
-    }
-
-    fn restore_allocation(&mut self, allocation: SymbolTableAllocation) {
-        match (self, allocation) {
-            (Self::Persistent(p), SymbolTableAllocation::Persistent(allocation)) => {
-                p.restore_allocation(allocation)
-            }
-            (Self::Transient(t), SymbolTableAllocation::Transient(allocation)) => {
-                t.restore_allocation(allocation)
-            }
-            _ => unreachable!("symbol table allocation variant mismatch"),
-        }
-    }
-
-    fn restore_entry(
-        &mut self,
-        id: SymbolId,
-        entry: SymbolEntry,
-    ) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(p) => p.restore_entry(id, entry),
-            Self::Transient(t) => {
-                t.restore_entry(id, entry);
-                Ok(())
-            }
-        }
-    }
-
-    fn clear_entry(&mut self, id: SymbolId) -> Result<bool, EntityStorageError> {
-        match self {
-            Self::Persistent(p) => p.clear_entry(id),
-            Self::Transient(t) => Ok(t.clear_entry(id)),
         }
     }
 
@@ -310,38 +274,10 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn get_ids_by_symbol(
-        &self,
-        symbol: impl AsRef<str>,
-    ) -> Option<&SmallVec<[SymbolId; 2]>> {
-        match self {
-            Self::Persistent(p) => p.get_ids_by_symbol(symbol),
-            Self::Transient(t) => t.get_ids_by_symbol(symbol),
-        }
-    }
-
-    pub(crate) fn get_ids_by_address(&self, address: Address) -> Option<&SmallVec<[SymbolId; 2]>> {
-        match self {
-            Self::Persistent(p) => p.get_ids_by_address(address),
-            Self::Transient(t) => t.get_ids_by_address(address),
-        }
-    }
-
     pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         match self {
             Self::Persistent(p) => p.get_id_by_index(index),
             Self::Transient(t) => t.get_id_by_index(index),
-        }
-    }
-
-    pub(crate) fn get_ids_replaced_by_insert(
-        &self,
-        index: SymbolIndex,
-        entry: &SymbolEntry,
-    ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
-        match self {
-            Self::Persistent(p) => p.get_ids_replaced_by_insert(index, entry),
-            Self::Transient(t) => Ok(t.get_ids_replaced_by_insert(index, entry)),
         }
     }
 
@@ -747,31 +683,5 @@ mod test {
         assert!(reloaded.get_first("beta").is_some());
         assert!(reloaded.get_first("alpha").is_none());
         assert!(reloaded.contains_address(Address::from(0x3000u32)));
-    }
-
-    #[test]
-    fn test_revert_restores_previous_entries() {
-        let mut table = persistent_table();
-        let sel = SymbolTableSelector::new(0);
-
-        let id = table
-            .insert(
-                SymbolIndex::new(sel, 1),
-                Address::from(0x1000u32),
-                "alpha",
-                SymbolProperties::LOCAL,
-            )
-            .unwrap()
-            .id();
-
-        let revert = SymbolTableRevert::capture_remove_id(&table, id).unwrap();
-        assert!(table.remove_by_id(id));
-        assert_eq!(table.len(), 0);
-
-        revert.restore(&mut table).unwrap();
-        assert_eq!(table.len(), 1);
-        let (restored_id, entry) = table.get_first("alpha").unwrap();
-        assert_eq!(restored_id, id);
-        assert_eq!(entry.address(), Address::from(0x1000u32));
     }
 }

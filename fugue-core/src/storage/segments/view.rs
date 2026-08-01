@@ -104,6 +104,16 @@ impl<'a> SegmentMappingView<'a> {
         })
     }
 
+    pub(crate) fn mapping_hints_from(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
+        self.mapping
+            .mapping_hints_from(address.raw_address())
+            .map(|(address, hint)| (Address::new(self.space(), address.raw_address()), hint))
+            .take_while(|(address, _)| self.contains(*address))
+    }
+
     pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
         let addr = addr.into();
         self.contains(addr).then(|| {

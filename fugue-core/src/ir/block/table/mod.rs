@@ -1,18 +1,20 @@
-use std::collections::BTreeMap;
-use std::error::Error as StdError;
-use std::fmt::{Debug as FmtDebug, Display};
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
 use iset::IntervalMap;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{
-    Address, AddressRangeSet, CodeBlock, Id, IdAllocation, IdAllocator, IdSet, RawAddress,
+    Address, AddressRange, AddressRangeSet, CodeBlock, Id, IdAllocator, IdSet, RawAddress,
 };
+use crate::ir::persistent::PersistentIdAllocator;
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
 use crate::storage::entities::{
-    Entity, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityMut, EntityRef, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::space::AddressSpaceId;
@@ -21,7 +23,6 @@ use crate::storage::{EntityStorage, EntityStorageError};
 mod persistent;
 mod transient;
 
-use persistent::CodeBlockTable as PersistentCodeBlockTable;
 use transient::CodeBlockTable as TransientCodeBlockTable;
 
 const CODE_BLOCK_TABLE_VERSION: u32 = 1;
@@ -41,7 +42,57 @@ struct CodeBlockIndex {
     live: usize,
 }
 
-pub(crate) type CodeBlockTableAllocation = IdAllocation<CodeBlock>;
+pub(crate) struct PreparedBlockMutation {
+    block: Option<CodeBlock>,
+    encoded_len: usize,
+    id: Id<CodeBlock>,
+    previous: Option<AddressRange>,
+}
+
+impl PreparedBlockMutation {
+    pub(crate) fn new(
+        id: Id<CodeBlock>,
+        block: Option<CodeBlock>,
+        previous: Option<AddressRange>,
+        encoded_len: usize,
+    ) -> Self {
+        Self {
+            block,
+            encoded_len,
+            id,
+            previous,
+        }
+    }
+
+    pub(crate) fn block(&self) -> Option<&CodeBlock> {
+        self.block.as_ref()
+    }
+
+    pub(crate) fn id(&self) -> Id<CodeBlock> {
+        self.id
+    }
+
+    pub(crate) fn previous(&self) -> Option<AddressRange> {
+        self.previous
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Id<CodeBlock>,
+        Option<CodeBlock>,
+        Option<AddressRange>,
+        usize,
+    ) {
+        (self.id, self.block, self.previous, self.encoded_len)
+    }
+}
+
+pub struct PersistentCodeBlockTable {
+    allocator: PersistentIdAllocator<CodeBlock>,
+    entries: EntityCache<Id<CodeBlock>, CodeBlock>,
+    storage: EntityStorage,
+}
 
 pub enum CodeBlockTable {
     Persistent(PersistentCodeBlockTable),
@@ -61,14 +112,14 @@ pub enum CodeBlockTableError {
 impl CodeBlockTableError {
     pub fn other<E>(error: E) -> Self
     where
-        E: StdError + Send + Sync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::new(error))
     }
 
     pub fn other_with<M>(msg: M) -> Self
     where
-        M: FmtDebug + Display + Send + Sync + 'static,
+        M: fmt::Debug + fmt::Display + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::msg(msg))
     }
@@ -76,6 +127,8 @@ impl CodeBlockTableError {
 
 pub type CodeBlockRef<'a> = EntityRef<'a, CodeBlock>;
 pub type CodeBlockMut<'a> = EntityMut<'a, CodeBlock>;
+pub(crate) type CodeBlockIds = SmallVec<[Id<CodeBlock>; 2]>;
+pub(crate) type CodeBlockIdsByStart = Vec<(Address, CodeBlockIds)>;
 
 impl CodeBlockTable {
     pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
@@ -108,34 +161,55 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> CodeBlockTableAllocation {
+    pub(crate) fn preview_id(&self, offset: usize) -> Id<CodeBlock> {
         match self {
-            Self::Persistent(p) => p.allocation_checkpoint(max_pops),
-            Self::Transient(t) => t.allocation_checkpoint(max_pops),
+            Self::Persistent(table) => table
+                .allocator
+                .preview_id(offset)
+                .unwrap_or_else(|error| error.into_fatal()),
+            Self::Transient(t) => t.preview_id(offset),
         }
     }
 
-    pub(crate) fn restore_allocation(&mut self, allocation: CodeBlockTableAllocation) {
-        match self {
-            Self::Persistent(p) => p.restore_allocation(allocation),
-            Self::Transient(t) => t.restore_allocation(allocation),
-        }
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
     }
 
-    pub(crate) fn restore_entry(&mut self, block: CodeBlock) -> Result<(), EntityStorageError> {
+    pub(crate) fn publish_prepared(
+        &mut self,
+        reservations: &[Id<CodeBlock>],
+        cancelled: &BTreeSet<Id<CodeBlock>>,
+        added: usize,
+        removed: usize,
+    ) {
         match self {
-            Self::Persistent(p) => p.restore_entry(block),
-            Self::Transient(t) => {
-                t.restore_entry(block);
-                Ok(())
+            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
+            Self::Transient(table) => {
+                table.publish_reservations(reservations);
+                for &id in cancelled {
+                    table.publish_release(id);
+                }
             }
         }
     }
 
-    pub(crate) fn clear_entry(&mut self, id: Id<CodeBlock>) -> Result<bool, EntityStorageError> {
+    pub(crate) fn publish_upsert(&mut self, block: CodeBlock, encoded_len: usize) {
         match self {
-            Self::Persistent(p) => p.clear_entry(id),
-            Self::Transient(t) => Ok(t.clear_entry(id)),
+            Self::Persistent(p) => p.publish_upsert(block, encoded_len),
+            Self::Transient(t) => t.publish_upsert(block),
+        }
+    }
+
+    pub(crate) fn publish_new_batch(&mut self, blocks: impl IntoIterator<Item = CodeBlock>) {
+        if let Self::Transient(table) = self {
+            table.publish_batch(blocks);
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: Id<CodeBlock>, previous: AddressRange) {
+        match self {
+            Self::Persistent(p) => p.publish_remove(id),
+            Self::Transient(t) => t.publish_remove(id, previous),
         }
     }
 
@@ -284,6 +358,32 @@ impl CodeBlockTable {
         }
     }
 
+    pub(crate) fn find_by_range_and_context(
+        &self,
+        range: AddressRange,
+        context: &ContextSet,
+        predicate: impl FnMut(&CodeBlock) -> bool,
+    ) -> Option<CodeBlockRef<'_>> {
+        match self {
+            Self::Persistent(table) => table
+                .find_by_range_and_context(range, context, predicate)
+                .map(EntityRef::cached),
+            Self::Transient(table) => table
+                .find_by_range_and_context(range, context, predicate)
+                .map(EntityRef::borrowed),
+        }
+    }
+
+    pub(crate) fn try_ids_at_starts(
+        &self,
+        starts: &[Address],
+    ) -> Result<CodeBlockIdsByStart, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.ids_at_starts(starts),
+            Self::Transient(table) => Ok(table.ids_at_starts(starts)),
+        }
+    }
+
     pub fn contains(&self, addr: Address) -> bool {
         match self {
             Self::Persistent(p) => p.contains(addr),
@@ -298,8 +398,14 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn block_containing(&self, address: Address) -> Option<CodeBlockRef<'_>> {
-        self.overlaps(address).next()
+    pub fn overlaps_range<'a>(
+        &'a self,
+        range: &'a AddressRange,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
+        match self {
+            Self::Persistent(p) => Box::new(p.overlaps_range(range).map(EntityRef::cached)),
+            Self::Transient(t) => Box::new(t.overlaps_range(range).map(EntityRef::borrowed)),
+        }
     }
 
     pub fn get_by_address_mut(
@@ -384,6 +490,8 @@ impl PersistableProjectEntity for CodeBlockTable {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeSet;
+
     #[cfg(feature = "sqlite")]
     use tempfile::TempDir;
 
@@ -483,6 +591,15 @@ mod test {
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id2));
         assert!(overlaps.iter().any(|blk| blk.id() == blk_id3));
 
+        let exact = table
+            .find_by_range_and_context(
+                AddressRange::from_size(addr2, 0x8).expect("valid block range"),
+                &ContextSet::default(),
+                |_| true,
+            )
+            .expect("block with exact range exists");
+        assert_eq!(exact.id(), blk_id2);
+
         let removed_count = table.remove_by_address(Address::from(0x1000));
         assert_eq!(removed_count, 2);
 
@@ -513,7 +630,7 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn test_free_id_rebuild_on_reopen_sqlite() {
+    fn test_free_id_reuse_after_reopen_sqlite() {
         let dir = TempDir::new().unwrap();
 
         {
@@ -562,7 +679,14 @@ mod test {
             })
             .unwrap();
 
-        assert_eq!([first.index(), second.index(), third.index()], [5, 6, 7]);
+        assert_eq!(
+            [
+                (first.index(), first.generation()),
+                (second.index(), second.generation()),
+                (third.index(), third.generation()),
+            ],
+            [(1, 1), (3, 1), (5, 0)]
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -570,7 +694,6 @@ mod test {
     fn test_get_by_id_mut_persists_sqlite() {
         let dir = TempDir::new().unwrap();
         let addr = Address::from(0x1000);
-        let successor = Id::<CodeBlock>::new(7);
 
         {
             let storage =
@@ -586,7 +709,7 @@ mod test {
 
             {
                 let mut block = table.get_by_id_mut(bid).expect("block exists");
-                block.add_successor(successor);
+                block.mark_call();
             }
 
             table.flush().unwrap();
@@ -598,14 +721,13 @@ mod test {
         let table = CodeBlockTable::with_worker(storage, worker, 64 * 1024).unwrap();
 
         let block = table.get_by_address(addr).next().expect("block exists");
-        assert!(block.successors().contains(successor));
+        assert!(block.is_call());
     }
 
     #[cfg(feature = "sqlite")]
     #[test]
     fn test_iter_mut_persists() {
         let dir = TempDir::new().unwrap();
-        let successor = Id::<CodeBlock>::new(99);
 
         {
             let storage =
@@ -622,7 +744,7 @@ mod test {
             }
 
             for mut block in table.iter_mut() {
-                block.add_successor(successor);
+                block.mark_unresolved();
             }
 
             table.flush().unwrap();
@@ -635,7 +757,7 @@ mod test {
 
         assert_eq!(table.len(), 3);
         for block in table.iter() {
-            assert!(block.successors().contains(successor));
+            assert!(block.has_unresolved());
         }
     }
 
@@ -664,9 +786,40 @@ mod test {
     }
 
     #[test]
+    fn transient_block_batches_merge_exact_and_overlapping_ranges() {
+        let mut table = CodeBlockTable::new_transient();
+        let ids = (0..5)
+            .map(|offset| table.preview_id(offset))
+            .collect::<Vec<_>>();
+        table.publish_prepared(&ids, &BTreeSet::new(), 0, 0);
+
+        let block = |id, address, len| {
+            CodeBlock::try_new(id, Address::from(address), len, InsnList::new())
+                .expect("valid block")
+        };
+        table.publish_new_batch([
+            block(ids[0], 0x1000, 0x10),
+            block(ids[1], 0x2000, 0x10),
+        ]);
+        table.publish_new_batch([
+            block(ids[2], 0x1000, 0x10),
+            block(ids[3], 0x1008, 0x10),
+            block(ids[4], 0x3000, 0x10),
+        ]);
+
+        let overlaps = table
+            .overlaps(Address::from(0x1008))
+            .map(|block| block.id())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(overlaps, BTreeSet::from([ids[0], ids[2], ids[3]]));
+        assert_eq!(table.len(), ids.len());
+        assert!(table.contains(Address::from(0x2000)));
+        assert!(table.contains(Address::from(0x3000)));
+    }
+
+    #[test]
     fn test_transient_iter_mut_mutate() {
         let mut table = CodeBlockTable::new_transient();
-        let successor = Id::<CodeBlock>::new(42);
 
         let ids = (1..=3u64)
             .map(|base| {
@@ -679,12 +832,12 @@ mod test {
             .collect::<Vec<_>>();
 
         for mut block in table.iter_mut() {
-            block.add_successor(successor);
+            block.mark_call();
         }
 
         for id in ids {
             let block = table.get_by_id(id).unwrap();
-            assert!(block.successors().contains(successor));
+            assert!(block.is_call());
         }
     }
 }

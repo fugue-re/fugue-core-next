@@ -24,7 +24,7 @@ pub use entities::{
     DummyEntityStorage, ENTITY_PROJECT_REVISION_ID, Entity, EntityBytesAsIterator,
     EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityId,
     EntityIterator, EntityKey, EntityKeyBytesIterator, EntityKeyId, EntityKeyIterator,
-    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError,
+    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError, EntityWrite,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityTransactionalReader,
     EntityTransactionalWriter, InMemoryEntityStorage, MutableEntity, ProjectEntity,
@@ -40,13 +40,13 @@ pub(crate) mod segments;
 pub use segments::{
     AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind, DEFAULT_SPACE_ID,
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
-    SegmentMapping, SegmentMappingBuilder, SegmentMappingCache, SegmentMappingFlags,
-    SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
-    SegmentMappingView, SegmentStorage, SegmentStorageDescriptor, SegmentStorageError,
-    SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
-    SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
-    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
-    SegmentSubMapping,
+    MemoryMappedSegmentStorage, SegmentMapping, SegmentMappingBuilder, SegmentMappingCache,
+    SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
+    SegmentMappingRef, SegmentMappingView, SegmentStorage, SegmentStorageDescriptor,
+    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderDescriptor,
+    SegmentStorageProviderEntry, SegmentStorageProviderFromLoadable,
+    SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
+    SegmentStorageProviderId, SegmentStorageProviderRegistry, SegmentSubMapping,
 };
 
 // The magic bytes used to identify a Fugue project file.
@@ -83,6 +83,9 @@ pub const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 pub const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
 pub const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+pub const ATTRIBUTE_PROBLEM_CACHE_SIZE: &str = "storage.entities.problem.cache_size";
+pub const DEFAULT_PROBLEM_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
@@ -259,6 +262,39 @@ impl StorageContainer {
 
     pub fn write_back(&self) -> Option<&Arc<WriteBackWorker>> {
         self.write_back.as_ref()
+    }
+
+    pub(crate) fn entity<K, E>(&self, key: &K) -> Result<Option<E>, EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+    {
+        if let Some(worker) = self.write_back() {
+            let encoded_key = entities::schema::make_key::<K, E>(key);
+            if let Some(pending) = worker.pending(&encoded_key) {
+                return match pending {
+                    WriteBackAction::Insert(bytes) => entities::decode_entity(&bytes).map(Some),
+                    WriteBackAction::Remove => Ok(None),
+                };
+            }
+        }
+
+        self.entities.get::<K, E>(key)
+    }
+
+    pub(crate) fn contains_entity<K, E>(&self, key: &K) -> Result<bool, EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+    {
+        if let Some(worker) = self.write_back() {
+            let encoded_key = entities::schema::make_key::<K, E>(key);
+            if let Some(pending) = worker.pending(&encoded_key) {
+                return Ok(matches!(pending, WriteBackAction::Insert(_)));
+            }
+        }
+
+        self.entities.contains::<K, E>(key)
     }
 
     pub(crate) fn table<T>(

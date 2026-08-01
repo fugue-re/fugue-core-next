@@ -10,7 +10,6 @@ use crate::types::Confidence;
 use crate::types::common::archived_bitflags;
 
 mod table;
-pub(crate) use table::SwitchTableRevert;
 pub use table::{SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;

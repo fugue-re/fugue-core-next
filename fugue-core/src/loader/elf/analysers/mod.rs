@@ -6,10 +6,9 @@ use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryHandler};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
-use crate::platform::CallingConvention;
+use crate::platform::{CallingConvention, Format};
 use crate::project::Project;
 use crate::registry::submit;
-use crate::types::attributes::ATTRIBUTE_LOADER_FORMAT;
 
 mod specs;
 
@@ -38,12 +37,7 @@ impl<'a> ElfAnalysers<'a> {
         project: &Project,
         analyser: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        if project
-            .attributes()
-            .get_attr::<String>(ATTRIBUTE_LOADER_FORMAT)
-            .as_deref()
-            != Some("elf")
-        {
+        if project.platform().format() != Format::Elf {
             return Ok(());
         }
 

@@ -14,7 +14,7 @@ use crate::types::common::archived_bitflags;
 
 mod table;
 
-pub(crate) use table::SymbolTableRevert;
+pub(crate) use table::SymbolIndexState;
 pub use table::{SymbolInsertion, SymbolRef, SymbolTable, TransientSymbolTable};
 
 pub type SymbolId = Id<Symbol>;
@@ -127,18 +127,18 @@ where
         self.properties = properties;
     }
 
-    fn add_index(&mut self, index: SymbolIndex) {
+    pub(crate) fn add_index(&mut self, index: SymbolIndex) {
         if !self.indices.contains(&index) {
             self.indices.push(index);
         }
     }
 
-    fn with_index(mut self, index: SymbolIndex) -> Self {
+    pub(crate) fn with_index(mut self, index: SymbolIndex) -> Self {
         self.add_index(index);
         self
     }
 
-    fn remove_index(&mut self, index: SymbolIndex) {
+    pub(crate) fn remove_index(&mut self, index: SymbolIndex) {
         self.indices.retain(|existing| *existing != index);
     }
 

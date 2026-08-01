@@ -1,43 +1,82 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::{self, Display, Formatter};
 use std::mem;
 use std::ops::{ControlFlow, RangeInclusive};
 use std::time::Instant;
 
-use itertools::{Itertools, MinMaxResult};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::Level;
 
+use super::builder::{FunctionBuilderInputs, FunctionCandidateOutcome};
 use super::{
-    FunctionBuilder, FunctionBuilderContext, FunctionRecoveryCommitContext,
-    FunctionRecoveryCommitHook, FunctionRecoveryConfig, FunctionRecoveryError,
-    FunctionRecoveryState, InsnResolver,
+    FUNCTION_RECOVERY_BLOCKING_PROBLEMS, FunctionBuilder, FunctionBuilderContext,
+    FunctionRecoveryCommitContext, FunctionRecoveryCommitHook, FunctionRecoveryConfig,
+    FunctionRecoveryError, FunctionRecoveryState, InsnResolver,
 };
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::engine::{Analyser, AnalyserProvider, AnalysisContext, Priority, Trigger};
-use crate::ir::{
-    Address, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionProperties,
-    FunctionTable, IncompleteFunction, RawAddress, RawAddressRangeSet,
+use crate::engine::change::ChangeKinds;
+use crate::engine::{
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisPhase, Priority, ProjectUpdate,
+    ProjectView,
 };
-use crate::project::{Project, ProjectTransaction};
+use crate::ir::{
+    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionProperties,
+    FunctionTable, IncompleteFunction, ProblemKind, RawAddress, RawAddressRangeSet,
+};
+use crate::project::Project;
 use crate::registry::{self, Registration, submit};
 use crate::storage::{AddressSpaceId, SegmentStorage};
 use crate::types::Confidence;
 
-pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS: usize = 128;
-pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES: usize = 512;
+pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS: usize = 8192;
+pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES: usize = 8192;
+pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateExclusionReason {
+    AssertedFact,
+    ProblemCurrent(ProblemKind),
+    RetriesExhausted(ProblemKind),
+}
+
+impl Display for CandidateExclusionReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AssertedFact => f.write_str("a user assertion forbids a function here"),
+            Self::ProblemCurrent(kind) => write!(f, "recorded {kind:?} problem is still current"),
+            Self::RetriesExhausted(kind) => {
+                write!(f, "retry budget for {kind:?} is exhausted")
+            }
+        }
+    }
+}
+
+const FUNCTION_RECOVERY_ANALYSER: &str = "function-recovery";
 
 pub struct FunctionRecovery {
+    boundaries: FunctionBoundaries,
+    boundary_reconciliation_pending: bool,
     candidates: VecDeque<AddressWithContext>,
     builder: FunctionBuilder,
     discovery_passes: AnalysisGroup<FunctionDiscoveryContext>,
     structuring_passes: AnalysisGroup<FunctionStructuringContext>,
     commit_hook: Option<Box<dyn FunctionRecoveryCommitHook + 'static>>,
+    chunk_output_byte_limit: Option<usize>,
     chunk_candidate_limit: Option<usize>,
     chunk_function_limit: Option<usize>,
+    continuation_coverage: Option<FunctionCoverage>,
+    project_candidates_seeded: bool,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
+    reanalysis_candidates: FxHashSet<Address>,
+    recovery_active: bool,
     discovered_targets: Vec<AddressWithContext>,
     cancellation: CancellationToken,
     progress: Progress,
+    wave_active: bool,
+    wave_inputs: Option<FunctionRecoveryInputs>,
 }
 
 type FunctionRecoveryExtensionFn = fn(&Project, &mut FunctionRecovery) -> Result<(), AnalysisError>;
@@ -45,11 +84,25 @@ type FunctionRecoveryExtensionFn = fn(&Project, &mut FunctionRecovery) -> Result
 pub struct FunctionRecoveryExtension {
     apply: FunctionRecoveryExtensionFn,
     name: &'static str,
+    priority: Priority,
 }
 
 impl FunctionRecoveryExtension {
     pub const fn new(name: &'static str, apply: FunctionRecoveryExtensionFn) -> Self {
-        Self { apply, name }
+        Self {
+            apply,
+            name,
+            priority: Priority::DISCOVERY,
+        }
+    }
+
+    pub const fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn priority(&self) -> Priority {
+        self.priority
     }
 
     pub fn apply(
@@ -73,18 +126,49 @@ registry::collect!(FunctionRecoveryExtension);
 pub struct FunctionDiscoveryContext {
     config: FunctionRecoveryConfig,
     candidates: VecDeque<AddressWithContext>,
-    avoids: RawAddressRangeSet,
-    failures: BTreeSet<Address>,
+    avoids: AddressRangeSet,
+    coverage: FunctionCoverage,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
 }
 
 #[derive(Default)]
+struct FunctionCoverage {
+    available: BTreeMap<AddressSpaceId, RawAddressRangeSet>,
+    covered: AddressRangeSet,
+    fine_grained: bool,
+    pending: Vec<AddressRange>,
+}
+
+#[derive(Default)]
+struct FunctionRecoveryProblems {
+    exclusions: FxHashMap<Address, (usize, CandidateExclusionReason)>,
+}
+
+struct FunctionRecoveryInputs {
+    function_entries: Vec<Address>,
+    non_returning_targets: Vec<Address>,
+    problems: FunctionRecoveryProblems,
+}
+
+#[derive(Default)]
+struct FunctionBoundaries {
+    entries: Vec<Address>,
+    initialised: bool,
+    scratch: Vec<Address>,
+}
+
+#[derive(Default)]
+struct FunctionBoundaryChanges {
+    added: Vec<Address>,
+    removed: Vec<Address>,
+}
+
+#[derive(Default)]
 pub struct FunctionStructuringContext {
     config: FunctionRecoveryConfig,
-    avoids: RawAddressRangeSet,
+    avoids: AddressRangeSet,
     candidates: VecDeque<AddressWithContext>,
-    failures: BTreeSet<Address>,
     functions: BTreeMap<Address, Confidence>,
     new_functions: BTreeMap<Address, Confidence>,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
@@ -114,11 +198,11 @@ impl FunctionDiscoveryContext {
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
     }
 
-    pub fn avoids(&self) -> &RawAddressRangeSet {
+    pub fn avoids(&self) -> &AddressRangeSet {
         &self.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
         &mut self.avoids
     }
 
@@ -126,16 +210,8 @@ impl FunctionDiscoveryContext {
         self.avoids.insert(address.into());
     }
 
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
-        self.avoids.insert_range(range);
-    }
-
-    pub fn failures(&self) -> &BTreeSet<Address> {
-        &self.failures
-    }
-
-    pub fn add_failure(&mut self, address: impl Into<Address>) {
-        self.failures.insert(address.into());
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_meta_range(range.into());
     }
 
     pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
@@ -146,79 +222,19 @@ impl FunctionDiscoveryContext {
         &self.new_functions
     }
 
-    fn covered_by_minmax_block_bounds(
-        &self,
-        ftable: &FunctionTable,
-        cbtable: &CodeBlockTable,
-    ) -> RawAddressRangeSet {
-        let mut covered = RawAddressRangeSet::new();
-
-        for function in ftable.iter() {
-            let mm = function.blocks().minmax_by_key(|&(addr, _)| addr);
-
-            match mm {
-                MinMaxResult::OneElement((_, bid)) => {
-                    if let Some(block) = cbtable.get_by_id(bid) {
-                        covered.insert_meta_range(block.range());
-                    }
-                }
-                MinMaxResult::MinMax((_, min_bid), (_, max_bid)) => {
-                    if let (Some(min_block), Some(max_block)) =
-                        (cbtable.get_by_id(min_bid), cbtable.get_by_id(max_bid))
-                    {
-                        covered.insert_meta_range(min_block.address()..=max_block.last_address());
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        covered
+    pub fn covered(&self) -> &AddressRangeSet {
+        &self.coverage.covered
     }
 
-    fn covered_by_all_block_bounds(
-        &self,
-        ftable: &FunctionTable,
-        cbtable: &CodeBlockTable,
-    ) -> RawAddressRangeSet {
-        let mut covered = RawAddressRangeSet::new();
-
-        for function in ftable.iter() {
-            for block in function
-                .blocks()
-                .filter_map(|(_, bid)| cbtable.get_by_id(bid))
-            {
-                covered.insert_meta_range(block.range());
-            }
-        }
-
-        covered
+    pub fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
+        self.coverage.gaps(space_id)
     }
 
-    pub fn covered(&self, ftable: &FunctionTable, cbtable: &CodeBlockTable) -> RawAddressRangeSet {
-        if self.config.use_fine_grained_block_coverage() {
-            self.covered_by_all_block_bounds(ftable, cbtable)
-        } else {
-            self.covered_by_minmax_block_bounds(ftable, cbtable)
-        }
-    }
-
-    pub fn gaps(
+    pub(super) fn available_ranges(
         &self,
-        ftable: &FunctionTable,
-        cbtable: &CodeBlockTable,
-        segments: &SegmentStorage,
         space_id: AddressSpaceId,
-    ) -> Result<RawAddressRangeSet, FunctionRecoveryError> {
-        let covered = self.covered(ftable, cbtable);
-
-        let avail = segments
-            .iter_views(space_id)?
-            .filter(|segm| segm.properties().is_executable() && !segm.properties().is_external())
-            .map(|segm| segm.start()..=segm.last())
-            .collect::<RawAddressRangeSet>();
-
-        Ok(avail.difference(&covered))
+    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
+        self.coverage.available_ranges(space_id)
     }
 
     fn insert_function(
@@ -238,16 +254,248 @@ impl FunctionDiscoveryContext {
     }
 
     fn candidate_known(
-        project: &Project,
+        project_functions: &FunctionTable,
         pending_functions: &BTreeMap<Address, IncompleteFunction>,
         functions: &BTreeMap<Address, Confidence>,
         new_functions: &BTreeMap<Address, Confidence>,
         address: Address,
     ) -> bool {
-        project.functions().get_by_address(address).is_some()
-            || pending_functions.contains_key(&address)
+        pending_functions.contains_key(&address)
             || functions.contains_key(&address)
             || new_functions.contains_key(&address)
+            || project_functions.contains(address)
+    }
+}
+
+impl FunctionCoverage {
+    fn new(
+        config: &FunctionRecoveryConfig,
+        ftable: &FunctionTable,
+        cbtable: &CodeBlockTable,
+        segments: &SegmentStorage,
+    ) -> Result<Self, FunctionRecoveryError> {
+        let mut coverage = Self {
+            available: BTreeMap::new(),
+            covered: AddressRangeSet::new(),
+            fine_grained: config.use_fine_grained_block_coverage(),
+            pending: Vec::new(),
+        };
+
+        for space_id in segments.spaces().map(|space| space.id()) {
+            let mut gaps = RawAddressRangeSet::new();
+            for view in segments.iter_views(space_id)?.filter(|view| {
+                view.properties().is_executable() && !view.properties().is_external()
+            }) {
+                gaps.insert_range(view.start().raw_address()..=view.last().raw_address());
+            }
+            coverage.available.insert(space_id, gaps);
+        }
+
+        for function in ftable.iter() {
+            if coverage.fine_grained {
+                for block in function
+                    .blocks()
+                    .filter_map(|(_, block)| cbtable.get_by_id(block))
+                {
+                    coverage.insert_range(block.address_range());
+                }
+                continue;
+            }
+
+            let mut blocks = function.blocks();
+            let Some((first, first_block)) = blocks.next() else {
+                continue;
+            };
+            let last = blocks
+                .next_back()
+                .map(|(_, block)| block)
+                .unwrap_or(first_block);
+            if let Some(last) = cbtable.get_by_id(last) {
+                coverage.insert_range(AddressRange::new(
+                    first.space(),
+                    first.raw_address(),
+                    last.last_address().raw_address(),
+                ));
+            }
+        }
+        coverage.flush();
+
+        Ok(coverage)
+    }
+
+    fn insert(&mut self, function: &IncompleteFunction) {
+        if self.fine_grained {
+            for block in function.blocks() {
+                if let Some(range) = AddressRange::from_size(block.address(), block.len() as u64) {
+                    self.insert_range(range);
+                }
+            }
+            return;
+        }
+
+        let Some(first) = function.blocks().first() else {
+            return;
+        };
+        let last = function
+            .blocks()
+            .last()
+            .expect("function has a first block");
+        let Some(last) = AddressRange::from_size(last.address(), last.len() as u64) else {
+            return;
+        };
+        self.insert_range(AddressRange::new(
+            first.address().space(),
+            first.address().raw_address(),
+            last.end(),
+        ));
+    }
+
+    fn insert_range(&mut self, range: AddressRange) {
+        self.pending.push(range);
+    }
+
+    fn flush(&mut self) {
+        self.pending.sort_unstable();
+
+        let mut output = 0usize;
+        for input in 0..self.pending.len() {
+            let range = self.pending[input];
+            if output != 0 {
+                let previous = &mut self.pending[output - 1];
+                let adjacent = previous
+                    .end()
+                    .checked_add(1usize)
+                    .is_some_and(|next| range.start() <= next);
+                if previous.space() == range.space() && (previous.intersects(&range) || adjacent) {
+                    *previous = AddressRange::new(
+                        previous.space(),
+                        previous.start(),
+                        previous.end().max(range.end()),
+                    );
+                    continue;
+                }
+            }
+            self.pending[output] = range;
+            output += 1;
+        }
+
+        for index in 0..output {
+            self.covered.insert_range(self.pending[index]);
+        }
+        self.pending.clear();
+    }
+
+    fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
+        let mut gaps = AddressRangeSet::new();
+        if let Some(available) = self.available.get(&space_id) {
+            let covered = self
+                .covered
+                .spaces()
+                .find_map(|(space, ranges)| (space == space_id).then_some(ranges));
+            let ranges = covered
+                .map(|covered| available.difference(covered))
+                .unwrap_or_else(|| available.clone());
+            for range in ranges.ranges() {
+                gaps.insert_raw_range(space_id, range);
+            }
+        }
+        gaps
+    }
+
+    fn available_ranges(
+        &self,
+        space_id: AddressSpaceId,
+    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
+        self.available
+            .get(&space_id)
+            .into_iter()
+            .flat_map(RawAddressRangeSet::ranges)
+    }
+}
+
+impl FunctionRecoveryProblems {
+    fn new(project: &ProjectView<'_>) -> Self {
+        let mut problems = Self::default();
+
+        for problem in project.problems().iter() {
+            let kind = problem.kind();
+            let Some(priority) = FUNCTION_RECOVERY_BLOCKING_PROBLEMS
+                .iter()
+                .position(|candidate| *candidate == kind)
+            else {
+                continue;
+            };
+            let Some(address) = problem.address() else {
+                continue;
+            };
+            let exclusion = if kind == ProblemKind::HinderedByAssertedFact {
+                CandidateExclusionReason::AssertedFact
+            } else if problem.attempts() >= DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS {
+                CandidateExclusionReason::RetriesExhausted(kind)
+            } else {
+                CandidateExclusionReason::ProblemCurrent(kind)
+            };
+
+            let entry = problems
+                .exclusions
+                .entry(address)
+                .or_insert((priority, exclusion));
+            if priority < entry.0 {
+                *entry = (priority, exclusion);
+            }
+        }
+
+        problems
+    }
+
+    fn exclusion_at(&self, address: Address) -> Option<CandidateExclusionReason> {
+        self.exclusions
+            .get(&address)
+            .map(|(_, exclusion)| *exclusion)
+    }
+}
+
+impl FunctionBoundaries {
+    fn entries(&self) -> &[Address] {
+        &self.entries
+    }
+
+    fn synchronise(&mut self, functions: &FunctionTable) -> FunctionBoundaryChanges {
+        self.scratch.clear();
+        self.scratch.extend(functions.addresses());
+        debug_assert!(self.scratch.is_sorted());
+
+        if !self.initialised {
+            mem::swap(&mut self.entries, &mut self.scratch);
+            self.initialised = true;
+            return FunctionBoundaryChanges::default();
+        }
+
+        let mut changes = FunctionBoundaryChanges::default();
+        let mut previous = self.entries.iter().copied().peekable();
+        let mut current = self.scratch.iter().copied().peekable();
+
+        while let (Some(&old), Some(&new)) = (previous.peek(), current.peek()) {
+            match old.cmp(&new) {
+                Ordering::Less => {
+                    changes.removed.push(old);
+                    previous.next();
+                }
+                Ordering::Equal => {
+                    previous.next();
+                    current.next();
+                }
+                Ordering::Greater => {
+                    changes.added.push(new);
+                    current.next();
+                }
+            }
+        }
+        changes.removed.extend(previous);
+        changes.added.extend(current);
+
+        mem::swap(&mut self.entries, &mut self.scratch);
+        changes
     }
 }
 
@@ -260,28 +508,20 @@ impl FunctionStructuringContext {
         self.candidates.push_back(candidate.into());
     }
 
-    pub fn avoids(&self) -> &RawAddressRangeSet {
+    pub fn avoids(&self) -> &AddressRangeSet {
         &self.avoids
     }
 
-    pub fn avoids_mut(&mut self) -> &mut RawAddressRangeSet {
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
         &mut self.avoids
     }
 
     pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into().offset());
+        self.avoids.insert(address.into());
     }
 
-    pub fn add_avoid_range(&mut self, range: RangeInclusive<Address>) {
-        self.avoids.insert_meta_range(range);
-    }
-
-    pub fn failures(&self) -> &BTreeSet<Address> {
-        &self.failures
-    }
-
-    pub fn add_failure(&mut self, address: impl Into<Address>) {
-        self.failures.insert(address.into());
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_meta_range(range.into());
     }
 
     pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
@@ -390,22 +630,35 @@ impl FunctionRecovery {
 
     pub fn new_with(config: FunctionRecoveryConfig) -> Self {
         FunctionRecovery {
+            boundaries: FunctionBoundaries::default(),
+            boundary_reconciliation_pending: false,
             candidates: VecDeque::new(),
             builder: FunctionBuilder::new(config),
             discovery_passes: AnalysisGroup::new(),
             structuring_passes: AnalysisGroup::new(),
             commit_hook: None,
+            chunk_output_byte_limit: None,
             chunk_candidate_limit: None,
             chunk_function_limit: None,
+            continuation_coverage: None,
+            project_candidates_seeded: false,
             pending_functions: BTreeMap::new(),
+            reanalysis_candidates: FxHashSet::default(),
+            recovery_active: false,
             discovered_targets: Vec::new(),
             cancellation: CancellationToken::default(),
             progress: Progress::default(),
+            wave_active: false,
+            wave_inputs: None,
         }
     }
 
     pub fn config(&self) -> &FunctionRecoveryConfig {
         self.builder.config()
+    }
+
+    pub fn config_mut(&mut self) -> &mut FunctionRecoveryConfig {
+        self.builder.config_mut()
     }
 
     pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
@@ -438,6 +691,14 @@ impl FunctionRecovery {
 
     pub fn set_chunk_function_limit(&mut self, limit: Option<usize>) {
         self.chunk_function_limit = limit.filter(|limit| *limit > 0);
+    }
+
+    pub fn chunk_output_byte_limit(&self) -> Option<usize> {
+        self.chunk_output_byte_limit
+    }
+
+    pub fn set_chunk_output_byte_limit(&mut self, limit: Option<usize>) {
+        self.chunk_output_byte_limit = limit.filter(|limit| *limit > 0);
     }
 
     pub fn chunk_candidate_limit(&self) -> Option<usize> {
@@ -504,12 +765,106 @@ impl FunctionRecovery {
         self.commit_hook = Some(Box::new(hook));
     }
 
-    fn add_project_candidates(&mut self, project: &Project) -> Result<(), AnalysisError> {
+    fn start_recovery(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
+        self.synchronise_boundaries(project)?;
+        self.recovery_active = true;
+        Ok(())
+    }
+
+    fn start_wave(&mut self, project: &ProjectView<'_>) {
+        if self.wave_active {
+            return;
+        }
+
+        let mut targets = project
+            .functions()
+            .iter()
+            .filter(|function| function.is_non_returning())
+            .map(|function| function.address())
+            .collect::<Vec<_>>();
+        targets.extend(
+            project
+                .symbols()
+                .iter_by_address()
+                .filter(|(_, symbol)| symbol.is_non_returning())
+                .map(|(_, symbol)| symbol.address()),
+        );
+        targets.sort_unstable();
+        targets.dedup();
+
+        self.wave_inputs = Some(FunctionRecoveryInputs {
+            function_entries: self.boundaries.entries().to_vec(),
+            non_returning_targets: targets,
+            problems: FunctionRecoveryProblems::new(project),
+        });
+        self.wave_active = true;
+    }
+
+    fn finish_wave_after_admission(&mut self) {
+        if self.candidates.is_empty() && self.pending_functions.is_empty() {
+            self.boundary_reconciliation_pending = true;
+            self.wave_active = false;
+        }
+    }
+
+    fn synchronise_boundaries(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
+        let changes = self.boundaries.synchronise(project.functions());
+        if changes.added.is_empty() && changes.removed.is_empty() {
+            return Ok(());
+        }
+
+        let blocks = project.blocks();
+        let functions = project.functions();
+        let mut callers = BTreeSet::new();
+
+        for boundary in changes.added {
+            for function in functions.functions_containing(blocks, boundary) {
+                let Some(function) = functions.get_by_id(function) else {
+                    continue;
+                };
+                if function.address() != boundary {
+                    callers.insert(function.address());
+                }
+            }
+        }
+
+        for boundary in changes.removed {
+            let references = project
+                .references()
+                .references_to(boundary.into(), None)
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
+            for reference in references {
+                let reference = reference.map_err(|error| {
+                    AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error)
+                })?;
+                if !(reference.is_call() && reference.is_jump() && reference.is_terminal()) {
+                    continue;
+                }
+                for function in functions.functions_containing(blocks, reference.from()) {
+                    let Some(function) = functions.get_by_id(function) else {
+                        continue;
+                    };
+                    callers.insert(function.address());
+                }
+            }
+        }
+
+        for caller in callers {
+            if self.reanalysis_candidates.insert(caller) {
+                self.candidates.push_back(caller.into());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn seed_project_candidates(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
         self.cancellation.check()?;
+        let mut candidates = BTreeSet::new();
 
         if let Some(entry) = project.entry() {
             tracing::debug!("entry point: {entry}");
-            self.add_candidate(entry);
+            candidates.insert(entry.into());
         }
 
         if self.config().use_symbol_table_function_hints() {
@@ -525,7 +880,7 @@ impl FunctionRecovery {
                     entry.address(),
                     entry.symbol(),
                 );
-                self.add_candidate(entry.address());
+                candidates.insert(entry.address().into());
             }
         }
 
@@ -533,16 +888,43 @@ impl FunctionRecovery {
             for hint in project.segments().function_hints() {
                 self.cancellation.check()?;
                 tracing::debug!(source = "segment", "function hint: {hint}");
-                self.add_candidate(hint);
+                candidates.insert(hint.into());
             }
         }
+
+        let arch = project.arch();
+        let blocks = project.blocks();
+        let functions = project.functions();
+        for function in functions.iter() {
+            self.cancellation.check()?;
+            for target in function
+                .flow_targets(blocks)
+                .filter(|target| target.kind().is_global())
+            {
+                let target = target.to();
+                let Some((address, context)) = arch.canonicalise_address(target.raw_address())
+                else {
+                    continue;
+                };
+                let address = Address::new(target.space(), address);
+                if functions.get_by_address(address).is_none() {
+                    candidates.insert(AddressWithContext::new(address, context));
+                }
+            }
+        }
+
+        for queued in &self.candidates {
+            candidates.remove(queued);
+        }
+        self.candidates.extend(candidates);
+        self.project_candidates_seeded = true;
 
         Ok(())
     }
 
     fn add_region_candidates(
         &mut self,
-        project: &Project,
+        project: &ProjectView<'_>,
         regions: &AddressRangeSet,
     ) -> Result<(), AnalysisError> {
         for range in regions.ranges() {
@@ -582,88 +964,136 @@ impl FunctionRecovery {
 
         Ok(())
     }
-    pub fn analyse_transaction(
+
+    pub fn analyse_view(
         &mut self,
-        transaction: &mut ProjectTransaction<'_>,
+        project: &ProjectView<'_>,
+        updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
-        self.add_project_candidates(transaction.project())?;
-        self.analyse_candidates(transaction, None, None)
+        if !self.recovery_active {
+            self.start_recovery(project)?;
+        }
+        if !self.project_candidates_seeded {
+            self.seed_project_candidates(project)?;
+        }
+        self.analyse_candidates(
+            project,
+            updates,
+            self.chunk_output_byte_limit,
+            self.chunk_function_limit,
+            self.chunk_candidate_limit,
+            1,
+        )
     }
 
     fn analyse_regions(
         &mut self,
-        transaction: &mut ProjectTransaction<'_>,
+        project: &ProjectView<'_>,
+        updates: &mut Vec<ProjectUpdate>,
         regions: &AddressRangeSet,
+        worker_limit: usize,
     ) -> Result<(), AnalysisError> {
-        if transaction.project().functions().is_empty() {
-            self.add_project_candidates(transaction.project())?;
-        } else {
-            self.add_region_candidates(transaction.project(), regions)?;
+        let functions_empty = project.functions().is_empty();
+        let project_seed_required = !self.project_candidates_seeded;
+        if project_seed_required {
+            self.seed_project_candidates(project)?;
+        }
+        if !functions_empty || !project_seed_required {
+            self.add_region_candidates(project, regions)?;
         }
 
         self.analyse_candidates(
-            transaction,
+            project,
+            updates,
+            self.chunk_output_byte_limit,
             self.chunk_function_limit,
             self.chunk_candidate_limit,
+            worker_limit,
         )
     }
 
-    fn function_chunk_exhausted(function_limit: Option<usize>, chunk_functions: usize) -> bool {
-        function_limit.is_some_and(|limit| chunk_functions >= limit)
+    fn chunk_exhausted(
+        output_byte_limit: Option<usize>,
+        function_limit: Option<usize>,
+        output_bytes: usize,
+        chunk_functions: usize,
+    ) -> bool {
+        output_byte_limit.is_some_and(|limit| output_bytes >= limit)
+            || function_limit.is_some_and(|limit| chunk_functions >= limit)
     }
 
-    fn commit_pending_function(
-        transaction: &mut ProjectTransaction<'_>,
+    fn exceeds_remaining_output(
+        output_byte_limit: Option<usize>,
+        output_bytes: usize,
+        function_bytes: usize,
+    ) -> bool {
+        output_bytes != 0
+            && output_byte_limit
+                .is_some_and(|limit| function_bytes > limit.saturating_sub(output_bytes))
+    }
+
+    fn stage_function_updates(
+        updates: &mut Vec<ProjectUpdate>,
         address: Address,
         mut function: IncompleteFunction,
-    ) -> Result<(), AnalysisError> {
-        tracing::debug!("committing pending function at {address}");
-
+    ) {
+        tracing::debug!("staging recovered function at {address}");
         let switches = function.take_pending_switches();
-
-        match transaction.add_function(function) {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::debug!("failed to commit function at {address}: {e}");
-                return Err(AnalysisError::pass_failed("function-recovery", e));
-            }
-        }
-
-        for switch in switches {
-            let branch = switch.branch();
-            transaction
-                .add_switch(branch, move |id, _| switch.with_id(id))
-                .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
-        }
-
-        Ok(())
+        updates.push(ProjectUpdate::add_function(function));
+        updates.extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
     }
 
-    fn commit_pending_functions(
+    fn stage_pending_functions(
         &mut self,
-        transaction: &mut ProjectTransaction<'_>,
+        updates: &mut Vec<ProjectUpdate>,
+        chunk_output_byte_limit: Option<usize>,
         chunk_function_limit: Option<usize>,
+        chunk_output_bytes: &mut usize,
         chunk_functions: &mut usize,
-    ) -> Result<(), AnalysisError> {
-        while !Self::function_chunk_exhausted(chunk_function_limit, *chunk_functions) {
+    ) {
+        while !Self::chunk_exhausted(
+            chunk_output_byte_limit,
+            chunk_function_limit,
+            *chunk_output_bytes,
+            *chunk_functions,
+        ) {
+            let Some((_, function)) = self.pending_functions.first_key_value() else {
+                return;
+            };
+            let function_bytes = function.estimated_retained_bytes();
+            if Self::exceeds_remaining_output(
+                chunk_output_byte_limit,
+                *chunk_output_bytes,
+                function_bytes,
+            ) {
+                return;
+            }
             let Some((address, function)) = self.pending_functions.pop_first() else {
-                return Ok(());
+                return;
             };
 
-            Self::commit_pending_function(transaction, address, function)?;
+            Self::stage_function_updates(updates, address, function);
+            *chunk_output_bytes = chunk_output_bytes.saturating_add(function_bytes);
             *chunk_functions += 1;
         }
-
-        Ok(())
     }
 
     fn analyse_candidates(
         &mut self,
-        transaction: &mut ProjectTransaction<'_>,
+        project: &ProjectView<'_>,
+        updates: &mut Vec<ProjectUpdate>,
+        chunk_output_byte_limit: Option<usize>,
         chunk_function_limit: Option<usize>,
         chunk_candidate_limit: Option<usize>,
+        worker_limit: usize,
     ) -> Result<(), AnalysisError> {
         tracing::debug!("starting function recovery");
+
+        if self.boundary_reconciliation_pending {
+            self.synchronise_boundaries(project)?;
+            self.boundary_reconciliation_pending = false;
+        }
+        self.start_wave(project);
 
         let span = tracing::span!(Level::TRACE, "function-recovery");
         let function_recovery_span = span.enter();
@@ -672,192 +1102,327 @@ impl FunctionRecovery {
         self.progress.reset();
         self.progress.set_message("recovering functions");
         self.progress.set_total(self.candidates.len() as u64);
+        let mut chunk_output_bytes = 0usize;
         let mut chunk_functions = 0usize;
         let mut chunk_candidates = 0usize;
-        let chunk_limit_reached =
-            |chunk_functions: usize, chunk_candidates: usize, has_more_candidates: bool| {
-                has_more_candidates
-                    && (chunk_function_limit.is_some_and(|limit| chunk_functions >= limit)
-                        || chunk_candidate_limit.is_some_and(|limit| chunk_candidates >= limit))
-            };
+        let mut function_changes = false;
+        let expected_functions = self
+            .candidates
+            .len()
+            .saturating_add(self.pending_functions.len())
+            .min(chunk_function_limit.unwrap_or(DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS));
+        updates.reserve(expected_functions);
+        let chunk_limit_reached = |chunk_output_bytes: usize,
+                                   chunk_functions: usize,
+                                   chunk_candidates: usize,
+                                   has_more_candidates: bool| {
+            has_more_candidates
+                && (Self::chunk_exhausted(
+                    chunk_output_byte_limit,
+                    chunk_function_limit,
+                    chunk_output_bytes,
+                    chunk_functions,
+                ) || chunk_candidate_limit.is_some_and(|limit| chunk_candidates >= limit))
+        };
+
+        if self.config().commit_pending_functions() {
+            self.stage_pending_functions(
+                updates,
+                chunk_output_byte_limit,
+                chunk_function_limit,
+                &mut chunk_output_bytes,
+                &mut chunk_functions,
+            );
+            if chunk_functions != 0 {
+                self.finish_wave_after_admission();
+                tracing::debug!(
+                    "yielding function recovery after {chunk_functions} committed functions and {chunk_candidates} processed candidates"
+                );
+                return Ok(());
+            }
+        }
 
         // global state
-        let mut failures = BTreeSet::new();
         let mut functions = BTreeMap::new();
-        let mut resolver_slot = Some(InsnResolver::new(transaction.project()));
+        let inputs = self
+            .wave_inputs
+            .as_mut()
+            .expect("function recovery inputs must be initialised");
+        let mut resolver_slot = Some(InsnResolver::new(project.arch()));
+        let project_functions = project.functions();
+        let project_blocks = project.blocks();
+        if !self.discovery_passes.is_empty() && self.continuation_coverage.is_none() {
+            self.continuation_coverage = Some(
+                FunctionCoverage::new(
+                    self.builder.config(),
+                    project_functions,
+                    project_blocks,
+                    project.segments(),
+                )
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?,
+            );
+        }
+        let coverage = &mut self.continuation_coverage;
+        if let Some(coverage) = coverage.as_mut() {
+            coverage.pending.reserve(expected_functions);
+        }
         // per pass state
         let mut new_functions = BTreeMap::new();
 
-        tracing::debug!(
-            "existing functions: {}",
-            transaction.project().functions().len()
-        );
+        tracing::debug!("existing functions: {}", project_functions.len());
 
         loop {
             self.cancellation.check()?;
             let mut yield_after_pass = false;
 
-            while let Some(candidate) = self.candidates.pop_front() {
-                self.cancellation.check()?;
-                self.progress.advance(1);
-                chunk_candidates += 1;
+            while !self.candidates.is_empty() {
+                let batch_capacity = self
+                    .candidates
+                    .len()
+                    .min(DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES);
+                let mut batch = Vec::with_capacity(batch_capacity);
+                let mut batch_addresses = FxHashSet::default();
+                let mut replacements = BTreeMap::new();
+                batch_addresses.reserve(batch_capacity);
+                while batch.len() < DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES {
+                    let Some(candidate) = self.candidates.pop_front() else {
+                        break;
+                    };
+                    let original_address = candidate.address();
+                    let replacing = self.reanalysis_candidates.contains(&original_address);
+                    self.cancellation.check()?;
+                    self.progress.advance(1);
+                    chunk_candidates += 1;
 
-                let candidate = match resolver_slot.as_mut() {
-                    Some(resolver) => {
-                        let project = transaction.project();
-                        let (address, context) = candidate.into_parts();
-                        let address = self.builder.context_mut().skip_padding(
-                            project.segments(),
-                            project.arch(),
-                            resolver,
-                            address,
-                        );
-                        AddressWithContext::new(address, context)
-                    }
-                    None => candidate,
-                };
-
-                let address = candidate.address();
-                let confidence = Confidence::certain();
-
-                if !transaction
-                    .project()
-                    .segments()
-                    .contains_segment_in_space(address.space(), address)
-                {
-                    tracing::trace!("skipping {address}: not mapped");
-                    if chunk_limit_reached(
+                    let at_limit = chunk_limit_reached(
+                        chunk_output_bytes,
                         chunk_functions,
                         chunk_candidates,
                         !self.candidates.is_empty(),
-                    ) {
-                        yield_after_pass = true;
-                        break;
-                    }
-                    continue;
-                }
+                    );
+                    let candidate = match resolver_slot.as_mut() {
+                        Some(resolver) => {
+                            let confidence = candidate.confidence();
+                            let (address, context) = candidate.into_parts();
+                            self.builder
+                                .context_mut()
+                                .skip_padding(project.segments(), project.arch(), resolver, address)
+                                .map(|address| {
+                                    AddressWithContext::new_with(address, context, confidence)
+                                })
+                        }
+                        None => Some(candidate),
+                    };
 
-                if self.builder.avoids().contains(address) {
-                    tracing::trace!("skipping {address}: in avoidance set");
-                    if chunk_limit_reached(
-                        chunk_functions,
-                        chunk_candidates,
-                        !self.candidates.is_empty(),
-                    ) {
-                        yield_after_pass = true;
-                        break;
-                    }
-                    continue;
-                }
-
-                if failures.contains(&address) {
-                    tracing::trace!("skipping {address}: already failed");
-                    if chunk_limit_reached(
-                        chunk_functions,
-                        chunk_candidates,
-                        !self.candidates.is_empty(),
-                    ) {
-                        yield_after_pass = true;
-                        break;
-                    }
-                    continue;
-                }
-
-                if FunctionDiscoveryContext::candidate_known(
-                    transaction.project(),
-                    &self.pending_functions,
-                    &functions,
-                    &new_functions,
-                    address,
-                ) {
-                    tracing::trace!("skipping {address}: already analysed");
-                    if chunk_limit_reached(
-                        chunk_functions,
-                        chunk_candidates,
-                        !self.candidates.is_empty(),
-                    ) {
-                        yield_after_pass = true;
-                        break;
-                    }
-                    continue;
-                }
-
-                tracing::debug!(
-                    "analysing function candidate at {candidate} (confidence: {confidence})"
-                );
-
-                let function = match self.builder.analyse(
-                    transaction,
-                    &mut resolver_slot,
-                    candidate,
-                    &self.cancellation,
-                ) {
-                    Ok(ControlFlow::Continue(f)) => f,
-                    Ok(ControlFlow::Break(cancelled)) => return Err(cancelled.into()),
-                    Err(e) => {
-                        failures.insert(address);
-                        tracing::trace!("failed to analyse {address}: {e}");
-                        if chunk_limit_reached(
-                            chunk_functions,
-                            chunk_candidates,
-                            !self.candidates.is_empty(),
-                        ) {
+                    let Some(candidate) = candidate else {
+                        tracing::trace!("skipping candidate: not mapped");
+                        if replacing {
+                            self.reanalysis_candidates.remove(&original_address);
+                            updates.push(ProjectUpdate::remove_function(original_address));
+                            function_changes = true;
+                        }
+                        if at_limit {
                             yield_after_pass = true;
                             break;
                         }
                         continue;
+                    };
+                    let address = candidate.address();
+
+                    if self.builder.avoids().contains(address) {
+                        tracing::trace!("skipping {address}: in avoidance set");
+                        if replacing {
+                            self.reanalysis_candidates.remove(&original_address);
+                            updates.push(ProjectUpdate::remove_function(original_address));
+                            function_changes = true;
+                        }
+                    } else if let Some(reason) = inputs.problems.exclusion_at(address) {
+                        tracing::trace!("skipping {address}: {reason}");
+                        if replacing {
+                            self.reanalysis_candidates.remove(&original_address);
+                            updates.push(ProjectUpdate::remove_function(original_address));
+                            function_changes = true;
+                        }
+                    } else if (!replacing
+                        && FunctionDiscoveryContext::candidate_known(
+                            project_functions,
+                            &self.pending_functions,
+                            &functions,
+                            &new_functions,
+                            address,
+                        ))
+                        || !batch_addresses.insert(address)
+                    {
+                        tracing::trace!("skipping {address}: already analysed");
+                    } else {
+                        if replacing {
+                            replacements.insert(address, original_address);
+                        }
+                        batch.push(candidate);
                     }
+
+                    if at_limit {
+                        yield_after_pass = true;
+                        break;
+                    }
+                }
+
+                if batch.is_empty() {
+                    if yield_after_pass {
+                        break;
+                    }
+                    continue;
+                }
+
+                let builder = &mut self.builder;
+                let cancellation = &self.cancellation;
+                let commit_hook = &self.commit_hook;
+                let pending_functions = &mut self.pending_functions;
+                let reanalysis_candidates = &mut self.reanalysis_candidates;
+                let candidates = &mut self.candidates;
+                let discovered_targets = &mut self.discovered_targets;
+                let mut handle_outcome = |mut outcome: FunctionCandidateOutcome,
+                                          discovered_targets: &mut Vec<AddressWithContext>|
+                 -> Result<bool, AnalysisError> {
+                    let address = outcome.address();
+                    let confidence = outcome.confidence();
+                    let replacement = replacements.remove(&address);
+                    if let Some(replacement) = replacement {
+                        reanalysis_candidates.remove(&replacement);
+                    }
+                    for (problem_address, kind) in outcome.drain_problems() {
+                        updates.push(ProjectUpdate::insert_problem(problem_address, kind));
+                    }
+
+                    let function = match outcome.take_result() {
+                        Ok(ControlFlow::Continue(function)) => function,
+                        Ok(ControlFlow::Break(cancelled)) => return Err(cancelled.into()),
+                        Err(error) => {
+                            let kind = error.problem_kind();
+                            tracing::trace!("failed to analyse {address}: {error}");
+                            updates.push(ProjectUpdate::insert_problem(address, kind));
+                            if let Some(replacement) = replacement {
+                                updates.push(ProjectUpdate::remove_function(replacement));
+                                function_changes = true;
+                            }
+                            return Ok(false);
+                        }
+                    };
+                    if let Some(coverage) = coverage.as_mut() {
+                        coverage.insert(&function);
+                    }
+                    let commit_context = FunctionRecoveryCommitContext::new(function, confidence);
+                    let should_commit = commit_hook
+                        .should_commit(project, &commit_context)
+                        .map_err(|error| AnalysisError::pass_failed("function-recovery", error))?;
+                    let function = commit_context.into_function();
+                    let function_bytes = function.estimated_retained_bytes();
+                    if let Some(replacement) = replacement.filter(|&entry| entry != address) {
+                        updates.push(ProjectUpdate::remove_function(replacement));
+                        function_changes = true;
+                    }
+                    let should_yield = should_commit
+                        && Self::exceeds_remaining_output(
+                            chunk_output_byte_limit,
+                            chunk_output_bytes,
+                            function_bytes,
+                        );
+                    if should_commit && !should_yield {
+                        Self::stage_function_updates(updates, address, function);
+                        chunk_output_bytes = chunk_output_bytes.saturating_add(function_bytes);
+                        chunk_functions += 1;
+                        function_changes = true;
+                    } else {
+                        tracing::debug!("deferring commit of function at {address}");
+                        pending_functions.insert(address, function);
+                    }
+                    new_functions.insert(address, confidence);
+
+                    discovered_targets.clear();
+                    for candidate in outcome.drain_targets() {
+                        let start = candidate.address();
+                        if !FunctionDiscoveryContext::candidate_known(
+                            project_functions,
+                            pending_functions,
+                            &functions,
+                            &new_functions,
+                            start,
+                        ) && inputs.problems.exclusion_at(start).is_none()
+                        {
+                            discovered_targets.push(candidate);
+                        }
+                    }
+                    discovered_targets.sort_unstable();
+                    Ok(should_yield)
                 };
 
-                let commit_context = FunctionRecoveryCommitContext::new(function, confidence);
-
-                if self
-                    .commit_hook
-                    .should_commit(transaction.project(), &commit_context)
-                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?
-                {
-                    tracing::debug!("committing function at {address}");
-
-                    let function = commit_context.into_function();
-
-                    Self::commit_pending_function(transaction, address, function).inspect_err(
-                        |error| tracing::debug!("failed to commit function at {address}: {error}"),
-                    )?;
-                    chunk_functions += 1;
+                let workers = builder.candidate_worker_count(batch.len(), worker_limit);
+                let builder_inputs = FunctionBuilderInputs::new(
+                    &inputs.function_entries,
+                    &inputs.non_returning_targets,
+                );
+                if workers <= 1 {
+                    let mut batch = batch.into_iter();
+                    while let Some(candidate) = batch.next() {
+                        let outcome = builder.analyse_candidate(
+                            project,
+                            builder_inputs,
+                            &mut resolver_slot,
+                            candidate,
+                            cancellation,
+                        );
+                        let should_yield = handle_outcome(outcome, discovered_targets)?;
+                        candidates.extend(discovered_targets.drain(..));
+                        if should_yield {
+                            for candidate in batch.rev() {
+                                candidates.push_front(candidate);
+                            }
+                            yield_after_pass = true;
+                            break;
+                        }
+                    }
                 } else {
-                    tracing::debug!("deferring commit of function at {address}");
-
-                    self.pending_functions
-                        .insert(address, commit_context.into_function());
-                }
-
-                new_functions.insert(address, confidence);
-
-                // avoids shouldn't make it into the candidate set
-                self.discovered_targets.clear();
-                for candidate in self.builder.global_targets() {
-                    let start = candidate.address();
-                    if !FunctionDiscoveryContext::candidate_known(
-                        transaction.project(),
-                        &self.pending_functions,
-                        &functions,
-                        &new_functions,
-                        start,
-                    ) && !failures.contains(&start)
-                    {
-                        self.discovered_targets.push(candidate.clone());
+                    let remaining = builder.analyse_candidates_in_parallel(
+                        project,
+                        builder_inputs,
+                        batch,
+                        cancellation,
+                        workers,
+                        |outcome| {
+                            let should_yield = handle_outcome(outcome, discovered_targets)?;
+                            candidates.extend(discovered_targets.drain(..));
+                            Ok(should_yield)
+                        },
+                    )?;
+                    if !remaining.is_empty() {
+                        for candidate in remaining.into_iter().rev() {
+                            candidates.push_front(candidate);
+                        }
+                        yield_after_pass = true;
                     }
                 }
-                self.candidates.extend(self.discovered_targets.drain(..));
 
-                if chunk_limit_reached(
-                    chunk_functions,
-                    chunk_candidates,
-                    !self.candidates.is_empty(),
-                ) {
+                if yield_after_pass
+                    || chunk_limit_reached(
+                        chunk_output_bytes,
+                        chunk_functions,
+                        chunk_candidates,
+                        !self.candidates.is_empty(),
+                    )
+                {
                     yield_after_pass = true;
                     break;
                 }
+            }
+
+            if function_changes || yield_after_pass {
+                if function_changes {
+                    self.finish_wave_after_admission();
+                }
+                tracing::debug!(
+                    "yielding function recovery after {chunk_functions} committed functions and {chunk_candidates} processed candidates"
+                );
+                return Ok(());
             }
 
             // flush pass functions
@@ -877,7 +1442,6 @@ impl FunctionRecovery {
                 config: *self.builder.config(),
                 avoids: mem::take(self.builder.avoids_mut()),
                 candidates: VecDeque::new(),
-                failures: mem::take(&mut failures),
                 functions: mem::take(&mut functions),
                 new_functions: mem::take(&mut new_functions),
                 pending_functions: mem::take(&mut self.pending_functions),
@@ -886,14 +1450,23 @@ impl FunctionRecovery {
                 removed_functions: BTreeSet::new(),
             };
 
-            let result = transaction
-                .analyse_with(&mut self.structuring_passes, &mut context)
+            let updates_before_structuring = updates.len();
+            let result = self
+                .structuring_passes
+                .analyse_with(project, &mut context)
                 .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
 
             if let Err(e) = result {
                 // restore state
                 *self.builder.avoids_mut() = context.avoids;
                 return Err(e);
+            }
+
+            if let Some(coverage) = coverage.as_mut() {
+                for function in context.pending_functions.values() {
+                    coverage.insert(function);
+                }
+                coverage.flush();
             }
 
             self.candidates.append(&mut context.candidates);
@@ -904,36 +1477,51 @@ impl FunctionRecovery {
                     continue;
                 }
 
-                transaction
-                    .remove_function(f)
-                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+                updates.push(ProjectUpdate::remove_function(f));
             }
 
             for (f, properties) in context.changed_functions {
-                transaction
-                    .set_function_properties(f, properties)
-                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e))?;
+                updates.push(ProjectUpdate::set_function_properties(f, properties));
             }
 
             // commit any functions that were forced during restructuring
             for f in context.committed_functions {
-                if Self::function_chunk_exhausted(chunk_function_limit, chunk_functions) {
+                if Self::chunk_exhausted(
+                    chunk_output_byte_limit,
+                    chunk_function_limit,
+                    chunk_output_bytes,
+                    chunk_functions,
+                ) {
                     break;
                 }
 
+                let Some(function) = context.pending_functions.get(&f) else {
+                    continue;
+                };
+                let function_bytes = function.estimated_retained_bytes();
+                if Self::exceeds_remaining_output(
+                    chunk_output_byte_limit,
+                    chunk_output_bytes,
+                    function_bytes,
+                ) {
+                    break;
+                }
                 let function = match context.pending_functions.remove(&f) {
                     Some(func) => func,
                     None => continue,
                 };
 
-                Self::commit_pending_function(transaction, f, function)?;
+                Self::stage_function_updates(updates, f, function);
+                chunk_output_bytes = chunk_output_bytes.saturating_add(function_bytes);
                 chunk_functions += 1;
             }
             self.pending_functions = mem::take(&mut context.pending_functions);
 
-            if Self::function_chunk_exhausted(chunk_function_limit, chunk_functions)
-                && !self.pending_functions.is_empty()
+            if updates.len() != updates_before_structuring
+                || chunk_functions != 0
+                || !self.pending_functions.is_empty()
             {
+                self.finish_wave_after_admission();
                 *self.builder.avoids_mut() = context.avoids;
                 tracing::debug!(
                     "yielding function recovery after {chunk_functions} committed functions and {chunk_candidates} processed candidates"
@@ -941,33 +1529,40 @@ impl FunctionRecovery {
                 return Ok(());
             }
 
-            // perform a candidate discovery pass
-            tracing::debug!(
-                "performing {} candidate discovery pass(es)",
-                self.discovery_passes.len()
-            );
-            self.cancellation.check()?;
+            if self.discovery_passes.is_empty() {
+                *self.builder.avoids_mut() = context.avoids;
+                functions = context.functions;
+            } else {
+                tracing::debug!(
+                    "performing {} candidate discovery pass(es)",
+                    self.discovery_passes.len()
+                );
+                self.cancellation.check()?;
 
-            let mut context = FunctionDiscoveryContext {
-                config: context.config,
-                candidates: mem::take(&mut self.candidates),
-                avoids: context.avoids,
-                failures: context.failures,
-                functions: context.functions,
-                new_functions: context.new_functions,
-            };
+                let mut context = FunctionDiscoveryContext {
+                    config: context.config,
+                    candidates: mem::take(&mut self.candidates),
+                    avoids: context.avoids,
+                    coverage: coverage
+                        .take()
+                        .expect("function coverage must be initialised"),
+                    functions: context.functions,
+                    new_functions: context.new_functions,
+                };
 
-            let result = transaction
-                .analyse_with(&mut self.discovery_passes, &mut context)
-                .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
+                let result = self
+                    .discovery_passes
+                    .analyse_with(project, &mut context)
+                    .map_err(|e| AnalysisError::pass_failed("function-recovery", e));
 
-            self.candidates = context.candidates;
-            *self.builder.avoids_mut() = context.avoids;
+                self.candidates = context.candidates;
+                *self.builder.avoids_mut() = context.avoids;
 
-            failures = context.failures;
-            functions = context.functions;
+                *coverage = Some(context.coverage);
+                functions = context.functions;
 
-            result?;
+                result?;
+            }
 
             if yield_after_pass && !self.candidates.is_empty() {
                 tracing::debug!(
@@ -983,9 +1578,18 @@ impl FunctionRecovery {
                 .set_total(self.progress.done() + self.candidates.len() as u64);
         }
 
+        let _ = coverage;
+
         if self.config().commit_pending_functions() {
-            self.commit_pending_functions(transaction, chunk_function_limit, &mut chunk_functions)?;
-            if !self.pending_functions.is_empty() {
+            self.stage_pending_functions(
+                updates,
+                chunk_output_byte_limit,
+                chunk_function_limit,
+                &mut chunk_output_bytes,
+                &mut chunk_functions,
+            );
+            if chunk_functions != 0 {
+                self.finish_wave_after_admission();
                 tracing::debug!(
                     "yielding function recovery after {chunk_functions} committed functions and {chunk_candidates} processed candidates"
                 );
@@ -998,7 +1602,7 @@ impl FunctionRecovery {
         drop(function_recovery_span);
         drop(span);
 
-        let num_functions = transaction.project().functions().len();
+        let num_functions = project_functions.len() + chunk_functions;
 
         tracing::debug!(
             "function recovery completed in {}s ({}ms) with {num_functions} functions",
@@ -1006,15 +1610,24 @@ impl FunctionRecovery {
             elapsed.as_millis(),
         );
         self.progress.clear_message();
+        self.continuation_coverage = None;
+        self.boundary_reconciliation_pending = false;
+        self.recovery_active = false;
+        self.wave_active = false;
+        self.wave_inputs = None;
 
         Ok(())
     }
 
     pub fn build_analyser(project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
         let mut recovery = Self::new();
+        recovery.set_chunk_output_byte_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_OUTPUT_BYTES));
         recovery.set_chunk_candidate_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES));
         recovery.set_chunk_function_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS));
-        for extension in registry::iter::<FunctionRecoveryExtension>() {
+        let mut extensions = registry::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
+        extensions.sort_unstable_by_key(|extension| (extension.priority(), extension.name()));
+
+        for extension in extensions {
             extension.apply(project, &mut recovery)?;
         }
 
@@ -1022,28 +1635,36 @@ impl FunctionRecovery {
     }
 }
 
-impl AnalysisPass for FunctionRecovery {
-    fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
-        let mut transaction = project.transaction("function recovery");
-        let result = self.analyse_transaction(&mut transaction);
-        match result {
-            Ok(()) => {
-                transaction
-                    .commit()
-                    .map_err(|error| AnalysisError::pass_failed("function-recovery", error))?;
-                Ok(())
+impl FunctionRecovery {
+    pub fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+        loop {
+            let (result, reads, updates) = {
+                let view = ProjectView::new(project);
+                let mut updates = Vec::new();
+                let result = self.analyse_view(&view, &mut updates);
+                let reads = view.into_reads();
+                (result, reads, updates)
+            };
+            if let Err(error) = &result
+                && !matches!(error, AnalysisError::Cancelled(_))
+            {
+                return result;
             }
-            Err(AnalysisError::Cancelled(cancelled)) => {
-                transaction
-                    .commit()
-                    .map_err(|error| AnalysisError::pass_failed("function-recovery", error))?;
-                Err(AnalysisError::Cancelled(cancelled))
-            }
-            Err(error) => {
-                transaction.rollback().map_err(|rollback| {
-                    AnalysisError::pass_failed("function-recovery", rollback)
-                })?;
-                Err(error)
+
+            let mut transaction = project.transaction("function recovery");
+            transaction.absorb_reads(&reads);
+            ProjectUpdate::apply_all(updates, &mut transaction)
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
+            transaction
+                .commit()
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
+            result?;
+
+            let bounded = self.chunk_output_byte_limit.is_some()
+                || self.chunk_function_limit.is_some()
+                || self.chunk_candidate_limit.is_some();
+            if bounded || !Analyser::has_pending_work(self) {
+                return Ok(());
             }
         }
     }
@@ -1051,11 +1672,25 @@ impl AnalysisPass for FunctionRecovery {
 
 impl Analyser for FunctionRecovery {
     fn name(&self) -> &'static str {
-        "function-recovery"
+        FUNCTION_RECOVERY_ANALYSER
     }
 
-    fn triggers(&self) -> &'static [Trigger] {
-        &[Trigger::BytesMapped, Trigger::SymbolChanged]
+    fn triggers(&self) -> ChangeKinds {
+        ChangeKinds::SEGMENT_MAPPED
+            | ChangeKinds::BYTES_WRITTEN
+            | ChangeKinds::FUNCTION_REMOVED
+            | ChangeKinds::SYMBOL_CHANGED
+    }
+
+    fn phase(&self) -> AnalysisPhase {
+        AnalysisPhase::Partition
+    }
+
+    fn produces(&self) -> ChangeKinds {
+        ChangeKinds::FUNCTIONS
+            | ChangeKinds::SWITCHES
+            | ChangeKinds::REFERENCES
+            | ChangeKinds::PROBLEMS
     }
 
     fn priority(&self) -> Priority {
@@ -1069,18 +1704,37 @@ impl Analyser for FunctionRecovery {
 
     fn analyse(
         &mut self,
-        transaction: &mut ProjectTransaction<'_>,
+        project: &ProjectView<'_>,
         regions: &AddressRangeSet,
         cx: &AnalysisContext,
+        updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
         self.set_cancellation_token(cx.cancellation().clone());
         self.progress = cx.progress().clone();
 
-        self.analyse_regions(transaction, regions)
+        if cx.is_continuation() {
+            self.analyse_candidates(
+                project,
+                updates,
+                self.chunk_output_byte_limit,
+                self.chunk_function_limit,
+                self.chunk_candidate_limit,
+                cx.worker_limit(),
+            )
+        } else {
+            self.continuation_coverage = None;
+            self.boundary_reconciliation_pending = false;
+            self.recovery_active = false;
+            self.wave_active = false;
+            self.wave_inputs = None;
+            self.start_recovery(project)?;
+            self.analyse_regions(project, updates, regions, cx.worker_limit())
+        }
     }
 
     fn has_pending_work(&self) -> bool {
-        !self.candidates.is_empty()
+        self.boundary_reconciliation_pending
+            || !self.candidates.is_empty()
             || (self.config().commit_pending_functions() && !self.pending_functions.is_empty())
     }
 }
@@ -1092,6 +1746,7 @@ submit! {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::storage::TransientStorageProvider;
 
     fn incomplete(entry: Address) -> IncompleteFunction {
         IncompleteFunction::new(entry)
@@ -1139,5 +1794,40 @@ mod test {
             context.candidates.front().map(AddressWithContext::address),
             Some(entry)
         );
+    }
+
+    #[test]
+    fn observing_an_exhausted_candidate_does_not_increment_attempts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut project =
+            Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
+        let address = project.entry().ok_or("fixture must have an entry point")?;
+
+        for _ in 0..DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS {
+            let mut transaction = project.transaction("test");
+            transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+            transaction.commit()?;
+        }
+
+        for _ in 0..3 {
+            let view = ProjectView::new(&project);
+            assert_eq!(
+                FunctionRecoveryProblems::new(&view).exclusion_at(address),
+                Some(CandidateExclusionReason::RetriesExhausted(
+                    ProblemKind::DecodeFailed
+                ))
+            );
+        }
+
+        assert_eq!(
+            project
+                .problems()
+                .get(address, ProblemKind::DecodeFailed)
+                .ok_or("problem must remain current")?
+                .attempts(),
+            DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS
+        );
+
+        Ok(())
     }
 }

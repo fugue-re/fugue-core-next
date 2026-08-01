@@ -1,54 +1,333 @@
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::error::Error;
 use std::hint::black_box;
+use std::ops::Bound;
 #[cfg(feature = "sqlite")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
-use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeKinds;
+use fugue_core::engine::{AnalysisEngine, ProjectUpdate, ProjectView};
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
     ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
-use fugue_core::loader::Loader;
+use fugue_core::loader::{Loadable, Loader};
 use fugue_core::project::Project;
 use fugue_core::queries::{Cached, Dependency, QueryReader};
-use fugue_core::storage::DEFAULT_SPACE_ID;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::DefaultPersistentEntityStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::DefaultPersistentSegmentStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
+use fugue_core::storage::{
+    BufferedEntityWriter, DEFAULT_SPACE_ID, EntityBytesAsIterator, EntityBytesIterator,
+    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityStorage, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError,
+};
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
+use fugue_core::types::{AttributeMap, BytesOrSlice};
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
+const LARGE_FUNCTION_BLOCKS: usize = 4096;
 const PAGE_LIMIT: usize = 64;
 const QUERY_REPETITIONS: usize = 128;
+const REPRESENTATIVE_FIXTURE: &str = "tests/libipmi.so";
+const REPEATED_FUNCTION_REPLACEMENTS: usize = 8193;
+
+struct MeasuringAllocator;
+
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static ENTITY_READS: AtomicU64 = AtomicU64::new(0);
+static ENTITY_WRITES: AtomicU64 = AtomicU64::new(0);
+static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[global_allocator]
+static ALLOCATOR: MeasuringAllocator = MeasuringAllocator;
+
+impl MeasuringAllocator {
+    fn grow(size: usize) {
+        let live = LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+        PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+    }
+
+    fn shrink(size: usize) {
+        LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for MeasuringAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let allocation = unsafe { System.alloc(layout) };
+        if !allocation.is_null() {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            Self::grow(layout.size());
+        }
+        allocation
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let allocation = unsafe { System.alloc_zeroed(layout) };
+        if !allocation.is_null() {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            Self::grow(layout.size());
+        }
+        allocation
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        Self::shrink(layout.size());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let allocation = unsafe { System.realloc(pointer, layout, size) };
+        if !allocation.is_null() {
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+            if size >= layout.size() {
+                Self::grow(size - layout.size());
+            } else {
+                Self::shrink(layout.size() - size);
+            }
+        }
+        allocation
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AllocationSnapshot {
+    allocations: u64,
+    bytes: u64,
+    live_bytes: u64,
+    peak_live_bytes: u64,
+}
+
+impl AllocationSnapshot {
+    fn begin() -> Self {
+        let live_bytes = LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_LIVE_BYTES.store(live_bytes, Ordering::Relaxed);
+        Self {
+            allocations: ALLOCATIONS.load(Ordering::Relaxed),
+            bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+            live_bytes,
+            peak_live_bytes: live_bytes,
+        }
+    }
+
+    fn capture() -> Self {
+        Self {
+            allocations: ALLOCATIONS.load(Ordering::Relaxed),
+            bytes: ALLOCATED_BYTES.load(Ordering::Relaxed),
+            live_bytes: LIVE_BYTES.load(Ordering::Relaxed),
+            peak_live_bytes: PEAK_LIVE_BYTES.load(Ordering::Relaxed),
+        }
+    }
+
+    fn since(self, previous: Self) -> Self {
+        Self {
+            allocations: self.allocations.saturating_sub(previous.allocations),
+            bytes: self.bytes.saturating_sub(previous.bytes),
+            live_bytes: self.live_bytes.saturating_sub(previous.live_bytes),
+            peak_live_bytes: self.peak_live_bytes.saturating_sub(previous.live_bytes),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EntityAccessSnapshot {
+    reads: u64,
+    writes: u64,
+}
+
+impl EntityAccessSnapshot {
+    fn capture() -> Self {
+        Self {
+            reads: ENTITY_READS.load(Ordering::Relaxed),
+            writes: ENTITY_WRITES.load(Ordering::Relaxed),
+        }
+    }
+
+    fn since(self, previous: Self) -> Self {
+        Self {
+            reads: self.reads.saturating_sub(previous.reads),
+            writes: self.writes.saturating_sub(previous.writes),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingEntityStorage {
+    inner: InMemoryEntityStorage,
+}
+
+impl EntityStorageProviderFromLoadable for CountingEntityStorage {
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, EntityStorageError> {
+        Ok(Self {
+            inner: InMemoryEntityStorage::from_loadable(loadable, attributes)?,
+        })
+    }
+}
+
+impl EntityStorageProvider for CountingEntityStorage {
+    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(key)
+    }
+
+    fn get_as<F, T>(&self, key: &[u8], f: F) -> Result<Option<T>, EntityStorageError>
+    where
+        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
+    {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.get_as(key, f)
+    }
+
+    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        ENTITY_WRITES.fetch_add(1, Ordering::Relaxed);
+        self.inner.insert(key, value)
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        ENTITY_WRITES.fetch_add(1, Ordering::Relaxed);
+        self.inner.remove(key)
+    }
+
+    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.contains(key)
+    }
+
+    fn iter_prefix_keys(
+        &self,
+        prefix: &[u8],
+    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.iter_prefix_keys(prefix)
+    }
+
+    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.iter_prefix(prefix)
+    }
+
+    fn iter_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.iter_range(prefix, start)
+    }
+
+    fn iter_prefix_as<'a, F, T>(
+        &'a self,
+        prefix: &[u8],
+        f: F,
+    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
+        T: 'a,
+    {
+        ENTITY_READS.fetch_add(1, Ordering::Relaxed);
+        self.inner.iter_prefix_as(prefix, f)
+    }
+
+    fn transactional_reader(
+        &self,
+    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+        Ok(Box::new(BufferedEntityWriter::new(self)))
+    }
+
+    fn transactional_writer(
+        &self,
+    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+        Ok(Box::new(BufferedEntityWriter::new(self)))
+    }
+
+    fn persistence(&self) -> StoragePersistence {
+        PERSISTENT
+    }
+}
+
+struct CountingStorageProvider;
+
+impl StorageProvider for CountingStorageProvider {
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        let entities =
+            EntityStorage::new(CountingEntityStorage::from_loadable(loadable, attributes)?);
+        let (segments, image_resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?
+                .into_parts();
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution))
+    }
+
+    fn from_storage(
+        path: impl AsRef<std::path::Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        let _ = path;
+        let _ = attributes;
+        Err(StorageProviderError::NotAStandaloneProject)
+    }
+}
 
 struct BenchResult {
+    allocated_bytes: u64,
+    allocations: u64,
+    entity_reads: u64,
+    entity_writes: u64,
     name: &'static str,
     elapsed: Duration,
     items: usize,
     p50_latency: Option<Duration>,
     p99_latency: Option<Duration>,
+    peak_live_bytes: u64,
+    retained_bytes: u64,
     rss_kib: Option<u64>,
 }
 
 impl BenchResult {
-    fn new(name: &'static str, elapsed: Duration, items: usize) -> Self {
+    fn new(
+        name: &'static str,
+        elapsed: Duration,
+        items: usize,
+        allocations: AllocationSnapshot,
+        entities: EntityAccessSnapshot,
+    ) -> Self {
         Self {
+            allocated_bytes: allocations.bytes,
+            allocations: allocations.allocations,
+            entity_reads: entities.reads,
+            entity_writes: entities.writes,
             name,
             elapsed,
             items,
             p50_latency: None,
             p99_latency: None,
+            peak_live_bytes: allocations.peak_live_bytes,
+            retained_bytes: allocations.live_bytes,
             rss_kib: current_rss_kib(),
         }
     }
@@ -58,13 +337,21 @@ impl BenchResult {
         elapsed: Duration,
         items: usize,
         samples: &[Duration],
+        allocations: AllocationSnapshot,
+        entities: EntityAccessSnapshot,
     ) -> Self {
         Self {
+            allocated_bytes: allocations.bytes,
+            allocations: allocations.allocations,
+            entity_reads: entities.reads,
+            entity_writes: entities.writes,
             name,
             elapsed,
             items,
             p50_latency: percentile(samples, 50),
             p99_latency: percentile(samples, 99),
+            peak_live_bytes: allocations.peak_live_bytes,
+            retained_bytes: allocations.live_bytes,
             rss_kib: current_rss_kib(),
         }
     }
@@ -83,10 +370,16 @@ impl BenchResult {
             .map(|latency| latency.as_nanos().to_string())
             .unwrap_or_else(|| "none".to_owned());
         println!(
-            "bench={},elapsed_ns={},items={},p50_latency_ns={p50},p99_latency_ns={p99},rss_kib={rss}",
+            "bench={},elapsed_ns={},items={},allocations={},allocated_bytes={},peak_live_bytes={},retained_bytes={},entity_reads={},entity_writes={},p50_latency_ns={p50},p99_latency_ns={p99},rss_kib={rss}",
             self.name,
             self.elapsed.as_nanos(),
             self.items,
+            self.allocations,
+            self.allocated_bytes,
+            self.peak_live_bytes,
+            self.retained_bytes,
+            self.entity_reads,
+            self.entity_writes,
         );
     }
 }
@@ -111,13 +404,21 @@ fn load_project() -> Result<Project, Box<dyn Error>> {
     Ok(Project::new_transient(&loader)?)
 }
 
+fn load_counting_project() -> Result<Project, Box<dyn Error>> {
+    let loader = Loader::from_file(fixture_path())?;
+    Ok(Project::new_with_provider::<CountingStorageProvider>(
+        &loader,
+        AttributeMap::new(),
+    )?)
+}
+
 fn load_engine() -> Result<(AnalysisEngine, Address), Box<dyn Error>> {
     let project = load_project()?;
     let entry = project
         .entry()
         .ok_or_else(|| std::io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     Ok((engine, entry))
 }
 
@@ -125,15 +426,24 @@ fn measure<T, F>(name: &'static str, f: F) -> Result<(BenchResult, T), Box<dyn E
 where
     F: FnOnce() -> Result<(T, usize), Box<dyn Error>>,
 {
+    let allocations = AllocationSnapshot::begin();
+    let entities = EntityAccessSnapshot::capture();
     let start = Instant::now();
     let (value, items) = f()?;
-    Ok((BenchResult::new(name, start.elapsed(), items), value))
+    let allocations = AllocationSnapshot::capture().since(allocations);
+    let entities = EntityAccessSnapshot::capture().since(entities);
+    Ok((
+        BenchResult::new(name, start.elapsed(), items, allocations, entities),
+        value,
+    ))
 }
 
 fn measure_repeated<T, F>(name: &'static str, mut f: F) -> Result<(BenchResult, T), Box<dyn Error>>
 where
     F: FnMut() -> Result<(T, usize), Box<dyn Error>>,
 {
+    let allocations = AllocationSnapshot::begin();
+    let entities = EntityAccessSnapshot::capture();
     let start = Instant::now();
     let (mut value, mut items) = f()?;
     for _ in 1..QUERY_REPETITIONS {
@@ -141,7 +451,12 @@ where
         value = next;
         items += next_items;
     }
-    Ok((BenchResult::new(name, start.elapsed(), items), value))
+    let allocations = AllocationSnapshot::capture().since(allocations);
+    let entities = EntityAccessSnapshot::capture().since(entities);
+    Ok((
+        BenchResult::new(name, start.elapsed(), items, allocations, entities),
+        value,
+    ))
 }
 
 fn current_rss_kib() -> Option<u64> {
@@ -178,7 +493,7 @@ fn add_symbols(
         )?;
     }
 
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     Ok(())
 }
 
@@ -192,6 +507,45 @@ fn add_empty_function(engine: &AnalysisEngine, entry: Address) -> Result<(), Box
     ));
     engine.add_function(function)?;
     Ok(())
+}
+
+fn function_updates(base: Address, count: usize) -> Result<Vec<ProjectUpdate>, Box<dyn Error>> {
+    let mut updates = Vec::with_capacity(count);
+    for index in 0..count {
+        let entry = base
+            .checked_add(index as u64)
+            .ok_or_else(|| std::io::Error::other("synthetic function address overflow"))?;
+        let mut function = IncompleteFunction::new(entry);
+        function.push_block(IncompleteCodeBlock::new(
+            entry,
+            1,
+            Vec::new(),
+            Default::default(),
+        ));
+        updates.push(ProjectUpdate::add_function(function));
+    }
+    Ok(updates)
+}
+
+fn large_function(
+    entry: Address,
+    blocks: usize,
+    changed_from: usize,
+) -> Result<IncompleteFunction, Box<dyn Error>> {
+    let mut function = IncompleteFunction::new(entry);
+    for index in 0..blocks {
+        let address = entry
+            .checked_add((index as u64) * 0x10)
+            .ok_or_else(|| std::io::Error::other("synthetic block address overflow"))?;
+        let length = if index >= changed_from { 2 } else { 1 };
+        function.push_block(IncompleteCodeBlock::new(
+            address,
+            length,
+            Vec::new(),
+            Default::default(),
+        ));
+    }
+    Ok(function)
 }
 
 fn page_symbols(reader: &QueryReader) -> Result<usize, Box<dyn Error>> {
@@ -246,13 +600,51 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     let (result, engine) = measure("initial_analysis_startup", || {
         let project = load_project()?;
         let engine = AnalysisEngine::new(project)?;
-        engine.wait_until_idle()?;
+        engine.analyse()?;
         Ok((engine, 1))
     })?;
 
     let reader = engine.query_reader()?;
     black_box(reader.revision()?);
     results.push(result);
+    Ok(())
+}
+
+fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (load, project) = measure("representative_project_load", || {
+        let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+        let project = Project::new_transient(&loader)?;
+        Ok((project, 1))
+    })?;
+    results.push(load);
+
+    let (result, engine) = measure("representative_arm_analysis", || {
+        let engine = AnalysisEngine::new(project)?;
+        engine.analyse()?;
+        Ok((engine, 1))
+    })?;
+
+    let entry = engine
+        .query_reader()?
+        .project()?
+        .entry()
+        .ok_or_else(|| std::io::Error::other("representative fixture entry missing"))?;
+    black_box(engine.query_reader()?.revision()?);
+    results.push(result);
+
+    let batch_base = Address::new(entry.space(), 0xf000_0000u64);
+    let (output, updates) = measure("representative_function_batch_output", || {
+        let updates = function_updates(batch_base, SYNTHETIC_FUNCTIONS)?;
+        Ok((updates, SYNTHETIC_FUNCTIONS))
+    })?;
+    results.push(output);
+
+    let (admission, _) = measure("representative_function_batch_admission", || {
+        engine.apply_updates(updates)?;
+        Ok(((), SYNTHETIC_FUNCTIONS))
+    })?;
+    results.push(admission);
+    engine.analyse()?;
     Ok(())
 }
 
@@ -271,7 +663,7 @@ fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box
     results.push(hit);
 
     add_empty_function(&engine, entry)?;
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     let (after_same_entry, _) = measure("flow_targets_after_same_entry_edit", || {
         black_box(reader.flow_targets(entry)?);
         Ok(((), 1))
@@ -279,7 +671,7 @@ fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box
     results.push(after_same_entry);
 
     add_empty_function(&engine, disjoint_entry)?;
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     let (after_disjoint_range, _) =
         measure_repeated("flow_targets_after_disjoint_range_edit", || {
             black_box(reader.flow_targets(entry)?);
@@ -291,7 +683,7 @@ fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box
         SymbolIndex::new(SymbolTableSelector::new(241), 0),
         SymbolEntry::new(entry, "bench_unrelated_symbol", SymbolProperties::LOCAL),
     )?;
-    engine.wait_until_idle()?;
+    engine.analyse()?;
 
     let (after_unrelated_kind, _) =
         measure_repeated("flow_targets_after_unrelated_kind_edit", || {
@@ -363,7 +755,7 @@ fn bench_single_function_edit(results: &mut Vec<BenchResult>) -> Result<(), Box<
 
     let (edit, _) = measure("single_function_edit", || {
         add_empty_function(&engine, new_entry)?;
-        engine.wait_until_idle()?;
+        engine.analyse()?;
         Ok(((), 1))
     })?;
     results.push(edit);
@@ -379,6 +771,70 @@ fn bench_single_function_edit(results: &mut Vec<BenchResult>) -> Result<(), Box<
         Ok(((), PAGE_LIMIT))
     })?;
     results.push(unrelated);
+    Ok(())
+}
+
+fn bench_large_function_replacement(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let entry = Address::from(0x1000_0000u64);
+
+    let mut repeated_project = load_counting_project()?;
+    let (repeated, _) = measure("repeated_function_replacement_one_admission", || {
+        let mut transaction =
+            repeated_project.transaction("repeated function replacement benchmark");
+        for _ in 0..REPEATED_FUNCTION_REPLACEMENTS {
+            transaction.add_function(large_function(entry, 1, 1)?)?;
+        }
+        black_box(transaction.commit()?);
+        Ok(((), REPEATED_FUNCTION_REPLACEMENTS))
+    })?;
+    results.push(repeated);
+
+    let mut insertion_project = load_counting_project()?;
+    let (insertion, _) = measure("large_function_insert", || {
+        let function = large_function(entry, LARGE_FUNCTION_BLOCKS, LARGE_FUNCTION_BLOCKS)?;
+        let mut transaction = insertion_project.transaction("large function insertion benchmark");
+        transaction.add_function(function)?;
+        transaction.commit()?;
+        Ok(((), LARGE_FUNCTION_BLOCKS))
+    })?;
+    results.push(insertion);
+
+    let mut replacement_project = load_counting_project()?;
+    let mut transaction = replacement_project.transaction("large function replacement baseline");
+    transaction.add_function(large_function(
+        entry,
+        LARGE_FUNCTION_BLOCKS,
+        LARGE_FUNCTION_BLOCKS,
+    )?)?;
+    transaction.commit()?;
+    let (replacement, _) = measure("large_function_replace", || {
+        let function = large_function(entry, LARGE_FUNCTION_BLOCKS, 0)?;
+        let mut transaction =
+            replacement_project.transaction("large function replacement benchmark");
+        transaction.add_function(function)?;
+        transaction.commit()?;
+        Ok(((), LARGE_FUNCTION_BLOCKS))
+    })?;
+    results.push(replacement);
+
+    let mut shared_project = load_counting_project()?;
+    let mut transaction = shared_project.transaction("shared function replacement baseline");
+    transaction.add_function(large_function(
+        entry,
+        LARGE_FUNCTION_BLOCKS,
+        LARGE_FUNCTION_BLOCKS,
+    )?)?;
+    transaction.commit()?;
+    let changed_from = LARGE_FUNCTION_BLOCKS - (LARGE_FUNCTION_BLOCKS / 100).max(1);
+    let (mostly_shared, _) = measure("large_function_replace_mostly_shared", || {
+        let function = large_function(entry, LARGE_FUNCTION_BLOCKS, changed_from)?;
+        let mut transaction = shared_project.transaction("shared function replacement benchmark");
+        transaction.add_function(function)?;
+        transaction.commit()?;
+        Ok(((), LARGE_FUNCTION_BLOCKS))
+    })?;
+    results.push(mostly_shared);
+
     Ok(())
 }
 
@@ -409,7 +865,7 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
 
     let (small_write, _) = measure("byte_write_small_range_publication", || {
         engine.write_bytes(address, vec![0u8; 4])?;
-        engine.wait_until_idle()?;
+        engine.analyse()?;
         Ok(((), 1))
     })?;
     results.push(small_write);
@@ -417,7 +873,7 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
     let large_len = available.min(64 * 1024) as usize;
     let (large_write, _) = measure("byte_write_large_range_publication", || {
         engine.write_bytes(address, vec![0u8; large_len])?;
-        engine.wait_until_idle()?;
+        engine.analyse()?;
         Ok(((), large_len))
     })?;
     results.push(large_write);
@@ -449,7 +905,7 @@ fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Err
             .ok_or_else(|| std::io::Error::other("scatter write address overflow"))?;
         engine.write_bytes(scatter, vec![0u8; 4])?;
     }
-    engine.wait_until_idle()?;
+    engine.analyse()?;
 
     let (scattered, _) = measure_repeated("latest_change_after_many_scattered_writes", || {
         black_box(reader.latest_change(ChangeKinds::all(), &region)?);
@@ -462,6 +918,8 @@ fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Err
 fn bench_reader_latency(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
+    let allocations = AllocationSnapshot::begin();
+    let entities = EntityAccessSnapshot::capture();
     let start = Instant::now();
     let mut samples = Vec::new();
 
@@ -492,30 +950,45 @@ fn bench_reader_latency(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
         Ok(())
     })?;
 
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     results.push(BenchResult::with_latencies(
         "reader_latency_during_write_batch",
         start.elapsed(),
         samples.len(),
         &samples,
+        AllocationSnapshot::capture().since(allocations),
+        EntityAccessSnapshot::capture().since(entities),
     ));
     Ok(())
 }
 
 fn bench_index_maintenance(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (separate_engine, separate_entry) = load_engine()?;
+    let separate_base = separate_entry
+        .checked_add(0x20_000u64)
+        .ok_or_else(|| std::io::Error::other("synthetic function base overflow"))?;
+
+    let (separate, _) = measure("function_separate_admission", || {
+        for index in 0..SYNTHETIC_FUNCTIONS {
+            let function_entry = separate_base
+                .checked_add(index as u64)
+                .ok_or_else(|| std::io::Error::other("synthetic function address overflow"))?;
+            add_empty_function(&separate_engine, function_entry)?;
+        }
+        separate_engine.analyse()?;
+        Ok(((), SYNTHETIC_FUNCTIONS))
+    })?;
+    results.push(separate);
+
     let (engine, entry) = load_engine()?;
     let base = entry
         .checked_add(0x20_000u64)
         .ok_or_else(|| std::io::Error::other("synthetic function base overflow"))?;
 
-    let (result, _) = measure("call_graph_index_maintenance_per_function", || {
-        for index in 0..SYNTHETIC_FUNCTIONS {
-            let function_entry = base
-                .checked_add(index as u64)
-                .ok_or_else(|| std::io::Error::other("synthetic function address overflow"))?;
-            add_empty_function(&engine, function_entry)?;
-        }
-        engine.wait_until_idle()?;
+    let (result, _) = measure("function_batch_admission", || {
+        let updates = function_updates(base, SYNTHETIC_FUNCTIONS)?;
+        engine.apply_updates(updates)?;
+        engine.analyse()?;
         Ok(((), SYNTHETIC_FUNCTIONS))
     })?;
     results.push(result);
@@ -533,11 +1006,8 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
         entry.raw_address() + 0xffffu64,
     ));
 
-    let compute = |reader: &QueryReader| {
-        reader
-            .symbol_page(None, PAGE_LIMIT)
-            .map(|page| page.entries().len())
-    };
+    let probe = entry;
+    let compute = move |view: &ProjectView<'_>| Ok(view.function_at(probe).is_some() as usize);
     let mut cached = Cached::new(Dependency::on(ChangeKinds::FUNCTIONS).within(region));
     black_box(cached.get(&reader, compute)?);
 
@@ -629,7 +1099,7 @@ fn bench_reference_hot_target(results: &mut Vec<BenchResult>) -> Result<(), Box<
                 .ok_or_else(|| std::io::Error::other("reference source address overflow"))?;
             engine.add_reference(Reference::data(from, hot_target, ReferenceProperties::READ))?;
         }
-        engine.wait_until_idle()?;
+        engine.analyse()?;
         Ok(((), HOT_TARGET_REFERENCES))
     })?;
     results.push(insert);
@@ -714,7 +1184,7 @@ fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), B
     results.push(insert);
 
     let engine = AnalysisEngine::new(project)?;
-    engine.wait_until_idle()?;
+    engine.analyse()?;
     let reader = engine.query_reader()?;
 
     let (first_page, _) = measure_repeated("reference_scale_hot_first_page", || {
@@ -754,23 +1224,44 @@ fn bench_reference_million_scale(results: &mut Vec<BenchResult>) -> Result<(), B
     Ok(())
 }
 
+fn selected_group(selected: Option<&str>, group: &str) -> bool {
+    selected.is_none_or(|selected| selected == group)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
+    let selected = std::env::args().nth(1);
 
-    bench_initial_analysis(&mut results)?;
-    bench_repeated_flow_targets(&mut results)?;
-    bench_page_scans(&mut results)?;
-    bench_call_graph_pages(&mut results)?;
-    bench_single_function_edit(&mut results)?;
-    bench_byte_writes(&mut results)?;
-    bench_latest_change(&mut results)?;
-    bench_reader_latency(&mut results)?;
-    bench_index_maintenance(&mut results)?;
-    bench_cached_derived(&mut results)?;
-    bench_multi_client(&mut results)?;
-    bench_reference_hot_target(&mut results)?;
-    #[cfg(feature = "sqlite")]
-    bench_reference_million_scale(&mut results)?;
+    if selected_group(selected.as_deref(), "analysis") {
+        bench_initial_analysis(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "representative") {
+        bench_representative_analysis(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "queries") {
+        bench_repeated_flow_targets(&mut results)?;
+        bench_page_scans(&mut results)?;
+        bench_call_graph_pages(&mut results)?;
+        bench_cached_derived(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "functions") {
+        bench_single_function_edit(&mut results)?;
+        bench_large_function_replacement(&mut results)?;
+        bench_index_maintenance(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "changes") {
+        bench_byte_writes(&mut results)?;
+        bench_latest_change(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "concurrency") {
+        bench_reader_latency(&mut results)?;
+        bench_multi_client(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "references") {
+        bench_reference_hot_target(&mut results)?;
+        #[cfg(feature = "sqlite")]
+        bench_reference_million_scale(&mut results)?;
+    }
 
     for result in results {
         result.print();

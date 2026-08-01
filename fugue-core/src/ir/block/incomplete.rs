@@ -68,12 +68,12 @@ impl IncompleteCodeBlock {
         self.properties
     }
 
-    pub fn mark_entry(&mut self) {
-        self.properties.insert(CodeBlockProperties::ENTRY);
+    pub fn mark_call(&mut self) {
+        self.properties.insert(CodeBlockProperties::CALL);
     }
 
-    pub fn mark_exit(&mut self) {
-        self.properties.insert(CodeBlockProperties::EXIT);
+    pub fn mark_unresolved(&mut self) {
+        self.properties.insert(CodeBlockProperties::UNRESOLVED);
     }
 
     pub fn predecessors(&self) -> &IdSet<IncompleteCodeBlock> {

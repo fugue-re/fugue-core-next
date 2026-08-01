@@ -177,6 +177,10 @@ where
     pub(crate) fn cached(entity: CachedRef<'a, E>) -> Self {
         Self(RefRepr::Cached(entity))
     }
+
+    pub(crate) fn owned(entity: E) -> Self {
+        Self::cached(CachedRef::new(entity))
+    }
 }
 
 impl<E> Deref for EntityRef<'_, E>
@@ -357,6 +361,15 @@ where
             .unwrap_or_else(|error| error.into_fatal())
     }
 
+    pub(crate) fn publish_put(
+        &self,
+        key: K,
+        entity: impl Into<Arc<E>>,
+        encoded_len: usize,
+    ) -> CachedRef<'_, E> {
+        self.admit(key, entity.into(), ByteWeighter::entry_weight(encoded_len))
+    }
+
     pub fn try_remove(&self, key: &K) -> Result<(), EntityStorageError> {
         match &self.sink {
             WriteSink::WriteThrough => self.storage.remove::<K, E>(key)?,
@@ -369,6 +382,10 @@ where
         self.entities.remove(key);
 
         Ok(())
+    }
+
+    pub(crate) fn publish_remove(&self, key: &K) {
+        self.entities.remove(key);
     }
 
     pub fn try_iter(&self) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError> {
@@ -432,12 +449,6 @@ where
                 self.try_remove(&key)?;
             }
         }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = CachedRef<'_, E>> + '_ {
-        self.try_iter()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|result| result.unwrap_or_else(|error| error.into_fatal()).1)
     }
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
@@ -587,7 +598,7 @@ where
             }
             WriteSink::Worker(worker) => {
                 let key_bytes = schema::make_key::<K, E>(key);
-                worker.enqueue(key_bytes, Some(Bytes::copy_from_slice(encoded.as_ref())))?;
+                worker.enqueue(key_bytes, Some(Bytes::from_owner(encoded)))?;
             }
         }
 
@@ -760,7 +771,9 @@ mod test {
         fn transactional_writer(
             &self,
         ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-            self.0.transactional_writer()
+            Err(EntityStorageError::unsupported_with(
+                "failing provider has no transactional writer",
+            ))
         }
     }
 
@@ -851,10 +864,7 @@ mod test {
         cache.put(key, cache_entity(13, "before"));
 
         {
-            let mut guard = cache
-                .try_get_mut(&key)
-                .unwrap()
-                .expect("entry exists");
+            let mut guard = cache.try_get_mut(&key).unwrap().expect("entry exists");
             guard.name = "after".to_owned();
         }
 

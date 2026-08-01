@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::analysis::function::recovery::FunctionStructuringContext;
 use crate::analysis::non_returning::NonReturningTargets;
 use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::engine::ProjectView;
 use crate::ir::{Address, FunctionProperties, Insn};
-use crate::project::Project;
 
 enum BlockExit {
     Returns,
@@ -13,12 +13,15 @@ enum BlockExit {
 }
 
 impl BlockExit {
-    fn from_terminator(targets: &NonReturningTargets<'_>, terminator: &Insn) -> Self {
+    fn from_terminator(terminator: &Insn) -> Self {
         if terminator.is_return() {
             return Self::Returns;
         }
 
-        match targets.called(terminator) {
+        match terminator
+            .flow_targets()
+            .find_map(|target| target.kind().is_call().then_some(target.to()))
+        {
             Some(target) => Self::Via(target),
             None => Self::Unknown,
         }
@@ -50,7 +53,7 @@ struct ExitGraph {
 }
 
 impl ExitGraph {
-    fn from_project(project: &Project, context: &FunctionStructuringContext) -> Self {
+    fn from_project(project: &ProjectView<'_>, context: &FunctionStructuringContext) -> Self {
         let targets = NonReturningTargets::new(project);
         let mut graph = Self::default();
 
@@ -67,7 +70,7 @@ impl ExitGraph {
                     &targets,
                     &mut exits,
                     caller,
-                    block.successors().is_empty(),
+                    !function.has_successors(id),
                     block.instructions().last(),
                 );
             }
@@ -129,7 +132,7 @@ impl ExitGraph {
     ) {
         if is_exit {
             match terminator {
-                Some(terminator) => exits.add(BlockExit::from_terminator(targets, terminator)),
+                Some(terminator) => exits.add(BlockExit::from_terminator(terminator)),
                 None => exits.returns = true,
             }
             return;
@@ -150,7 +153,7 @@ impl ExitGraph {
         })
     }
 
-    fn non_returning(&self, project: &Project) -> BTreeSet<Address> {
+    fn non_returning(&self, project: &ProjectView<'_>) -> BTreeSet<Address> {
         let targets = NonReturningTargets::new(project);
         let mut returning = self
             .functions
@@ -199,7 +202,7 @@ impl NonReturningPropagation {
 impl AnalysisPass<FunctionStructuringContext> for NonReturningPropagation {
     fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         context: &mut FunctionStructuringContext,
     ) -> Result<(), AnalysisError> {
         let graph = ExitGraph::from_project(project, context);
@@ -245,6 +248,7 @@ mod test {
     use crate::analysis::non_returning::NonReturningFromExterns;
     use crate::analysis::switch::SwitchRecovery;
     use crate::loader::{Loadable, LoadableAnalysers, Loader};
+    use crate::project::Project;
     use crate::registry;
 
     struct Recovered {
@@ -270,7 +274,7 @@ mod test {
 
         recovery.add_builder_post_structuring_pass("switch-recovery", SwitchRecovery::new());
 
-        AnalysisPass::analyse(&mut recovery, &mut project)?;
+        recovery.analyse(&mut project)?;
 
         let mut instructions = BTreeMap::new();
         let mut largest = 0;
@@ -399,8 +403,6 @@ mod test {
     #[ignore = "requires binary test fixtures"]
     fn test_indirect_call_targets_are_resolved() -> Result<(), Box<dyn std::error::Error>> {
         let Recovered { project, .. } = recover("tests/hello-pe.exe", false)?;
-        let targets = NonReturningTargets::new(&project);
-
         let mut imports = 0;
 
         for function in project.functions().iter() {
@@ -412,7 +414,7 @@ mod test {
                 let Some(target) = block
                     .instructions()
                     .last()
-                    .and_then(|terminator| targets.called(terminator))
+                    .and_then(|terminator| terminator.direct_call_target())
                 else {
                     continue;
                 };
@@ -440,7 +442,8 @@ mod test {
     fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn std::error::Error>> {
         for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
             let Recovered { project, .. } = recover(path, true)?;
-            let targets = NonReturningTargets::new(&project);
+            let view = ProjectView::new(&project);
+            let targets = NonReturningTargets::new(&view);
 
             let mut suppressed = 0;
 
@@ -463,7 +466,7 @@ mod test {
                     }
 
                     assert!(
-                        block.successors().is_empty(),
+                        !function.has_successors(id),
                         "call to a non-returning function at {} in {path} kept its fall-through",
                         terminator.address()
                     );

@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::{FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::ir::{
@@ -7,50 +8,76 @@ use crate::ir::{
 use crate::lifter::ContextSet;
 
 #[derive(Default)]
-pub(crate) struct CodeBlockStructurer {
-    block_starts: BTreeMap<Address, IncompleteCodeBlockId>,
-    block_ends: BTreeMap<Address, IncompleteCodeBlockId>,
+pub(super) struct CodeBlockStructurer {
+    block_starts: FxHashMap<Address, IncompleteCodeBlockId>,
+    block_ends: FxHashMap<Address, IncompleteCodeBlockId>,
     cut_positions: Vec<usize>,
 }
 
 impl CodeBlockStructurer {
-    pub(crate) fn block_starts(&self) -> &BTreeMap<Address, IncompleteCodeBlockId> {
-        &self.block_starts
+    pub(super) fn block_starts(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
+        self.block_starts
+            .iter()
+            .map(|(address, block)| (*address, *block))
     }
 
-    pub(crate) fn block_ends(&self) -> &BTreeMap<Address, IncompleteCodeBlockId> {
-        &self.block_ends
+    pub(super) fn block_start_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+        self.block_starts.get(&address).copied()
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub(super) fn block_ends(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
+        self.block_ends
+            .iter()
+            .map(|(address, block)| (*address, *block))
+    }
+
+    pub(super) fn block_end_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+        self.block_ends.get(&address).copied()
+    }
+
+    pub(super) fn clear(&mut self) {
         self.block_starts.clear();
         self.block_ends.clear();
         self.cut_positions.clear();
     }
 
-    pub(crate) fn structure(
+    pub(super) fn structure<'a>(
         &mut self,
         function: &mut IncompleteFunction,
         config: &FunctionRecoveryConfig,
-        contexts: &BTreeMap<Address, ContextSet>,
-        local_targets: &BTreeSet<FlowTarget>,
+        block_starts: impl ExactSizeIterator<Item = Address>,
+        context_at: impl Fn(Address) -> Option<&'a ContextSet>,
+        local_targets: &IndexSet<FlowTarget, FxBuildHasher>,
     ) -> Result<(), FunctionRecoveryError> {
         function.clear_blocks();
         function.sort_insns_by_address();
-        self.clear();
-
-        for position in 0..function.insns().len() {
-            let insn_id = function.insn_id(position).expect("instruction must exist");
-            let insn = function.insn_mut(insn_id).expect("instruction must exist");
-            let address = insn.address();
-
-            if contexts.contains_key(&address) {
-                self.cut_positions.push(position);
-                insn.mark_maybe_taken();
-            } else {
-                insn.unmark_maybe_taken();
-            }
+        for &address in self.block_starts.keys() {
+            let Some(insn_id) = function.first_insn_id_at(address) else {
+                continue;
+            };
+            function
+                .insn_mut(insn_id)
+                .expect("instruction must exist")
+                .unmark_maybe_taken();
         }
+        self.clear();
+        self.cut_positions.reserve(block_starts.len());
+
+        for address in block_starts {
+            let Some(insn_id) = function.first_insn_id_at(address) else {
+                continue;
+            };
+            function
+                .insn_mut(insn_id)
+                .expect("instruction must exist")
+                .mark_maybe_taken();
+            self.cut_positions.push(insn_id.index());
+        }
+        self.cut_positions.sort_unstable();
 
         let num_insns = function.insns().len();
         let num_blocks = self.cut_positions.len();
@@ -68,15 +95,19 @@ impl CodeBlockStructurer {
             ));
         }
 
+        function.reserve_blocks(num_blocks);
+        self.block_starts.reserve(num_blocks);
+        self.block_ends.reserve(num_blocks);
+
         'cuts: for cut_index in 0..self.cut_positions.len() {
             let start = self.cut_positions[cut_index];
             let address = function.insns()[start].address();
-            let block_context = contexts.get(&address).cloned().unwrap_or_default();
+            let block_context = context_at(address).cloned().unwrap_or_default();
             let mut next_cut_index = cut_index + 1;
             let mut next_cut = self.next_cut_point(next_cut_index, num_insns);
             let mut expected = address;
             let mut length = 0usize;
-            let mut insns = Vec::new();
+            let mut insns = Vec::with_capacity(next_cut.saturating_sub(start).min(max_insns));
 
             tracing::trace!("structuring block at {address}; start: {start}");
 
@@ -167,7 +198,7 @@ impl CodeBlockStructurer {
     fn connect_local_targets(
         &self,
         function: &mut IncompleteFunction,
-        local_targets: &BTreeSet<FlowTarget>,
+        local_targets: &IndexSet<FlowTarget, FxBuildHasher>,
     ) {
         for target in local_targets {
             let Some(&from) = self.block_ends.get(&target.from()) else {

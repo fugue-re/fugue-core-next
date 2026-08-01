@@ -4,10 +4,49 @@ pub mod non_returning;
 pub mod posix;
 pub mod windows;
 
+use ustr::Ustr;
+
 use crate::arch::Arch;
 use crate::ir::Endian;
+use crate::storage::entities::schema::ENTITY_PLATFORM_ID;
+use crate::storage::entities::{Entity, EntityId};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub enum Format {
+    Elf,
+    MachO,
+    Pe,
+    #[default]
+    Unknown,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum OperatingSystem {
     FreeBsd,
     Linux,
@@ -19,7 +58,20 @@ pub enum OperatingSystem {
     Windows,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum Abi {
     Eabi,
     Gnu,
@@ -30,7 +82,20 @@ pub enum Abi {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum CallingConvention {
     Aapcs,
     Cdecl,
@@ -66,7 +131,19 @@ impl Display for CallingConvention {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct TypeLayout {
     endian: Endian,
     pointer_size: usize,
@@ -93,13 +170,29 @@ impl TypeLayout {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct Platform {
     abi: Abi,
     calling_convention: CallingConvention,
-    compiler_spec_id: &'static str,
+    compiler_spec_id: Ustr,
+    format: Format,
     os: OperatingSystem,
     type_layout: TypeLayout,
+}
+
+impl Entity for Platform {
+    const ID: EntityId = ENTITY_PLATFORM_ID;
 }
 
 impl Platform {
@@ -107,7 +200,8 @@ impl Platform {
         Self {
             abi: Abi::Unknown,
             calling_convention: CallingConvention::Default,
-            compiler_spec_id: "default",
+            compiler_spec_id: Ustr::from("default"),
+            format: Format::Unknown,
             os: OperatingSystem::Unknown,
             type_layout,
         }
@@ -126,7 +220,11 @@ impl Platform {
     }
 
     pub(crate) fn compiler_spec_id(&self) -> &'static str {
-        self.compiler_spec_id
+        self.compiler_spec_id.as_str()
+    }
+
+    pub fn format(&self) -> Format {
+        self.format
     }
 
     pub fn os(&self) -> OperatingSystem {
@@ -145,8 +243,12 @@ impl Platform {
         self.calling_convention = calling_convention;
     }
 
-    pub(crate) fn set_compiler_spec_id(&mut self, compiler_spec_id: &'static str) {
-        self.compiler_spec_id = compiler_spec_id;
+    pub(crate) fn set_compiler_spec_id(&mut self, compiler_spec_id: impl AsRef<str>) {
+        self.compiler_spec_id = Ustr::from(compiler_spec_id.as_ref());
+    }
+
+    pub fn set_format(&mut self, format: Format) {
+        self.format = format;
     }
 
     pub fn set_os(&mut self, os: OperatingSystem) {
@@ -167,8 +269,13 @@ impl Platform {
         self
     }
 
-    pub(crate) fn with_compiler_spec_id(mut self, compiler_spec_id: &'static str) -> Self {
+    pub(crate) fn with_compiler_spec_id(mut self, compiler_spec_id: impl AsRef<str>) -> Self {
         self.set_compiler_spec_id(compiler_spec_id);
+        self
+    }
+
+    pub fn with_format(mut self, format: Format) -> Self {
+        self.set_format(format);
         self
     }
 

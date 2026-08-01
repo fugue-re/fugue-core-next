@@ -9,6 +9,7 @@ pub use fugue_lifter::{
     ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp as RawPCodeOp, Varnode,
 };
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::Address;
@@ -102,7 +103,7 @@ impl ContextUpdate {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct ContextSet(ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>);
+pub struct ContextSet(SmallVec<[ContextUpdate; 1]>);
 
 impl Display for ContextSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,8 +143,9 @@ impl rkyv::Archive for ContextSet {
     type Resolver = <ContextSetInner as rkyv::Archive>::Resolver;
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let inner = self.0.iter().cloned().collect::<ContextSetInner>();
         let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<ContextSetInner>>() };
-        self.0.resolve(resolver, out_inner);
+        inner.resolve(resolver, out_inner);
     }
 }
 
@@ -151,20 +153,24 @@ impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writ
     rkyv::Serialize<S> for ContextSet
 {
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0.serialize(serializer)
+        self.0
+            .iter()
+            .cloned()
+            .collect::<ContextSetInner>()
+            .serialize(serializer)
     }
 }
 
 impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
     fn deserialize(&self, deserializer: &mut D) -> Result<ContextSet, D::Error> {
         let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserializer)?;
-        Ok(ContextSet(inner))
+        Ok(ContextSet(inner.into_iter().collect()))
     }
 }
 
 impl From<ContextUpdate> for ContextSet {
     fn from(value: ContextUpdate) -> Self {
-        Self(ArrayVec::from_iter([value]))
+        Self(SmallVec::from_iter([value]))
     }
 }
 
@@ -179,7 +185,7 @@ impl FromIterator<(ContextBitRange, u32)> for ContextSet {
 
 impl FromIterator<ContextUpdate> for ContextSet {
     fn from_iter<T: IntoIterator<Item = ContextUpdate>>(iter: T) -> Self {
-        Self(ArrayVec::from_iter(
+        Self(SmallVec::from_iter(
             iter.into_iter().take(MAX_CONTEXT_UPDATES),
         ))
     }
@@ -208,6 +214,10 @@ impl ContextSet {
                 return;
             }
         }
+        assert!(
+            self.0.len() < MAX_CONTEXT_UPDATES,
+            "context update limit exceeded",
+        );
         self.0.push(value);
     }
 

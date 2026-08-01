@@ -3,23 +3,26 @@ use std::io::Read;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
+use anyhow::Error as AnyError;
 use fugue_specs::PatternsWithContext;
 use serde::{Deserialize, Serialize};
+use serde_yaml::Error as YamlError;
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::ir::{Address, AddressWithContext, RawAddress};
+use crate::engine::ProjectView;
+use crate::ir::{Address, AddressRange, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
-use crate::project::Project;
 use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentMappingView, SegmentStorage};
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryPatternMatcherError {
     #[error("failed to read patterns from {0}: {1}")]
-    Io(PathBuf, anyhow::Error),
+    Io(PathBuf, AnyError),
     #[error("failed to parse patterns: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] YamlError),
 }
 
 impl FunctionRecoveryPatternMatcherError {
@@ -132,16 +135,16 @@ impl FunctionRecoveryPatternMatcher {
 
     fn analyse_space(
         &mut self,
-        project: &Project,
+        project: &ProjectView<'_>,
         state: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
     ) -> Result<(), AnalysisError> {
         let segments = project.segments();
-        let gaps = state
-            .gaps(project.functions(), project.blocks(), segments, space_id)
-            .map_err(|e| AnalysisError::pass_failed("function-recovery-pattern-matcher", e))?;
+        let available = state
+            .available_ranges(space_id)
+            .collect::<SmallVec<[_; 4]>>();
 
-        if gaps.is_empty() {
+        if available.is_empty() {
             tracing::debug!("no gaps to analyse");
             return Ok(());
         }
@@ -151,39 +154,57 @@ impl FunctionRecoveryPatternMatcher {
 
         let mut mapping_cache = SegmentMappingCache::new();
 
-        for gap in gaps.ranges() {
-            tracing::debug!("analysing gap {}-{}", gap.start(), gap.end());
-            Self::for_each_segment(segments, &mut mapping_cache, space_id, gap, |gap, bytes| {
-                for pat in self.patterns.iter() {
-                    for (range, ctx, confidence) in pat.matches(bytes) {
-                        let start = Address::new(space_id, *gap.start() + range.start);
+        for available in available {
+            tracing::debug!(
+                "analysing available range {}-{}",
+                available.start(),
+                available.end()
+            );
+            Self::for_each_segment(
+                segments,
+                &mut mapping_cache,
+                space_id,
+                available,
+                |range_in_space, bytes| {
+                    for pat in self.patterns.iter() {
+                        for (range, ctx, confidence) in pat.matches(bytes) {
+                            let start =
+                                Address::new(space_id, *range_in_space.start() + range.start);
+                            let Some(matched) =
+                                AddressRange::from_size(start, (range.end - range.start) as u64)
+                            else {
+                                continue;
+                            };
 
-                        if arch.canonicalise_address(start).is_none() {
-                            continue;
+                            if state.covered().intersects_range(&matched)
+                                || arch.canonicalise_address(start).is_none()
+                            {
+                                continue;
+                            }
+
+                            if state.avoids().contains(start) {
+                                continue;
+                            }
+
+                            let ctx = ctx
+                                .variables()
+                                .filter_map(|(var, val)| {
+                                    let bits = language.context_variable_by_name(var)?;
+                                    Some((bits, val))
+                                })
+                                .collect::<ContextSet>();
+
+                            tracing::debug!(
+                                "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
+                            );
+
+                            state.add_candidate(AddressWithContext::new_with(
+                                start, ctx, confidence,
+                            ));
                         }
-
-                        if state.avoids().contains(start.offset())
-                            || state.failures().contains(&start)
-                        {
-                            continue;
-                        }
-
-                        let ctx = ctx
-                            .variables()
-                            .filter_map(|(var, val)| {
-                                let bits = language.context_variable_by_name(var)?;
-                                Some((bits, val))
-                            })
-                            .collect::<ContextSet>();
-
-                        tracing::debug!(
-                            "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
-                        );
-
-                        state.add_candidate(AddressWithContext::new_with(start, ctx, confidence));
                     }
-                }
-            });
+                },
+            );
         }
 
         Ok(())
@@ -193,7 +214,7 @@ impl FunctionRecoveryPatternMatcher {
 impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher {
     fn analyse_with(
         &mut self,
-        project: &mut Project,
+        project: &ProjectView<'_>,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segments = project.segments();

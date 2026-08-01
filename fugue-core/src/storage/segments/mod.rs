@@ -33,14 +33,12 @@ pub use mapping::{
     SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef, SegmentSubMapping,
 };
-use mapping::{SegmentMappingLocation, SegmentMappingMetadata};
 pub use provider::{
     InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
     SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
     SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
 };
-use space::AddressSpaceRevert;
 pub use space::{AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind};
 pub use view::SegmentMappingView;
 
@@ -160,220 +158,6 @@ pub struct SegmentStorage {
     path: Option<PathBuf>,
 }
 
-pub(crate) struct SegmentStorageRevert {
-    mapping_ctr: usize,
-    space_ctr: usize,
-    created_mappings: Vec<SegmentMappingId>,
-    created_spaces: Vec<AddressSpaceId>,
-    mappings: Vec<SegmentMappingRestore>,
-    spaces: Vec<(AddressSpaceId, AddressSpaceRevert)>,
-    touched_spaces: Vec<AddressSpaceId>,
-}
-
-enum SegmentMappingRestore {
-    Location(SegmentMappingId, SegmentMappingLocation),
-    Metadata(SegmentMappingId, SegmentMappingMetadata),
-    Removed(SegmentMappingId, SegmentMapping),
-}
-
-impl SegmentStorageRevert {
-    pub(crate) fn capture_empty(segments: &SegmentStorage) -> SegmentStorageRevert {
-        Self::new(segments)
-    }
-
-    pub(crate) fn capture_mapping_remap(
-        segments: &SegmentStorage,
-        mapping: SegmentMappingId,
-        new_start: Address,
-    ) -> SegmentStorageRevert {
-        let mut revert = Self::new(segments);
-        if let Some(current) = segments.mappings.get(&mapping) {
-            revert.mappings.push(SegmentMappingRestore::Location(
-                mapping,
-                SegmentMappingLocation::capture(current),
-            ));
-            let old_range = (current.start().raw_address(), current.end().raw_address());
-            let new_end = new_start + current.size();
-            let new_range = (new_start.raw_address(), new_end.raw_address());
-            revert.capture_mapping_spaces(segments, mapping, [old_range, new_range]);
-        }
-        revert
-    }
-
-    pub(crate) fn capture_mapping_resize(
-        segments: &SegmentStorage,
-        mapping: SegmentMappingId,
-        new_size: u64,
-    ) -> SegmentStorageRevert {
-        let mut revert = Self::new(segments);
-        if let Some(current) = segments.mappings.get(&mapping) {
-            revert.mappings.push(SegmentMappingRestore::Location(
-                mapping,
-                SegmentMappingLocation::capture(current),
-            ));
-            let old_range = (current.start().raw_address(), current.end().raw_address());
-            let new_end = current.start() + new_size;
-            let new_range = (current.start().raw_address(), new_end.raw_address());
-            revert.capture_mapping_spaces(segments, mapping, [old_range, new_range]);
-        }
-        revert
-    }
-
-    pub(crate) fn capture_mapping_metadata(
-        segments: &SegmentStorage,
-        mapping: SegmentMappingId,
-    ) -> SegmentStorageRevert {
-        let mut revert = Self::new(segments);
-        revert.capture_metadata(segments, mapping);
-        revert
-    }
-
-    fn new(storage: &SegmentStorage) -> Self {
-        Self {
-            mapping_ctr: storage.mapping_ctr,
-            space_ctr: storage.space_ctr,
-            created_mappings: Vec::new(),
-            created_spaces: Vec::new(),
-            mappings: Vec::new(),
-            spaces: Vec::new(),
-            touched_spaces: Vec::new(),
-        }
-    }
-
-    fn capture_mapping_spaces(
-        &mut self,
-        storage: &SegmentStorage,
-        id: SegmentMappingId,
-        ranges: impl Clone + IntoIterator<Item = (RawAddress, RawAddress)>,
-    ) {
-        let spaces = storage
-            .spaces
-            .values()
-            .filter(|space| {
-                space
-                    .priority_list()
-                    .iter()
-                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
-            })
-            .map(|space| {
-                (
-                    space.id(),
-                    AddressSpaceRevert::capture_ranges(space, id, ranges.clone()),
-                )
-            })
-            .collect::<SmallVec<[_; 8]>>();
-
-        for (id, space) in spaces {
-            self.push_space(id, space);
-        }
-    }
-
-    fn capture_metadata(&mut self, storage: &SegmentStorage, id: SegmentMappingId) {
-        if let Some(mapping) = storage.mappings.get(&id) {
-            self.mappings.push(SegmentMappingRestore::Metadata(
-                id,
-                SegmentMappingMetadata::capture(mapping),
-            ));
-        }
-    }
-
-    fn push_removed_mapping(&mut self, id: SegmentMappingId, mapping: SegmentMapping) {
-        self.mappings
-            .push(SegmentMappingRestore::Removed(id, mapping));
-    }
-
-    fn capture_space_mapping(
-        &mut self,
-        storage: &SegmentStorage,
-        space_id: AddressSpaceId,
-        mapping_id: SegmentMappingId,
-    ) {
-        let Some(mapping) = storage.mappings.get(&mapping_id) else {
-            return;
-        };
-        let Some(space) = storage.spaces.get(&space_id) else {
-            return;
-        };
-
-        let space = AddressSpaceRevert::capture_ranges(
-            space,
-            mapping_id,
-            [(mapping.start().raw_address(), mapping.end().raw_address())],
-        );
-        self.push_space(space_id, space);
-    }
-
-    fn capture_removed_space_mapping(
-        &mut self,
-        storage: &SegmentStorage,
-        space_id: AddressSpaceId,
-        mapping_id: SegmentMappingId,
-    ) {
-        if let Some(space) = storage.spaces.get(&space_id) {
-            self.push_space(
-                space_id,
-                AddressSpaceRevert::capture_mapping(space, mapping_id),
-            );
-        }
-    }
-
-    fn push_space(&mut self, id: AddressSpaceId, space: AddressSpaceRevert) {
-        if self.touched_spaces.contains(&id) {
-            return;
-        }
-
-        self.spaces.push((id, space));
-        self.touched_spaces.push(id);
-    }
-
-    pub(crate) fn touch_mapping(&mut self, id: SegmentMappingId) {
-        self.created_mappings.push(id);
-    }
-
-    pub(crate) fn touch_space(&mut self, id: AddressSpaceId) {
-        self.created_spaces.push(id);
-    }
-
-    pub(crate) fn restore(self, storage: &mut SegmentStorage) {
-        for mapping in self.created_mappings {
-            storage.mappings.remove(&mapping);
-        }
-
-        for space in self.created_spaces {
-            storage.spaces.remove(&space);
-        }
-
-        storage.mapping_ctr = self.mapping_ctr;
-        storage.space_ctr = self.space_ctr;
-
-        for mapping in self.mappings {
-            match mapping {
-                SegmentMappingRestore::Location(id, location) => {
-                    if let Some(mapping) = storage.mappings.get_mut(&id) {
-                        mapping.restore_location(location);
-                    }
-                }
-                SegmentMappingRestore::Metadata(id, metadata) => {
-                    if let Some(mapping) = storage.mappings.get_mut(&id) {
-                        mapping.restore_metadata(metadata);
-                    }
-                }
-                SegmentMappingRestore::Removed(id, mapping) => {
-                    storage.mappings.insert(id, mapping);
-                }
-            }
-        }
-
-        for (id, space) in self.spaces {
-            if let Some(current) = storage.spaces.get_mut(&id) {
-                space.restore(current);
-            }
-        }
-
-        storage.touch();
-    }
-}
-
 pub(crate) struct SegmentWriteRevert {
     chunks: Vec<SegmentWriteRevertChunk>,
 }
@@ -405,18 +189,6 @@ impl SegmentWriteRevert {
         }
 
         Ok(())
-    }
-}
-
-impl Drop for SegmentStorage {
-    fn drop(&mut self) {
-        if self.is_transient() {
-            return;
-        }
-
-        if let Err(e) = self.persist_storage() {
-            tracing::error!("failed to persist segment storage metadata: {e}");
-        }
     }
 }
 
@@ -473,16 +245,6 @@ impl SegmentStorage {
 
     fn touch(&mut self) {
         self.revision = self.revision.next();
-    }
-
-    pub(crate) fn space_mapping_revert(
-        &self,
-        space: AddressSpaceId,
-        mapping: SegmentMappingId,
-    ) -> SegmentStorageRevert {
-        let mut revert = SegmentStorageRevert::new(self);
-        revert.capture_space_mapping(self, space, mapping);
-        revert
     }
 
     pub fn from_loadable<S>(
@@ -718,30 +480,55 @@ impl SegmentStorage {
         }
 
         storage.fill_byte = metadata.fill_byte;
-        let mut space_map = BTreeMap::new();
         storage.spaces.clear();
 
+        if !metadata
+            .spaces
+            .iter()
+            .any(|space| space.id == DEFAULT_SPACE_ID)
+        {
+            return Err(SegmentStorageError::backing_with(
+                "segment metadata has no default address space",
+            ));
+        }
+
         for space_meta in &metadata.spaces {
-            let new_id =
-                if space_meta.id == DEFAULT_SPACE_ID && !space_map.contains_key(&space_meta.id) {
-                    DEFAULT_SPACE_ID
-                } else {
-                    AddressSpaceId::try_from(storage.space_ctr)?
-                };
+            if storage.spaces.contains_key(&space_meta.id) {
+                return Err(SegmentStorageError::backing_with(format!(
+                    "duplicate address space id `{}` in segment metadata",
+                    space_meta.id
+                )));
+            }
+
             let kind = match space_meta.kind {
                 AddressSpaceKind::Base => AddressSpaceKind::Base,
-                AddressSpaceKind::Overlay { base } => AddressSpaceKind::Overlay {
-                    base: *space_map
-                        .get(&base)
-                        .ok_or(SegmentStorageError::MissingOverlayBase(base))?,
-                },
+                AddressSpaceKind::Overlay { base } => AddressSpaceKind::Overlay { base },
             };
 
             storage
                 .spaces
-                .insert(new_id, AddressSpace::new_with(new_id, kind));
-            storage.space_ctr = storage.space_ctr.max(new_id.index() + 1);
-            space_map.insert(space_meta.id, new_id);
+                .insert(space_meta.id, AddressSpace::new_with(space_meta.id, kind));
+            storage.space_ctr = storage.space_ctr.max(space_meta.id.index() + 1);
+        }
+
+        if !matches!(
+            storage
+                .spaces
+                .get(&DEFAULT_SPACE_ID)
+                .map(AddressSpace::kind),
+            Some(AddressSpaceKind::Base)
+        ) {
+            return Err(SegmentStorageError::backing_with(
+                "default address space must be a base space",
+            ));
+        }
+
+        for space in storage.spaces.values() {
+            if let AddressSpaceKind::Overlay { base } = space.kind()
+                && !storage.spaces.contains_key(&base)
+            {
+                return Err(SegmentStorageError::MissingOverlayBase(base));
+            }
         }
 
         let mut mapping_map = BTreeMap::new();
@@ -752,9 +539,12 @@ impl SegmentStorage {
                     "unknown provider `{provider_id}` in metadata"
                 )));
             }
-            let space_id = *space_map
-                .get(&mapping_meta.space_id)
-                .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
+            let space_id = mapping_meta.space_id;
+            if !storage.spaces.contains_key(&space_id) {
+                return Err(SegmentStorageError::backing_with(
+                    "unknown space in mapping metadata",
+                ));
+            }
             let start = Address::new(space_id, mapping_meta.virtual_start);
 
             let mapping_id = storage.create_mapping_from_builder(
@@ -777,9 +567,7 @@ impl SegmentStorage {
         }
 
         for space_meta in &metadata.spaces {
-            let space_id = *space_map
-                .get(&space_meta.id)
-                .ok_or_else(|| SegmentStorageError::backing_with("unknown space in metadata"))?;
+            let space_id = space_meta.id;
             for mapping_id in &space_meta.mapping_ids {
                 let mapping_id = *mapping_map.get(mapping_id).ok_or_else(|| {
                     SegmentStorageError::backing_with(format!(
@@ -808,11 +596,10 @@ impl SegmentStorage {
         !self.is_persistable()
     }
 
-    fn persist_storage(&mut self) -> Result<(), SegmentStorageError> {
+    pub(crate) fn persist_storage(&mut self) -> Result<(), SegmentStorageError> {
         if self.is_transient() {
-            return Err(SegmentStorageError::backing_with(
-                "storage contains non-persistable providers",
-            ));
+            tracing::debug!("segment storage is transient; skipping persistence");
+            return Ok(());
         }
 
         let Some(meta_path) = self.path.as_ref().map(|p| p.join(SEGMENT_STORAGE_FILE)) else {
@@ -1038,6 +825,41 @@ impl SegmentStorage {
         Ok(id)
     }
 
+    pub(crate) fn create_mapping_with_id(
+        &mut self,
+        id: SegmentMappingId,
+        builder: SegmentMappingBuilder,
+    ) -> Result<(), SegmentStorageError> {
+        if !self.providers.contains_key(&builder.provider_id()) {
+            return Err(SegmentStorageError::backing_with("provider not found"));
+        }
+        if self.mappings.contains_key(&id) {
+            return Err(SegmentStorageError::backing_with("mapping already exists"));
+        }
+
+        self.mapping_ctr = self.mapping_ctr.max(id.index() + 1);
+        self.mappings
+            .insert(id, SegmentMapping::from_builder(id, builder));
+        self.touch();
+        Ok(())
+    }
+
+    pub(crate) fn has_provider(&self, id: SegmentStorageProviderId) -> bool {
+        self.providers.contains_key(&id)
+    }
+
+    pub(crate) fn preview_mapping_id(
+        &self,
+        offset: usize,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        let index = self
+            .mapping_ctr
+            .checked_add(offset)
+            .ok_or_else(|| SegmentStorageError::backing_with("mapping id exhausted"))?;
+        SegmentMappingId::try_from(index)
+            .map_err(|_| SegmentStorageError::backing_with("mapping id exhausted"))
+    }
+
     pub fn remove_mapping(&mut self, id: SegmentMappingId) -> Result<(), SegmentStorageError> {
         for space in self.spaces.values_mut() {
             space.remove_mapping(id);
@@ -1049,46 +871,6 @@ impl SegmentStorage {
         self.touch();
 
         Ok(())
-    }
-
-    pub(crate) fn remove_mapping_tracked(
-        &mut self,
-        id: SegmentMappingId,
-    ) -> Result<SegmentStorageRevert, SegmentStorageError> {
-        if !self.mappings.contains_key(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
-        }
-
-        let mut revert = SegmentStorageRevert::new(self);
-        let spaces = self
-            .spaces
-            .values()
-            .filter(|space| {
-                space
-                    .priority_list()
-                    .iter()
-                    .any(|mapping_ref| mapping_ref.mapping_id() == id)
-            })
-            .map(|space| space.id())
-            .collect::<SmallVec<[_; 8]>>();
-
-        for space in spaces {
-            revert.capture_removed_space_mapping(self, space, id);
-        }
-
-        for space in self.spaces.values_mut() {
-            space.remove_mapping(id);
-        }
-
-        let mapping = self
-            .mappings
-            .remove(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
-        revert.push_removed_mapping(id, mapping);
-
-        self.touch();
-
-        Ok(revert)
     }
 
     pub fn mapping(&self, id: SegmentMappingId) -> Option<&SegmentMapping> {
@@ -1207,6 +989,33 @@ impl SegmentStorage {
         self.spaces.insert(id, AddressSpace::new(id));
         self.touch();
         Ok(id)
+    }
+
+    pub(crate) fn create_space_with_id(
+        &mut self,
+        id: AddressSpaceId,
+    ) -> Result<(), SegmentStorageError> {
+        if self.spaces.contains_key(&id) {
+            return Err(SegmentStorageError::backing_with(
+                "address space already exists",
+            ));
+        }
+
+        self.space_ctr = self.space_ctr.max(id.index() + 1);
+        self.spaces.insert(id, AddressSpace::new(id));
+        self.touch();
+        Ok(())
+    }
+
+    pub(crate) fn preview_space_id(
+        &self,
+        offset: usize,
+    ) -> Result<AddressSpaceId, SegmentStorageError> {
+        let index = self
+            .space_ctr
+            .checked_add(offset)
+            .ok_or_else(|| SegmentStorageError::backing_with("address space id exhausted"))?;
+        AddressSpaceId::try_from(index).map_err(Into::into)
     }
 
     pub fn add_mapping_to_space(
@@ -2216,6 +2025,24 @@ mod test {
         let mut bytes = [0u8; 4];
         storage.read_bytes_exact(0x1000u64, &mut bytes)?;
         assert_eq!(bytes, [0x5a; 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_address_space_ids_survive_reload() -> Result<(), SegmentStorageError> {
+        let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let sparse = AddressSpaceId::new(7);
+        let mut storage = SegmentStorage::empty();
+        storage.create_space_with_id(sparse)?;
+        storage.path = Some(project.path().to_owned());
+        storage.persist_storage()?;
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());
+        let mut storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+
+        assert!(storage.spaces().any(|space| space.id() == sparse));
+        assert_eq!(storage.create_space()?, AddressSpaceId::new(8));
         Ok(())
     }
 

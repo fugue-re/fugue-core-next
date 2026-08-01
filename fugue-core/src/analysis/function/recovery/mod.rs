@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId};
+use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId, ProblemKind};
 use crate::lifter::{DisassemblerError, LifterError};
 use crate::storage::SegmentStorageError;
 
@@ -27,6 +27,16 @@ mod structuring;
 
 pub const DEFAULT_MAX_BLOCK_INSNS: usize = u16::MAX as usize;
 pub const DEFAULT_MAX_FUNCTION_BLOCKS: usize = u16::MAX as usize;
+pub const DEFAULT_MAX_FUNCTION_INSNS: usize = u16::MAX as usize;
+pub(super) const FUNCTION_RECOVERY_BLOCKING_PROBLEMS: [ProblemKind; 7] = [
+    ProblemKind::HinderedByAssertedFact,
+    ProblemKind::AvoidedBytes,
+    ProblemKind::CannotCreateFunction,
+    ProblemKind::DecodeFailed,
+    ProblemKind::FunctionTooLarge,
+    ProblemKind::PassFailed,
+    ProblemKind::Unknown,
+];
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
@@ -52,6 +62,14 @@ pub enum FunctionRecoveryError {
     },
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
+    #[error(
+        "invalid function at {address}; number of instructions ({instructions}) exceeds limit ({maximum})"
+    )]
+    InvalidFunctionInstructionCount {
+        address: Address,
+        instructions: usize,
+        maximum: usize,
+    },
     #[error(
         "invalid function at {address}; number of blocks ({blocks}) must be less than {maximum}"
     )]
@@ -95,8 +113,38 @@ impl FunctionRecoveryError {
         }
     }
 
+    pub fn invalid_function_instructions(
+        address: Address,
+        instructions: usize,
+        maximum: usize,
+    ) -> Self {
+        Self::InvalidFunctionInstructionCount {
+            address,
+            instructions,
+            maximum,
+        }
+    }
+
     pub fn invalid_instruction_id(id: InsnId) -> Self {
         FunctionRecoveryError::InvalidInstructionId(id)
+    }
+
+    pub fn problem_kind(&self) -> ProblemKind {
+        match self {
+            Self::CommitHook(_) | Self::InitialisationPass(_) | Self::PostStructuringPass(_) => {
+                ProblemKind::PassFailed
+            }
+            Self::Disassembly(_) | Self::Instruction(_) | Self::Lifting(_) => {
+                ProblemKind::DecodeFailed
+            }
+            Self::InvalidBlockLength { .. }
+            | Self::InvalidBlockSize { .. }
+            | Self::InvalidFunctionInstructionCount { .. }
+            | Self::InvalidFunctionSize { .. } => ProblemKind::FunctionTooLarge,
+            Self::InvalidFunction => ProblemKind::CannotCreateFunction,
+            Self::InvalidBlockId(_) | Self::InvalidInstructionId(_) => ProblemKind::Unknown,
+            Self::SegmentStorage(_) => ProblemKind::AvoidedBytes,
+        }
     }
 }
 
@@ -113,6 +161,8 @@ pub struct FunctionRecoveryConfig {
     commit_pending_functions: bool,
     // This value controls the maximum number of basic blocks allowed in a single function.
     max_function_blocks: usize,
+    // This value controls the maximum number of instructions allowed in a single function.
+    max_function_insns: usize,
     // This value controls the maximum number of instructions allowed in a single basic block.
     max_block_insns: usize,
     // This flag controls whether to use fine-grained block coverage when computing function
@@ -137,6 +187,7 @@ impl Default for FunctionRecoveryConfig {
         FunctionRecoveryConfig {
             commit_pending_functions: true,
             max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
+            max_function_insns: DEFAULT_MAX_FUNCTION_INSNS,
             max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
             use_fine_grained_block_coverage: false,
             use_non_returning_analysis: false,
@@ -171,6 +222,19 @@ impl FunctionRecoveryConfig {
 
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
         self.set_max_function_blocks(max);
+        self
+    }
+
+    pub fn max_function_insns(&self) -> usize {
+        self.max_function_insns
+    }
+
+    pub fn set_max_function_insns(&mut self, max: usize) {
+        self.max_function_insns = max.clamp(1, DEFAULT_MAX_FUNCTION_INSNS);
+    }
+
+    pub fn with_max_function_insns(mut self, max: usize) -> Self {
+        self.set_max_function_insns(max);
         self
     }
 
@@ -255,7 +319,9 @@ impl FunctionRecoveryConfig {
 
 #[cfg(test)]
 mod test {
-    use crate::analysis::AnalysisPass;
+    use tracing_subscriber::filter::EnvFilter;
+    use tracing_subscriber::fmt::format::FmtSpan;
+
     use crate::loader::{Loadable, LoadableAnalysers, Loader, Shellcode};
     use crate::project::Project;
 
@@ -263,10 +329,10 @@ mod test {
     #[ignore = "requires local language data and binary fixtures"]
     fn test_control_flow_recovery_ls() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_env_filter(EnvFilter::from_default_env())
             .with_line_number(true)
             .with_file(true)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_span_events(FmtSpan::CLOSE)
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
@@ -286,10 +352,10 @@ mod test {
     #[ignore = "requires FUGUE_LANGUAGE_DIR"]
     fn test_control_flow_recovery_overlap() -> Result<(), Box<dyn std::error::Error>> {
         let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+            .with_env_filter(EnvFilter::from_default_env())
             .with_line_number(true)
             .with_file(true)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_span_events(FmtSpan::CLOSE)
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {

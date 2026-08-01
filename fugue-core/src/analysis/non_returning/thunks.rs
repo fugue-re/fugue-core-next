@@ -1,89 +1,73 @@
+use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::FunctionRecoveryState;
-use crate::analysis::non_returning::NonReturningTargets;
-use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::project::Project;
+use crate::engine::ProjectView;
+use crate::ir::Address;
 
 const MAX_INSN_BYTES: usize = 32;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NonReturningThunks;
-
-impl NonReturningThunks {
-    pub fn new() -> Self {
-        Self
+pub(in crate::analysis) fn analyse_non_returning_thunk(
+    project: &ProjectView<'_>,
+    state: &mut FunctionRecoveryState,
+    non_returning_targets: &[Address],
+) -> Result<(), AnalysisError> {
+    if state.function().is_non_returning() {
+        return Ok(());
     }
-}
 
-impl AnalysisPass<FunctionRecoveryState> for NonReturningThunks {
-    fn analyse_with(
-        &mut self,
-        project: &mut Project,
-        state: &mut FunctionRecoveryState,
-    ) -> Result<(), AnalysisError> {
-        if state.function.is_non_returning() {
-            return Ok(());
-        }
+    let [block] = state.function().blocks() else {
+        return Ok(());
+    };
 
-        let [block] = state.function.blocks() else {
-            return Ok(());
-        };
+    let Some(terminator) = block
+        .insns()
+        .last()
+        .and_then(|&id| state.function().insn(id))
+        .filter(|insn| insn.is_flow())
+    else {
+        return Ok(());
+    };
 
-        let Some(terminator) = block
-            .insns()
-            .last()
-            .and_then(|&id| state.function.insn(id))
-            .filter(|insn| insn.is_flow())
-        else {
-            return Ok(());
-        };
+    let address = terminator.address();
+    let mut bytes = [0u8; MAX_INSN_BYTES];
 
-        let address = terminator.address();
-        let mut bytes = [0u8; MAX_INSN_BYTES];
+    let Ok(read) = project.segments().read_bytes(address, &mut bytes) else {
+        return Ok(());
+    };
 
-        let Ok(read) = project.segments().read_bytes(address, &mut bytes) else {
-            return Ok(());
-        };
+    let Some(bytes) = bytes.get(..read) else {
+        return Ok(());
+    };
 
-        let Some(bytes) = bytes.get(..read) else {
-            return Ok(());
-        };
+    let arch = project.arch();
+    let (function, resolver) = state.function_and_resolver(arch);
+    let entry = function.entry();
+    let Ok(terminator) = resolver.resolve(address, bytes) else {
+        return Ok(());
+    };
 
-        let Ok(terminator) = state.resolver.resolve(address, bytes) else {
-            return Ok(());
-        };
+    let Some(target) = resolver.resolve_indirect_target(project.segments(), &terminator) else {
+        return Ok(());
+    };
 
-        let targets = NonReturningTargets::new(project);
-
-        let Some(target) = state
-            .resolver
-            .resolve_indirect_target(project.segments(), &terminator)
-        else {
-            return Ok(());
-        };
-
-        if !targets.is_non_returning(target) {
-            return Ok(());
-        }
-
-        tracing::debug!(
-            "marking thunk at {} to {target} as non-returning",
-            state.function.entry()
-        );
-
-        state.function.mark_thunk();
-        state.function.mark_non_returning();
-
-        Ok(())
+    if non_returning_targets.binary_search(&target).is_err() {
+        return Ok(());
     }
+
+    tracing::debug!("marking thunk at {} to {target} as non-returning", entry);
+
+    let function = state.function_mut();
+    function.mark_thunk();
+    function.mark_non_returning();
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::analysis::AnalysisPass;
     use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryExtension};
     use crate::analysis::non_returning::NonReturningFromExterns;
     use crate::loader::{Loadable, LoadableAnalysers, Loader};
+    use crate::project::Project;
     use crate::registry;
 
     #[test]
@@ -102,7 +86,7 @@ mod test {
                 extension.apply(&project, &mut recovery)?;
             }
 
-            AnalysisPass::analyse(&mut recovery, &mut project)?;
+            recovery.analyse(&mut project)?;
 
             let thunks = project
                 .functions()

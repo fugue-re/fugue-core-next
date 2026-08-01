@@ -1,7 +1,7 @@
 use super::FunctionRecoveryError;
+use crate::arch::Arch;
 use crate::ir::{Address, IncompleteCodeBlockId, IncompleteFunction, Insn};
 use crate::lifter::{Disassembler, Lifter, LiftingContext, Op, RawPCodeOp};
-use crate::project::Project;
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 
 pub struct InsnResolver {
@@ -12,9 +12,9 @@ pub struct InsnResolver {
 }
 
 impl InsnResolver {
-    pub fn new(project: &Project) -> Self {
-        let disassembler = project.arch().disassembler();
-        let lifter = project.arch().lifter();
+    pub fn new(arch: &Arch) -> Self {
+        let disassembler = arch.disassembler();
+        let lifter = arch.lifter();
 
         Self {
             disassembler,
@@ -30,6 +30,7 @@ impl InsnResolver {
         bytes: impl AsRef<[u8]>,
     ) -> Result<Insn, FunctionRecoveryError> {
         let bytes = bytes.as_ref();
+        self.operations.clear();
         let mut insn = self
             .disassembler
             .disassemble(address, bytes, self.lifter.context_mut())?;
@@ -46,7 +47,6 @@ impl InsnResolver {
         insn: &mut Insn,
         bytes: impl AsRef<[u8]>,
     ) -> Result<(), FunctionRecoveryError> {
-        self.operations.clear();
         let length = self
             .lifter
             .lift(insn.address(), bytes.as_ref(), &mut self.operations)?;

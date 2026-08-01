@@ -16,8 +16,9 @@ use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, RawAddress, Reference, ReferenceTarget,
-    SegmentProperties, Switch, Symbol, SymbolEntry, SymbolProperties,
+    Address, AddressRangeSet, FunctionId, Problem, ProblemKey, ProblemKind, ProblemScope,
+    RawAddress, Reference, ReferenceTarget, SegmentProperties, Switch, Symbol, SymbolEntry,
+    SymbolProperties,
 };
 use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
@@ -68,6 +69,10 @@ pub enum QueryError {
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
+    #[error("cached computation observed undeclared change kinds: {0:?}")]
+    UndeclaredDependency(ChangeKinds),
+    #[error("cannot wait on the analysis worker from the analysis worker")]
+    WouldDeadlock,
 }
 
 impl From<EngineError> for QueryError {
@@ -227,6 +232,45 @@ impl SwitchRow {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProblemRow {
+    problem: Problem,
+}
+
+impl ProblemRow {
+    pub fn address(&self) -> Option<Address> {
+        self.problem.address()
+    }
+
+    pub fn scope(&self) -> ProblemScope {
+        self.problem.scope()
+    }
+
+    pub fn kind(&self) -> ProblemKind {
+        self.problem.kind()
+    }
+
+    pub fn key(&self) -> ProblemKey {
+        self.problem.key()
+    }
+
+    pub fn attempts(&self) -> u8 {
+        self.problem.attempts()
+    }
+
+    pub fn problem(&self) -> &Problem {
+        &self.problem
+    }
+}
+
+impl From<&Problem> for ProblemRow {
+    fn from(problem: &Problem) -> Self {
+        Self {
+            problem: problem.clone(),
+        }
+    }
+}
+
 impl From<&Switch> for SwitchRow {
     fn from(switch: &Switch) -> Self {
         Self {
@@ -333,6 +377,10 @@ impl QueryReader {
         self
     }
 
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
     pub fn revision(&self) -> Result<Revision, QueryError> {
         self.with_project(|read| read.project().revision())
     }
@@ -429,6 +477,10 @@ impl QueryReader {
         let Some(intake) = &self.intake else {
             return Ok(false);
         };
+
+        if crate::engine::on_analysis_thread() {
+            return Err(QueryError::WouldDeadlock);
+        }
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         intake
@@ -544,6 +596,27 @@ impl QueryReader {
 
     pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchRow>, QueryError> {
         self.with_project(|read| read.switch_at(branch))
+    }
+
+    pub fn problem_at(
+        &self,
+        address: Address,
+        kind: ProblemKind,
+    ) -> Result<Option<ProblemRow>, QueryError> {
+        self.with_project(|read| read.problem_at(address, kind))
+    }
+
+    pub fn problem_page(
+        &self,
+        after: Option<ProblemKey>,
+        limit: usize,
+    ) -> Result<QueryPage<ProblemRow, ProblemKey>, QueryError> {
+        self.with_project(|read| read.problem_page(after, limit))
+    }
+
+    pub fn problems(&self) -> impl Iterator<Item = Result<ProblemRow, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.problem_page(cursor, WALK_PAGE_COUNT))
     }
 
     pub fn switch_page(
@@ -680,8 +753,8 @@ impl QueryEngine {
         self.gate.write_arc()
     }
 
-    pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) {
-        self.changes.write().apply(changes);
+    pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) -> bool {
+        let collapsed = self.changes.write().apply(changes);
 
         for record in changes.records() {
             match record {
@@ -694,7 +767,7 @@ impl QueryEngine {
                 | ChangeRecord::LiftedRemoved { function, level } => {
                     self.cache.evict_lifted(*function, *level);
                 }
-                ChangeRecord::Restored { .. } => self.cache.clear(),
+                ChangeRecord::Resynchronise { .. } => self.cache.clear(),
                 _ => {}
             }
 
@@ -702,6 +775,8 @@ impl QueryEngine {
                 self.cache.clear_lifted();
             }
         }
+
+        collapsed
     }
 
     pub(crate) fn mark_dead(&self) {
@@ -737,7 +812,7 @@ mod test {
     };
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
     use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
-    use crate::il::storage::IlRevert;
+    use crate::il::storage::StagedIl;
     use crate::ir::{AddressRange, IncompleteCodeBlock, IncompleteFunction, ReferenceKind};
     use crate::loader::Loader;
     use crate::project::ProjectTransaction;
@@ -788,7 +863,7 @@ mod test {
                 let value = match mutate(&mut transaction) {
                     Ok(value) => value,
                     Err(error) => {
-                        transaction.rollback()?;
+                        transaction.reject()?;
                         return Err(error.into());
                     }
                 };
@@ -816,10 +891,11 @@ mod test {
 
         fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn Error>>
         where
-            T: IlArtefact,
-            IlRevert: From<(FunctionId, Option<T>)>,
+            T: Clone + StagedIl,
         {
-            self.commit_with(|transaction| transaction.materialise_lifted(ir))
+            ir.metadata_mut()
+                .set_input_revision(self.project.read().semantic_revision());
+            self.commit_with(|transaction| transaction.materialise_lifted(ir.clone()))
         }
 
         fn apply(&mut self, changes: &ChangeSet) {
@@ -1359,16 +1435,16 @@ mod test {
     }
 
     #[test]
-    fn test_restored_marks_every_region_changed() -> Result<(), Box<dyn Error>> {
+    fn test_resynchronisation_marks_every_region_changed() -> Result<(), Box<dyn Error>> {
         let mut fixture = Fixture::new()?;
         let reader = fixture.reader();
 
         let baseline = reader.revision()?;
-        let restored_revision = fixture.next_revision();
+        let resynchronised_revision = fixture.next_revision();
         fixture.apply(&ChangeSet::with_records(
-            restored_revision,
-            [ChangeRecord::Restored {
-                to: restored_revision,
+            resynchronised_revision,
+            [ChangeRecord::Resynchronise {
+                to: resynchronised_revision,
             }],
         ));
 
@@ -1539,6 +1615,26 @@ mod test {
         cached.get(&reader, |_| Ok(calls.fetch_add(1, Ordering::SeqCst)))?;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_cached_rejects_undeclared_observed_reads() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let reader = fixture.reader();
+        let mut cached = Cached::new(Dependency::on(ChangeKinds::FUNCTIONS));
+
+        let error = cached
+            .get(&reader, |view| {
+                let _ = view.symbols();
+                Ok(())
+            })
+            .expect_err("symbol reads must exceed a functions-only dependency");
+
+        assert!(matches!(
+            error,
+            QueryError::UndeclaredDependency(kinds) if kinds.contains(ChangeKinds::SYMBOLS)
+        ));
         Ok(())
     }
 

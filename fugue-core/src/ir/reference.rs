@@ -1,20 +1,25 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Bound;
 use std::sync::Arc;
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, Bytes};
+use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::cfg::FlowKind;
 use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
+#[cfg(test)]
+use crate::storage::entities::schema::ENTITY_PREFIX_SIZE;
 use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
+    make_key,
 };
 use crate::storage::entities::{
-    Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, ProjectEntity,
-    WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, EntityWrite,
+    ProjectEntity, WriteBackWorker,
 };
 use crate::types::Revision;
 use crate::types::common::{archived_bitflags, cursor_bound, cursor_bound_or_minimum};
@@ -52,6 +57,7 @@ impl ReferenceKind {
     Debug,
     Clone,
     Copy,
+    Default,
     PartialEq,
     Eq,
     PartialOrd,
@@ -63,6 +69,7 @@ impl ReferenceKind {
 )]
 #[repr(u8)]
 pub enum ReferenceOrigin {
+    #[default]
     Derived = 0,
     Asserted = 1,
 }
@@ -138,10 +145,10 @@ impl ReferenceTarget {
         }
     }
 
-    pub(crate) fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.tag());
+    pub(crate) fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend([self.tag()]);
         match self {
-            Self::Address(address) => address.encode(buf),
+            Self::Address(address) => address.encode(output),
         }
     }
 
@@ -288,6 +295,14 @@ impl Reference {
     pub fn is_indirect(&self) -> bool {
         self.properties.contains(ReferenceProperties::INDIRECT)
     }
+
+    pub(crate) fn same_fact(&self, other: &Self) -> bool {
+        self.from == other.from
+            && self.target == other.target
+            && self.kind == other.kind
+            && self.properties == other.properties
+            && self.origin == other.origin
+    }
 }
 
 impl PartialEq for Reference {
@@ -338,7 +353,7 @@ impl ReferenceKey {
         self.target
     }
 
-    fn minimum_for(from: Address) -> Self {
+    pub(crate) fn minimum_for(from: Address) -> Self {
         Self::new(from, ReferenceTarget::minimum())
     }
 }
@@ -359,9 +374,9 @@ impl EntityKey for ReferenceKey {
         Some(Self { from, target })
     }
 
-    fn encode(&self, buf: &mut BytesMut) {
-        self.from.encode(buf);
-        self.target.encode(buf);
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        self.from.encode(output);
+        self.target.encode(output);
     }
 }
 
@@ -402,9 +417,9 @@ impl EntityKey for InverseReferenceKey {
         Some(Self { target, from })
     }
 
-    fn encode(&self, buf: &mut BytesMut) {
-        self.target.encode(buf);
-        self.from.encode(buf);
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        self.target.encode(output);
+        self.from.encode(output);
     }
 }
 
@@ -443,13 +458,101 @@ impl Entity for ReferenceRecord {
 
 #[derive(Clone)]
 pub struct ReferenceIndex {
-    forward: EntityCache<ReferenceKey, ReferenceRecord>,
-    inverse: EntityCache<InverseReferenceKey, ReferenceRecord>,
-    storage: EntityStorage,
+    backing: ReferenceIndexBacking,
+}
+
+#[derive(Clone)]
+enum ReferenceIndexBacking {
+    Persistent {
+        forward: EntityCache<ReferenceKey, ReferenceRecord>,
+        inverse: EntityCache<InverseReferenceKey, ReferenceRecord>,
+        storage: EntityStorage,
+    },
+    Transient(Arc<RwLock<TransientReferenceIndex>>),
+}
+
+#[derive(Default)]
+struct TransientReferenceIndex {
+    forward: BTreeMap<ReferenceKey, Reference>,
+    inverse: BTreeMap<InverseReferenceKey, Reference>,
+}
+
+struct PersistentReferenceIndex<'a> {
+    forward: &'a EntityCache<ReferenceKey, ReferenceRecord>,
+    inverse: &'a EntityCache<InverseReferenceKey, ReferenceRecord>,
+    storage: &'a EntityStorage,
+}
+
+struct TransientReferencesFrom {
+    index: ArcRwLockReadGuard<RawRwLock, TransientReferenceIndex>,
+    from: Address,
+    cursor: Option<ReferenceKey>,
+}
+
+impl Iterator for TransientReferencesFrom {
+    type Item = Result<Reference, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.cursor.map_or_else(
+            || Bound::Included(ReferenceKey::minimum_for(self.from)),
+            Bound::Excluded,
+        );
+        let (&key, &reference) = self.index.forward.range((start, Bound::Unbounded)).next()?;
+        if key.from() != self.from {
+            return None;
+        }
+        self.cursor = Some(key);
+        Some(Ok(reference))
+    }
+}
+
+struct TransientReferencesTo {
+    index: ArcRwLockReadGuard<RawRwLock, TransientReferenceIndex>,
+    target: ReferenceTarget,
+    cursor: Option<InverseReferenceKey>,
+}
+
+impl Iterator for TransientReferencesTo {
+    type Item = Result<Reference, EntityStorageError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.cursor.map_or_else(
+            || Bound::Included(InverseReferenceKey::minimum_for(self.target)),
+            Bound::Excluded,
+        );
+        let (&key, &reference) = self.index.inverse.range((start, Bound::Unbounded)).next()?;
+        if key.target() != self.target {
+            return None;
+        }
+        self.cursor = Some(key);
+        Some(Ok(reference))
+    }
+}
+
+impl TransientReferenceIndex {
+    fn insert(&mut self, reference: Reference) {
+        let forward = ReferenceKey::new(reference.from(), reference.target());
+        let inverse = InverseReferenceKey::new(reference.target(), reference.from());
+        self.forward.insert(forward, reference);
+        self.inverse.insert(inverse, reference);
+    }
+
+    fn remove(&mut self, from: Address, target: ReferenceTarget) {
+        self.forward.remove(&ReferenceKey::new(from, target));
+        self.inverse.remove(&InverseReferenceKey::new(target, from));
+    }
 }
 
 impl ReferenceIndex {
     const CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+    pub(crate) fn new_transient() -> Self {
+        Self {
+            backing: ReferenceIndexBacking::Transient(Arc::new(RwLock::new(
+                TransientReferenceIndex::default(),
+            ))),
+        }
+    }
 
     pub(crate) fn new(
         storage: EntityStorage,
@@ -460,23 +563,50 @@ impl ReferenceIndex {
         let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
 
         Ok(Self {
-            forward,
-            inverse,
-            storage,
+            backing: ReferenceIndexBacking::Persistent {
+                forward,
+                inverse,
+                storage,
+            },
         })
     }
 
-    pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
-        let record = ReferenceRecord::of(reference);
-        self.forward.try_put(
-            ReferenceKey::new(reference.from(), reference.target()),
-            record,
-        )?;
-        self.inverse.try_put(
-            InverseReferenceKey::new(reference.target(), reference.from()),
-            record,
-        )?;
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self.backing, ReferenceIndexBacking::Transient(_))
+    }
 
+    fn persistent(&self) -> Option<PersistentReferenceIndex<'_>> {
+        match &self.backing {
+            ReferenceIndexBacking::Persistent {
+                forward,
+                inverse,
+                storage,
+            } => Some(PersistentReferenceIndex {
+                forward,
+                inverse,
+                storage,
+            }),
+            ReferenceIndexBacking::Transient(_) => None,
+        }
+    }
+}
+
+impl ReferenceIndex {
+    pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
+        let forward_key = ReferenceKey::new(reference.from(), reference.target());
+        let inverse_key = InverseReferenceKey::new(reference.target(), reference.from());
+        match &self.backing {
+            ReferenceIndexBacking::Persistent {
+                forward, inverse, ..
+            } => {
+                let record = ReferenceRecord::of(reference);
+                forward.try_put(forward_key, record)?;
+                inverse.try_put(inverse_key, record)?;
+            }
+            ReferenceIndexBacking::Transient(index) => {
+                index.write().insert(*reference);
+            }
+        }
         Ok(())
     }
 
@@ -485,9 +615,20 @@ impl ReferenceIndex {
         from: Address,
         target: ReferenceTarget,
     ) -> Result<(), EntityStorageError> {
-        self.forward.try_remove(&ReferenceKey::new(from, target))?;
-        self.inverse
-            .try_remove(&InverseReferenceKey::new(target, from))
+        let forward_key = ReferenceKey::new(from, target);
+        let inverse_key = InverseReferenceKey::new(target, from);
+        match &self.backing {
+            ReferenceIndexBacking::Persistent {
+                forward, inverse, ..
+            } => {
+                forward.try_remove(&forward_key)?;
+                inverse.try_remove(&inverse_key)
+            }
+            ReferenceIndexBacking::Transient(index) => {
+                index.write().remove(from, target);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn get(
@@ -496,58 +637,166 @@ impl ReferenceIndex {
         target: ReferenceTarget,
     ) -> Result<Option<Reference>, EntityStorageError> {
         let key = ReferenceKey::new(from, target);
-        let Some(cached) = self.forward.try_get(&key)? else {
-            return Ok(None);
+        match &self.backing {
+            ReferenceIndexBacking::Persistent { forward, .. } => {
+                let Some(cached) = forward.try_get(&key)? else {
+                    return Ok(None);
+                };
+                Ok(Some(Self::reference_from_record(
+                    from,
+                    target,
+                    cached.as_ref(),
+                )))
+            }
+            ReferenceIndexBacking::Transient(index) => Ok(index
+                .read()
+                .forward
+                .get(&ReferenceKey::new(from, target))
+                .copied()),
+        }
+    }
+
+    pub(crate) fn encode_mutation(
+        key: ReferenceKey,
+        reference: Option<&Reference>,
+    ) -> Result<(usize, [EntityWrite; 2]), EntityStorageError> {
+        let forward = make_key::<ReferenceKey, ReferenceRecord>(&key);
+        let inverse_key = InverseReferenceKey::new(key.target(), key.from());
+        let inverse = make_key::<InverseReferenceKey, ReferenceRecord>(&inverse_key);
+        let Some(reference) = reference else {
+            return Ok((
+                0,
+                [EntityWrite::remove(forward), EntityWrite::remove(inverse)],
+            ));
         };
-        Ok(Some(Self::reference_from_record(
-            from,
-            target,
-            cached.as_ref(),
-        )))
+
+        let record = ReferenceRecord::of(reference);
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&record).map_err(EntityStorageError::encode)?;
+        let encoded = Bytes::from_owner(encoded);
+        let encoded_len = encoded.len();
+        Ok((
+            encoded_len,
+            [
+                EntityWrite::insert(forward, encoded.clone()),
+                EntityWrite::insert(inverse, encoded),
+            ],
+        ))
+    }
+
+    pub(crate) fn publish_mutations(
+        &self,
+        mutations: impl IntoIterator<Item = (ReferenceKey, Option<Reference>, usize)>,
+    ) {
+        match &self.backing {
+            ReferenceIndexBacking::Persistent {
+                forward,
+                inverse: inverse_index,
+                ..
+            } => {
+                for (key, reference, encoded_len) in mutations {
+                    let inverse = InverseReferenceKey::new(key.target(), key.from());
+                    match reference {
+                        Some(reference) => {
+                            let record = ReferenceRecord::of(&reference);
+                            forward.publish_put(key, record, encoded_len);
+                            inverse_index.publish_put(inverse, record, encoded_len);
+                        }
+                        None => {
+                            forward.publish_remove(&key);
+                            inverse_index.publish_remove(&inverse);
+                        }
+                    }
+                }
+            }
+            ReferenceIndexBacking::Transient(index) => {
+                let mut index = index.write();
+                for (key, reference, _) in mutations {
+                    match reference {
+                        Some(reference) => index.insert(reference),
+                        None => index.remove(key.from(), key.target()),
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn references_from(
         &self,
         from: Address,
         after: Option<&Reference>,
-    ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
-    {
-        let after = after.map(|after| ReferenceKey::new(after.from(), after.target()));
-        let start = cursor_bound_or_minimum(after, ReferenceKey::minimum_for(from));
-
-        Ok(self
-            .forward
-            .try_iter_range(start.as_ref())?
-            .take_while(move |result| result.as_ref().map_or(true, |(key, _)| key.from() == from))
-            .map(move |result| {
-                result.map(|(key, cached)| {
-                    Self::reference_from_record(key.from(), key.target(), cached.as_ref())
-                })
-            }))
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match &self.backing {
+            ReferenceIndexBacking::Persistent { forward, .. } => {
+                let after = after.map(|after| ReferenceKey::new(after.from(), after.target()));
+                let start = cursor_bound_or_minimum(after, ReferenceKey::minimum_for(from));
+                Ok(Box::new(
+                    forward
+                        .try_iter_range(start.as_ref())?
+                        .take_while(move |result| {
+                            result.as_ref().map_or(true, |(key, _)| key.from() == from)
+                        })
+                        .map(move |result| {
+                            result.map(|(key, cached)| {
+                                Self::reference_from_record(
+                                    key.from(),
+                                    key.target(),
+                                    cached.as_ref(),
+                                )
+                            })
+                        }),
+                ))
+            }
+            ReferenceIndexBacking::Transient(index) => Ok(Box::new(TransientReferencesFrom {
+                index: index.read_arc(),
+                from,
+                cursor: after.map(|after| ReferenceKey::new(after.from(), after.target())),
+            })),
+        }
     }
 
     pub(crate) fn references_to(
         &self,
         target: ReferenceTarget,
         after: Option<&Reference>,
-    ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
-    {
-        let after = after.map(|after| InverseReferenceKey::new(after.target(), after.from()));
-        let start = cursor_bound_or_minimum(after, InverseReferenceKey::minimum_for(target));
-
-        Ok(self
-            .inverse
-            .try_iter_range(start.as_ref())?
-            .take_while(move |result| {
-                result
-                    .as_ref()
-                    .map_or(true, |(key, _)| key.target() == target)
-            })
-            .map(move |result| {
-                result.map(|(key, cached)| {
-                    Self::reference_from_record(key.from(), key.target(), cached.as_ref())
-                })
-            }))
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match &self.backing {
+            ReferenceIndexBacking::Persistent { inverse, .. } => {
+                let after =
+                    after.map(|after| InverseReferenceKey::new(after.target(), after.from()));
+                let start =
+                    cursor_bound_or_minimum(after, InverseReferenceKey::minimum_for(target));
+                Ok(Box::new(
+                    inverse
+                        .try_iter_range(start.as_ref())?
+                        .take_while(move |result| {
+                            result
+                                .as_ref()
+                                .map_or(true, |(key, _)| key.target() == target)
+                        })
+                        .map(move |result| {
+                            result.map(|(key, cached)| {
+                                Self::reference_from_record(
+                                    key.from(),
+                                    key.target(),
+                                    cached.as_ref(),
+                                )
+                            })
+                        }),
+                ))
+            }
+            ReferenceIndexBacking::Transient(index) => Ok(Box::new(TransientReferencesTo {
+                index: index.read_arc(),
+                target,
+                cursor: after.map(|after| InverseReferenceKey::new(after.target(), after.from())),
+            })),
+        }
     }
 
     pub(crate) fn ensure_current<'a>(
@@ -556,7 +805,10 @@ impl ReferenceIndex {
         blocks: &CodeBlockTable,
         revision: Revision,
     ) -> Result<(), EntityStorageError> {
-        let header = self
+        let Some(persistent) = self.persistent() else {
+            return self.rebuild(functions, blocks);
+        };
+        let header = persistent
             .storage
             .get::<ProjectEntity, IndexHeader>(&ProjectEntity::ReferenceIndex)?;
         if header.is_some_and(|header| header.revision() == revision) {
@@ -564,13 +816,17 @@ impl ReferenceIndex {
         }
 
         self.rebuild(functions, blocks)?;
-        self.forward.flush()?;
-        self.inverse.flush()?;
+        persistent.forward.flush()?;
+        persistent.inverse.flush()?;
         self.mark_current(revision)
     }
 
     pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
-        self.storage
+        let Some(persistent) = self.persistent() else {
+            return Ok(());
+        };
+        persistent
+            .storage
             .insert(&ProjectEntity::ReferenceIndex, &IndexHeader::new(revision))
     }
 
@@ -594,12 +850,33 @@ impl ReferenceIndex {
     }
 
     fn clear_derived(&self) -> Result<FxHashSet<ReferenceKey>, EntityStorageError> {
+        if let ReferenceIndexBacking::Transient(index) = &self.backing {
+            let mut index = index.write();
+            let mut asserted = FxHashSet::default();
+            let asserted_references = index
+                .forward
+                .values()
+                .filter(|reference| !reference.origin().is_derived())
+                .copied()
+                .collect::<Vec<_>>();
+            index.forward.clear();
+            index.inverse.clear();
+            for reference in asserted_references {
+                asserted.insert(ReferenceKey::new(reference.from(), reference.target()));
+                index.insert(reference);
+            }
+            return Ok(asserted);
+        }
+
+        let persistent = self
+            .persistent()
+            .expect("persistent reference index required");
         let mut asserted = FxHashSet::default();
         let mut cursor = None;
 
         loop {
             let start = cursor_bound(cursor.as_ref());
-            let batch = self
+            let batch = persistent
                 .forward
                 .try_iter_batch(start)?
                 .into_iter()
@@ -632,38 +909,6 @@ impl ReferenceIndex {
             self.collect_range(range, &mut references)?;
         }
         Ok(references)
-    }
-
-    pub(crate) fn clear_in(&self, coverage: &AddressRangeSet) -> Result<(), EntityStorageError> {
-        for reference in self.references_in(coverage)? {
-            self.remove(reference.from(), reference.target())?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn replace_derived_of_kind(
-        &self,
-        current: &[Reference],
-        derived: impl IntoIterator<Item = Reference>,
-        kind: ReferenceKind,
-    ) -> Result<(), EntityStorageError> {
-        let mut occupied = FxHashSet::default();
-        for reference in current {
-            let key = ReferenceKey::new(reference.from(), reference.target());
-            if reference.origin().is_derived() && reference.kind() == kind {
-                self.remove(reference.from(), reference.target())?;
-            } else {
-                occupied.insert(key);
-            }
-        }
-        for reference in derived {
-            debug_assert_eq!(reference.kind(), kind);
-            let key = ReferenceKey::new(reference.from(), reference.target());
-            if !occupied.contains(&key) {
-                self.insert(&reference)?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn derived_kind_matches(
@@ -700,16 +945,33 @@ impl ReferenceIndex {
     ) -> Result<(), EntityStorageError> {
         let end = range.end_address();
         let start = ReferenceKey::minimum_for(range.start_address());
-        for result in self.forward.try_iter_range(Bound::Included(&start))? {
-            let (key, cached) = result?;
-            if key.from() > end {
-                break;
+        match &self.backing {
+            ReferenceIndexBacking::Persistent { forward, .. } => {
+                for result in forward.try_iter_range(Bound::Included(&start))? {
+                    let (key, cached) = result?;
+                    if key.from() > end {
+                        break;
+                    }
+                    references.push(Self::reference_from_record(
+                        key.from(),
+                        key.target(),
+                        cached.as_ref(),
+                    ));
+                }
             }
-            references.push(Self::reference_from_record(
-                key.from(),
-                key.target(),
-                cached.as_ref(),
-            ));
+            ReferenceIndexBacking::Transient(index) => {
+                references.extend(
+                    index
+                        .read()
+                        .forward
+                        .range((
+                            Bound::Included(ReferenceKey::minimum_for(range.start_address())),
+                            Bound::Unbounded,
+                        ))
+                        .take_while(|(key, _)| key.from() <= end)
+                        .map(|(_, reference)| *reference),
+                );
+            }
         }
         Ok(())
     }
@@ -721,75 +983,6 @@ impl ReferenceIndex {
     ) -> Reference {
         Reference::new(from, target, record.kind(), record.properties())
             .with_origin(record.origin())
-    }
-}
-
-pub(crate) enum ReferenceRevert {
-    Coverage {
-        coverage: AddressRangeSet,
-        previous: Vec<Reference>,
-    },
-    Edge {
-        from: Address,
-        target: ReferenceTarget,
-        previous: Option<Reference>,
-    },
-}
-
-impl ReferenceRevert {
-    pub(crate) fn capture(
-        index: &ReferenceIndex,
-        coverage: &AddressRangeSet,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Coverage {
-            coverage: coverage.clone(),
-            previous: index.references_in(coverage)?,
-        })
-    }
-
-    pub(crate) fn edge(
-        from: Address,
-        target: ReferenceTarget,
-        previous: Option<Reference>,
-    ) -> Self {
-        Self::Edge {
-            from,
-            target,
-            previous,
-        }
-    }
-
-    pub(crate) fn had_derived(&self) -> bool {
-        self.previous()
-            .iter()
-            .any(|reference| reference.origin().is_derived())
-    }
-
-    pub(crate) fn previous(&self) -> &[Reference] {
-        match self {
-            Self::Coverage { previous, .. } => previous,
-            Self::Edge { previous, .. } => previous.as_slice(),
-        }
-    }
-
-    pub(crate) fn restore(self, index: &ReferenceIndex) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Coverage { coverage, previous } => {
-                index.clear_in(&coverage)?;
-                for reference in previous {
-                    index.insert(&reference)?;
-                }
-                Ok(())
-            }
-            Self::Edge {
-                from,
-                target,
-                previous,
-            } => match previous {
-                Some(reference) => index.insert(&reference),
-                None => index.remove(from, target),
-            },
-        }
     }
 }
 #[cfg(test)]
@@ -859,12 +1052,6 @@ mod test {
             &derived,
             ReferenceKind::Data,
         ));
-    }
-
-    fn single_point(address: Address) -> AddressRangeSet {
-        let mut coverage = AddressRangeSet::new();
-        coverage.insert_range(AddressRange::point(address));
-        coverage
     }
 
     #[test]
@@ -943,18 +1130,17 @@ mod test {
         let low = ReferenceTarget::from(address(0, 0x10));
         let mid = ReferenceTarget::from(address(0, 0x20));
         let high = ReferenceTarget::from(address(1, 0x00));
+        let from = Address::MINIMUM;
+        let low_encoded = make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, low));
+        let mid_encoded = make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, mid));
+        let high_encoded =
+            make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, high));
 
-        let mut low_buf = BytesMut::new();
-        low.encode(&mut low_buf);
-        let mut mid_buf = BytesMut::new();
-        mid.encode(&mut mid_buf);
-        let mut high_buf = BytesMut::new();
-        high.encode(&mut high_buf);
+        assert!(low_encoded < mid_encoded);
+        assert!(mid_encoded < high_encoded);
 
-        assert!(low_buf.as_ref() < mid_buf.as_ref());
-        assert!(mid_buf.as_ref() < high_buf.as_ref());
-
-        let mut slice = low_buf.as_ref();
+        let target_start = ENTITY_PREFIX_SIZE + Address::ENCODED_SIZE;
+        let mut slice = &low_encoded[target_start..];
         assert_eq!(ReferenceTarget::decode(&mut slice), Some(low));
         assert!(slice.is_empty());
     }
@@ -1152,75 +1338,6 @@ mod test {
         assert_eq!(derived[0].target().address(), Some(callee));
         assert!(derived[0].is_call());
         assert!(derived[0].origin().is_derived());
-        Ok(())
-    }
-
-    #[test]
-    fn replace_derived_preserves_asserted() -> Result<(), Box<dyn std::error::Error>> {
-        let index = index()?;
-        let from = address(0, 0x1000);
-        let old_target = address(0, 0x2000);
-        let asserted_target = address(0, 0x3000);
-        let new_target = address(0, 0x4000);
-
-        index.insert(&Reference::data(
-            from,
-            asserted_target,
-            ReferenceProperties::READ,
-        ))?;
-        index.insert(&flow_reference(from, old_target))?;
-
-        let current = index.references_in(&single_point(from))?;
-        index.replace_derived_of_kind(
-            &current,
-            [flow_reference(from, new_target)],
-            ReferenceKind::Flow,
-        )?;
-
-        let from_refs = index
-            .references_from(from, None)?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(from_refs.len(), 2);
-        assert!(from_refs.iter().any(|reference| {
-            reference.target().address() == Some(asserted_target)
-                && reference.origin().is_asserted()
-        }));
-        assert!(from_refs.iter().any(|reference| {
-            reference.target().address() == Some(new_target) && reference.origin().is_derived()
-        }));
-        assert!(
-            from_refs
-                .iter()
-                .all(|reference| reference.target().address() != Some(old_target))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn reference_revert_restores_prior_state() -> Result<(), Box<dyn std::error::Error>> {
-        let index = index()?;
-        let from = address(0, 0x1000);
-        let original = address(0, 0x2000);
-        index.insert(&flow_reference(from, original))?;
-
-        let revert = ReferenceRevert::capture(&index, &single_point(from))?;
-        assert!(revert.had_derived());
-
-        index.clear_in(&single_point(from))?;
-        index.insert(&Reference::data(
-            from,
-            address(0, 0x9000),
-            ReferenceProperties::WRITE,
-        ))?;
-
-        revert.restore(&index)?;
-
-        let from_refs = index
-            .references_from(from, None)?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(from_refs.len(), 1);
-        assert_eq!(from_refs[0].target().address(), Some(original));
-        assert!(from_refs[0].is_call());
         Ok(())
     }
 

@@ -1,14 +1,18 @@
+use fugue_bytes::{BE, ByteCast, Endian, LE};
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::arm::*;
 use fugue_lifter::runtime::context::ContextBitRange;
-use yaxpeax_arch::*;
-use yaxpeax_arm::armv7::{DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg};
+use yaxpeax_arch::{Decoder as _, LengthedInstruction as _, U8Reader};
+use yaxpeax_arm::armv7::{
+    ConditionCode, DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg,
+};
 
-use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
+use crate::arch::{Arch, BytesProperties};
 use crate::ir::{
-    Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, RawAddress, Symbol,
+    Address, ExternFunctionTemplate, Insn, InsnError, InsnProperties, LazySymbol, RawAddress,
+    Symbol,
 };
 use crate::lazy_symbol;
 use crate::lifter::dynamic::LanguageSource;
@@ -21,6 +25,11 @@ use crate::lifter::{
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
 static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
+
+const ARM_PADDING_BE: &[&[u8]] = &[&[0xe3, 0x20, 0xf0, 0x00], &[0xe1, 0xa0, 0x00, 0x00]];
+const ARM_PADDING_LE: &[&[u8]] = &[&[0x00, 0xf0, 0x20, 0xe3], &[0x00, 0x00, 0xa0, 0xe1]];
+const THUMB_PADDING_BE: &[&[u8]] = &[&[0xf3, 0xaf, 0x80, 0x00], &[0xbf, 0x00], &[0x46, 0xc0]];
+const THUMB_PADDING_LE: &[&[u8]] = &[&[0xaf, 0xf3, 0x00, 0x80], &[0x00, 0xbf], &[0xc0, 0x46]];
 
 #[derive(Clone)]
 struct ArchData {
@@ -57,7 +66,7 @@ pub struct Arm {
 
 impl ArchT for Arm {
     fn disassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb, self.data.t_mode)
+        ArmDisassembler::new(self.is_thumb, self.endian(), self.data.t_mode)
     }
 
     fn lifter(&self) -> Lifter {
@@ -78,6 +87,34 @@ impl ArchT for Arm {
             || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1)
             as u32;
         self.canonicalise_with_mode(addr, t_mode)
+    }
+
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        let arm = Self::padding_length(bytes, self.language().is_big_endian(), false);
+        let thumb = Self::padding_length(bytes, self.language().is_big_endian(), true);
+        if (arm != 0 && arm == bytes.len()) || (thumb != 0 && thumb == bytes.len()) {
+            BytesProperties::PADDING
+        } else {
+            BytesProperties::empty()
+        }
+    }
+
+    fn classify_contiguous_bytes(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let thumb = context.get_variable_by_bits(self.data.t_mode, address.offset()) == 1;
+        let length = Self::padding_length(bytes, self.language().is_big_endian(), thumb);
+        (
+            length,
+            if length == 0 {
+                BytesProperties::empty()
+            } else {
+                BytesProperties::PADDING
+            },
+        )
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -122,6 +159,29 @@ impl ArchT for Arm {
 }
 
 impl Arm {
+    fn padding_length(bytes: &[u8], big_endian: bool, thumb: bool) -> usize {
+        let patterns = match (big_endian, thumb) {
+            (false, false) => ARM_PADDING_LE,
+            (false, true) => THUMB_PADDING_LE,
+            (true, false) => ARM_PADDING_BE,
+            (true, true) => THUMB_PADDING_BE,
+        };
+        let mut length = 0usize;
+
+        while let Some(remaining) = bytes.get(length..) {
+            let Some(pattern) = patterns
+                .iter()
+                .copied()
+                .find(|pattern| remaining.starts_with(pattern))
+            else {
+                break;
+            };
+            length += pattern.len();
+        }
+
+        length
+    }
+
     fn canonicalise_with_mode(
         &self,
         address: RawAddress,
@@ -241,23 +301,55 @@ impl LanguageProvider {
 
 struct ArmDisassembler {
     decoder: InstDecoder,
+    endian: Endian,
     t_mode: ContextBitRange,
 }
 
 impl ArmDisassembler {
     #[allow(clippy::new_ret_no_self)]
-    fn new(thumb: bool, t_mode: ContextBitRange) -> Disassembler {
+    fn new(is_thumb: bool, endian: Endian, t_mode: ContextBitRange) -> Disassembler {
         Disassembler::new(Self {
-            decoder: if thumb {
+            decoder: if is_thumb {
                 InstDecoder::default_thumb()
             } else {
                 InstDecoder::default()
             },
+            endian,
             t_mode,
         })
     }
 
-    fn should_lift(&self, insn: &Instruction) -> bool {
+    fn arm_definitely_falls_through(word: u32) -> bool {
+        if word >> 28 == 0b1111 {
+            return false;
+        }
+
+        let class = (word >> 25) & 0b111;
+        let opcode = (word >> 21) & 0b1111;
+        let set_flags = word & (1 << 20) != 0;
+        let first_operand = (word >> 16) & 0b1111;
+        let destination = (word >> 12) & 0b1111;
+        match class {
+            0b000 if word & (1 << 4) == 0 => match opcode {
+                0..=7 | 12 | 14 => destination != 15,
+                8..=11 => set_flags && destination == 0,
+                13 | 15 => first_operand == 0 && destination != 15,
+                _ => false,
+            },
+            0b001 => match opcode {
+                0..=7 | 12 | 14 => destination != 15,
+                8..=11 => set_flags && destination == 0,
+                13 | 15 => first_operand == 0 && destination != 15,
+                _ => false,
+            },
+            0b010 => destination != 15,
+            0b011 => word & (1 << 4) == 0 && destination != 15,
+            0b100 => word & (1 << 20) == 0 || word & (1 << 15) == 0,
+            _ => false,
+        }
+    }
+
+    fn should_lift(insn: &Instruction) -> bool {
         let pc = Reg::from_u8(15);
 
         match insn.opcode {
@@ -306,6 +398,74 @@ impl ArmDisassembler {
             _ => false,
         }
     }
+
+    fn resolve_arm_direct_flow(
+        address: Address,
+        insn: &Instruction,
+        length: usize,
+    ) -> Result<Option<Insn>, InsnError> {
+        match insn.opcode {
+            Opcode::B | Opcode::BL => {
+                let Operand::BranchOffset(offset) = insn.operands[0] else {
+                    return Ok(None);
+                };
+                let target = Address::new(
+                    address.space(),
+                    address.offset().wrapping_add_signed(i64::from(offset) << 2),
+                );
+                if insn.opcode == Opcode::B {
+                    Insn::from_direct_branch(
+                        address,
+                        length,
+                        target,
+                        insn.condition != ConditionCode::AL,
+                    )
+                } else {
+                    Insn::from_direct_call(address, length, target)
+                }
+                .map(Some)
+            }
+            _ if insn.condition != ConditionCode::AL => Ok(None),
+            Opcode::BLX if matches!(insn.operands[0], Operand::Reg(_)) => {
+                Insn::from_indirect_call(address, length).map(Some)
+            }
+            Opcode::BX => {
+                let Operand::Reg(register) = insn.operands[0] else {
+                    return Ok(None);
+                };
+                if register == Reg::from_u8(14) {
+                    Insn::from_return(address, length)
+                } else {
+                    Insn::from_indirect_branch(address, length)
+                }
+                .map(Some)
+            }
+            Opcode::AND
+            | Opcode::EOR
+            | Opcode::SUB
+            | Opcode::RSB
+            | Opcode::ADD
+            | Opcode::ADC
+            | Opcode::SBC
+            | Opcode::RSC
+            | Opcode::ORR
+            | Opcode::MOV
+            | Opcode::BIC
+            | Opcode::MVN
+            | Opcode::LSL
+            | Opcode::LSR
+            | Opcode::ASR
+            | Opcode::RRX
+            | Opcode::ROR
+            | Opcode::ORN
+            | Opcode::LDR
+                if insn.operands[0] == Operand::Reg(Reg::from_u8(15)) =>
+            {
+                Insn::from_indirect_branch(address, length).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl DisassemblerT for ArmDisassembler {
@@ -316,18 +476,33 @@ impl DisassemblerT for ArmDisassembler {
         context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
         let in_thumb = context.get_variable_by_bits(self.t_mode, address.offset());
+        let arm_word = bytes.get(..u32::SIZEOF).map(|bytes| match self.endian {
+            Endian::Big => u32::from_bytes::<BE>(bytes),
+            Endian::Little => u32::from_bytes::<LE>(bytes),
+        });
+
+        if in_thumb == 0 && arm_word.is_some_and(Self::arm_definitely_falls_through) {
+            return Ok(Insn::from_disassembly(
+                address,
+                4,
+                InsnProperties::FALL_THROUGH,
+            )?);
+        }
 
         self.decoder.set_thumb_mode(in_thumb == 1);
 
-        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let mut reader = U8Reader::new(bytes);
         let insn = match self.decoder.decode(&mut reader) {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;
-                let properties = if self.should_lift(&insn) {
+                if !insn.thumb
+                    && let Some(resolved) = Self::resolve_arm_direct_flow(address, &insn, size)?
+                {
+                    return Ok(resolved);
+                }
+                let properties = if Self::should_lift(&insn) {
                     InsnProperties::NEEDS_FLOW_RESOLUTION
                 } else {
-                    let naddress = address + size;
-                    context.set_variable_by_bits(self.t_mode, naddress.offset(), in_thumb);
                     InsnProperties::FALL_THROUGH
                 };
 
@@ -346,8 +521,38 @@ impl DisassemblerT for ArmDisassembler {
 
 #[cfg(test)]
 mod test {
-    use super::Arm;
-    use crate::ir::RawAddress;
+    use yaxpeax_arch::{Decoder, LengthedInstruction, U8Reader};
+    use yaxpeax_arm::armv7::InstDecoder;
+
+    use super::{Arm, ArmDisassembler};
+    use crate::arch::BytesProperties;
+    use crate::ir::{Address, Insn, RawAddress};
+
+    fn assert_direct_flow_matches_lifter(bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let language = Arm::resolve_default_variant(false)?;
+        let arch = Arm::new(language);
+        let address = Address::in_default_space(0x1000u64);
+        let mut disassembly_context = arch.lifter();
+        let mut disassembler = arch.disassembler();
+        let direct = disassembler.disassemble(address, bytes, disassembly_context.context_mut())?;
+
+        let mut lifter = arch.lifter();
+        let mut operations = Vec::new();
+        let length = lifter.lift(address, bytes, &mut operations)?;
+        let lifted = Insn::from_resolved_flow(language, address, length, &operations)?;
+
+        assert_eq!(
+            direct.properties(),
+            lifted.properties(),
+            "flow properties differ for {bytes:02x?}",
+        );
+        assert_eq!(
+            direct.flow_targets().collect::<Vec<_>>(),
+            lifted.flow_targets().collect::<Vec<_>>(),
+            "flow targets differ for {bytes:02x?}",
+        );
+        Ok(())
+    }
 
     #[test]
     fn canonicalise_address_decodes_thumb_mode() {
@@ -380,5 +585,108 @@ mod test {
                 .is_none(),
             "an out-of-space thumb pointer must be rejected, not silently wrapped",
         );
+    }
+
+    #[test]
+    fn contiguous_padding_respects_arm_mode() {
+        let language = Arm::resolve_default_variant(false).expect("arm language");
+        let arch = Arm::new(language);
+        let address = Address::in_default_space(0x1000u64);
+        let mut lifter = arch.lifter();
+
+        let (length, properties) = arch.classify_contiguous_bytes(
+            address.raw_address(),
+            lifter.context(),
+            &[0x00, 0xf0, 0x20, 0xe3, 0x00, 0x00, 0xa0, 0xe1, 0x01],
+        );
+        assert_eq!(length, 8);
+        assert_eq!(properties, BytesProperties::PADDING);
+
+        let (_, thumb) = arch
+            .canonicalise_address(RawAddress::from(0x1001u64))
+            .expect("thumb address canonicalises");
+        thumb.apply(address, lifter.context_mut());
+        let (length, properties) = arch.classify_contiguous_bytes(
+            address.raw_address(),
+            lifter.context(),
+            &[0x00, 0xbf, 0xc0, 0x46, 0x01],
+        );
+        assert_eq!(length, 4);
+        assert_eq!(properties, BytesProperties::PADDING);
+    }
+
+    #[test]
+    fn direct_arm_branches_match_lifted_flow() -> Result<(), Box<dyn std::error::Error>> {
+        assert_direct_flow_matches_lifter(&[0x00, 0x00, 0x00, 0xea])?;
+        assert_direct_flow_matches_lifter(&[0x00, 0x00, 0x00, 0x1a])?;
+        assert_direct_flow_matches_lifter(&[0x00, 0x00, 0x00, 0xeb])?;
+        Ok(())
+    }
+
+    #[test]
+    fn direct_arm_indirect_flows_match_lifted_flow() -> Result<(), Box<dyn std::error::Error>> {
+        assert_direct_flow_matches_lifter(&[0x1e, 0xff, 0x2f, 0xe1])?;
+        assert_direct_flow_matches_lifter(&[0x10, 0xff, 0x2f, 0xe1])?;
+        assert_direct_flow_matches_lifter(&[0x30, 0xff, 0x2f, 0xe1])?;
+        assert_direct_flow_matches_lifter(&[0x00, 0xf0, 0x9f, 0xe5])?;
+        assert_direct_flow_matches_lifter(&[0x00, 0xf0, 0x8f, 0xe0])?;
+        Ok(())
+    }
+
+    #[test]
+    fn arm_fall_through_fast_path_excludes_control_flow() {
+        for word in [
+            0xea00_0000,
+            0xe12f_ff1e,
+            0xe59f_f000,
+            0xe8bd_8000,
+            0xe7f0_00f0,
+            0xf000_0000,
+        ] {
+            assert!(
+                !ArmDisassembler::arm_definitely_falls_through(word),
+                "{word:08x} must use the decoder",
+            );
+        }
+    }
+
+    #[test]
+    fn arm_fall_through_fast_path_accepts_regular_instructions() {
+        for word in [
+            0xe1a0_0000,
+            0xe280_0001,
+            0xe240_0001,
+            0xe590_1000,
+            0xe580_1000,
+            0xe8b0_000e,
+        ] {
+            assert!(
+                ArmDisassembler::arm_definitely_falls_through(word),
+                "{word:08x} should bypass the decoder",
+            );
+        }
+    }
+
+    #[test]
+    fn arm_fall_through_fast_path_matches_decoder_samples() {
+        let decoder = InstDecoder::default();
+        let mut state = 0x6d2b_79f5u32;
+
+        for _ in 0..250_000 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if !ArmDisassembler::arm_definitely_falls_through(state) {
+                continue;
+            }
+
+            let bytes = state.to_le_bytes();
+            let instruction = decoder
+                .decode(&mut U8Reader::new(&bytes))
+                .unwrap_or_else(|error| panic!("{state:08x} did not decode: {error}"));
+            assert_eq!(instruction.len().to_const(), 4);
+            assert!(
+                !ArmDisassembler::should_lift(&instruction),
+                "{state:08x} decoded as flow: {instruction}",
+            );
+        }
     }
 }

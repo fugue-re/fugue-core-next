@@ -8,7 +8,7 @@ use std::time::Duration;
 use arrayvec::ArrayString;
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use thiserror::Error;
 
 use super::schema::{ENTITY_PREFIX_SIZE, STORED_ENTITY_PREFIXES};
@@ -16,7 +16,7 @@ use super::{
     EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
     EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
+    EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityWrite,
 };
 use crate::loader::Loadable;
 use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
@@ -25,6 +25,7 @@ use crate::types::{AttributeMap, BytesOrSlice};
 
 const PROJECT_SQLITE_DATA: &str = "entities.db";
 const DEFAULT_POOL_SIZE: u32 = 16;
+const WRITE_BATCH_ROWS: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum SqliteEntityStorageError {
@@ -60,18 +61,20 @@ const fn hex_digit(n: u8) -> char {
     }
 }
 
-fn push_table_name<const N: usize>(s: &mut ArrayString<N>, prefix: &EntityKeyPrefix) {
-    s.push_str("entity_");
-    s.push(hex_digit(prefix[0] >> 4));
-    s.push(hex_digit(prefix[0] & 0xf));
-    s.push(hex_digit(prefix[1] >> 4));
-    s.push(hex_digit(prefix[1] & 0xf));
+fn table_name(prefix: &EntityKeyPrefix) -> ArrayString<11> {
+    let mut name = ArrayString::new();
+    name.push_str("entity_");
+    name.push(hex_digit(prefix[0] >> 4));
+    name.push(hex_digit(prefix[0] & 0xf));
+    name.push(hex_digit(prefix[1] >> 4));
+    name.push(hex_digit(prefix[1] & 0xf));
+    name
 }
 
 fn build_create_table_query(prefix: &EntityKeyPrefix) -> ArrayString<128> {
     let mut query = ArrayString::new();
     query.push_str("CREATE TABLE IF NOT EXISTS ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL) WITHOUT ROWID");
     query
 }
@@ -79,7 +82,7 @@ fn build_create_table_query(prefix: &EntityKeyPrefix) -> ArrayString<128> {
 fn build_select_value_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     let mut query = ArrayString::new();
     query.push_str("SELECT value FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" WHERE key = ?1");
     query
 }
@@ -87,23 +90,52 @@ fn build_select_value_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
 fn build_insert_query(prefix: &EntityKeyPrefix) -> ArrayString<80> {
     let mut query = ArrayString::new();
     query.push_str("INSERT OR REPLACE INTO ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" (key, value) VALUES (?1, ?2)");
+    query
+}
+
+fn build_insert_batch_query(prefix: &EntityKeyPrefix, rows: usize) -> String {
+    let mut query = String::with_capacity(48 + rows * 8);
+    query.push_str("INSERT OR REPLACE INTO ");
+    query.push_str(&table_name(prefix));
+    query.push_str(" (key, value) VALUES ");
+    for row in 0..rows {
+        if row != 0 {
+            query.push(',');
+        }
+        query.push_str("(?, ?)");
+    }
     query
 }
 
 fn build_delete_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     let mut query = ArrayString::new();
     query.push_str("DELETE FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" WHERE key = ?1");
+    query
+}
+
+fn build_delete_batch_query(prefix: &EntityKeyPrefix, rows: usize) -> String {
+    let mut query = String::with_capacity(40 + rows * 2);
+    query.push_str("DELETE FROM ");
+    query.push_str(&table_name(prefix));
+    query.push_str(" WHERE key IN (");
+    for row in 0..rows {
+        if row != 0 {
+            query.push(',');
+        }
+        query.push('?');
+    }
+    query.push(')');
     query
 }
 
 fn build_select_keys_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     let mut query = ArrayString::new();
     query.push_str("SELECT key FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" ORDER BY key");
     query
 }
@@ -111,7 +143,7 @@ fn build_select_keys_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
 fn build_select_all_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     let mut query = ArrayString::new();
     query.push_str("SELECT key, value FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" ORDER BY key");
     query
 }
@@ -119,7 +151,7 @@ fn build_select_all_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
 fn build_select_range_query(prefix: &EntityKeyPrefix, inclusive: bool) -> ArrayString<96> {
     let mut query = ArrayString::new();
     query.push_str("SELECT key, value FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     if inclusive {
         query.push_str(" WHERE key >= ?1 ORDER BY key");
     } else {
@@ -131,7 +163,7 @@ fn build_select_range_query(prefix: &EntityKeyPrefix, inclusive: bool) -> ArrayS
 fn build_contains_query(prefix: &EntityKeyPrefix) -> ArrayString<64> {
     let mut query = ArrayString::new();
     query.push_str("SELECT EXISTS(SELECT 1 FROM ");
-    push_table_name(&mut query, prefix);
+    query.push_str(&table_name(prefix));
     query.push_str(" WHERE key = ?1)");
     query
 }
@@ -146,7 +178,8 @@ fn create_table(
 
 fn init_database(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
+        "PRAGMA page_size = 16384;
+         PRAGMA journal_mode = WAL;
          PRAGMA wal_autocheckpoint = 1000;
          PRAGMA synchronous = NORMAL;
          PRAGMA wal_checkpoint(TRUNCATE);
@@ -589,10 +622,12 @@ impl<'a> Iterator for SqliteEntityBytesIterator<'a> {
     }
 }
 
+type EntityBytesMapper<'a, T> = dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a;
+
 struct SqliteEntityBytesAsIterator<'a, T> {
     inner: SqliteEntityBytesIteratorInner,
     prefix: EntityKeyPrefix,
-    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+    f: Box<EntityBytesMapper<'a, T>>,
 }
 
 impl<'a, T: 'a> SqliteEntityBytesAsIterator<'a, T> {
@@ -723,6 +758,70 @@ impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
             _marker: PhantomData,
         }))
     }
+
+    fn insert_batch(
+        &self,
+        prefix: &EntityKeyPrefix,
+        writes: &[EntityWrite],
+    ) -> Result<(), EntityStorageError> {
+        let mut chunks = writes.chunks_exact(WRITE_BATCH_ROWS);
+        if writes.len() >= WRITE_BATCH_ROWS {
+            let query = build_insert_batch_query(prefix, WRITE_BATCH_ROWS);
+            let mut stmt = self.conn.prepare_cached(&query)?;
+            for chunk in &mut chunks {
+                let parameters = chunk.iter().flat_map(|write| {
+                    [
+                        &write.key()[ENTITY_PREFIX_SIZE..],
+                        write.value().expect("insertion batch checked"),
+                    ]
+                });
+                stmt.execute(params_from_iter(parameters))?;
+            }
+        }
+
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            let query = build_insert_batch_query(prefix, remainder.len());
+            let mut stmt = self.conn.prepare_cached(&query)?;
+            let parameters = remainder.iter().flat_map(|write| {
+                [
+                    &write.key()[ENTITY_PREFIX_SIZE..],
+                    write.value().expect("insertion batch checked"),
+                ]
+            });
+            stmt.execute(params_from_iter(parameters))?;
+        }
+        Ok(())
+    }
+
+    fn remove_batch(
+        &self,
+        prefix: &EntityKeyPrefix,
+        writes: &[EntityWrite],
+    ) -> Result<(), EntityStorageError> {
+        let mut chunks = writes.chunks_exact(WRITE_BATCH_ROWS);
+        if writes.len() >= WRITE_BATCH_ROWS {
+            let query = build_delete_batch_query(prefix, WRITE_BATCH_ROWS);
+            let mut stmt = self.conn.prepare_cached(&query)?;
+            for chunk in &mut chunks {
+                let parameters = chunk
+                    .iter()
+                    .map(|write| &write.key()[ENTITY_PREFIX_SIZE..]);
+                stmt.execute(params_from_iter(parameters))?;
+            }
+        }
+
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            let query = build_delete_batch_query(prefix, remainder.len());
+            let mut stmt = self.conn.prepare_cached(&query)?;
+            let parameters = remainder
+                .iter()
+                .map(|write| &write.key()[ENTITY_PREFIX_SIZE..]);
+            stmt.execute(params_from_iter(parameters))?;
+        }
+        Ok(())
+    }
 }
 
 impl<const P: StoragePersistence> Drop for SqliteEntityWriter<'_, P> {
@@ -786,6 +885,35 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
         let mut stmt = self.conn.prepare_cached(&query)?;
         stmt.execute(params![key_rest])?;
 
+        Ok(())
+    }
+
+    fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+        let mut start = 0;
+        while start < writes.len() {
+            let write = &writes[start];
+            let (prefix, _) =
+                extract_key_parts(write.key()).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            let insertion = write.value().is_some();
+            let mut end = start + 1;
+            while end < writes.len() {
+                let next = &writes[end];
+                let Some((next_prefix, _)) = extract_key_parts(next.key()) else {
+                    return Err(EntityStorageError::InvalidKeyFormat);
+                };
+                if next_prefix != prefix || next.value().is_some() != insertion {
+                    break;
+                }
+                end += 1;
+            }
+
+            if insertion {
+                self.insert_batch(&prefix, &writes[start..end])?;
+            } else {
+                self.remove_batch(&prefix, &writes[start..end])?;
+            }
+            start = end;
+        }
         Ok(())
     }
 

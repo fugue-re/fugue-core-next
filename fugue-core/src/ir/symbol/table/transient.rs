@@ -5,17 +5,11 @@ use std::slice::Iter;
 
 use smallvec::SmallVec;
 
-use super::SymbolInsertion;
+use super::{SymbolIndexState, SymbolInsertion};
 use crate::ir::symbol::{
     Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties, SymbolTableSelector,
 };
-use crate::ir::{Address, IdAllocation, IdAllocator};
-
-pub(super) struct Allocation {
-    ids: IdAllocation<Symbol>,
-    symbols_len: usize,
-    generations_len: usize,
-}
+use crate::ir::{Address, IdAllocator};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable<A = Address> {
@@ -98,46 +92,7 @@ where
         Self::default()
     }
 
-    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> Allocation {
-        Allocation {
-            ids: self.allocator.checkpoint(max_pops),
-            symbols_len: self.symbols.len(),
-            generations_len: self.generations.len(),
-        }
-    }
-
-    pub(super) fn restore_allocation(&mut self, allocation: Allocation) {
-        self.allocator.restore(allocation.ids);
-        self.symbols.truncate(allocation.symbols_len);
-        self.generations.truncate(allocation.generations_len);
-    }
-
-    pub(super) fn restore_entry(&mut self, id: SymbolId, entry: SymbolEntry<A>) {
-        self.clear_entry(id);
-
-        let index = id.index();
-        if index >= self.symbols.len() {
-            self.symbols.resize_with(index + 1, SymbolEntry::default);
-            self.generations.resize(index + 1, 0);
-        }
-
-        self.symbols[index] = entry;
-        self.generations[index] = id.generation();
-
-        let entry = &self.symbols[index];
-        if entry.is_valid() {
-            self.names.entry(entry.symbol()).or_default().push(id);
-            self.addresses.entry(entry.address()).or_default().push(id);
-
-            for &symbol_index in entry.indices() {
-                self.indices.insert(symbol_index, id);
-            }
-        }
-
-        self.allocator.mark_allocated(id);
-    }
-
-    pub(super) fn clear_entry(&mut self, id: SymbolId) -> bool {
+    fn clear_entry(&mut self, id: SymbolId) -> bool {
         use std::collections::btree_map::Entry as AddrsEntry;
         use std::collections::hash_map::Entry as NamesEntry;
 
@@ -177,35 +132,50 @@ where
         true
     }
 
-    pub(super) fn get_ids_replaced_by_insert(
-        &self,
-        index: SymbolIndex,
-        entry: &SymbolEntry<A>,
-    ) -> SmallVec<[SymbolId; 2]> {
-        let mut replaced = SmallVec::new();
-        if let Some(id) = self.indices.get(&index).copied() {
-            replaced.push(id);
-        }
-
-        if let Some(id) = self.addresses.get(&entry.address()).and_then(|ids| {
-            SymbolEntryIter::new(ids, &self.symbols)
-                .find_map(|(id, existing)| existing.has_same_referent(entry).then_some(id))
-        }) {
-            replaced.push(id);
-        }
-
-        replaced
+    pub(super) fn preview_id(&self, offset: usize) -> SymbolId {
+        self.allocator.preview_id(offset)
     }
 
-    pub(super) fn get_ids_by_symbol(
-        &self,
-        symbol: impl AsRef<str>,
-    ) -> Option<&SmallVec<[SymbolId; 2]>> {
-        Symbol::from_existing(symbol.as_ref()).and_then(|symbol| self.names.get(&symbol))
+    pub(super) fn publish_reservation(&mut self, id: SymbolId) {
+        let allocated = self.allocator.allocate();
+        debug_assert_eq!(allocated, id);
+        if id.index() >= self.symbols.len() {
+            self.symbols
+                .resize_with(id.index() + 1, SymbolEntry::default);
+            self.generations.resize(id.index() + 1, 0);
+        }
+        self.generations[id.index()] = id.generation();
     }
 
-    pub(super) fn get_ids_by_address(&self, address: A) -> Option<&SmallVec<[SymbolId; 2]>> {
-        self.addresses.get(&address)
+    pub(super) fn publish_release(&mut self, id: SymbolId) {
+        self.generations[id.index()] = id.next_generation().generation();
+        self.allocator.release(id);
+    }
+
+    pub(super) fn publish_upsert(
+        &mut self,
+        id: SymbolId,
+        entry: SymbolEntry<A>,
+        previous: Option<&SymbolIndexState>,
+    ) {
+        if previous.is_some() {
+            self.clear_entry(id);
+        }
+        self.symbols[id.index()] = entry;
+        self.generations[id.index()] = id.generation();
+        let entry = &self.symbols[id.index()];
+        self.names.entry(entry.symbol()).or_default().push(id);
+        self.addresses.entry(entry.address()).or_default().push(id);
+        for &index in entry.indices() {
+            self.indices.insert(index, id);
+        }
+    }
+
+    pub(super) fn publish_remove(&mut self, id: SymbolId, _previous: &SymbolIndexState) {
+        let removed = self.clear_entry(id);
+        debug_assert!(removed);
+        self.generations[id.index()] = id.next_generation().generation();
+        self.allocator.release(id);
     }
 
     pub(super) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
@@ -499,6 +469,10 @@ where
                 let id = SymbolId::with_generation(i as u32, self.generations[i]);
                 (id, entry)
             })
+    }
+
+    pub(super) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
+        self.symbols.into_iter().filter(SymbolEntry::is_valid)
     }
 
     // Iterator over all symbol entries for a given selector.

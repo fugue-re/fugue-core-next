@@ -33,11 +33,9 @@ use crate::loader::{
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
-use crate::platform::{OperatingSystem, Platform};
+use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::mapping::SegmentMappingProvenance;
-use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LOADER_FORMAT,
-};
+use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 mod analysers;
@@ -214,8 +212,6 @@ impl<'a> Pe<'a> {
         if let Some(entry) = slf.entry() {
             slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
         }
-
-        slf.attributes.set_attr(ATTRIBUTE_LOADER_FORMAT, "pe");
 
         slf
     }
@@ -1268,6 +1264,7 @@ impl Loadable for Pe<'_> {
         self.architecture()
             .platform()
             .with_compiler_spec_id("windows")
+            .with_format(Format::Pe)
             .with_os(self.object.borrow_loaded().view.operating_system())
     }
 

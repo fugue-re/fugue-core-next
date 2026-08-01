@@ -6,6 +6,7 @@ use fugue_core::lifter::ContextSet;
 use fugue_core::project::Project;
 use fugue_core::storage::DEFAULT_SPACE_ID;
 
+#[allow(dead_code)]
 pub fn one_block_function(entry: Address, len: usize) -> IncompleteFunction {
     let mut function = IncompleteFunction::new(entry);
     function.push_block(
@@ -15,6 +16,7 @@ pub fn one_block_function(entry: Address, len: usize) -> IncompleteFunction {
     function
 }
 
+#[allow(dead_code)]
 pub fn writable_address(project: &Project, minimum_size: u64) -> Result<Address, Box<dyn Error>> {
     project
         .segments()

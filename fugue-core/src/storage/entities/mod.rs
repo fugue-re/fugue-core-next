@@ -138,7 +138,7 @@ impl EntityStorageError {
     }
 }
 
-fn decode_entity<E: Entity>(bytes: &[u8]) -> Result<E, EntityStorageError> {
+pub(super) fn decode_entity<E: Entity>(bytes: &[u8]) -> Result<E, EntityStorageError> {
     let root = root_position::<Archived<E>>(bytes.len());
     let root_pointer = bytes.as_ptr().wrapping_add(root);
     if root_pointer.align_offset(align_of::<Archived<E>>()) == 0
@@ -162,6 +162,57 @@ pub type EntityIterator<'a, K, E> =
     Box<dyn Iterator<Item = Result<(K, E), EntityStorageError>> + 'a>;
 
 pub type EntityKeyIterator<'a, K> = Box<dyn Iterator<Item = Result<K, EntityStorageError>> + 'a>;
+
+#[derive(Debug)]
+pub struct EntityWrite {
+    key: Bytes,
+    value: Option<EntityWriteValue>,
+}
+
+#[derive(Debug)]
+enum EntityWriteValue {
+    Archive(AlignedVec),
+    Shared(Bytes),
+}
+
+impl EntityWriteValue {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Archive(value) => value.as_ref(),
+            Self::Shared(value) => value.as_ref(),
+        }
+    }
+}
+
+impl EntityWrite {
+    pub fn insert(key: Bytes, value: Bytes) -> Self {
+        Self {
+            key,
+            value: Some(EntityWriteValue::Shared(value)),
+        }
+    }
+
+    pub(crate) fn insert_archive(key: Bytes, value: AlignedVec) -> Self {
+        Self {
+            key,
+            value: Some(EntityWriteValue::Archive(value)),
+        }
+    }
+
+    pub fn remove(key: Bytes) -> Self {
+        Self { key, value: None }
+    }
+
+    pub fn key(&self) -> &[u8] {
+        self.key.as_ref()
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_ref().map(EntityWriteValue::as_slice)
+    }
+}
+
+pub(crate) type EntityWriteBatch = Vec<EntityWrite>;
 
 pub trait EntityStorageTransactionalReader<'a> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
@@ -209,6 +260,17 @@ impl<'a> EntityTransactionalReader<'a> {
 pub trait EntityStorageTransactionalWriter<'a>: EntityStorageTransactionalReader<'a> {
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
+
+    fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+        for write in writes {
+            match write.value() {
+                Some(value) => self.insert(write.key(), BytesOrSlice::from(value))?,
+                None => self.remove(write.key())?,
+            }
+        }
+        Ok(())
+    }
+
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
 }
 
@@ -418,6 +480,9 @@ where
     S: EntityStorageProvider + ?Sized,
 {
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        if key.len() < schema::ENTITY_PREFIX_SIZE {
+            return Err(EntityStorageError::InvalidKeyFormat);
+        }
         self.writes.borrow_mut().push(BufferedEntityWrite::Insert(
             Bytes::copy_from_slice(key),
             value.into_bytes(),
@@ -426,6 +491,9 @@ where
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+        if key.len() < schema::ENTITY_PREFIX_SIZE {
+            return Err(EntityStorageError::InvalidKeyFormat);
+        }
         self.writes
             .borrow_mut()
             .push(BufferedEntityWrite::Remove(Bytes::copy_from_slice(key)));
@@ -813,6 +881,24 @@ impl EntityStorage {
         Ok(EntityTransactionalWriter::new(writer))
     }
 
+    pub(crate) fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+
+        let writer = self.backing.transactional_writer().map_err(|error| {
+            if matches!(error, EntityStorageError::Unsupported(_)) {
+                EntityStorageError::unsupported_with(
+                    "entity storage does not support atomic batch admission",
+                )
+            } else {
+                error
+            }
+        })?;
+        writer.apply_batch(writes)?;
+        writer.commit()
+    }
+
     pub fn persistence(&self) -> StoragePersistence {
         self.backing.persistence()
     }
@@ -834,6 +920,8 @@ impl EntityStorage {
 mod test {
     use super::*;
     use crate::ir::Address;
+    #[cfg(feature = "sqlite")]
+    use crate::ir::{Switch, SwitchId, SwitchModel};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     struct TestEntity {
@@ -944,6 +1032,71 @@ mod test {
             })
             .expect_err("writer closure error must be returned");
         assert!(matches!(error, EntityStorageError::Backing(_)));
+    }
+
+    #[test]
+    fn storage_batch_requires_atomic_admission() {
+        let storage = EntityStorage::new(DummyEntityStorage);
+        let writes = [(
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+        )];
+
+        let error = storage
+            .apply_batch(&writes)
+            .expect_err("storage without transactions must reject the batch");
+
+        assert!(matches!(error, EntityStorageError::Unsupported(_)));
+    }
+
+    #[test]
+    fn failed_in_memory_batch_publishes_no_prefix() -> Result<(), EntityStorageError> {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let address = Address::from(42u64);
+        let key = schema::make_key::<Address, TestEntity>(&address);
+        let entity = TestEntity {
+            id: 42,
+            name: "atomic".to_owned(),
+        };
+        let encoded = rkyv::to_bytes::<RkyvError>(&entity).map_err(EntityStorageError::encode)?;
+        let writes = [
+            (
+                Bytes::copy_from_slice(&key),
+                Some(Bytes::from(encoded.into_vec())),
+            ),
+            (Bytes::from_static(b"x"), Some(Bytes::from_static(b"value"))),
+        ];
+
+        assert!(matches!(
+            storage.apply_batch(&writes),
+            Err(EntityStorageError::InvalidKeyFormat)
+        ));
+        assert!(storage.get::<_, TestEntity>(&address)?.is_none());
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn failed_sqlite_batch_publishes_no_prefix() -> Result<(), EntityStorageError> {
+        let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?);
+        let id = SwitchId::new(0);
+        let key = schema::make_key::<SwitchId, Switch>(&id);
+        let switch = Switch::new(id, Address::from(42u64), SwitchModel::Explicit);
+        let encoded = rkyv::to_bytes::<RkyvError>(&switch).map_err(EntityStorageError::encode)?;
+        let writes = [
+            (
+                Bytes::copy_from_slice(&key),
+                Some(Bytes::from(encoded.into_vec())),
+            ),
+            (Bytes::from_static(b"x"), Some(Bytes::from_static(b"value"))),
+        ];
+
+        assert!(matches!(
+            storage.apply_batch(&writes),
+            Err(EntityStorageError::InvalidKeyFormat)
+        ));
+        assert!(!storage.contains::<_, Switch>(&id)?);
+        Ok(())
     }
 
     #[test]

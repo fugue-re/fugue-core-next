@@ -1,12 +1,12 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86_64::*;
 use yaxpeax_arch::*;
-use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode};
+use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode, Operand};
 
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, Flag};
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
+use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnError, InsnProperties, RawAddress};
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
@@ -46,6 +46,35 @@ fn classify_bytes(bytes: &[u8]) -> BytesProperties {
     }
 
     properties
+}
+
+fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
+    let decoder = InstDecoder::default();
+    let mut length = 0usize;
+    let mut properties = BytesProperties::empty();
+
+    while let Some(remaining) = bytes.get(length..) {
+        let mut reader = U8Reader::new(remaining);
+        let Ok(insn) = decoder.decode(&mut reader) else {
+            break;
+        };
+        let insn_length = insn.len().to_const() as usize;
+        if insn_length == 0 {
+            break;
+        }
+        let Some(insn_bytes) = remaining.get(..insn_length) else {
+            break;
+        };
+        let insn_properties = classify_bytes(insn_bytes);
+        if insn_properties.is_empty() || (!properties.is_empty() && insn_properties != properties) {
+            break;
+        }
+
+        properties = insn_properties;
+        length += insn_length;
+    }
+
+    (length, properties)
 }
 
 #[derive(Clone)]
@@ -126,6 +155,15 @@ impl ArchT for X86_64 {
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
         classify_bytes(bytes)
+    }
+
+    fn classify_contiguous_bytes(
+        &self,
+        _address: RawAddress,
+        _context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        classify_contiguous_bytes(bytes)
     }
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
@@ -220,6 +258,7 @@ impl LanguageProvider {
 
 struct X86_64Disassembler {
     decoder: InstDecoder,
+    instruction: Instruction,
 }
 
 impl X86_64Disassembler {
@@ -227,40 +266,88 @@ impl X86_64Disassembler {
     fn new() -> Disassembler {
         Disassembler::new(Self {
             decoder: InstDecoder::default(),
+            instruction: Instruction::default(),
         })
     }
 
-    fn should_lift(&self, insn: &Instruction) -> bool {
-        matches!(
-            insn.opcode(),
-            Opcode::JO
-                | Opcode::JB
-                | Opcode::JZ
-                | Opcode::JA
-                | Opcode::JS
-                | Opcode::JP
-                | Opcode::JL
-                | Opcode::JG
-                | Opcode::JMP
-                | Opcode::JNO
-                | Opcode::JNB
-                | Opcode::JNZ
-                | Opcode::JNA
-                | Opcode::JNS
-                | Opcode::JNP
-                | Opcode::JGE
-                | Opcode::JLE
-                | Opcode::JMPF
-                | Opcode::JMPE
-                | Opcode::JRCXZ
-                | Opcode::CALL
-                | Opcode::CALLF
-                | Opcode::RETF
-                | Opcode::RETURN
-                | Opcode::HLT
-                | Opcode::INT
-                | Opcode::UD2
-        )
+    fn relative_target(address: Address, length: usize, operand: &Operand) -> Option<Address> {
+        let displacement = match operand {
+            Operand::ImmediateI8 { imm } => i64::from(*imm),
+            Operand::ImmediateI32 { imm } => i64::from(*imm),
+            _ => return None,
+        };
+        let offset = address
+            .offset()
+            .wrapping_add(length as u64)
+            .wrapping_add_signed(displacement);
+        Some(Address::new(address.space(), offset))
+    }
+
+    fn resolve_control_flow(
+        address: Address,
+        insn: &Instruction,
+        length: usize,
+    ) -> Result<Option<Insn>, InsnError> {
+        let opcode = insn.opcode();
+
+        if opcode.is_jcc()
+            || matches!(
+                opcode,
+                Opcode::LOOPNZ | Opcode::LOOPZ | Opcode::LOOP | Opcode::JRCXZ | Opcode::JECXZ
+            )
+        {
+            let operand = insn.operand(0);
+            let target = Self::relative_target(address, length, &operand);
+            return target
+                .map(|target| Insn::from_direct_branch(address, length, target, true))
+                .transpose();
+        }
+
+        match opcode {
+            Opcode::JMP | Opcode::CALL => {
+                let operand = insn.operand(0);
+                let target = Self::relative_target(address, length, &operand);
+                match (opcode, target) {
+                    (Opcode::JMP, Some(target)) => {
+                        Insn::from_direct_branch(address, length, target, false)
+                    }
+                    (Opcode::JMP, None) if matches!(operand, Operand::Register { .. }) => {
+                        Insn::from_indirect_branch(address, length)
+                    }
+                    (Opcode::CALL, Some(target)) => Insn::from_direct_call(address, length, target),
+                    (Opcode::CALL, None) if matches!(operand, Operand::Register { .. }) => {
+                        Insn::from_indirect_call(address, length)
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            Opcode::RETURN => Insn::from_return(address, length),
+            _ => return Ok(None),
+        }
+        .map(Some)
+    }
+
+    fn should_lift(insn: &Instruction) -> bool {
+        let opcode = insn.opcode();
+        opcode.is_jcc()
+            || matches!(
+                opcode,
+                Opcode::JMP
+                    | Opcode::JMPF
+                    | Opcode::JMPE
+                    | Opcode::LOOPNZ
+                    | Opcode::LOOPZ
+                    | Opcode::LOOP
+                    | Opcode::JRCXZ
+                    | Opcode::JECXZ
+                    | Opcode::CALL
+                    | Opcode::CALLF
+                    | Opcode::RETF
+                    | Opcode::RETURN
+                    | Opcode::HLT
+                    | Opcode::INT
+                    | Opcode::UD2
+            )
     }
 }
 
@@ -271,14 +358,19 @@ impl DisassemblerT for X86_64Disassembler {
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
-        let insn = match self.decoder.decode(&mut reader) {
-            Ok(insn) => {
-                let size = insn.len().to_const() as usize;
+        let mut reader = U8Reader::new(bytes);
+        let insn = match self.decoder.decode_into(&mut self.instruction, &mut reader) {
+            Ok(()) => {
+                let size = self.instruction.len().to_const() as usize;
+                if let Some(resolved) =
+                    Self::resolve_control_flow(address, &self.instruction, size)?
+                {
+                    return Ok(resolved);
+                }
                 Insn::from_disassembly(
                     address,
                     size,
-                    if self.should_lift(&insn) {
+                    if Self::should_lift(&self.instruction) {
                         InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
                         InsnProperties::FALL_THROUGH
@@ -298,7 +390,36 @@ impl DisassemblerT for X86_64Disassembler {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::error::Error;
+
+    use super::{X86_64, classify_bytes};
+    use crate::ir::{Address, Insn};
+
+    fn assert_direct_flow_matches_lifter(bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+        let language = X86_64::resolve_default_variant()?;
+        let arch = X86_64::new(language);
+        let address = Address::in_default_space(0x1000u64);
+        let mut disassembly_context = arch.lifter();
+        let mut disassembler = arch.disassembler();
+        let direct = disassembler.disassemble(address, bytes, disassembly_context.context_mut())?;
+
+        let mut lifter = arch.lifter();
+        let mut operations = Vec::new();
+        let length = lifter.lift(address, bytes, &mut operations)?;
+        let lifted = Insn::from_resolved_flow(language, address, length, &operations)?;
+
+        assert_eq!(
+            direct.properties(),
+            lifted.properties(),
+            "flow properties differ for {bytes:02x?}",
+        );
+        assert_eq!(
+            direct.flow_targets().collect::<Vec<_>>(),
+            lifted.flow_targets().collect::<Vec<_>>(),
+            "flow targets differ for {bytes:02x?}",
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_byte_patterns_are_classified() {
@@ -330,5 +451,61 @@ mod test {
 
         assert!(classify_bytes(&[0x55, 0x48, 0x89, 0xe5]).is_empty());
         assert!(classify_bytes(&[]).is_empty());
+    }
+
+    #[test]
+    fn direct_relative_flows_match_lifted_flow() -> Result<(), Box<dyn Error>> {
+        for bytes in [
+            [0xeb, 0x10].as_slice(),
+            &[0xeb, 0xf0],
+            &[0xe9, 0x01, 0x00, 0x00, 0x00],
+            &[0x75, 0x10],
+            &[0x0f, 0x85, 0x01, 0x00, 0x00, 0x00],
+            &[0xe8, 0x01, 0x00, 0x00, 0x00],
+            &[0xe3, 0x12],
+            &[0x67, 0xe3, 0x12],
+            &[0xe0, 0x12],
+            &[0xe1, 0x12],
+            &[0xe2, 0x12],
+        ] {
+            assert_direct_flow_matches_lifter(bytes)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn direct_indirect_flows_match_lifted_flow() -> Result<(), Box<dyn Error>> {
+        for bytes in [
+            [0xff, 0xe0].as_slice(),
+            &[0xff, 0xd0],
+            &[0xc3],
+            &[0xc2, 0x08, 0x00],
+        ] {
+            assert_direct_flow_matches_lifter(bytes)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_indirect_flows_retain_lifted_resolution() -> Result<(), Box<dyn Error>> {
+        let language = X86_64::resolve_default_variant()?;
+        let arch = X86_64::new(language);
+        let address = Address::in_default_space(0x1000u64);
+        let mut context = arch.lifter();
+        let mut disassembler = arch.disassembler();
+
+        for bytes in [
+            [0xff, 0x20].as_slice(),
+            &[0xff, 0x10],
+            &[0xff, 0x25, 0x10, 0x00, 0x00, 0x00],
+            &[0xff, 0x15, 0x10, 0x00, 0x00, 0x00],
+        ] {
+            let insn = disassembler.disassemble(address, bytes, context.context_mut())?;
+            assert!(
+                insn.needs_flow_resolution(),
+                "memory-indirect flow {bytes:02x?} must retain lifted resolution",
+            );
+        }
+        Ok(())
     }
 }

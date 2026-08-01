@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 
-use super::{FunctionIndex, FunctionTableAllocation, FunctionTableError};
-use crate::ir::{Address, Function, Id, IdAllocator, RawAddress};
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+
+use super::{FunctionIndex, FunctionTableError};
+use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, RawAddress};
 use crate::storage::EntityStorageError;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -20,10 +23,7 @@ impl Default for FunctionTable {
 impl FunctionTable {
     pub fn new() -> Self {
         Self {
-            index: FunctionIndex {
-                allocator: IdAllocator::new(),
-                addresses: BTreeMap::new(),
-            },
+            index: FunctionIndex::new(IdAllocator::new(), BTreeMap::new()),
             entries: Vec::new(),
         }
     }
@@ -32,63 +32,95 @@ impl FunctionTable {
         Ok(())
     }
 
-    pub(super) fn allocation_checkpoint(&self, max_pops: usize) -> FunctionTableAllocation {
-        self.index.allocator.checkpoint(max_pops)
+    pub(super) fn preview_id(&self, offset: usize) -> FunctionId {
+        self.index.allocator.preview_id(offset)
     }
 
-    pub(super) fn restore_allocation(&mut self, allocation: FunctionTableAllocation) {
-        self.index.allocator.restore(allocation);
+    pub(super) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
+        let mut required = self.entries.len();
+        for &id in reservations {
+            let allocated = self.index.allocator.allocate();
+            debug_assert_eq!(allocated, id);
+            required = required.max(id.index() + 1);
+        }
+        if required > self.entries.len() {
+            self.entries.resize_with(required, || None);
+        }
     }
 
-    pub(super) fn restore_entry(&mut self, function: Function) {
+    pub(super) fn publish_release(&mut self, id: FunctionId) {
+        self.index.allocator.release(id);
+    }
+
+    pub(super) fn publish_upsert(&mut self, function: Function, previous_entry: Option<Address>) {
+        if let Some(previous_entry) = previous_entry {
+            self.index.addresses.remove(&previous_entry);
+        }
         let id = function.id();
-        self.clear_entry(id);
-
         let index = id.index();
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
         self.index.addresses.insert(function.entry(), id);
-        self.index.allocator.mark_allocated(id);
         self.entries[index] = Some(function);
     }
 
-    pub(super) fn clear_entry(&mut self, id: Id<Function>) -> bool {
-        let Some(function) = self.get_by_id(id) else {
-            return false;
-        };
-        let entry = function.entry();
-
+    pub(super) fn publish_remove(&mut self, id: FunctionId, entry: Address) {
         self.index.addresses.remove(&entry);
         self.entries[id.index()] = None;
-        true
+        self.index.allocator.release(id);
     }
 
-    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
+    pub(super) fn publish_owners(
+        &mut self,
+        owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+    ) {
+        self.index.publish_owners(owners);
+    }
+
+    pub(crate) fn insert_with<R, F>(
+        &mut self,
+        addr: Address,
+        f: F,
+    ) -> Result<(FunctionId, R), FunctionTableError>
     where
-        F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
+        F: FnOnce(Id<Function>, Address) -> Result<(Function, R), FunctionTableError>,
     {
         if let Some(&existing) = self.index.addresses.get(&addr) {
-            let function = f(existing, addr)?;
+            let (function, value) = f(existing, addr)?;
 
             if function.entry() != addr {
                 return Err(FunctionTableError::AddressMismatch);
             }
 
+            let previous_blocks = self.entries[existing.index()].as_ref().map(|previous| {
+                previous
+                    .blocks()
+                    .map(|(_, block)| block)
+                    .collect::<SmallVec<[_; 8]>>()
+            });
+            let blocks = function
+                .blocks()
+                .map(|(_, block)| block)
+                .collect::<SmallVec<[_; 8]>>();
             self.entries[existing.index()] = Some(function);
+            self.index
+                .remove_members(existing, previous_blocks.iter().flatten().copied());
+            self.index.insert_members(existing, blocks);
 
-            return Ok(existing);
+            return Ok((existing, value));
         }
 
-        let (id, function) = self.index.allocator.try_allocate(|id| {
-            let function = f(id, addr)?;
+        let (id, (function, value)) = self.index.allocator.try_allocate(|id| {
+            let (function, value) = f(id, addr)?;
             if function.entry() != addr {
                 return Err(FunctionTableError::AddressMismatch);
             }
-            Ok(function)
+            Ok((function, value))
         })?;
 
         self.index.addresses.insert(addr, id);
+        self.index.insert_membership(&function);
 
         let index = id.index();
         if index >= self.entries.len() {
@@ -96,7 +128,7 @@ impl FunctionTable {
         }
         self.entries[index] = Some(function);
 
-        Ok(id)
+        Ok((id, value))
     }
 
     pub fn get_by_id(&self, id: Id<Function>) -> Option<&Function> {
@@ -149,6 +181,7 @@ impl FunctionTable {
         };
 
         self.index.addresses.remove(&function.entry());
+        self.index.remove_membership(&function);
         self.index.allocator.release(id);
 
         true
@@ -159,12 +192,16 @@ impl FunctionTable {
             return false;
         };
 
-        if let Some(slot) = self.entries.get_mut(id.index()) {
-            *slot = None;
+        if let Some(function) = self.entries.get_mut(id.index()).and_then(Option::take) {
+            self.index.remove_membership(&function);
         }
         self.index.allocator.release(id);
 
         true
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        self.index.addresses.contains_key(&addr)
     }
 
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
@@ -184,6 +221,10 @@ impl FunctionTable {
             .addresses
             .range((start, end))
             .map(|(address, _)| *address)
+    }
+
+    pub(super) fn block_owners(&self, block: CodeBlockId) -> &[FunctionId] {
+        self.index.owners(block)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {

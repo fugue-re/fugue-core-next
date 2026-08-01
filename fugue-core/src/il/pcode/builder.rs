@@ -533,7 +533,10 @@ mod test {
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
-        assert!(matches!(ir.verify(), Err(VerifyError::ForbiddenEffectSpace)));
+        assert!(matches!(
+            ir.verify(),
+            Err(VerifyError::ForbiddenEffectSpace)
+        ));
     }
 
     #[test]

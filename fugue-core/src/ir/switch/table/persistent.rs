@@ -1,7 +1,7 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use super::{SwitchIndex, SwitchTableAllocation, SwitchTableError};
+use super::{SwitchIndex, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::{CachedRef, EntityCache, WriteBackWorker};
@@ -53,37 +53,39 @@ impl SwitchTable {
         self.entries.flush()
     }
 
-    pub(crate) fn allocation_checkpoint(&self, max_pops: usize) -> SwitchTableAllocation {
-        self.index.allocator.checkpoint(max_pops)
+    pub(super) fn preview_id(&self, offset: usize) -> SwitchId {
+        self.index.allocator.preview_id(offset)
     }
 
-    pub(crate) fn restore_allocation(&mut self, allocation: SwitchTableAllocation) {
-        self.index.allocator.restore(allocation);
+    pub(super) fn publish_reservation(&mut self, id: SwitchId) {
+        let allocated = self.index.allocator.allocate();
+        debug_assert_eq!(allocated, id);
     }
 
-    pub(crate) fn restore_entry(&mut self, switch: Switch) -> Result<(), EntityStorageError> {
+    pub(super) fn publish_release(&mut self, id: SwitchId) {
+        self.index.allocator.release(id);
+    }
+
+    pub(super) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        previous_function: Option<FunctionId>,
+        encoded_len: usize,
+    ) {
         let id = switch.id();
-        self.clear_entry(id)?;
-
-        let function = switch.function();
         let branch = switch.branch();
-        self.entries.try_put(id, switch)?;
+        let function = switch.function();
+        self.entries.publish_put(id, switch, encoded_len);
+        if let Some(previous_function) = previous_function {
+            self.index.remove(previous_function, branch);
+        }
         self.index.insert(id, function, branch);
-        self.index.allocator.mark_allocated(id);
-        Ok(())
     }
 
-    pub(crate) fn clear_entry(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
-        let Some(switch) = self.entries.try_get(&id)? else {
-            return Ok(false);
-        };
-        let branch = switch.branch();
-        let function = switch.function();
-        drop(switch);
-
-        self.entries.try_remove(&id)?;
+    pub(super) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        self.entries.publish_remove(&id);
         self.index.remove(function, branch);
-        Ok(true)
+        self.index.allocator.release(id);
     }
 
     pub(crate) fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>

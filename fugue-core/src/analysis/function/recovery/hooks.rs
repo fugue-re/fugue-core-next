@@ -1,18 +1,16 @@
 use super::FunctionRecoveryError;
+use crate::engine::ProjectView;
 use crate::ir::IncompleteFunction;
-use crate::project::Project;
 use crate::types::Confidence;
 
 pub struct FunctionRecoveryCommitContext {
     function: IncompleteFunction,
-    confidence: Confidence,
 }
 
 impl FunctionRecoveryCommitContext {
     pub fn new(function: IncompleteFunction, confidence: Confidence) -> Self {
         Self {
-            function,
-            confidence,
+            function: function.with_confidence(confidence),
         }
     }
 
@@ -21,7 +19,7 @@ impl FunctionRecoveryCommitContext {
     }
 
     pub fn confidence(&self) -> Confidence {
-        self.confidence
+        self.function.confidence()
     }
 
     pub(crate) fn into_function(self) -> IncompleteFunction {
@@ -32,18 +30,19 @@ impl FunctionRecoveryCommitContext {
 pub trait FunctionRecoveryCommitHook: Send {
     fn should_commit(
         &self,
-        project: &Project,
+        project: &ProjectView<'_>,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
 impl<F> FunctionRecoveryCommitHook for F
 where
-    F: Fn(&Project, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError> + Send,
+    F: Fn(&ProjectView<'_>, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>
+        + Send,
 {
     fn should_commit(
         &self,
-        project: &Project,
+        project: &ProjectView<'_>,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         (self)(project, context)
@@ -53,7 +52,7 @@ where
 impl FunctionRecoveryCommitHook for Box<dyn FunctionRecoveryCommitHook + 'static> {
     fn should_commit(
         &self,
-        project: &Project,
+        project: &ProjectView<'_>,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         self.as_ref().should_commit(project, context)
@@ -66,7 +65,7 @@ where
 {
     fn should_commit(
         &self,
-        project: &Project,
+        project: &ProjectView<'_>,
         context: &FunctionRecoveryCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         match self {

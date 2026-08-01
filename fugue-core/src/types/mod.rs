@@ -7,8 +7,8 @@ pub(crate) mod memmap;
 
 pub use attributes::{
     ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_IMAGE_BASE,
-    ATTRIBUTE_LOADER_FORMAT, ATTRIBUTE_PROJECT_PATH, ArchivedAttributeMap, ArchivedJsonValue,
-    Attribute, AttributeMap, serde_json,
+    ATTRIBUTE_PROJECT_PATH, ArchivedAttributeMap, ArchivedJsonValue, Attribute, AttributeMap,
+    serde_json,
 };
 pub use bytes::BytesOrSlice;
 pub use common::{OwnedOrRef, Revision};
