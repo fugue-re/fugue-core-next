@@ -261,7 +261,7 @@ impl<'a> ProjectView<'a> {
         }
     }
 
-    pub(crate) fn with_independent_reads(&self) -> Self {
+    pub(crate) fn fork(&self) -> Self {
         Self::new(self.project)
     }
 
@@ -296,8 +296,8 @@ impl<'a> ProjectView<'a> {
         self.project.platform()
     }
 
-    pub fn entry(&self) -> Option<Address> {
-        self.project.entry()
+    pub fn entry_point(&self) -> Option<Address> {
+        self.project.entry_point()
     }
 
     pub fn language(&self) -> &'static Language {
@@ -326,7 +326,7 @@ impl<'a> ProjectView<'a> {
         self.project.functions().get_by_address(address)
     }
 
-    pub fn has_function_at(&self, address: Address) -> bool {
+    pub fn contains_function_at(&self, address: Address) -> bool {
         self.record(ChangeKinds::FUNCTIONS, AddressRange::point(address));
         self.project.functions().contains(address)
     }
@@ -344,8 +344,8 @@ impl<'a> ProjectView<'a> {
         self.record(
             ChangeKinds::FUNCTIONS,
             AddressRange::new(
-                block.start().space(),
-                block.start().raw_address(),
+                block.address().space(),
+                block.address().raw_address(),
                 block.last_address().raw_address(),
             ),
         );
@@ -357,12 +357,12 @@ impl<'a> ProjectView<'a> {
         self.project.switches().get_by_branch(branch)
     }
 
-    pub fn has_problem(&self, address: Address) -> bool {
+    pub fn contains_problem(&self, address: Address) -> bool {
         self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
         self.project.problems().contains(address)
     }
 
-    pub fn has_problem_kind(&self, address: Address, kinds: &[ProblemKind]) -> bool {
+    pub fn contains_problem_kind(&self, address: Address, kinds: &[ProblemKind]) -> bool {
         self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
         kinds
             .iter()

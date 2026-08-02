@@ -1,11 +1,10 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Cursor, Error as IoError, Read, Seek, SeekFrom, Write};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitflags::bitflags;
-use fugue_bytes::BE;
-use fugue_bytes::traits::{ReadBytesExt as _, WriteBytesExt as _};
 use hex_display::HexDisplayExt;
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -19,16 +18,22 @@ use crate::types::{AttributeMap, BytesOrMapping};
 pub(crate) mod entities;
 #[cfg(feature = "sqlite")]
 pub use entities::SqliteEntityStorage;
+#[cfg(feature = "mdbx")]
+pub use entities::{ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS, MdbxEntityStorage, MdbxOptions};
+#[cfg(feature = "rocksdb")]
+pub use entities::{
+    ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS, RocksDbEntityStorage, RocksDbOptions,
+};
 pub use entities::{
     BufferedEntityWriter, DefaultPersistentEntityStorage, DefaultTransientEntityStorage,
     DummyEntityStorage, ENTITY_PROJECT_REVISION_ID, Entity, EntityBytesAsIterator,
     EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityId,
     EntityIterator, EntityKey, EntityKeyBytesIterator, EntityKeyId, EntityKeyIterator,
-    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError, EntityWrite,
+    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityTransactionalReader,
-    EntityTransactionalWriter, InMemoryEntityStorage, MutableEntity, ProjectEntity,
-    WriteBackAction, WriteBackWorker, make_key_with_entity_id,
+    EntityTransactionalWriter, EntityWrite, InMemoryEntityStorage, MutableEntity, ProjectEntity,
+    WriteBackAction, WriteBackWorker,
 };
 
 pub(crate) mod project;
@@ -49,43 +54,25 @@ pub use segments::{
     SegmentStorageProviderId, SegmentStorageProviderRegistry, SegmentSubMapping,
 };
 
-// The magic bytes used to identify a Fugue project file.
-//
-// Currently, we have a magic number of `FDBZ` followed by another four
-// bytes, which are reserved for future use or versioning.
-//
 pub const FUGUE_STORAGE_MAGIC: &[u8] = b"FDBZ";
 
 bitflags! {
-    /// Flags used to indicate the persistence of storage.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
     #[repr(transparent)]
-    pub struct FugueStorageHeader: u32 {
-        /// Indicates that the storage is self-contained, i.e., that both the segment and entity
-        /// storage providers can be built without a loadable instance.
+    pub struct FugueStorageFlags: u32 {
         const STANDALONE = 0x00000001;
     }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FugueStorageMetadata {
+    flags: u32,
 }
 
 pub const PERSISTENT: bool = true;
 pub const TRANSIENT: bool = false;
 
 pub type StoragePersistence = bool;
-
-pub const ATTRIBUTE_FUNCTION_CACHE_SIZE: &str = "storage.entities.function.cache_size";
-pub const DEFAULT_FUNCTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
-
-pub const ATTRIBUTE_CODE_BLOCK_CACHE_SIZE: &str = "storage.entities.code_block.cache_size";
-pub const DEFAULT_CODE_BLOCK_CACHE_BYTES: usize = 8 * 1024 * 1024;
-
-pub const ATTRIBUTE_SYMBOL_CACHE_SIZE: &str = "storage.entities.symbol.cache_size";
-pub const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
-
-pub const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
-pub const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
-
-pub const ATTRIBUTE_PROBLEM_CACHE_SIZE: &str = "storage.entities.problem.cache_size";
-pub const DEFAULT_PROBLEM_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum StorageProviderError {
@@ -155,9 +142,9 @@ impl StorageProviderError {
 }
 
 pub struct StorageContainer {
-    pub(crate) entities: EntityStorage,
-    pub(crate) image_resolution: Option<ImageResolution>,
-    pub(crate) segments: SegmentStorage,
+    entities: EntityStorage,
+    image_resolution: Option<ImageResolution>,
+    segments: SegmentStorage,
     write_back: Option<Arc<WriteBackWorker>>,
     cleanup_handler: StorageCleanupHandlerOneShot,
 }
@@ -174,7 +161,6 @@ impl StorageCleanupHandlerOneShot {
 
 impl Drop for StorageCleanupHandlerOneShot {
     fn drop(&mut self) {
-        // Ensure we only run the cleanup handler once.
         let Some(mut handler) = self.0.take() else {
             return;
         };
@@ -264,19 +250,24 @@ impl StorageContainer {
         self.write_back.as_ref()
     }
 
+    pub fn entities(&self) -> &EntityStorage {
+        &self.entities
+    }
+
+    pub fn image_resolution(&self) -> Option<&ImageResolution> {
+        self.image_resolution.as_ref()
+    }
+
     pub(crate) fn entity<K, E>(&self, key: &K) -> Result<Option<E>, EntityStorageError>
     where
         K: EntityKey,
         E: Entity,
     {
-        if let Some(worker) = self.write_back() {
-            let encoded_key = entities::schema::make_key::<K, E>(key);
-            if let Some(pending) = worker.pending(&encoded_key) {
-                return match pending {
-                    WriteBackAction::Insert(bytes) => entities::decode_entity(&bytes).map(Some),
-                    WriteBackAction::Remove => Ok(None),
-                };
-            }
+        if let Some(pending) = self.pending_entity::<K, E>(key) {
+            return match pending {
+                WriteBackAction::Insert(bytes) => entities::decode_entity(&bytes).map(Some),
+                WriteBackAction::Remove => Ok(None),
+            };
         }
 
         self.entities.get::<K, E>(key)
@@ -287,14 +278,19 @@ impl StorageContainer {
         K: EntityKey,
         E: Entity,
     {
-        if let Some(worker) = self.write_back() {
-            let encoded_key = entities::schema::make_key::<K, E>(key);
-            if let Some(pending) = worker.pending(&encoded_key) {
-                return Ok(matches!(pending, WriteBackAction::Insert(_)));
-            }
+        match self.pending_entity::<K, E>(key) {
+            Some(WriteBackAction::Insert(_)) => Ok(true),
+            Some(WriteBackAction::Remove) => Ok(false),
+            None => self.entities.contains::<K, E>(key),
         }
+    }
 
-        self.entities.contains::<K, E>(key)
+    fn pending_entity<K, E>(&self, key: &K) -> Option<WriteBackAction>
+    where
+        K: EntityKey,
+        E: Entity,
+    {
+        self.write_back()?.pending(&E::ID.key_for(key))
     }
 
     pub(crate) fn table<T>(
@@ -336,7 +332,6 @@ pub trait StorageProvider {
     ) -> Result<StorageContainer, StorageProviderError>;
 }
 
-// This provider uses the default transient storage provider for both segments and entities.
 pub struct TransientStorageProvider;
 
 impl StorageProvider for TransientStorageProvider {
@@ -362,8 +357,6 @@ impl StorageProvider for TransientStorageProvider {
     }
 }
 
-// This provider uses the default transient storage provider for segments and default persistent
-// storage provider for entities.
 pub struct PersistentEntityStorageProvider;
 
 impl StorageProvider for PersistentEntityStorageProvider {
@@ -393,7 +386,6 @@ impl StorageProvider for PersistentEntityStorageProvider {
     }
 }
 
-// This provider uses the default persistent storage provider for both segments and entities.
 pub struct PersistentStorageProvider<T, U = DefaultPersistentSegmentStorage>(
     std::marker::PhantomData<(T, U)>,
 );
@@ -422,8 +414,8 @@ where
         loadable: &impl Loadable,
         attributes: &mut AttributeMap,
     ) -> Result<StorageContainer, StorageProviderError> {
-        let compressed = CompressedPersistentStorage::new(attributes)?
-            .with_header(FugueStorageHeader::STANDALONE);
+        let compressed =
+            CompressedPersistentStorage::new(attributes)?.with_flags(FugueStorageFlags::STANDALONE);
 
         let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
         let (segments, image_resolution) =
@@ -449,13 +441,13 @@ pub type DefaultProjectStorageProvider = DefaultPersistentStorageProvider;
 pub type DefaultProjectStorageProvider = TransientStorageProvider;
 
 pub struct CompressedPersistentStorage {
-    header: FugueStorageHeader,
+    flags: FugueStorageFlags,
     path: PathBuf,
 }
 
 impl StorageCleanupHandler for CompressedPersistentStorage {
     fn cleanup_storage(&mut self) -> Result<(), StorageProviderError> {
-        let result = self.cleanup_storage_aux();
+        let result = self.pack();
         if result.is_err() {
             let path = self.path.with_extension("fdbz");
             if path.exists()
@@ -472,14 +464,14 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
 }
 
 impl CompressedPersistentStorage {
-    fn cleanup_storage_aux(&mut self) -> Result<(), StorageProviderError> {
+    fn pack(&mut self) -> Result<(), StorageProviderError> {
         let packed = self.path.with_extension("fdbz");
         let unpacked = self.path.with_extension("fdb");
 
         let file = File::create(&packed).map_err(StorageProviderError::CleanupProject)?;
         let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Zstd);
         let mut writer = BufWriter::new(file);
-        self.write_header(&mut writer)?;
+        self.write_metadata(&mut writer)?;
         let mut zip = ZipWriter::new(writer);
 
         for tracked in WalkDir::new(&unpacked)
@@ -549,12 +541,11 @@ impl CompressedPersistentStorage {
 
         Self::create_or_load(&path)?;
 
-        // ensure we point to the (unpacked) project path
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
 
         Ok(Self {
             path,
-            header: FugueStorageHeader::empty(),
+            flags: FugueStorageFlags::empty(),
         })
     }
 
@@ -569,32 +560,31 @@ impl CompressedPersistentStorage {
             )));
         }
 
-        let header = Self::load_standalone(path)?;
+        let flags = Self::unpack(path, true)?;
 
-        // ensure we point to the (unpacked) project path
         attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
 
         Ok(Self {
             path: path.to_path_buf(),
-            header,
+            flags,
         })
     }
 
-    pub fn header(&self) -> FugueStorageHeader {
-        self.header
+    pub fn flags(&self) -> FugueStorageFlags {
+        self.flags
     }
 
-    pub fn set_header(&mut self, header: FugueStorageHeader) -> &mut Self {
-        self.header = header;
+    pub fn set_flags(&mut self, flags: FugueStorageFlags) -> &mut Self {
+        self.flags = flags;
         self
     }
 
-    pub fn with_header(mut self, header: FugueStorageHeader) -> Self {
-        self.set_header(header);
+    pub fn with_flags(mut self, flags: FugueStorageFlags) -> Self {
+        self.set_flags(flags);
         self
     }
 
-    pub fn read_header(mut input: impl Read) -> Result<FugueStorageHeader, StorageProviderError> {
+    pub fn read_metadata(mut input: impl Read) -> Result<FugueStorageFlags, StorageProviderError> {
         let mut magic = [0u8; FUGUE_STORAGE_MAGIC.len()];
 
         input
@@ -610,22 +600,30 @@ impl CompressedPersistentStorage {
             return Err(StorageProviderError::NotAValidProject);
         }
 
-        let header = input
-            .read_u32::<BE>()
-            .map(FugueStorageHeader::from_bits_truncate)
-            .map_err(|_| StorageProviderError::create_project("failed to read storage header"))?;
+        let mut encoded = vec![0; size_of::<rkyv::Archived<FugueStorageMetadata>>()];
+        input
+            .read_exact(&mut encoded)
+            .map_err(|_| StorageProviderError::create_project("failed to read storage metadata"))?;
+        let metadata = rkyv::from_bytes::<FugueStorageMetadata, rkyv::rancor::Error>(&encoded)
+            .map_err(|_| StorageProviderError::create_project("invalid storage metadata"))?;
 
-        Ok(header)
+        Ok(FugueStorageFlags::from_bits_truncate(metadata.flags))
     }
 
-    pub fn write_header(&self, mut output: impl Write) -> Result<(), StorageProviderError> {
+    pub fn write_metadata(&self, mut output: impl Write) -> Result<(), StorageProviderError> {
         output
             .write_all(FUGUE_STORAGE_MAGIC)
             .map_err(|_| StorageProviderError::create_project("failed to write magic bytes"))?;
 
-        output
-            .write_u32::<BE>(self.header.bits())
-            .map_err(|_| StorageProviderError::create_project("failed to write storage header"))?;
+        let metadata = FugueStorageMetadata {
+            flags: self.flags.bits(),
+        };
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).map_err(|_| {
+            StorageProviderError::create_project("failed to encode storage metadata")
+        })?;
+        output.write_all(&encoded).map_err(|_| {
+            StorageProviderError::create_project("failed to write storage metadata")
+        })?;
 
         Ok(())
     }
@@ -638,8 +636,7 @@ impl CompressedPersistentStorage {
         }
 
         if path.is_file() {
-            // load file
-            Self::load(path)?;
+            Self::unpack(path, false)?;
         } else if !path.exists() {
             Self::create(path)?;
         } else {
@@ -664,7 +661,10 @@ impl CompressedPersistentStorage {
         Ok(())
     }
 
-    fn load_aux(input: impl Read + Seek, unpacked: &Path) -> Result<(), StorageProviderError> {
+    fn extract_archive(
+        input: impl Read + Seek,
+        unpacked: &Path,
+    ) -> Result<(), StorageProviderError> {
         let mut zip = ZipArchive::new(input).map_err(StorageProviderError::create_project)?;
 
         tracing::debug!("unpacking project to `{}`", unpacked.display());
@@ -682,10 +682,10 @@ impl CompressedPersistentStorage {
         Ok(())
     }
 
-    fn load_with(
+    fn unpack(
         path: &Path,
-        standalone: bool,
-    ) -> Result<FugueStorageHeader, StorageProviderError> {
+        require_standalone: bool,
+    ) -> Result<FugueStorageFlags, StorageProviderError> {
         let unpacked = path.with_extension("fdb");
         if unpacked.exists() {
             return Err(StorageProviderError::create_project_already_exists(
@@ -699,11 +699,11 @@ impl CompressedPersistentStorage {
             BytesOrMapping::from_file(path).map_err(StorageProviderError::create_project)?,
         );
 
-        let header = Self::read_header(&mut input)?;
+        let flags = Self::read_metadata(&mut input)?;
 
-        tracing::trace!("project has the following properties: {header:?}");
+        tracing::trace!("project has the following properties: {flags:?}");
 
-        if standalone && !header.contains(FugueStorageHeader::STANDALONE) {
+        if require_standalone && !flags.contains(FugueStorageFlags::STANDALONE) {
             tracing::error!(
                 "project is not a standalone project; cannot be loaded without a loadable instance"
             );
@@ -712,21 +712,12 @@ impl CompressedPersistentStorage {
 
         fs::create_dir_all(&unpacked).map_err(StorageProviderError::CreateProject)?;
 
-        let result = Self::load_aux(input, &unpacked);
+        let result = Self::extract_archive(input, &unpacked);
 
         if result.is_err() {
-            // if we failed to load the project, we attempt to clean-up
             fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
         }
 
-        result.map(|_| header)
-    }
-
-    fn load_standalone(path: &Path) -> Result<FugueStorageHeader, StorageProviderError> {
-        Self::load_with(path, true)
-    }
-
-    fn load(path: &Path) -> Result<FugueStorageHeader, StorageProviderError> {
-        Self::load_with(path, false)
+        result.map(|_| flags)
     }
 }

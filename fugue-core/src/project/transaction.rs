@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::{mem, thread};
+use std::{iter, mem, thread};
 
-use bytes::Bytes;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tracing::Span;
@@ -10,7 +10,7 @@ use super::segment::SegmentMetadataStage;
 use super::{Project, ProjectError};
 use crate::engine::ReadSet;
 use crate::engine::change::{
-    ChangeCategory, ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind,
+    ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind,
     MAX_DETAILED_CHANGE_RECORDS, Revision,
 };
 use crate::il::common::{IlError, IlLevel};
@@ -19,24 +19,25 @@ use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::il::storage::{IlStage, StagedIl};
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CallGraphStage, CodeBlockTable, Function, FunctionId,
-    FunctionMaterialisation, FunctionProperties, FunctionRef, FunctionTable, FunctionTableStage,
-    IncompleteFunction, IncompleteFunctionError, Problem, ProblemKey, ProblemKind, ProblemScope,
-    ProblemTable, RawAddress, Reference, ReferenceIndex, ReferenceKey, ReferenceKind,
-    ReferenceOrigin, ReferenceTarget, Switch, SwitchId, SwitchRef, SwitchTable, SymbolEntry,
-    SymbolId, SymbolIndex, SymbolIndexState, SymbolProperties, SymbolTable,
+    Address, AddressRange, AddressRangeSet, CallGraphStage, CodeBlockId, CodeBlockTable, Function,
+    FunctionId, FunctionMaterialisation, FunctionProperties, FunctionRef, FunctionTable,
+    FunctionTableStage, IncompleteFunction, IncompleteFunctionError, PreparedFunctionMutation,
+    Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope, ProblemTable, RawAddress, Reference,
+    ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceMutation, ReferenceOrigin,
+    ReferenceTarget, Switch, SwitchId, SwitchRef, SwitchTable, SwitchTableError, Symbol,
+    SymbolEntry, SymbolId, SymbolIndex, SymbolIndexState, SymbolProperties, SymbolTable,
 };
-use crate::storage::SegmentStorageError;
-use crate::storage::entities::{EntityWrite, EntityWriteBatch, schema};
+use crate::storage::entities::{Entity, EntityWrite, EntityWriteBatch};
 use crate::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance,
 };
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentWriteRevert};
+use crate::storage::{EntityRef, EntityStorageError, SegmentStorageError};
 
 struct PreparedProblemMutation {
-    encoded_len: usize,
+    encoded_size: usize,
     is_new: bool,
     key: ProblemKey,
     problem: Option<Problem>,
@@ -44,7 +45,7 @@ struct PreparedProblemMutation {
 
 struct PreparedSwitchMutation {
     branch: Address,
-    encoded_len: usize,
+    encoded_size: usize,
     previous: Option<PreviousSwitch>,
     switch: Option<Switch>,
 }
@@ -56,17 +57,41 @@ struct PreviousSwitch {
 }
 
 struct PreparedSymbolMutation {
-    encoded_len: usize,
+    encoded_size: usize,
     entry: Option<SymbolEntry>,
     id: SymbolId,
     previous: Option<SymbolIndexState>,
 }
 
 struct PreparedReferenceMutation {
-    encoded_len: usize,
-    key: ReferenceKey,
+    mutation: ReferenceMutation,
     previous: Option<Reference>,
-    reference: Option<Reference>,
+}
+
+struct DerivedReferenceBatch {
+    coverage: AddressRangeSet,
+    kind: ReferenceKind,
+    references: Vec<Reference>,
+}
+
+impl DerivedReferenceBatch {
+    fn new(
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        references: impl IntoIterator<Item = Reference>,
+    ) -> Self {
+        Self {
+            coverage,
+            kind,
+            references: references.into_iter().collect(),
+        }
+    }
+}
+
+struct StagedFunction {
+    id: FunctionId,
+    coverage: AddressRangeSet,
+    references: Vec<Reference>,
 }
 
 #[derive(Clone, Copy)]
@@ -419,6 +444,18 @@ impl ProjectTransaction<'_> {
         self.worker_limit = limit.max(1);
     }
 
+    pub fn replace_ecode(&mut self, ir: ECodeIr) -> Result<(), ProjectError> {
+        self.materialise_lifted(ir)
+    }
+
+    pub fn replace_ecode_ssa(&mut self, ir: ECodeSsaIr) -> Result<(), ProjectError> {
+        self.materialise_lifted(ir)
+    }
+
+    pub fn replace_pcode(&mut self, ir: PCodeIr) -> Result<(), ProjectError> {
+        self.materialise_lifted(ir)
+    }
+
     pub(crate) fn materialise_lifted<T>(&mut self, mut ir: T) -> Result<(), ProjectError>
     where
         T: StagedIl,
@@ -441,40 +478,41 @@ impl ProjectTransaction<'_> {
         kind: ReferenceKind,
         derived: impl IntoIterator<Item = Reference>,
     ) -> Result<bool, ProjectError> {
-        self.replace_derived_reference_batches(vec![(
-            coverage,
-            kind,
-            derived.into_iter().collect(),
-        )])
+        self.replace_derived_reference_batches(iter::once(DerivedReferenceBatch::new(
+            coverage, kind, derived,
+        )))
     }
 
     fn replace_derived_reference_batches(
         &mut self,
-        mut replacements: Vec<(AddressRangeSet, ReferenceKind, Vec<Reference>)>,
+        replacements: impl IntoIterator<Item = DerivedReferenceBatch>,
     ) -> Result<bool, ProjectError> {
+        let mut replacements = replacements.into_iter().collect::<SmallVec<[_; 4]>>();
         let mut combined_coverage = AddressRangeSet::new();
         let flow_reference_count = replacements
             .iter()
-            .filter(|(_, kind, _)| kind.is_flow())
-            .map(|(_, _, derived)| derived.len())
+            .filter(|replacement| replacement.kind.is_flow())
+            .map(|replacement| replacement.references.len())
             .sum();
         let mut supported_flow = FxHashMap::<ReferenceKey, Reference>::with_capacity_and_hasher(
             flow_reference_count,
             Default::default(),
         );
-        for (coverage, _, derived) in &mut replacements {
-            for reference in derived {
-                coverage.insert_range(AddressRange::point(reference.from()));
+        for replacement in &mut replacements {
+            for reference in &replacement.references {
+                replacement
+                    .coverage
+                    .insert_range(AddressRange::point(reference.from()));
             }
-            for range in coverage.ranges() {
+            for range in replacement.coverage.ranges() {
                 combined_coverage.insert_range(range);
             }
         }
-        for (_, kind, derived) in &replacements {
-            if !kind.is_flow() {
+        for replacement in &replacements {
+            if !replacement.kind.is_flow() {
                 continue;
             }
-            for &reference in derived {
+            for &reference in &replacement.references {
                 let key = ReferenceKey::new(reference.from(), reference.target());
                 supported_flow
                     .entry(key)
@@ -501,15 +539,15 @@ impl ProjectTransaction<'_> {
             .collect::<BTreeMap<_, _>>();
         if current.is_empty() {
             let mut changed = false;
-            for (coverage, _, derived) in replacements {
-                if derived.is_empty() {
+            for replacement in replacements {
+                if replacement.references.is_empty() {
                     continue;
                 }
-                for reference in derived {
+                for reference in replacement.references {
                     let key = ReferenceKey::new(reference.from(), reference.target());
                     self.stage_reference_mutation(key, None, Some(reference));
                 }
-                for range in coverage.ranges() {
+                for range in replacement.coverage.ranges() {
                     self.derived_reference_coverage.insert_range(range);
                 }
                 changed = true;
@@ -519,9 +557,9 @@ impl ProjectTransaction<'_> {
 
         let mut changed = false;
 
-        for (coverage, kind, derived) in replacements {
+        for replacement in replacements {
             let mut covered = Vec::new();
-            for range in coverage.ranges() {
+            for range in replacement.coverage.ranges() {
                 let start = ReferenceKey::minimum_for(range.start_address());
                 for (&key, &reference) in current.range(start..) {
                     if key.from() > range.end_address() {
@@ -531,31 +569,35 @@ impl ProjectTransaction<'_> {
                 }
             }
             if covered.is_empty() {
-                if derived.is_empty() {
+                if replacement.references.is_empty() {
                     continue;
                 }
-                for reference in derived {
+                for reference in replacement.references {
                     let key = ReferenceKey::new(reference.from(), reference.target());
                     current.insert(key, reference);
                     self.stage_reference_mutation(key, None, Some(reference));
                 }
-                for range in coverage.ranges() {
+                for range in replacement.coverage.ranges() {
                     self.derived_reference_coverage.insert_range(range);
                 }
                 changed = true;
                 continue;
             }
-            if ReferenceIndex::derived_kind_matches(&covered, &derived, kind) {
+            if ReferenceIndex::derived_kind_matches(
+                &covered,
+                &replacement.references,
+                replacement.kind,
+            ) {
                 continue;
             }
 
             let mut occupied = BTreeSet::new();
             for reference in covered {
                 let key = ReferenceKey::new(reference.from(), reference.target());
-                if reference.origin().is_derived() && reference.kind() == kind {
+                if reference.origin().is_derived() && reference.kind() == replacement.kind {
                     let supported = match supported_flow.get(&key) {
                         Some(&supported) => Some(supported),
-                        None if kind.is_flow() => {
+                        None if replacement.kind.is_flow() => {
                             self.function_stage.supported_backing_flow_reference(
                                 &self.project.functions,
                                 &self.project.blocks,
@@ -577,7 +619,7 @@ impl ProjectTransaction<'_> {
                     occupied.insert(key);
                 }
             }
-            for reference in derived {
+            for reference in replacement.references {
                 let key = ReferenceKey::new(reference.from(), reference.target());
                 if !occupied.contains(&key) {
                     current.insert(key, reference);
@@ -585,7 +627,7 @@ impl ProjectTransaction<'_> {
                 }
             }
 
-            for range in coverage.ranges() {
+            for range in replacement.coverage.ranges() {
                 self.derived_reference_coverage.insert_range(range);
             }
             changed = true;
@@ -696,7 +738,7 @@ impl ProjectTransaction<'_> {
         self.project
             .functions
             .staged_by_address(&self.function_stage, address)
-            .map(|function| function.map(crate::storage::EntityRef::owned))
+            .map(|function| function.map(EntityRef::owned))
             .map_err(ProjectError::from)
     }
 
@@ -716,13 +758,13 @@ impl ProjectTransaction<'_> {
     pub fn switch_at(&mut self, branch: Address) -> Option<SwitchRef<'_>> {
         self.record_read(ChangeKinds::SWITCHES, AddressRange::point(branch));
         match self.switch_mutations.get(&branch) {
-            Some(Some(switch)) => Some(crate::storage::EntityRef::owned(switch.clone())),
+            Some(Some(switch)) => Some(EntityRef::owned(switch.clone())),
             Some(None) => None,
             None => self.project.switches().get_by_branch(branch),
         }
     }
 
-    pub fn has_problem(&mut self, address: Address) -> bool {
+    pub fn contains_problem(&mut self, address: Address) -> bool {
         self.record_read(ChangeKinds::PROBLEMS, AddressRange::point(address));
         if self
             .problem_mutations
@@ -785,9 +827,9 @@ impl ProjectTransaction<'_> {
         &mut self,
         function: IncompleteFunction,
     ) -> Result<FunctionId, ProjectError> {
-        let (id, coverage, references) = self.stage_function_replacement(function)?;
-        self.replace_derived_references(coverage, ReferenceKind::Flow, references)?;
-        Ok(id)
+        let staged = self.stage_incomplete_function(function)?;
+        self.replace_derived_references(staged.coverage, ReferenceKind::Flow, staged.references)?;
+        Ok(staged.id)
     }
 
     pub(crate) fn add_functions(
@@ -818,34 +860,18 @@ impl ProjectTransaction<'_> {
         }
 
         let chunk_size = functions.len().div_ceil(workers);
-        let mut functions = functions.into_iter().map(Some).collect::<Vec<_>>();
         let mut prepared = Vec::with_capacity(functions.len());
-        prepared.resize_with(functions.len(), || None);
-        thread::scope(|scope| {
-            for (functions, prepared) in functions
-                .chunks_mut(chunk_size)
-                .zip(prepared.chunks_mut(chunk_size))
-            {
-                scope.spawn(move || {
-                    for (function, prepared) in functions.iter_mut().zip(prepared) {
-                        let function = function
-                            .take()
-                            .expect("function must only be materialised once");
-                        *prepared = Some(
-                            function
-                                .with_input_revision(revision)
-                                .prepare_materialisation(),
-                        );
-                    }
-                });
-            }
-        });
+        functions
+            .into_par_iter()
+            .with_min_len(chunk_size)
+            .map(|function| {
+                function
+                    .with_input_revision(revision)
+                    .prepare_materialisation()
+            })
+            .collect_into_vec(&mut prepared);
 
-        self.stage_function_batch(
-            prepared
-                .into_iter()
-                .map(|prepared| prepared.expect("worker must materialise every function")),
-        )
+        self.stage_function_batch(prepared)
     }
 
     fn stage_function_batch(
@@ -859,17 +885,21 @@ impl ProjectTransaction<'_> {
         let mut references = Vec::with_capacity(expected);
         for function in functions {
             let function = function?;
-            let (_, coverage, derived) = self.stage_function_materialisation(function)?;
-            references.push((coverage, ReferenceKind::Flow, derived));
+            let staged = self.stage_function_materialisation(function)?;
+            references.push(DerivedReferenceBatch::new(
+                staged.coverage,
+                ReferenceKind::Flow,
+                staged.references,
+            ));
         }
         self.replace_derived_reference_batches(references)?;
         Ok(())
     }
 
-    fn stage_function_replacement(
+    fn stage_incomplete_function(
         &mut self,
         function: IncompleteFunction,
-    ) -> Result<(FunctionId, AddressRangeSet, Vec<Reference>), ProjectError> {
+    ) -> Result<StagedFunction, ProjectError> {
         let function = function.with_input_revision(self.project.revision());
         self.stage_function_materialisation(function.prepare_materialisation()?)
     }
@@ -877,13 +907,35 @@ impl ProjectTransaction<'_> {
     fn stage_function_materialisation(
         &mut self,
         function: FunctionMaterialisation,
-    ) -> Result<(FunctionId, AddressRangeSet, Vec<Reference>), ProjectError> {
+    ) -> Result<StagedFunction, ProjectError> {
         let entry = function.entry();
-        let mut mutation = self.project.functions.stage_materialised_replacement(
+        let mutation = self.project.functions.stage_materialisation(
             &self.project.blocks,
             &mut self.function_stage,
             function,
         )?;
+        self.stage_prepared_function_mutation(entry, mutation)
+    }
+
+    fn stage_function_membership(
+        &mut self,
+        mut function: Function,
+    ) -> Result<StagedFunction, ProjectError> {
+        function.set_input_revision(self.project.revision());
+        let entry = function.entry();
+        let mutation = self.project.functions.stage_membership(
+            &self.project.blocks,
+            &mut self.function_stage,
+            function,
+        )?;
+        self.stage_prepared_function_mutation(entry, mutation)
+    }
+
+    fn stage_prepared_function_mutation(
+        &mut self,
+        entry: Address,
+        mut mutation: PreparedFunctionMutation,
+    ) -> Result<StagedFunction, ProjectError> {
         let id = mutation.id();
         let replaces_existing = mutation.replaces_existing();
         let previous_coverage = mutation.take_previous_coverage();
@@ -896,14 +948,14 @@ impl ProjectTransaction<'_> {
         let reference_coverage = covered.clone();
         self.call_graph_stage.set_function_edges(
             entry,
-            mutation.call_targets(),
+            mutation.take_call_targets(),
             !replaces_existing,
         );
         if replaces_existing {
             self.remove_lifted_from(id, IlLevel::PCode)?;
         }
 
-        let references = mutation.references();
+        let references = mutation.take_references();
 
         if replaces_existing {
             self.changes.push(ChangeRecord::FunctionChanged {
@@ -918,7 +970,11 @@ impl ProjectTransaction<'_> {
             });
         }
 
-        Ok((id, reference_coverage, references))
+        Ok(StagedFunction {
+            id,
+            coverage: reference_coverage,
+            references,
+        })
     }
 
     pub fn set_function_properties(
@@ -946,106 +1002,89 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
+    /// Splits a function at one of its member blocks.
+    ///
+    /// Blocks reachable exclusively from `new_entry` move to the new function. Blocks
+    /// reachable from both entries remain shared. The split is rejected when its boundary
+    /// cannot be represented by unconditional tail-call branches.
     pub fn split_function(
         &mut self,
-        entry: Address,
-        at: Address,
+        function: FunctionId,
+        new_entry: CodeBlockId,
     ) -> Result<Option<FunctionId>, ProjectError> {
         let Some(function) = self
             .project
             .functions
-            .staged_by_address(&self.function_stage, entry)?
+            .staged_by_id(&self.function_stage, function)?
         else {
             return Ok(None);
         };
-
-        let kept = function
-            .blocks()
-            .filter(|(address, _)| *address < at)
-            .collect::<SmallVec<[_; 8]>>();
-        let moved = function
-            .blocks()
-            .filter(|(address, _)| *address >= at)
-            .collect::<SmallVec<[_; 8]>>();
-        let edges = function.edges().collect::<SmallVec<[_; 16]>>();
-        let tail_call_sites = function.tail_call_sites().collect::<SmallVec<[_; 2]>>();
-
-        if moved.is_empty() || kept.is_empty() {
+        let Some((retained, split)) = function.split_at_block(new_entry, &self.project.blocks)
+        else {
+            return Ok(None);
+        };
+        if self
+            .project
+            .functions
+            .staged_by_address(&self.function_stage, split.entry())?
+            .is_some()
+        {
             return Ok(None);
         }
 
-        let Some(retained) = IncompleteFunction::from_committed(
-            entry,
-            &kept,
-            edges.iter().copied(),
-            tail_call_sites.iter().copied(),
-            &self.project.blocks,
-        ) else {
-            return Ok(None);
-        };
-        let Some(split) = IncompleteFunction::from_committed(
-            at,
-            &moved,
-            edges,
-            tail_call_sites,
-            &self.project.blocks,
-        ) else {
-            return Ok(None);
-        };
+        let split = self.stage_function_membership(split)?;
+        let retained = self.stage_function_membership(retained)?;
+        self.replace_derived_reference_batches([
+            DerivedReferenceBatch::new(split.coverage, ReferenceKind::Flow, split.references),
+            DerivedReferenceBatch::new(retained.coverage, ReferenceKind::Flow, retained.references),
+        ])?;
 
-        let split = self.add_function(split)?;
-        self.add_function(retained)?;
-
-        Ok(Some(split))
+        Ok(Some(split.id))
     }
 
-    pub fn merge_functions(&mut self, into: Address, from: Address) -> Result<bool, ProjectError> {
-        if into == from {
+    /// Merges `source` into `target`, preserving the target's identity.
+    ///
+    /// Membership and internal edges are united, former boundary tail calls become
+    /// internal branches, and body-derived state is invalidated.
+    pub fn merge_functions(
+        &mut self,
+        target: FunctionId,
+        source: FunctionId,
+    ) -> Result<bool, ProjectError> {
+        if target == source {
             return Ok(false);
         }
 
-        let Some(target) = self
+        let Some(target_function) = self
             .project
             .functions
-            .staged_by_address(&self.function_stage, into)?
+            .staged_by_id(&self.function_stage, target)?
         else {
             return Ok(false);
         };
-        let mut blocks = target.blocks().collect::<SmallVec<[_; 8]>>();
-        let mut edges = target.edges().collect::<SmallVec<[_; 16]>>();
-        let mut tail_call_sites = target.tail_call_sites().collect::<SmallVec<[_; 2]>>();
-
-        let Some(source) = self
+        let Some(source_function) = self
             .project
             .functions
-            .staged_by_address(&self.function_stage, from)?
+            .staged_by_id(&self.function_stage, source)?
         else {
             return Ok(false);
         };
-        let source_id = source.id();
-        blocks.extend(source.blocks());
-        edges.extend(source.edges());
-        tail_call_sites.extend(source.tail_call_sites());
-
-        blocks.sort_unstable_by_key(|(address, _)| *address);
-
-        let Some(merged) = IncompleteFunction::from_committed(
-            into,
-            &blocks,
-            edges,
-            tail_call_sites,
-            &self.project.blocks,
-        ) else {
+        let Some(merged) = target_function.merge_with(&source_function, &self.project.blocks)
+        else {
             return Ok(false);
         };
-
-        self.add_function(merged)?;
-        self.remove_function_by_id(source_id)?;
+        let staged = self.stage_function_membership(merged)?;
+        self.remove_function_by_id(source, ReferenceOrigin::Derived)?;
+        self.replace_derived_references(staged.coverage, ReferenceKind::Flow, staged.references)?;
 
         Ok(true)
     }
 
-    pub fn remove_function(&mut self, entry: Address) -> Result<bool, ProjectError> {
+    pub fn remove_function(
+        &mut self,
+        entry: Address,
+        origin: ReferenceOrigin,
+    ) -> Result<bool, ProjectError> {
         let Some(function) = self
             .project
             .functions
@@ -1055,23 +1094,27 @@ impl ProjectTransaction<'_> {
         };
         let id = function.id();
 
-        self.remove_function_by_id(id)
+        self.remove_function_by_id(id, origin)
     }
 
-    pub fn remove_function_by_id(&mut self, id: FunctionId) -> Result<bool, ProjectError> {
+    pub fn remove_function_by_id(
+        &mut self,
+        id: FunctionId,
+        origin: ReferenceOrigin,
+    ) -> Result<bool, ProjectError> {
         let Some(function) = self.stage_function_removal(id)? else {
             return Ok(false);
         };
 
-        if self.source.category() == ChangeCategory::Agent {
-            self.insert_problem(function.entry(), ProblemKind::HinderedByAssertedFact)?;
+        if origin.is_asserted() {
+            self.add_problem(function.entry(), ProblemKind::HinderedByAssertedFact)?;
         }
 
         Ok(true)
     }
 
     fn stage_function_removal(&mut self, id: FunctionId) -> Result<Option<Function>, ProjectError> {
-        let Some((function, covered)) = self.project.functions.stage_removal(
+        let Some(mut removed) = self.project.functions.stage_removal(
             &self.project.blocks,
             &mut self.function_stage,
             id,
@@ -1079,6 +1122,8 @@ impl ProjectTransaction<'_> {
         else {
             return Ok(None);
         };
+        let covered = removed.take_coverage();
+        let function = removed.into_function();
         let entry = function.entry();
         self.call_graph_stage.remove_function_edges(entry);
 
@@ -1141,14 +1186,14 @@ impl ProjectTransaction<'_> {
                 let id = self
                     .project
                     .switches
-                    .preview_id(self.switch_reservations.len());
+                    .pending_id(self.switch_reservations.len());
                 self.switch_reservations.push(id);
                 id
             }
         };
         let switch = f(id, branch);
         if switch.branch() != branch {
-            return Err(crate::ir::SwitchTableError::AddressMismatch.into());
+            return Err(SwitchTableError::AddressMismatch.into());
         }
         let switch = match function {
             Some(function) => switch.with_function(function),
@@ -1159,15 +1204,11 @@ impl ProjectTransaction<'_> {
         Ok(id)
     }
 
-    pub fn insert_problem(
-        &mut self,
-        address: Address,
-        kind: ProblemKind,
-    ) -> Result<(), ProjectError> {
-        self.insert_scoped_problem(ProblemScope::Address(address), kind)
+    pub fn add_problem(&mut self, address: Address, kind: ProblemKind) -> Result<(), ProjectError> {
+        self.add_scoped_problem(ProblemScope::Address(address), kind)
     }
 
-    pub(crate) fn insert_scoped_problem(
+    pub(crate) fn add_scoped_problem(
         &mut self,
         scope: ProblemScope,
         kind: ProblemKind,
@@ -1176,15 +1217,10 @@ impl ProjectTransaction<'_> {
         let observed_revision = self.project.revision();
         let (mut problem, repeated) = match self.problem_mutations.get(&key) {
             Some(Some(problem)) => (problem.clone(), true),
-            Some(None) | None => match self.project.problems.try_get_key(key)? {
+            Some(None) | None => match self.project.problems.try_get_by_key(key)? {
                 Some(problem) => (problem.as_ref().clone(), true),
                 None => (
-                    Problem::new_scoped(
-                        crate::ir::ProblemId::INVALID,
-                        scope,
-                        kind,
-                        observed_revision,
-                    ),
+                    Problem::new_scoped(ProblemId::INVALID, scope, kind, observed_revision),
                     false,
                 ),
             },
@@ -1413,8 +1449,11 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
-    pub fn remove_symbol(&mut self, symbol: impl AsRef<str>) -> Result<usize, ProjectError> {
-        let symbol = crate::ir::Symbol::from_existing(symbol.as_ref());
+    pub fn remove_symbols_by_name(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Result<usize, ProjectError> {
+        let symbol = Symbol::from_existing(symbol.as_ref());
         let Some(symbol) = symbol else {
             return Ok(0);
         };
@@ -1471,7 +1510,7 @@ impl ProjectTransaction<'_> {
         let id = self
             .project
             .symbols
-            .preview_id(self.symbol_reservations.len());
+            .pending_id(self.symbol_reservations.len());
         self.symbol_reservations.push(id);
         self.stage_symbol(id, Some(entry))?;
         Ok(id)
@@ -1577,7 +1616,7 @@ impl ProjectTransaction<'_> {
     ) -> Result<SegmentMappingId, ProjectError> {
         let mapping = self
             .segment_stage
-            .create_mapping(&self.project.storage.segments, builder)?;
+            .create_mapping(self.project.storage.segments(), builder)?;
         self.changes
             .push(ChangeRecord::SegmentMappingCreated { mapping });
         Ok(mapping)
@@ -1586,7 +1625,7 @@ impl ProjectTransaction<'_> {
     pub fn create_space(&mut self) -> Result<AddressSpaceId, ProjectError> {
         let space = self
             .segment_stage
-            .create_space(&self.project.storage.segments)?;
+            .create_space(self.project.storage.segments())?;
         self.changes.push(ChangeRecord::SpaceCreated { space });
         Ok(space)
     }
@@ -1597,7 +1636,7 @@ impl ProjectTransaction<'_> {
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
         self.segment_stage
-            .add_mapping(&self.project.storage.segments, space, mapping)?;
+            .add_mapping(self.project.storage.segments(), space, mapping)?;
         self.record_mapping_added(space, mapping)?;
         self.invalidate_functions_for_mapping(space, mapping)?;
 
@@ -1610,7 +1649,7 @@ impl ProjectTransaction<'_> {
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
         self.segment_stage
-            .add_mapping_top(&self.project.storage.segments, space, mapping)?;
+            .add_mapping_top(self.project.storage.segments(), space, mapping)?;
         self.record_mapping_added(space, mapping)?;
         self.invalidate_functions_for_mapping(space, mapping)?;
 
@@ -1623,7 +1662,7 @@ impl ProjectTransaction<'_> {
         mapping: SegmentMappingId,
     ) -> Result<(), ProjectError> {
         self.segment_stage
-            .add_mapping_bottom(&self.project.storage.segments, space, mapping)?;
+            .add_mapping_bottom(self.project.storage.segments(), space, mapping)?;
         self.record_mapping_added(space, mapping)?;
         self.invalidate_functions_for_mapping(space, mapping)?;
 
@@ -1633,7 +1672,7 @@ impl ProjectTransaction<'_> {
     pub fn remove_mapping(&mut self, id: SegmentMappingId) -> Result<(), ProjectError> {
         let removed = self
             .segment_stage
-            .remove_mapping(&self.project.storage.segments, id)?;
+            .remove_mapping(self.project.storage.segments(), id)?;
         self.record_mapping_removed(id, removed.iter().copied());
         self.invalidate_functions_for_placements(removed)?;
 
@@ -1648,9 +1687,9 @@ impl ProjectTransaction<'_> {
         let new_start = new_start.into();
         let removed = self
             .segment_stage
-            .mapping_placements(&self.project.storage.segments, id)?;
+            .mapping_placements(self.project.storage.segments(), id)?;
         self.segment_stage
-            .remap_mapping(&self.project.storage.segments, id, new_start)?;
+            .remap_mapping(self.project.storage.segments(), id, new_start)?;
         self.record_mapping_removed(id, removed.iter().copied());
         self.invalidate_functions_for_placements(removed)?;
         self.record_mapping_added_to_placements(id)?;
@@ -1666,9 +1705,9 @@ impl ProjectTransaction<'_> {
     ) -> Result<(), ProjectError> {
         let removed = self
             .segment_stage
-            .mapping_placements(&self.project.storage.segments, id)?;
+            .mapping_placements(self.project.storage.segments(), id)?;
         self.segment_stage
-            .resize_mapping(&self.project.storage.segments, id, new_size)?;
+            .resize_mapping(self.project.storage.segments(), id, new_size)?;
         self.record_mapping_removed(id, removed.iter().copied());
         self.invalidate_functions_for_placements(removed)?;
         self.record_mapping_added_to_placements(id)?;
@@ -1685,7 +1724,7 @@ impl ProjectTransaction<'_> {
         flags: SegmentMappingFlags,
     ) -> Result<(), ProjectError> {
         self.segment_stage.update_mapping_metadata(
-            &self.project.storage.segments,
+            self.project.storage.segments(),
             id,
             kind,
             provenance,
@@ -1703,7 +1742,7 @@ impl ProjectTransaction<'_> {
         id: SegmentMappingId,
     ) -> Result<(), ProjectError> {
         self.segment_stage
-            .prioritise_mapping(&self.project.storage.segments, space, id)?;
+            .prioritise_mapping(self.project.storage.segments(), space, id)?;
         self.record_mapping_added(space, id)?;
         self.invalidate_functions_for_mapping(space, id)?;
 
@@ -1716,7 +1755,7 @@ impl ProjectTransaction<'_> {
         id: SegmentMappingId,
     ) -> Result<(), ProjectError> {
         self.segment_stage
-            .deprioritise_mapping(&self.project.storage.segments, space, id)?;
+            .deprioritise_mapping(self.project.storage.segments(), space, id)?;
         self.record_mapping_added(space, id)?;
         self.invalidate_functions_for_mapping(space, id)?;
 
@@ -1724,11 +1763,11 @@ impl ProjectTransaction<'_> {
     }
 
     pub fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<(), ProjectError> {
-        let (written, revert) = self.project.storage.segments.write_bytes_to_space_tracked(
-            addr.space(),
-            addr,
-            bytes,
-        )?;
+        let (written, revert) = self
+            .project
+            .storage
+            .segments_mut()
+            .write_bytes_to_space_tracked(addr.space(), addr, bytes)?;
 
         if written == bytes.len() {
             self.segment_write_reverts.push(revert);
@@ -1738,7 +1777,7 @@ impl ProjectTransaction<'_> {
             }
             Ok(())
         } else {
-            revert.restore(&mut self.project.storage.segments)?;
+            revert.restore(self.project.storage.segments_mut())?;
             Err(SegmentStorageError::InvalidAddressRange.into())
         }
     }
@@ -1760,7 +1799,7 @@ impl ProjectTransaction<'_> {
     ) -> Result<usize, ProjectError> {
         let Some(range) =
             self.segment_stage
-                .mapping_range(&self.project.storage.segments, space, id)?
+                .mapping_range(self.project.storage.segments(), space, id)?
         else {
             return Ok(0);
         };
@@ -1773,19 +1812,18 @@ impl ProjectTransaction<'_> {
     ) -> Result<usize, ProjectError> {
         let placements = self
             .segment_stage
-            .mapping_placements(&self.project.storage.segments, id)?;
+            .mapping_placements(self.project.storage.segments(), id)?;
 
         self.invalidate_functions_for_placements(placements)
     }
 
     fn invalidate_functions_for_placements(
         &mut self,
-        placements: impl IntoIterator<Item = (AddressSpaceId, (RawAddress, RawAddress))>,
+        placements: impl IntoIterator<Item = AddressRange>,
     ) -> Result<usize, ProjectError> {
         let mut invalidated = 0usize;
 
-        for (space, range) in placements {
-            let range = AddressRange::new(space, range.0, range.1);
+        for range in placements {
             invalidated += self.invalidate_functions_in_range(&range)?;
         }
 
@@ -1819,7 +1857,7 @@ impl ProjectTransaction<'_> {
                     .staged_by_id(&self.function_stage, id)?
                     .expect("staged function origin requires a function");
                 self.remove_lifted_from(id, IlLevel::PCode)?;
-                self.insert_problem(function.entry(), ProblemKind::HinderedByAssertedFact)?;
+                self.add_problem(function.entry(), ProblemKind::HinderedByAssertedFact)?;
             } else if self.stage_function_removal(id)?.is_some() {
                 invalidated += 1;
             }
@@ -1835,7 +1873,7 @@ impl ProjectTransaction<'_> {
     ) -> Result<(), ProjectError> {
         if let Some(range) =
             self.segment_stage
-                .mapping_range(&self.project.storage.segments, space, id)?
+                .mapping_range(self.project.storage.segments(), space, id)?
         {
             self.changes
                 .push(ChangeRecord::SegmentMapped { mapping: id, range });
@@ -1849,13 +1887,11 @@ impl ProjectTransaction<'_> {
     ) -> Result<(), ProjectError> {
         let added = self
             .segment_stage
-            .mapping_placements(&self.project.storage.segments, id)?;
+            .mapping_placements(self.project.storage.segments(), id)?;
 
-        for (space, range) in added {
-            self.changes.push(ChangeRecord::SegmentMapped {
-                mapping: id,
-                range: AddressRange::new(space, range.0, range.1),
-            });
+        for range in added {
+            self.changes
+                .push(ChangeRecord::SegmentMapped { mapping: id, range });
         }
         Ok(())
     }
@@ -1863,13 +1899,11 @@ impl ProjectTransaction<'_> {
     fn record_mapping_removed(
         &mut self,
         id: SegmentMappingId,
-        removed: impl IntoIterator<Item = (AddressSpaceId, (RawAddress, RawAddress))>,
+        removed: impl IntoIterator<Item = AddressRange>,
     ) {
-        for (space, range) in removed {
-            self.changes.push(ChangeRecord::SegmentUnmapped {
-                mapping: id,
-                range: AddressRange::new(space, range.0, range.1),
-            });
+        for range in removed {
+            self.changes
+                .push(ChangeRecord::SegmentUnmapped { mapping: id, range });
         }
     }
 
@@ -1893,7 +1927,7 @@ impl ProjectTransaction<'_> {
         writes.extend(symbol_writes);
         let (references, reference_writes) = self.prepare_references()?;
         writes.extend(reference_writes);
-        let function_stage = std::mem::take(&mut self.function_stage);
+        let function_stage = mem::take(&mut self.function_stage);
         let (functions, function_writes) =
             function_stage.prepare(&self.project.functions, &self.project.blocks)?;
         writes.extend(function_writes);
@@ -1903,14 +1937,14 @@ impl ProjectTransaction<'_> {
             .prepare_stage(&self.call_graph_stage)?;
         writes.extend(call_graph_writes);
         writes.extend(self.il_stage.prepare()?);
-        writes.sort_unstable_by(|left, right| left.key().cmp(right.key()));
+        writes.sort_by_key();
         if !writes.is_empty() {
             if let Some(worker) = self.project.storage.write_back() {
                 worker.flush()?;
             }
-            self.project.storage.entities.apply_batch(&writes)?;
+            self.project.storage.entities().apply_batch(&writes)?;
         }
-        std::mem::take(&mut self.segment_stage).publish(&mut self.project.storage.segments);
+        mem::take(&mut self.segment_stage).publish(self.project.storage.segments_mut());
         self.publish_problems(problems);
         self.publish_switches(switches);
         self.publish_symbols(symbols);
@@ -1921,7 +1955,7 @@ impl ProjectTransaction<'_> {
             self.project.revisions.advance(self.changes.semantic());
         }
         self.committed = true;
-        let changes = std::mem::take(&mut self.changes);
+        let changes = mem::take(&mut self.changes);
         Ok(changes.finish(self.project.revision(), self.source.clone()))
     }
 
@@ -1984,13 +2018,14 @@ impl ProjectTransaction<'_> {
         &mut self,
     ) -> Result<(Vec<PreparedProblemMutation>, EntityWriteBatch), ProjectError> {
         let persistent = self.project.problems.is_persistent();
-        let mutations = std::mem::take(&mut self.problem_mutations);
+        let mutations = mem::take(&mut self.problem_mutations);
         let mut inserted = 0usize;
         let mut prepared = Vec::with_capacity(mutations.len());
-        let mut writes = Vec::with_capacity(if persistent { mutations.len() } else { 0 });
+        let mut writes =
+            EntityWriteBatch::with_capacity(if persistent { mutations.len() } else { 0 });
 
         for (key, mutation) in mutations {
-            let previous = self.project.problems.try_get_key(key)?;
+            let previous = self.project.problems.try_get_by_key(key)?;
             let is_new = previous.is_none();
             let previous_id = previous.as_ref().map(|problem| problem.id());
             drop(previous);
@@ -1998,23 +2033,23 @@ impl ProjectTransaction<'_> {
             match mutation {
                 Some(problem) => {
                     let problem = if is_new {
-                        let id = self.project.problems.preview_id(inserted);
+                        let id = self.project.problems.pending_id(inserted);
                         inserted += 1;
                         problem.with_id(id)
                     } else {
                         problem
                     };
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&problem)
-                        .map_err(crate::storage::EntityStorageError::encode)?;
-                    let encoded_len = encoded.len();
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
                     if persistent {
                         writes.push(EntityWrite::insert_archive(
-                            schema::make_key::<crate::ir::ProblemId, Problem>(&problem.id()),
+                            Problem::ID.key_for(&problem.id()),
                             encoded,
                         ));
                     }
                     prepared.push(PreparedProblemMutation {
-                        encoded_len,
+                        encoded_size,
                         is_new,
                         key,
                         problem: Some(problem),
@@ -2025,13 +2060,10 @@ impl ProjectTransaction<'_> {
                         continue;
                     };
                     if persistent {
-                        writes.push(EntityWrite::remove(schema::make_key::<
-                            crate::ir::ProblemId,
-                            Problem,
-                        >(&id)));
+                        writes.push(EntityWrite::remove(Problem::ID.key_for(&id)));
                     }
                     prepared.push(PreparedProblemMutation {
-                        encoded_len: 0,
+                        encoded_size: 0,
                         is_new: false,
                         key,
                         problem: None,
@@ -2051,7 +2083,7 @@ impl ProjectTransaction<'_> {
                 Some(problem) => {
                     self.project.problems.publish_upsert(
                         problem,
-                        mutation.encoded_len,
+                        mutation.encoded_size,
                         mutation.is_new,
                     );
                     self.changes
@@ -2070,9 +2102,10 @@ impl ProjectTransaction<'_> {
         &mut self,
     ) -> Result<(Vec<PreparedSwitchMutation>, EntityWriteBatch), ProjectError> {
         let persistent = self.project.switches.is_persistent();
-        let mutations = std::mem::take(&mut self.switch_mutations);
+        let mutations = mem::take(&mut self.switch_mutations);
         let mut prepared = Vec::with_capacity(mutations.len());
-        let mut writes = Vec::with_capacity(if persistent { mutations.len() } else { 0 });
+        let mut writes =
+            EntityWriteBatch::with_capacity(if persistent { mutations.len() } else { 0 });
 
         for (branch, mutation) in mutations {
             let previous = self.project.switches.try_get_by_branch(branch)?;
@@ -2092,17 +2125,17 @@ impl ProjectTransaction<'_> {
             match &mutation {
                 Some(switch) => {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(switch)
-                        .map_err(crate::storage::EntityStorageError::encode)?;
-                    let encoded_len = encoded.len();
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
                     if persistent {
                         writes.push(EntityWrite::insert_archive(
-                            schema::make_key::<SwitchId, Switch>(&switch.id()),
+                            Switch::ID.key_for(&switch.id()),
                             encoded,
                         ));
                     }
                     prepared.push(PreparedSwitchMutation {
                         branch,
-                        encoded_len,
+                        encoded_size,
                         previous,
                         switch: mutation,
                     });
@@ -2112,13 +2145,11 @@ impl ProjectTransaction<'_> {
                         .expect("prepared switch removal has a previous switch")
                         .id;
                     if persistent {
-                        writes.push(EntityWrite::remove(schema::make_key::<SwitchId, Switch>(
-                            &id,
-                        )));
+                        writes.push(EntityWrite::remove(Switch::ID.key_for(&id)));
                     }
                     prepared.push(PreparedSwitchMutation {
                         branch,
-                        encoded_len: 0,
+                        encoded_size: 0,
                         previous,
                         switch: None,
                     });
@@ -2142,7 +2173,7 @@ impl ProjectTransaction<'_> {
                     self.project.switches.publish_upsert(
                         switch,
                         mutation.previous.map(|previous| previous.function),
-                        mutation.encoded_len,
+                        mutation.encoded_size,
                     );
                     self.changes.push(ChangeRecord::SwitchAdded {
                         branch: mutation.branch,
@@ -2169,9 +2200,10 @@ impl ProjectTransaction<'_> {
         &mut self,
     ) -> Result<(Vec<PreparedSymbolMutation>, EntityWriteBatch), ProjectError> {
         let persistent = self.project.symbols.is_persistent();
-        let mutations = std::mem::take(&mut self.symbol_mutations);
+        let mutations = mem::take(&mut self.symbol_mutations);
         let mut prepared = Vec::with_capacity(mutations.len());
-        let mut writes = Vec::with_capacity(if persistent { mutations.len() } else { 0 });
+        let mut writes =
+            EntityWriteBatch::with_capacity(if persistent { mutations.len() } else { 0 });
 
         for (id, mutation) in mutations {
             let previous = self.project.symbols.try_get_by_id(id)?;
@@ -2189,16 +2221,16 @@ impl ProjectTransaction<'_> {
             match &mutation {
                 Some(entry) => {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entry)
-                        .map_err(crate::storage::EntityStorageError::encode)?;
-                    let encoded_len = encoded.len();
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
                     if persistent {
                         writes.push(EntityWrite::insert_archive(
-                            schema::make_key::<SymbolId, SymbolEntry>(&id),
+                            SymbolEntry::ID.key_for(&id),
                             encoded,
                         ));
                     }
                     prepared.push(PreparedSymbolMutation {
-                        encoded_len,
+                        encoded_size,
                         entry: mutation,
                         id,
                         previous,
@@ -2206,12 +2238,10 @@ impl ProjectTransaction<'_> {
                 }
                 None => {
                     if persistent {
-                        writes.push(EntityWrite::remove(schema::make_key::<SymbolId, SymbolEntry>(
-                            &id,
-                        )));
+                        writes.push(EntityWrite::remove(SymbolEntry::ID.key_for(&id)));
                     }
                     prepared.push(PreparedSymbolMutation {
-                        encoded_len: 0,
+                        encoded_size: 0,
                         entry: None,
                         id,
                         previous,
@@ -2224,7 +2254,7 @@ impl ProjectTransaction<'_> {
         let mut removed = 0usize;
         let mut releases = self.cancelled_symbols.clone();
         for mutation in &prepared {
-            self.project.symbols.append_index_writes(
+            self.project.symbols.append_stage_writes(
                 mutation.id,
                 mutation.entry.as_ref(),
                 mutation.previous.as_ref(),
@@ -2239,7 +2269,7 @@ impl ProjectTransaction<'_> {
                 _ => {}
             }
         }
-        self.project.symbols.append_allocator_writes(
+        self.project.symbols.append_stage_transition_writes(
             &self.symbol_reservations,
             &releases,
             added,
@@ -2291,7 +2321,7 @@ impl ProjectTransaction<'_> {
                 mutation.id,
                 entry,
                 mutation.previous.as_ref(),
-                mutation.encoded_len,
+                mutation.encoded_size,
             );
             self.changes.push(if mutation.previous.is_some() {
                 ChangeRecord::SymbolChanged { address, symbol }
@@ -2306,7 +2336,7 @@ impl ProjectTransaction<'_> {
     ) -> Result<(Vec<PreparedReferenceMutation>, EntityWriteBatch), ProjectError> {
         let mutations = mem::take(&mut self.reference_mutations);
         let mut prepared = Vec::with_capacity(mutations.len());
-        let mut writes = Vec::with_capacity(mutations.len().saturating_mul(2));
+        let mut writes = EntityWriteBatch::with_capacity(mutations.len().saturating_mul(2));
 
         for (key, mutation) in mutations {
             let StagedReferenceMutation {
@@ -2322,51 +2352,43 @@ impl ProjectTransaction<'_> {
                 continue;
             }
 
-            let encoded_len = if self.project.references.is_transient() {
-                0
-            } else {
-                let (encoded_len, encoded) =
-                    ReferenceIndex::encode_mutation(key, reference.as_ref())?;
+            let mutation = if self.project.references.is_persistent() {
+                let (mutation, encoded) = ReferenceIndex::encode_mutation(key, reference)?;
                 writes.extend(encoded);
-                encoded_len
+                mutation
+            } else {
+                ReferenceMutation::new(key, reference, 0)
             };
-            prepared.push(PreparedReferenceMutation {
-                encoded_len,
-                key,
-                previous,
-                reference,
-            });
+            prepared.push(PreparedReferenceMutation { mutation, previous });
         }
 
         Ok((prepared, writes))
     }
 
     fn publish_references(&mut self, references: Vec<PreparedReferenceMutation>) {
-        self.project.references.publish_mutations(
-            references
-                .iter()
-                .map(|mutation| (mutation.key, mutation.reference, mutation.encoded_len)),
-        );
+        self.project
+            .references
+            .publish_mutations(references.iter().map(|prepared| prepared.mutation));
 
         let mut derived_changed = false;
-        for mutation in references {
-            derived_changed |= self
-                .derived_reference_coverage
-                .contains(mutation.key.from());
+        for prepared in references {
+            let mutation = prepared.mutation;
+            let key = mutation.key();
+            derived_changed |= self.derived_reference_coverage.contains(key.from());
 
-            if !self.asserted_references.contains(&mutation.key) {
+            if !self.asserted_references.contains(&key) {
                 continue;
             }
-            match mutation.reference {
+            match mutation.reference() {
                 Some(reference) => self.changes.push(ChangeRecord::ReferenceAdded {
-                    from: mutation.key.from(),
-                    target: mutation.key.target(),
+                    from: key.from(),
+                    target: key.target(),
                     kind: reference.kind(),
                 }),
                 None => self.changes.push(ChangeRecord::ReferenceRemoved {
-                    from: mutation.key.from(),
-                    target: mutation.key.target(),
-                    kind: mutation
+                    from: key.from(),
+                    target: key.target(),
+                    kind: prepared
                         .previous
                         .expect("prepared reference removal has a previous reference")
                         .kind(),
@@ -2383,7 +2405,7 @@ impl ProjectTransaction<'_> {
 
     fn restore_eager_writes(&mut self) -> Result<(), ProjectError> {
         while let Some(revert) = self.segment_write_reverts.pop() {
-            revert.restore(&mut self.project.storage.segments)?;
+            revert.restore(self.project.storage.segments_mut())?;
         }
         self.changes.clear();
         Ok(())

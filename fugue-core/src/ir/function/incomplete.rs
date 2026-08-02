@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::collections::hash_map::Entry;
 use std::mem::{self, size_of};
 use std::num::NonZeroUsize;
 use std::vec::IntoIter;
@@ -8,21 +9,12 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlock, CodeBlockId,
-    CodeBlockProperties, CodeBlockTable, FlowKind, FlowTarget, Function, FunctionId,
-    FunctionProperties, IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnId, InsnList,
-    Reference, ReferenceOrigin, Switch, SwitchCase, Symbol,
+    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId,
+    CodeBlockMaterialisation, FlowKind, FlowTarget, Function, FunctionId, FunctionProperties,
+    IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnId, InsnList, Reference, ReferenceOrigin,
+    Switch, SwitchCase, Symbol,
 };
-use crate::lifter::ContextSet;
-use crate::types::{Confidence, Revision};
-
-pub(crate) struct CodeBlockMaterialisation {
-    address: Address,
-    context: ContextSet,
-    instructions: InsnList,
-    len: NonZeroUsize,
-    properties: CodeBlockProperties,
-}
+use crate::types::{Confidence, EstimateSize, Revision};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FunctionInsnIndex {
@@ -51,8 +43,6 @@ impl FunctionInsnIndex {
     }
 
     fn insert(&mut self, address: Address, id: InsnId) {
-        use std::collections::hash_map::Entry;
-
         match self.first.entry(address) {
             Entry::Vacant(entry) => {
                 entry.insert(id);
@@ -66,17 +56,20 @@ impl FunctionInsnIndex {
     fn is_empty(&self) -> bool {
         self.first.is_empty()
     }
+}
 
-    fn estimated_retained_bytes(&self) -> usize {
-        let mut size = self
-            .first
-            .capacity()
-            .saturating_mul(size_of::<(Address, InsnId)>())
-            .saturating_add(
-                self.additional
-                    .capacity()
-                    .saturating_mul(size_of::<(Address, SmallVec<[InsnId; 1]>)>()),
-            );
+impl EstimateSize for FunctionInsnIndex {
+    fn estimate_size(&self) -> usize {
+        let mut size = size_of::<Self>().saturating_add(
+            self.first
+                .capacity()
+                .saturating_mul(size_of::<(Address, InsnId)>())
+                .saturating_add(
+                    self.additional
+                        .capacity()
+                        .saturating_mul(size_of::<(Address, SmallVec<[InsnId; 1]>)>()),
+                ),
+        );
         for ids in self.additional.values().filter(|ids| ids.spilled()) {
             size = size.saturating_add(ids.capacity().saturating_mul(size_of::<InsnId>()));
         }
@@ -100,20 +93,20 @@ pub(crate) struct FunctionMaterialisation {
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
-enum BlockInstructionSource {
+enum BlockInsnSource {
     Ordered(IntoIter<Insn>),
     Shared {
-        instructions: Vec<Option<Insn>>,
+        insns: Vec<Option<Insn>>,
         remaining_uses: Vec<usize>,
     },
 }
 
-impl BlockInstructionSource {
+impl BlockInsnSource {
     fn take(&mut self, ids: &[InsnId]) -> InsnList {
         match self {
-            Self::Ordered(instructions) => instructions.by_ref().take(ids.len()).collect(),
+            Self::Ordered(insns) => insns.by_ref().take(ids.len()).collect(),
             Self::Shared {
-                instructions,
+                insns,
                 remaining_uses,
             } => ids
                 .iter()
@@ -121,11 +114,11 @@ impl BlockInstructionSource {
                     let remaining = &mut remaining_uses[id.index()];
                     *remaining -= 1;
                     if *remaining == 0 {
-                        instructions[id.index()]
+                        insns[id.index()]
                             .take()
                             .expect("validated instruction must remain available")
                     } else {
-                        instructions[id.index()]
+                        insns[id.index()]
                             .as_ref()
                             .expect("validated instruction must remain available")
                             .clone()
@@ -190,49 +183,6 @@ impl FunctionMaterialisation {
     }
 }
 
-impl CodeBlockMaterialisation {
-    pub(crate) fn address(&self) -> Address {
-        self.address
-    }
-
-    pub(crate) fn context(&self) -> &ContextSet {
-        &self.context
-    }
-
-    pub(crate) fn address_range(&self) -> AddressRange {
-        AddressRange::new(
-            self.address.space(),
-            self.address.raw_address(),
-            (self.address + self.len.get() - 1usize).raw_address(),
-        )
-    }
-
-    pub(crate) fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.instructions.iter().flat_map(Insn::flow_targets)
-    }
-
-    pub(crate) fn matches(&self, block: &CodeBlock) -> bool {
-        block.start() == self.address
-            && block.len() == self.len.get()
-            && block.context() == &self.context
-            && block.instructions() == &self.instructions
-            && block.is_call() == self.properties.contains(CodeBlockProperties::CALL)
-            && block.has_unresolved() == self.properties.contains(CodeBlockProperties::UNRESOLVED)
-    }
-
-    pub(crate) fn into_block(self, id: CodeBlockId) -> CodeBlock {
-        let mut block =
-            CodeBlock::new_with(id, self.address, self.len, self.instructions, self.context);
-        if self.properties.contains(CodeBlockProperties::CALL) {
-            block.mark_call();
-        }
-        if self.properties.contains(CodeBlockProperties::UNRESOLVED) {
-            block.mark_unresolved();
-        }
-        block
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum IncompleteFunctionError {
     #[error("failed to create block: {0}")]
@@ -241,10 +191,12 @@ pub enum IncompleteFunctionError {
     FunctionCreation(anyhow::Error),
     #[error("invalid block id: {0:?}")]
     InvalidBlockId(IncompleteCodeBlockId),
-    #[error("invalid zero-length block: {address}")]
-    InvalidBlockLength { address: Address },
-    #[error("invalid instruction id: {0:?}")]
-    InvalidInstructionId(InsnId),
+    #[error("invalid zero-size block: {address}")]
+    InvalidBlockSize { address: Address },
+    #[error("invalid insn id: {0:?}")]
+    InvalidInsnId(InsnId),
+    #[error("committed code block does not exist: {0:?}")]
+    MissingCodeBlock(CodeBlockId),
 }
 
 impl IncompleteFunctionError {
@@ -266,12 +218,16 @@ impl IncompleteFunctionError {
         Self::InvalidBlockId(id)
     }
 
-    fn invalid_block_length(address: Address) -> Self {
-        Self::InvalidBlockLength { address }
+    fn invalid_block_size(address: Address) -> Self {
+        Self::InvalidBlockSize { address }
     }
 
-    fn invalid_instruction_id(id: InsnId) -> Self {
-        Self::InvalidInstructionId(id)
+    fn invalid_insn_id(id: InsnId) -> Self {
+        Self::InvalidInsnId(id)
+    }
+
+    pub(crate) fn missing_code_block(id: CodeBlockId) -> Self {
+        Self::MissingCodeBlock(id)
     }
 }
 
@@ -346,6 +302,42 @@ pub struct IncompleteFunction {
     input_revision: Revision,
     pending_switches: Vec<Switch>,
     tail_call_sites: SmallVec<[Address; 1]>,
+}
+
+impl EstimateSize for IncompleteFunction {
+    fn estimate_size(&self) -> usize {
+        let mut size = size_of::<Self>()
+            .saturating_sub(size_of::<InsnList>())
+            .saturating_sub(size_of::<FunctionInsnIndex>())
+            .saturating_add(
+                self.blocks
+                    .capacity()
+                    .saturating_mul(size_of::<IncompleteCodeBlock>()),
+            )
+            .saturating_add(self.insns.estimate_size())
+            .saturating_add(self.insn_index.estimate_size())
+            .saturating_add(
+                self.pending_switches
+                    .capacity()
+                    .saturating_mul(size_of::<Switch>()),
+            );
+        if self.tail_call_sites.spilled() {
+            size = size.saturating_add(
+                self.tail_call_sites
+                    .capacity()
+                    .saturating_mul(size_of::<Address>()),
+            );
+        }
+
+        for block in &self.blocks {
+            size = size.saturating_add(block.insns().len().saturating_mul(size_of::<InsnId>()));
+        }
+        for switch in &self.pending_switches {
+            size = size.saturating_add(switch.case_count().saturating_mul(size_of::<SwitchCase>()));
+        }
+
+        size
+    }
 }
 
 impl IncompleteFunction {
@@ -439,7 +431,7 @@ impl IncompleteFunction {
         mem::take(&mut self.pending_switches)
     }
 
-    pub fn update_name(&mut self, name: impl Into<Symbol>) {
+    pub fn set_name(&mut self, name: impl Into<Symbol>) {
         self.name = Some(name.into());
     }
 
@@ -460,55 +452,6 @@ impl IncompleteFunction {
             .expect("entry block should always exist")
     }
 
-    pub(crate) fn from_committed(
-        entry: Address,
-        blocks: &[(Address, CodeBlockId)],
-        edges: impl IntoIterator<Item = (CodeBlockId, CodeBlockId)>,
-        tail_call_sites: impl IntoIterator<Item = Address>,
-        block_table: &CodeBlockTable,
-    ) -> Option<Self> {
-        let mut function = Self::new(entry);
-        let mut block_ids = BTreeMap::new();
-
-        for &(address, id) in blocks {
-            if function
-                .blocks
-                .last()
-                .is_some_and(|previous| previous.address() > address)
-            {
-                return None;
-            }
-
-            let block = block_table.get_by_id(id)?;
-
-            let mut insns = Vec::with_capacity(block.instructions().len());
-            for insn in block.instructions() {
-                insns.push(function.insert_distinct_insn(insn.clone()));
-            }
-
-            let incomplete =
-                IncompleteCodeBlock::try_new(address, block.len(), insns, block.context().clone())?;
-
-            let incomplete = function.push_block(incomplete);
-            block_ids.insert(id, incomplete);
-        }
-
-        for (source, target) in edges {
-            let (Some(&source), Some(&target)) = (block_ids.get(&source), block_ids.get(&target))
-            else {
-                continue;
-            };
-            function.add_block_edge(source, target).ok()?;
-        }
-        let tail_call_sites = tail_call_sites
-            .into_iter()
-            .filter(|site| function.contains_insn(*site))
-            .collect::<SmallVec<[_; 1]>>();
-        function.set_tail_call_sites(tail_call_sites);
-
-        Some(function)
-    }
-
     pub fn push_block(&mut self, block: IncompleteCodeBlock) -> IncompleteCodeBlockId {
         debug_assert!(
             self.blocks.is_empty() || self.blocks.last().unwrap().address() <= block.address(),
@@ -527,38 +470,6 @@ impl IncompleteFunction {
 
     pub fn blocks(&self) -> &[IncompleteCodeBlock] {
         &self.blocks
-    }
-
-    pub(crate) fn estimated_retained_bytes(&self) -> usize {
-        let mut size = size_of::<Self>()
-            .saturating_add(
-                self.blocks
-                    .capacity()
-                    .saturating_mul(size_of::<IncompleteCodeBlock>()),
-            )
-            .saturating_add(self.insns.capacity().saturating_mul(size_of::<Insn>()))
-            .saturating_add(self.insn_index.estimated_retained_bytes())
-            .saturating_add(
-                self.pending_switches
-                    .capacity()
-                    .saturating_mul(size_of::<Switch>()),
-            );
-        if self.tail_call_sites.spilled() {
-            size = size.saturating_add(
-                self.tail_call_sites
-                    .capacity()
-                    .saturating_mul(size_of::<Address>()),
-            );
-        }
-
-        for block in &self.blocks {
-            size = size.saturating_add(block.insns().len().saturating_mul(size_of::<InsnId>()));
-        }
-        for switch in &self.pending_switches {
-            size = size.saturating_add(switch.case_count().saturating_mul(size_of::<SwitchCase>()));
-        }
-
-        size
     }
 
     pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
@@ -660,33 +571,6 @@ impl IncompleteFunction {
                 unsorted: &mut self.insns_unsorted,
             }),
         }
-    }
-
-    fn insert_distinct_insn(&mut self, insn: Insn) -> InsnId {
-        self.ensure_insn_index();
-        let address = insn.address();
-        if let Some(id) = self
-            .insn_index
-            .ids(address)
-            .find(|&id| self.insn(id) == Some(&insn))
-        {
-            return id;
-        }
-
-        if self
-            .insns
-            .last()
-            .is_some_and(|previous| previous.address() > address)
-        {
-            self.insns_unsorted = true;
-        }
-        let id = InsnId::with_generation(
-            self.insns.len().try_into().expect("too many instructions"),
-            self.insn_generation,
-        );
-        self.insns.push(insn);
-        self.insn_index.insert(address, id);
-        id
     }
 
     pub fn indirect_branches(&self) -> impl Iterator<Item = (IncompleteCodeBlockId, Address)> + '_ {
@@ -873,13 +757,11 @@ impl IncompleteFunction {
         let mut ordered = true;
         for block in &self.blocks {
             if block.is_empty() {
-                return Err(IncompleteFunctionError::invalid_block_length(
-                    block.address(),
-                ));
+                return Err(IncompleteFunctionError::invalid_block_size(block.address()));
             }
             for &insn in block.insns() {
                 if self.insn(insn).is_none() {
-                    return Err(IncompleteFunctionError::invalid_instruction_id(insn));
+                    return Err(IncompleteFunctionError::invalid_insn_id(insn));
                 }
                 ordered &= insn.index() == expected_index;
                 expected_index += 1;
@@ -887,8 +769,8 @@ impl IncompleteFunction {
         }
         ordered &= expected_index == self.insns.len();
 
-        let mut instructions = if ordered {
-            BlockInstructionSource::Ordered(mem::take(&mut self.insns).into_iter())
+        let mut insns = if ordered {
+            BlockInsnSource::Ordered(mem::take(&mut self.insns).into_iter())
         } else {
             let mut remaining_uses = vec![0usize; self.insns.len()];
             for block in &self.blocks {
@@ -896,8 +778,8 @@ impl IncompleteFunction {
                     remaining_uses[insn.index()] += 1;
                 }
             }
-            BlockInstructionSource::Shared {
-                instructions: mem::take(&mut self.insns).into_iter().map(Some).collect(),
+            BlockInsnSource::Shared {
+                insns: mem::take(&mut self.insns).into_iter().map(Some).collect(),
                 remaining_uses,
             }
         };
@@ -907,30 +789,15 @@ impl IncompleteFunction {
         let mut pending_coverage = None::<AddressRange>;
         let mut references = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
-            let len = NonZeroUsize::new(block.len())
-                .ok_or_else(|| IncompleteFunctionError::invalid_block_length(block.address()))?;
-            let instructions = instructions.take(block.insns());
-            let mut properties = block.properties();
-            if let Some(terminator) = instructions.last() {
-                if terminator.is_call() {
-                    properties |= CodeBlockProperties::CALL;
-                }
-                if terminator.is_branch()
-                    && terminator.is_indirect()
-                    && !terminator.is_call()
-                    && !terminator.is_return()
-                    && terminator.iter_targets().next().is_none()
-                {
-                    properties |= CodeBlockProperties::UNRESOLVED;
-                }
-            }
-            let materialisation = CodeBlockMaterialisation {
-                address: block.address(),
-                context: block.context().clone(),
-                instructions,
-                len,
-                properties,
-            };
+            let size = NonZeroUsize::new(block.size())
+                .ok_or_else(|| IncompleteFunctionError::invalid_block_size(block.address()))?;
+            let block_insns = insns.take(block.insns());
+            let materialisation = CodeBlockMaterialisation::new(
+                block.address(),
+                size,
+                block_insns,
+                block.context().clone(),
+            );
             let block_range = materialisation.address_range();
             match pending_coverage.as_mut() {
                 Some(current)
@@ -1026,109 +893,5 @@ impl IncompleteFunction {
         }
         let index = id.index();
         (index < self.blocks.len()).then_some(index)
-    }
-}
-
-#[cfg(all(test, feature = "sqlite"))]
-mod test {
-    use fugue_lifter::runtime::pcode::Inputs;
-
-    use super::*;
-    use crate::ir::CodeBlock;
-    use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
-    use crate::storage::entities::SqliteEntityStorage;
-    use crate::storage::{EntityStorage, TRANSIENT};
-
-    fn block_table() -> CodeBlockTable {
-        CodeBlockTable::new(
-            EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new().unwrap()),
-            64 * 1024,
-        )
-        .unwrap()
-    }
-
-    fn call_insn(
-        language: &'static crate::lifter::Language,
-        address: Address,
-        target: Address,
-    ) -> Result<Insn, Box<dyn std::error::Error>> {
-        let operations = [RawPCodeOp {
-            op: Op::Call,
-            inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
-            output: Varnode::INVALID,
-        }];
-        Ok(Insn::from_resolved_flow(language, address, 1, &operations)?)
-    }
-
-    fn block_with(
-        blocks: &mut CodeBlockTable,
-        start: Address,
-        len: usize,
-        insn: Insn,
-    ) -> CodeBlockId {
-        blocks
-            .insert(start, |id, address| {
-                Ok(CodeBlock::new_with(
-                    id,
-                    address,
-                    len.try_into().unwrap(),
-                    vec![insn],
-                    ContextSet::default(),
-                ))
-            })
-            .unwrap()
-    }
-
-    #[test]
-    fn overlapping_blocks_at_one_address_survive() -> Result<(), Box<dyn std::error::Error>> {
-        let language = resolve_language("x86:LE:64")?;
-        let mut blocks = block_table();
-        let start = Address::in_default_space(0x1000u64);
-        let target = Address::in_default_space(0x9000u64);
-
-        let insn = call_insn(language, start, target)?;
-        let a = block_with(&mut blocks, start, 1, insn.clone());
-        let b = block_with(&mut blocks, start, 1, insn);
-
-        let entries = [(start, a), (start, b)];
-
-        let function = IncompleteFunction::from_committed(start, &entries, [], [], &blocks)
-            .expect("blocks at one address must remain distinct");
-        assert_eq!(function.blocks().len(), 2);
-        assert_eq!(function.blocks_at(start).count(), 2);
-        assert_eq!(function.insns_at(start).count(), 1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn blocks_with_distinct_decoding_at_one_address_survive()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let language = resolve_language("x86:LE:64")?;
-        let mut blocks = block_table();
-        let start = Address::in_default_space(0x2000u64);
-
-        let a = block_with(
-            &mut blocks,
-            start,
-            1,
-            call_insn(language, start, Address::in_default_space(0x9000u64))?,
-        );
-        let b = block_with(
-            &mut blocks,
-            start,
-            1,
-            call_insn(language, start, Address::in_default_space(0xa000u64))?,
-        );
-
-        let entries = [(start, a), (start, b)];
-
-        let function = IncompleteFunction::from_committed(start, &entries, [], [], &blocks)
-            .expect("context- or state-distinct decoding must remain representable");
-        assert_eq!(function.blocks().len(), 2);
-        assert_eq!(function.blocks_at(start).count(), 2);
-        assert_eq!(function.insns_at(start).count(), 2);
-
-        Ok(())
     }
 }

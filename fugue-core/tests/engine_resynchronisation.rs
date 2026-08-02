@@ -57,7 +57,7 @@ impl SymbolAgent {
 fn incremental_and_resynchronised_agents_converge() -> Result<(), Box<dyn Error>> {
     let project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
     let entry = project
-        .entry()
+        .entry_point()
         .ok_or_else(|| io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
@@ -88,7 +88,7 @@ fn incremental_and_resynchronised_agents_converge() -> Result<(), Box<dyn Error>
     engine.analyse()?;
 
     let incremental_batch = incremental_changes
-        .drain()
+        .drain_merged()
         .ok_or_else(|| io::Error::other("incremental agent received no changes"))?;
     assert!(
         incremental_batch

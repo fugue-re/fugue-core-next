@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::sync::Arc;
 
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::ir::{Address, CodeBlockId, FlowTarget, FunctionId, FunctionProperties, Insn};
@@ -13,9 +14,9 @@ struct RecoveredBlock {
     context: ContextSet,
     has_unresolved: bool,
     id: CodeBlockId,
-    instructions: Vec<Insn>,
+    insns: Vec<Insn>,
     is_call: bool,
-    length: usize,
+    size: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,23 +42,28 @@ fn recover(
     let functions = project
         .functions()
         .iter()
-        .map(|function| {
+        .map(|function| -> Result<_, Box<dyn Error>> {
             let blocks = function
                 .blocks()
                 .filter_map(|(_, id)| project.blocks().get_by_id(id))
-                .map(|block| RecoveredBlock {
-                    address: block.address(),
-                    context: block.context().clone(),
-                    has_unresolved: block.has_unresolved(),
-                    id: block.id(),
-                    instructions: block.instructions().to_vec(),
-                    is_call: block.is_call(),
-                    length: block.len(),
+                .map(|block| -> Result<_, Box<dyn Error>> {
+                    let insns = reader
+                        .insns(block.id())?
+                        .ok_or("recovered block insns missing")?;
+                    Ok(RecoveredBlock {
+                        address: block.address(),
+                        context: block.context().clone(),
+                        has_unresolved: block.has_unresolved(),
+                        id: block.id(),
+                        insns: insns.as_ref().clone(),
+                        is_call: block.is_call(),
+                        size: block.size(),
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             let flow_targets = function.flow_targets(project.blocks()).collect();
-            (
-                function.address(),
+            Ok((
+                function.entry(),
                 RecoveredFunction {
                     blocks,
                     entry_block: function.entry_block(),
@@ -65,9 +71,9 @@ fn recover(
                     id: function.id(),
                     properties: function.properties(),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     Ok(functions)
 }
 
@@ -83,6 +89,57 @@ fn analysis_engine_worker_limit_is_configurable() {
 
     config.set_worker_limit(0);
     assert_eq!(config.worker_limit(), 1);
+}
+
+#[test]
+fn analysis_engine_cache_budgets_are_configurable() {
+    let mut config = AnalysisEngineConfig::default()
+        .with_insn_cache_bytes(4096)
+        .with_lifted_cache_bytes(8192);
+    assert_eq!(config.insn_cache_bytes(), 4096);
+    assert_eq!(config.lifted_cache_bytes(), 8192);
+
+    config.set_insn_cache_bytes(0);
+    config.set_lifted_cache_bytes(0);
+    assert_eq!(config.insn_cache_bytes(), 0);
+    assert_eq!(config.lifted_cache_bytes(), 0);
+}
+
+#[test]
+fn zero_cache_budgets_disable_retention_without_disabling_queries() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let entry = project.entry_point().ok_or("fixture entry missing")?;
+    let config = AnalysisEngineConfig::default()
+        .with_insn_cache_bytes(0)
+        .with_lifted_cache_bytes(0);
+    let engine = AnalysisEngine::with_config(project, config)?;
+    engine.analyse()?;
+
+    let reader = engine.query_reader()?;
+    let function = reader
+        .function_id_at(entry)?
+        .ok_or("fixture entry function missing")?;
+    let block = {
+        let project = reader.project()?;
+        project
+            .functions()
+            .get_by_id(function)
+            .and_then(|function| function.blocks().next().map(|(_, block)| block))
+            .ok_or("fixture entry block missing")?
+    };
+
+    let first_insns = reader.insns(block)?.ok_or("insns missing")?;
+    let second_insns = reader.insns(block)?.ok_or("insns missing")?;
+    assert_eq!(first_insns, second_insns);
+    assert!(!Arc::ptr_eq(&first_insns, &second_insns));
+
+    let first_pcode = reader.pcode(function)?.ok_or("PCode missing")?;
+    let second_pcode = reader.pcode(function)?.ok_or("PCode missing")?;
+    assert_eq!(first_pcode, second_pcode);
+    assert!(!Arc::ptr_eq(&first_pcode, &second_pcode));
+
+    Ok(())
 }
 
 #[test]

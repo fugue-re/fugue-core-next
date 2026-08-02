@@ -1,5 +1,7 @@
 use crate::analysis::AnalysisError;
-use crate::analysis::function::recovery::FunctionRecoveryPatternMatcher;
+use crate::analysis::function::recovery::{
+    FUNCTION_RECOVERY_ANALYSER, FunctionRecoveryPatternMatcher,
+};
 use crate::arch::Arch;
 use crate::platform::CallingConvention;
 
@@ -33,7 +35,7 @@ impl FunctionRecoveryPatterns {
         match convention {
             CallingConvention::Gcc => {
                 analyser.add_patterns_from_str(X86_GCC).map_err(|e| {
-                    AnalysisError::pass_configuration_failed("function-recovery", e)
+                    AnalysisError::pass_configuration_failed(FUNCTION_RECOVERY_ANALYSER, e)
                 })?;
                 Ok(())
             }
@@ -48,7 +50,7 @@ impl FunctionRecoveryPatterns {
         match convention {
             CallingConvention::Gcc => {
                 analyser.add_patterns_from_str(X86_64_GCC).map_err(|e| {
-                    AnalysisError::pass_configuration_failed("function-recovery", e)
+                    AnalysisError::pass_configuration_failed(FUNCTION_RECOVERY_ANALYSER, e)
                 })?;
                 Ok(())
             }

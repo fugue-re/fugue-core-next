@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io;
 use std::mem::{ManuallyDrop, align_of};
-use std::ops::Bound;
+use std::ops::{Bound, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::vec::IntoIter;
 
 use bitflags::bitflags;
 use bytes::Bytes;
@@ -28,17 +29,19 @@ pub use memory::InMemoryEntityStorage;
 #[cfg(feature = "mdbx")]
 pub(crate) mod mdbx;
 #[cfg(feature = "mdbx")]
-pub use mdbx::MdbxEntityStorage;
+pub use mdbx::{ATTRIBUTE_ENTITY_STORAGE_MDBX_OPTIONS, MdbxEntityStorage, MdbxOptions};
 
 #[cfg(feature = "rocksdb")]
 pub(crate) mod rocksdb;
 #[cfg(feature = "rocksdb")]
-pub use rocksdb::RocksDbEntityStorage;
+pub use rocksdb::options::RocksDbOptions;
+#[cfg(feature = "rocksdb")]
+pub use rocksdb::{ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS, RocksDbEntityStorage};
 
 pub(crate) mod schema;
 pub use schema::{
     ENTITY_PROJECT_REVISION_ID, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
-    ProjectEntity, make_key_with_entity_id,
+    ProjectEntity,
 };
 
 #[cfg(feature = "sqlite")]
@@ -212,7 +215,92 @@ impl EntityWrite {
     }
 }
 
-pub(crate) type EntityWriteBatch = Vec<EntityWrite>;
+#[derive(Default)]
+pub(crate) struct EntityWriteBatch {
+    writes: Vec<EntityWrite>,
+}
+
+impl EntityWriteBatch {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            writes: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.writes.clear();
+    }
+
+    pub(crate) fn insert_entity<K, E>(
+        &mut self,
+        key: &K,
+        entity: &E,
+    ) -> Result<(), EntityStorageError>
+    where
+        K: EntityKey,
+        E: Entity,
+    {
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        self.push(EntityWrite::insert_archive(E::ID.key_for(key), encoded));
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.writes.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.writes.len()
+    }
+
+    pub(crate) fn push(&mut self, write: EntityWrite) {
+        self.writes.push(write);
+    }
+
+    pub(crate) fn remove_entity<K, E>(&mut self, key: &K)
+    where
+        K: EntityKey,
+        E: Entity,
+    {
+        self.push(EntityWrite::remove(E::ID.key_for(key)));
+    }
+
+    pub(crate) fn sort_by_key(&mut self) {
+        self.writes
+            .sort_unstable_by(|left, right| left.key().cmp(right.key()));
+    }
+}
+
+impl Extend<EntityWrite> for EntityWriteBatch {
+    fn extend<T>(&mut self, writes: T)
+    where
+        T: IntoIterator<Item = EntityWrite>,
+    {
+        self.writes.extend(writes);
+    }
+}
+
+impl IntoIterator for EntityWriteBatch {
+    type Item = EntityWrite;
+    type IntoIter = IntoIter<EntityWrite>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.writes.into_iter()
+    }
+}
+
+impl Deref for EntityWriteBatch {
+    type Target = [EntityWrite];
+
+    fn deref(&self) -> &Self::Target {
+        &self.writes
+    }
+}
 
 pub trait EntityStorageTransactionalReader<'a> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
@@ -231,7 +319,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner
             .get(&key)?
             .map(|bytes| decode_entity(bytes.as_slice()))
@@ -244,7 +332,7 @@ impl<'a> EntityTransactionalReader<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -252,7 +340,7 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner.contains(&key)
     }
 }
@@ -299,7 +387,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner
             .get(&key)?
             .map(|bytes| decode_entity(bytes.as_slice()))
@@ -312,7 +400,7 @@ impl<'a> EntityTransactionalWriter<'a> {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner
             .get(&key)?
             .map(|bytes| f(bytes.as_slice()))
@@ -320,7 +408,7 @@ impl<'a> EntityTransactionalWriter<'a> {
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner.contains(&key)
     }
 
@@ -329,18 +417,15 @@ impl<'a> EntityTransactionalWriter<'a> {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
-            .map(|v| v.to_vec())
-            .map_err(EntityStorageError::encode)?;
-
-        let encoded = BytesOrSlice::from(encoded);
-
-        self.inner.insert(&key, encoded)
+        let key = E::ID.key_for(key);
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        self.inner
+            .insert(&key, BytesOrSlice::from(encoded.as_ref()))
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.inner.remove(&key)
     }
 
@@ -399,6 +484,9 @@ pub trait EntityStorageProviderFromStorage: EntityStorageProviderFromLoadable {
 
 pub type EntityBytesAsIterator<'a, T> =
     Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>;
+#[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+pub(crate) type EntityBytesMapper<'a, T> =
+    dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a;
 
 pub trait EntityStorageProvider: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
@@ -763,7 +851,7 @@ impl EntityStorage {
     }
 
     pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.backing.get_as(&key, decode_entity::<E>)
     }
 
@@ -773,7 +861,7 @@ impl EntityStorage {
         E: Entity,
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.backing.get_as(&key, f)
     }
 
@@ -782,13 +870,11 @@ impl EntityStorage {
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity)
-            .map(|v| v.to_vec())
-            .map_err(EntityStorageError::encode)?;
-        let encoded = BytesOrSlice::from(encoded);
-
-        self.backing.insert(&key, encoded)
+        let key = E::ID.key_for(key);
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
+        self.backing
+            .insert(&key, BytesOrSlice::from(encoded.as_ref()))
     }
 
     pub fn insert_bytes<K: EntityKey, E: Entity>(
@@ -796,28 +882,28 @@ impl EntityStorage {
         key: &K,
         value: BytesOrSlice<'_>,
     ) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.backing.insert(&key, value)
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.backing.remove(&key)
     }
 
     pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = schema::make_key::<K, E>(key);
+        let key = E::ID.key_for(key);
         self.backing.contains(&key)
     }
 
     pub fn iter<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
-        let pfx = schema::make_prefix::<K, E>();
-        self.backing.iter_prefix(&pfx).map(|iter| {
+        let pfx = EntityKeyPrefix::of::<K, E>();
+        self.backing.iter_prefix(pfx.as_ref()).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
-                    let key = schema::extract_key::<K, E>(key)
+                    let key = EntityKeyPrefix::extract::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
                     let val = decode_entity::<E>(value.as_slice())?;
                     Ok((key, val))
@@ -830,10 +916,10 @@ impl EntityStorage {
         &self,
         start: Bound<&K>,
     ) -> Result<EntityIterator<'_, K, E>, EntityStorageError> {
-        let pfx = schema::make_prefix::<K, E>();
+        let pfx = EntityKeyPrefix::of::<K, E>();
         let start_key = match start {
-            Bound::Included(key) => Bound::Included(schema::make_key::<K, E>(key)),
-            Bound::Excluded(key) => Bound::Excluded(schema::make_key::<K, E>(key)),
+            Bound::Included(key) => Bound::Included(E::ID.key_for(key)),
+            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let start = match start_key.as_ref() {
@@ -842,10 +928,10 @@ impl EntityStorage {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        self.backing.iter_range(&pfx, start).map(|iter| {
+        self.backing.iter_range(pfx.as_ref(), start).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|(key, value)| {
-                    let key = schema::extract_key::<K, E>(key)
+                    let key = EntityKeyPrefix::extract::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
                     let val = decode_entity::<E>(value.as_slice())?;
                     Ok((key, val))
@@ -857,11 +943,12 @@ impl EntityStorage {
     pub fn keys<K: EntityKey, E: Entity>(
         &self,
     ) -> Result<EntityKeyIterator<'_, K>, EntityStorageError> {
-        let pfx = schema::make_prefix::<K, E>();
-        self.backing.iter_prefix_keys(&pfx).map(|iter| {
+        let pfx = EntityKeyPrefix::of::<K, E>();
+        self.backing.iter_prefix_keys(pfx.as_ref()).map(|iter| {
             Box::new(iter.map(|result| {
                 result.and_then(|key| {
-                    schema::extract_key::<K, E>(key).ok_or(EntityStorageError::InvalidKeyFormat)
+                    EntityKeyPrefix::extract::<K, E>(key)
+                        .ok_or(EntityStorageError::InvalidKeyFormat)
                 })
             })) as EntityKeyIterator<'_, K>
         })
@@ -1037,9 +1124,9 @@ mod test {
     #[test]
     fn storage_batch_requires_atomic_admission() {
         let storage = EntityStorage::new(DummyEntityStorage);
-        let writes = [(
+        let writes = [EntityWrite::insert(
             Bytes::from_static(b"key"),
-            Some(Bytes::from_static(b"value")),
+            Bytes::from_static(b"value"),
         )];
 
         let error = storage
@@ -1053,18 +1140,15 @@ mod test {
     fn failed_in_memory_batch_publishes_no_prefix() -> Result<(), EntityStorageError> {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let address = Address::from(42u64);
-        let key = schema::make_key::<Address, TestEntity>(&address);
+        let key = TestEntity::ID.key_for(&address);
         let entity = TestEntity {
             id: 42,
             name: "atomic".to_owned(),
         };
         let encoded = rkyv::to_bytes::<RkyvError>(&entity).map_err(EntityStorageError::encode)?;
         let writes = [
-            (
-                Bytes::copy_from_slice(&key),
-                Some(Bytes::from(encoded.into_vec())),
-            ),
-            (Bytes::from_static(b"x"), Some(Bytes::from_static(b"value"))),
+            EntityWrite::insert_archive(Bytes::copy_from_slice(&key), encoded),
+            EntityWrite::insert(Bytes::from_static(b"x"), Bytes::from_static(b"value")),
         ];
 
         assert!(matches!(
@@ -1080,15 +1164,12 @@ mod test {
     fn failed_sqlite_batch_publishes_no_prefix() -> Result<(), EntityStorageError> {
         let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?);
         let id = SwitchId::new(0);
-        let key = schema::make_key::<SwitchId, Switch>(&id);
+        let key = Switch::ID.key_for(&id);
         let switch = Switch::new(id, Address::from(42u64), SwitchModel::Explicit);
         let encoded = rkyv::to_bytes::<RkyvError>(&switch).map_err(EntityStorageError::encode)?;
         let writes = [
-            (
-                Bytes::copy_from_slice(&key),
-                Some(Bytes::from(encoded.into_vec())),
-            ),
-            (Bytes::from_static(b"x"), Some(Bytes::from_static(b"value"))),
+            EntityWrite::insert_archive(Bytes::copy_from_slice(&key), encoded),
+            EntityWrite::insert(Bytes::from_static(b"x"), Bytes::from_static(b"value")),
         ];
 
         assert!(matches!(
@@ -1172,7 +1253,7 @@ mod test {
                 id: i,
                 name: format!("New Cached Entity {i}"),
             };
-            cache.put(Address::from(i), entity);
+            cache.insert(Address::from(i), entity);
         }
 
         for i in 50u64..100 {

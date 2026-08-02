@@ -1,12 +1,12 @@
 use fugue_bv::BitVec;
 
 use super::SwitchIdiomMatcher;
-use crate::analysis::function::recovery::InsnResolver;
 use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTargetResolver};
 use crate::ir::{
     Address, AddressTable, IncompleteCodeBlockId, IncompleteFunction, SwitchCase, SwitchCaseLabel,
     SwitchModel, SwitchProperties,
 };
+use crate::lifter::InsnResolver;
 use crate::lifter::{LiftingContext, RawPCodeOp};
 
 pub(crate) struct SwitchIdiomRecovery {
@@ -26,7 +26,7 @@ impl SwitchIdiomRecovery {
 
     pub(crate) fn recover(
         &mut self,
-        resolver: &mut InsnResolver,
+        insn_resolver: &mut InsnResolver,
         function: &IncompleteFunction,
         predecessor: Option<IncompleteCodeBlockId>,
         block: IncompleteCodeBlockId,
@@ -34,35 +34,49 @@ impl SwitchIdiomRecovery {
         target_resolver: &mut SwitchTargetResolver<'_>,
     ) -> Option<RecoveredSwitch> {
         self.operations.clear();
-        let segments = target_resolver.segments();
         if let Some(predecessor) = predecessor {
-            resolver
-                .lift_block(
-                    function,
-                    predecessor,
-                    segments,
-                    target_resolver.mapping_cache_mut(),
-                    &mut self.operations,
-                )
-                .ok()?;
+            self.lift_block(insn_resolver, function, predecessor, target_resolver)?;
         }
-        resolver
-            .lift_block(
-                function,
-                block,
-                segments,
-                target_resolver.mapping_cache_mut(),
-                &mut self.operations,
-            )
-            .ok()?;
-        self.recover_operations(branch, resolver.context(), target_resolver)
+        self.lift_block(insn_resolver, function, block, target_resolver)?;
+        self.recover_operations(branch, insn_resolver.context(), target_resolver)
+    }
+
+    fn lift_block(
+        &mut self,
+        insn_resolver: &mut InsnResolver,
+        function: &IncompleteFunction,
+        block: IncompleteCodeBlockId,
+        target_resolver: &mut SwitchTargetResolver<'_>,
+    ) -> Option<()> {
+        let block = function.block(block)?;
+        block
+            .context()
+            .apply(block.address(), insn_resolver.context_mut());
+
+        let view = target_resolver.contiguous_view_from(block.address())?;
+        let bytes = view.as_contiguous()?.get(..block.size())?;
+        let output_start = self.operations.len();
+
+        for &insn_id in block.insns() {
+            let insn = function.insn(insn_id)?;
+            let offset = usize::from(insn.address() - block.address());
+            if insn_resolver
+                .lift_into(insn.address(), bytes.get(offset..)?, &mut self.operations)
+                .is_err()
+            {
+                self.operations.truncate(output_start);
+                return None;
+            }
+        }
+
+        Some(())
     }
 
     fn recover_operations(
         &mut self,
         branch: Address,
         context: &LiftingContext,
-        resolver: &mut SwitchTargetResolver<'_>,
+        target_resolver: &mut SwitchTargetResolver<'_>,
     ) -> Option<RecoveredSwitch> {
         let idiom = SwitchIdiomMatcher::new(&self.operations, self.config.max_trace_depth())?
             .match_idiom()?;
@@ -74,7 +88,7 @@ impl SwitchIdiomRecovery {
         let space = branch.space();
         let mut table = AddressTable::new(Address::new(space, idiom.table()), element_size)
             .with_shift(idiom.shift());
-        resolver.set_space(space);
+        target_resolver.set_space(space);
         let cap = u64::from(self.config.max_cases());
         let limit = idiom
             .bound()
@@ -83,7 +97,7 @@ impl SwitchIdiomRecovery {
 
         self.cases.clear();
         for index in 0..limit {
-            let raw = match resolver
+            let raw = match target_resolver
                 .read_bitvec(table.entry_address(index as u32), element_size as usize)
             {
                 Some(raw) => raw,
@@ -106,7 +120,7 @@ impl SwitchIdiomRecovery {
                 }
                 None => value.unsigned_cast(u64::BITS),
             };
-            let Some(target) = resolver.resolve_value(&target_value, context) else {
+            let Some(target) = target_resolver.resolve_value(&target_value, context) else {
                 break;
             };
 
@@ -130,7 +144,7 @@ impl SwitchIdiomRecovery {
         let table_start = Address::new(space, idiom.table());
         let properties = SwitchProperties::from_recovery(guarded, truncated)
             | SwitchProperties::CONTIGUOUS_ENTRIES
-            | resolver.properties_for_table(table_start, &self.cases);
+            | target_resolver.properties_for_table(table_start, &self.cases);
         let model = match idiom.base() {
             Some(base) => SwitchModel::OffsetRelative {
                 table,

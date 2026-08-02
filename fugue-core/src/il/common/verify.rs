@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::il::common::{IlError, IlParentSpan, IlSourceSpan};
+use crate::il::common::IlError;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StructureError {
@@ -29,53 +29,10 @@ pub trait StructureVerifierError: From<IlError> {
     }
 }
 
-pub(crate) fn verify_source_spans(
-    spans: &[IlSourceSpan],
-    node_count: usize,
-) -> Result<(), StructureError> {
-    let mut previous_end = 0usize;
-
-    for span in spans {
-        span.destination().verify_bounds(node_count)?;
-
-        if span.destination().start() < previous_end {
-            return Err(StructureError::OverlappingSourceSpan {
-                node: span.destination().start() as u32,
-            });
-        }
-
-        previous_end = span.destination().end();
-    }
-
-    Ok(())
-}
-
-pub(crate) fn verify_parent_spans(
-    spans: &[IlParentSpan],
-    node_count: usize,
-) -> Result<(), StructureError> {
-    let mut previous_end = 0usize;
-
-    for span in spans {
-        span.destination().verify_bounds(node_count)?;
-        span.source().verify_bounds(usize::MAX)?;
-
-        if span.destination().start() < previous_end {
-            return Err(StructureError::OverlappingParentSpan {
-                node: span.destination().start() as u32,
-            });
-        }
-
-        previous_end = span.destination().end();
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::IlIndexRange;
+    use crate::il::common::{IlIndexRange, IlParentSpan, IlSourceSpan};
     use crate::ir::Address;
     use crate::storage::segments::space::AddressSpaceId;
 
@@ -89,7 +46,7 @@ mod test {
         );
 
         assert!(matches!(
-            verify_source_spans(&[span], 1),
+            IlSourceSpan::verify(&[span], 1),
             Err(StructureError::Il(IlError::RangeOutOfBounds { .. }))
         ));
     }
@@ -110,7 +67,7 @@ mod test {
         );
 
         assert!(matches!(
-            verify_source_spans(&[first, second], 8),
+            IlSourceSpan::verify(&[first, second], 8),
             Err(StructureError::OverlappingSourceSpan { .. })
         ));
     }
@@ -123,7 +80,7 @@ mod test {
         );
 
         assert!(matches!(
-            verify_parent_spans(&[span], 1),
+            IlParentSpan::verify(&[span], 1),
             Err(StructureError::Il(IlError::RangeOutOfBounds { .. }))
         ));
     }

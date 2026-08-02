@@ -2,7 +2,7 @@ use std::error::Error;
 
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
-use fugue_core::ir::{Address, IncompleteCodeBlock, IncompleteFunction};
+use fugue_core::ir::{Address, IncompleteCodeBlock, IncompleteFunction, ReferenceOrigin};
 #[cfg(feature = "sqlite")]
 use fugue_core::lifter::ContextUpdate;
 use fugue_core::lifter::{ContextBitRange, ContextSet};
@@ -14,6 +14,9 @@ use fugue_core::storage::{
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
+
+mod common;
+use common::writable_address;
 
 #[cfg(feature = "sqlite")]
 type SqliteProjectProvider =
@@ -52,7 +55,9 @@ fn function_with_contextual_tail(
 #[test]
 fn two_functions_sharing_a_tail_share_one_block() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let first_entry = entry;
     let second_entry = entry + 0x40u64;
@@ -101,7 +106,9 @@ fn two_functions_sharing_a_tail_share_one_block() -> Result<(), Box<dyn Error>> 
 #[test]
 fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let first_entry = entry;
     let second_entry = entry + 0x40u64;
@@ -122,7 +129,7 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
         .ok_or("second function must own the tail")?;
 
     let mut transaction = project.transaction("test");
-    transaction.remove_function_by_id(first)?;
+    transaction.remove_function_by_id(first, ReferenceOrigin::Derived)?;
     transaction.commit()?;
 
     assert!(
@@ -139,7 +146,7 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
     );
 
     let mut transaction = project.transaction("test");
-    transaction.remove_function_by_id(second)?;
+    transaction.remove_function_by_id(second, ReferenceOrigin::Derived)?;
     transaction.commit()?;
 
     assert!(
@@ -153,7 +160,9 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
 #[test]
 fn context_distinct_blocks_at_one_address_remain_distinct() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let base = project.entry().ok_or("fixture must have an entry point")?;
+    let base = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let shared = base + 0x100u64;
     let bits = ContextBitRange::new(0, 0);
 
@@ -203,11 +212,13 @@ fn context_distinct_blocks_survive_persistent_admission_and_reopen() -> Result<(
         "tests/ls.elf",
         attributes![ATTRIBUTE_PROJECT_PATH => project_path.clone()],
     )?;
-    let base = project.entry().ok_or("fixture must have an entry point")?;
+    let base = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let shared = base + 0x100u64;
     let bits = ContextBitRange::new(0, 0);
     let mut first_context = ContextSet::single(bits, 0);
-    first_context.push(ContextUpdate::new(ContextBitRange::new(1, 1), 1));
+    first_context.insert(ContextUpdate::new(ContextBitRange::new(1, 1), 1));
     let second_context = ContextSet::single(bits, 1);
 
     let mut transaction = project.transaction("test");
@@ -252,7 +263,9 @@ fn persistent_functions_added_separately_share_one_block() -> Result<(), Box<dyn
         "tests/ls.elf",
         attributes![ATTRIBUTE_PROJECT_PATH => project_path],
     )?;
-    let first_entry = project.entry().ok_or("fixture must have an entry point")?;
+    let first_entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let second_entry = first_entry + 0x40u64;
     let tail = first_entry + 0x80u64;
 
@@ -294,7 +307,10 @@ fn persistent_functions_added_separately_share_one_block() -> Result<(), Box<dyn
 fn a_shared_block_can_be_entry_for_one_function_and_ordinary_for_another()
 -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let shared = project.entry().ok_or("fixture must have an entry point")? + 0x100u64;
+    let shared = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?
+        + 0x100u64;
     let other = shared - 0x40u64;
 
     let mut transaction = project.transaction("test");
@@ -333,16 +349,27 @@ fn a_shared_block_can_be_entry_for_one_function_and_ordinary_for_another()
 #[test]
 fn splitting_a_function_moves_its_tail_to_a_new_function() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = writable_address(&project, 0x100)?;
     let tail = entry + 0x80u64;
 
     let mut transaction = project.transaction("test");
-    let original = transaction.add_function(function_sharing_tail(entry, tail, 8))?;
+    transaction.write_bytes(entry, &[0x90; 8])?;
+    transaction.write_bytes(tail, &[0x90; 8])?;
+    let mut original_function = function_sharing_tail(entry, tail, 8);
+    original_function.mark_non_returning();
+    let original = transaction.add_function(original_function)?;
     transaction.commit()?;
+
+    let original_blocks = project
+        .functions()
+        .get_by_id(original)
+        .ok_or("the original function must exist")?
+        .blocks()
+        .collect::<Vec<_>>();
 
     let mut transaction = project.transaction("test");
     let split = transaction
-        .split_function(entry, tail)?
+        .split_function(original, original_blocks[1].1)?
         .ok_or("the tail must be splittable")?;
     transaction.commit()?;
 
@@ -352,6 +379,8 @@ fn splitting_a_function_moves_its_tail_to_a_new_function() -> Result<(), Box<dyn
         .ok_or("the parent must survive")?;
     assert_eq!(parent.blocks().count(), 1);
     assert!(parent.blocks().all(|(address, _)| address == entry));
+    assert!(!parent.is_non_returning());
+    assert_eq!(parent.blocks().collect::<Vec<_>>(), original_blocks[..1]);
 
     let child = project
         .functions()
@@ -359,6 +388,8 @@ fn splitting_a_function_moves_its_tail_to_a_new_function() -> Result<(), Box<dyn
         .ok_or("the split function must exist")?;
     assert_eq!(child.entry(), tail);
     assert_eq!(child.blocks().count(), 1);
+    assert!(!child.is_non_returning());
+    assert_eq!(child.blocks().collect::<Vec<_>>(), original_blocks[1..]);
 
     let block = child.blocks().next().map(|(_, id)| id).unwrap();
     assert_eq!(
@@ -376,16 +407,20 @@ fn splitting_a_function_moves_its_tail_to_a_new_function() -> Result<(), Box<dyn
 #[test]
 fn merging_absorbs_one_function_into_another() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = writable_address(&project, 0x100)?;
     let other = entry + 0x40u64;
 
     let mut transaction = project.transaction("test");
-    let target = transaction.add_function(common_one_block(entry, 8))?;
-    transaction.add_function(common_one_block(other, 8))?;
+    transaction.write_bytes(entry, &[0x90; 8])?;
+    transaction.write_bytes(other, &[0x90; 8])?;
+    let mut target_function = common_one_block(entry, 8);
+    target_function.mark_non_returning();
+    let target = transaction.add_function(target_function)?;
+    let source = transaction.add_function(common_one_block(other, 8))?;
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
-    assert!(transaction.merge_functions(entry, other)?);
+    assert!(transaction.merge_functions(target, source)?);
     transaction.commit()?;
 
     let merged = project
@@ -394,6 +429,7 @@ fn merging_absorbs_one_function_into_another() -> Result<(), Box<dyn Error>> {
         .ok_or("the merge target must survive")?;
     assert_eq!(merged.blocks().count(), 2);
     assert!(merged.blocks().any(|(address, _)| address == other));
+    assert!(!merged.is_non_returning());
 
     assert!(
         project.functions().get_by_address(other).is_none(),
@@ -415,7 +451,9 @@ fn common_one_block(entry: Address, len: usize) -> IncompleteFunction {
 #[test]
 fn rejecting_one_parent_replacement_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let first_entry = entry;
     let second_entry = entry + 0x40u64;

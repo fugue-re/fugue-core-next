@@ -46,14 +46,14 @@ impl ProblemTable {
         self.entries.flush()
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> ProblemId {
-        self.index.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> ProblemId {
+        self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_upsert(&mut self, problem: Problem, encoded_len: usize, is_new: bool) {
+    pub(super) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
         let id = problem.id();
         let key = problem.key();
-        self.entries.publish_put(id, problem, encoded_len);
+        self.entries.publish_insert(id, problem, encoded_size);
         self.index.insert(id, key);
         if is_new {
             let allocated = self.index.allocator.allocate();
@@ -86,7 +86,7 @@ impl ProblemTable {
             if problem.key() != key {
                 return Err(ProblemTableError::KeyMismatch);
             }
-            self.entries.try_put(existing, problem)?;
+            self.entries.try_insert(existing, problem)?;
             self.index.insert(existing, key);
             return Ok(existing);
         }
@@ -97,7 +97,7 @@ impl ProblemTable {
             if problem.key() != key {
                 return Err(ProblemTableError::KeyMismatch);
             }
-            entries.try_put(id, problem)?;
+            entries.try_insert(id, problem)?;
             Ok(())
         })?;
 
@@ -113,7 +113,7 @@ impl ProblemTable {
         self.entries.try_get(&id)
     }
 
-    pub(crate) fn try_get_key(
+    pub(crate) fn try_get_by_key(
         &self,
         key: ProblemKey,
     ) -> Result<Option<Ref<'_>>, EntityStorageError> {
@@ -139,7 +139,7 @@ impl ProblemTable {
         drop(previous);
         let result = f(&mut problem);
 
-        self.entries.try_put(id, problem)?;
+        self.entries.try_insert(id, problem)?;
 
         Ok(Some(result))
     }
@@ -157,7 +157,10 @@ impl ProblemTable {
         Ok(true)
     }
 
-    pub(crate) fn try_remove_key(&mut self, key: ProblemKey) -> Result<bool, EntityStorageError> {
+    pub(crate) fn try_remove_by_key(
+        &mut self,
+        key: ProblemKey,
+    ) -> Result<bool, EntityStorageError> {
         let Some(id) = self.index.id(key) else {
             return Ok(false);
         };

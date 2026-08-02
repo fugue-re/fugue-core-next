@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fugue_core::analysis::AnalysisError;
 use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, DEFAULT_WORK_ITEM_MAX_ATTEMPTS,
-    ProjectUpdate, ProjectView,
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
 };
 use fugue_core::ir::{Address, AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
 use fugue_core::loader::Loader;
@@ -16,6 +15,7 @@ use fugue_core::storage::{SegmentMappingId, TransientStorageProvider};
 use fugue_core::types::AttributeMap;
 
 const ANALYSER_ATTRIBUTE: &str = "fugue.test.rejecting-collapse-analyser";
+const EXPECTED_DEFAULT_WORK_ITEM_MAX_ATTEMPTS: usize = 3;
 const WORK_ITEM_LIMIT: usize = 4096;
 
 static ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -104,7 +104,7 @@ fn collapse_diagnostics_survive_rejected_admission() -> Result<(), Box<dyn Error
 
     assert_eq!(
         ANALYSER_RUNS.load(Ordering::SeqCst),
-        DEFAULT_WORK_ITEM_MAX_ATTEMPTS,
+        EXPECTED_DEFAULT_WORK_ITEM_MAX_ATTEMPTS,
         "the analyser admission must be rejected before diagnostics are flushed"
     );
 

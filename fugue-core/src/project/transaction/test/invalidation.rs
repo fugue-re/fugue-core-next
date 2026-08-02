@@ -78,7 +78,7 @@ fn rejecting_function_replacement_preserves_lifted_ir() -> Result<(), Box<dyn st
         .and_then(|function| function.blocks().next().map(|(_, block)| block))
         .and_then(|block| project.blocks().get_by_id(block))
         .expect("function body should be restored");
-    assert_eq!(block.len(), 1);
+    assert_eq!(block.size(), 1);
 
     Ok(())
 }
@@ -142,7 +142,7 @@ fn removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Erro
 
     let changes = {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_function_by_id(function)?);
+        assert!(transaction.remove_function_by_id(function, ReferenceOrigin::Derived)?);
         transaction.commit()?
     };
 

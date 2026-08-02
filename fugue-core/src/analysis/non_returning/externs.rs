@@ -6,12 +6,14 @@ use crate::platform::OperatingSystem;
 use crate::platform::non_returning::is_non_returning_extern;
 use crate::project::Project;
 
+pub(super) const NON_RETURNING_EXTERNS_ANALYSER: &str = "non-returning-externs";
+
 #[derive(Debug, Clone, Copy)]
-pub struct NonReturningFromExterns {
+pub struct NonReturningExterns {
     operating_system: OperatingSystem,
 }
 
-impl NonReturningFromExterns {
+impl NonReturningExterns {
     pub fn new(operating_system: OperatingSystem) -> Self {
         Self { operating_system }
     }
@@ -21,8 +23,8 @@ impl NonReturningFromExterns {
     }
 }
 
-impl NonReturningFromExterns {
-    pub fn analyse(&mut self, project: &mut Project) -> Result<(), AnalysisError> {
+impl NonReturningExterns {
+    pub fn analyse(&self, project: &mut Project) -> Result<(), AnalysisError> {
         let view = ProjectView::new(project);
         let marked = view
             .symbols()
@@ -39,19 +41,19 @@ impl NonReturningFromExterns {
             .map(|(id, entry)| (id, entry.properties() | SymbolProperties::NON_RETURNING))
             .collect::<Vec<_>>();
         let reads = view.into_reads();
-        let mut transaction = project.transaction("non-returning externs");
+        let mut transaction = project.transaction(NON_RETURNING_EXTERNS_ANALYSER);
         transaction.absorb_reads(&reads);
 
         marked.into_iter().try_for_each(|(id, properties)| {
             transaction
                 .set_symbol_properties(id, properties)
                 .map(|_| ())
-                .map_err(|error| AnalysisError::pass_failed("non-returning-externs", error))
+                .map_err(|error| AnalysisError::pass_failed(NON_RETURNING_EXTERNS_ANALYSER, error))
         })?;
         transaction
             .commit()
             .map(|_| ())
-            .map_err(|error| AnalysisError::pass_failed("non-returning-externs", error))
+            .map_err(|error| AnalysisError::pass_failed(NON_RETURNING_EXTERNS_ANALYSER, error))
     }
 }
 
@@ -79,7 +81,7 @@ mod test {
             );
 
             let os = loader.platform().os();
-            NonReturningFromExterns::new(os).analyse(&mut project)?;
+            NonReturningExterns::new(os).analyse(&mut project)?;
 
             for name in expected {
                 let marked = project

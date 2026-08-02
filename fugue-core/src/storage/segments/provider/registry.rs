@@ -119,7 +119,7 @@ impl SegmentStorageProviderRegistry {
         self.by_tag.keys().copied()
     }
 
-    pub fn has_tag(&self, tag: &str) -> bool {
+    pub fn contains_tag(&self, tag: &str) -> bool {
         self.by_tag.contains_key(tag)
     }
 

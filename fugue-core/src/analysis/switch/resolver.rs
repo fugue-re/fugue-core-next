@@ -1,10 +1,11 @@
 use fugue_bv::BitVec;
 use fugue_bytes::Endian;
 
-use crate::analysis::function::recovery::InsnResolver;
 use crate::arch::Arch;
 use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchProperties};
+use crate::lifter::InsnResolver;
 use crate::lifter::{ContextSet, LiftingContext};
+use crate::storage::segments::provider::SegmentView;
 use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentStorage};
 
 pub(crate) struct SwitchTargetResolver<'a> {
@@ -38,12 +39,10 @@ impl<'a> SwitchTargetResolver<'a> {
         self.space = space;
     }
 
-    pub(crate) fn mapping_cache_mut(&mut self) -> &mut SegmentMappingCache {
-        &mut self.mapping_cache
-    }
-
-    pub(crate) fn segments(&self) -> &'a SegmentStorage {
-        self.segments
+    pub(crate) fn contiguous_view_from(&mut self, address: Address) -> Option<SegmentView<'a>> {
+        self.mapping_cache
+            .contiguous_view_from(self.segments, address)
+            .ok()
     }
 
     pub(crate) fn read_bitvec(&mut self, address: Address, size: usize) -> Option<BitVec> {
@@ -74,7 +73,7 @@ impl<'a> SwitchTargetResolver<'a> {
     pub(crate) fn resolve_branch_target(
         &mut self,
         address: Address,
-        expected_length: Option<usize>,
+        expected_size: Option<usize>,
         context: &ContextSet,
         resolver: &mut InsnResolver,
     ) -> Option<AddressWithContext> {
@@ -85,7 +84,8 @@ impl<'a> SwitchTargetResolver<'a> {
         let bytes = view.as_contiguous()?;
         context.apply(address, resolver.context_mut());
         let instruction = resolver.resolve(address, bytes).ok()?;
-        if expected_length.is_some_and(|length| instruction.len() != length)
+        let instruction = instruction.as_ref();
+        if expected_size.is_some_and(|size| instruction.size() != size)
             || !instruction.is_branch()
             || instruction.is_call()
             || instruction.is_return()
@@ -110,7 +110,7 @@ impl<'a> SwitchTargetResolver<'a> {
         let mut properties = self.properties_for_targets(cases);
         if self
             .mapping_cache
-            .segment_properties(self.segments, table)
+            .mapping_properties(self.segments, table)
             .is_some_and(|properties| properties.is_readable() && !properties.is_writable())
         {
             properties |= SwitchProperties::TABLE_IN_READ_ONLY;
@@ -139,7 +139,7 @@ impl<'a> SwitchTargetResolver<'a> {
         let address = Address::new(self.space, canonical);
         let executable = self
             .mapping_cache
-            .segment_properties(self.segments, address)
+            .mapping_properties(self.segments, address)
             .is_some_and(|properties| properties.is_executable());
         executable.then(|| AddressWithContext::new(address, context))
     }

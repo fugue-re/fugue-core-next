@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref as DashMapRef;
 use skiplist::SkipMap;
@@ -32,20 +32,6 @@ impl InMemoryEntityStorage {
     pub fn new() -> Self {
         Self::default()
     }
-
-    fn extract_key_parts(key: &[u8]) -> Option<(EntityKeyPrefix, &[u8])> {
-        if key.len() < 2 {
-            return None;
-        }
-        Some(([key[0], key[1]], &key[2..]))
-    }
-
-    fn make_key_from_parts(prefix: EntityKeyPrefix, key: &[u8]) -> Bytes {
-        let mut full_key = BytesMut::with_capacity(key.len() + ENTITY_PREFIX_SIZE);
-        full_key.put_slice(&prefix);
-        full_key.put_slice(key);
-        full_key.freeze()
-    }
 }
 
 impl EntityStorageProviderFromLoadable for InMemoryEntityStorage {
@@ -60,7 +46,7 @@ impl EntityStorageProviderFromLoadable for InMemoryEntityStorage {
 impl EntityStorageProvider for InMemoryEntityStorage {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(None);
@@ -78,7 +64,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
     {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(None);
@@ -93,7 +79,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let mut map = self.data.entry(prefix).or_default();
         map.insert(Bytes::copy_from_slice(key), value.into_bytes());
@@ -103,7 +89,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
 
     fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         if let Some(mut map) = self.data.get_mut(&prefix) {
             map.remove(key);
@@ -114,7 +100,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
         let (prefix, key) =
-            Self::extract_key_parts(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
         let Some(map) = self.data.get(&prefix) else {
             return Ok(false);
@@ -138,9 +124,11 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             return Ok(Box::new(std::iter::empty()));
         };
 
-        Ok(Box::new(InMemoryKeyIterator::new(map, prefix, |iter| {
-            iter.keys()
-        })))
+        Ok(Box::new(InMemoryEntityKeyBytesIterator::new(
+            map,
+            prefix,
+            |iter| iter.keys(),
+        )))
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
@@ -155,9 +143,11 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             return Ok(Box::new(std::iter::empty()));
         };
 
-        Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
-            iter.iter()
-        })))
+        Ok(Box::new(InMemoryEntityBytesIterator::new(
+            map,
+            prefix,
+            |iter| iter.iter(),
+        )))
     }
 
     fn iter_range(
@@ -173,11 +163,11 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
         let start = match start {
             Bound::Included(key) => Bound::Included(Bytes::copy_from_slice(
-                key.strip_prefix(&prefix)
+                key.strip_prefix(prefix.as_ref())
                     .ok_or(EntityStorageError::InvalidKeyFormat)?,
             )),
             Bound::Excluded(key) => Bound::Excluded(Bytes::copy_from_slice(
-                key.strip_prefix(&prefix)
+                key.strip_prefix(prefix.as_ref())
                     .ok_or(EntityStorageError::InvalidKeyFormat)?,
             )),
             Bound::Unbounded => Bound::Unbounded,
@@ -187,14 +177,18 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             return Ok(Box::new(std::iter::empty()));
         };
 
-        Ok(Box::new(InMemoryIterator::new(map, prefix, |iter| {
-            let start = match &start {
-                Bound::Included(key) => Bound::Included(key),
-                Bound::Excluded(key) => Bound::Excluded(key),
-                Bound::Unbounded => Bound::Unbounded,
-            };
-            iter.range(start, Bound::Unbounded)
-        })))
+        Ok(Box::new(InMemoryEntityBytesIterator::new(
+            map,
+            prefix,
+            |iter| {
+                let start = match &start {
+                    Bound::Included(key) => Bound::Included(key),
+                    Bound::Excluded(key) => Bound::Excluded(key),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                iter.range(start, Bound::Unbounded)
+            },
+        )))
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -218,7 +212,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         };
 
         Ok(Box::new(
-            InMemoryIterator::new(map, prefix, |iter| iter.iter())
+            InMemoryEntityBytesIterator::new(map, prefix, |iter| iter.iter())
                 .map(move |res| res.and_then(|(k, e)| f(k.as_ref(), e.as_ref()))),
         ))
     }
@@ -243,7 +237,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
 }
 
 #[ouroboros::self_referencing]
-struct InMemoryKeyIterator<'a> {
+struct InMemoryEntityKeyBytesIterator<'a> {
     entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
     prefix: EntityKeyPrefix,
     #[covariant]
@@ -251,23 +245,20 @@ struct InMemoryKeyIterator<'a> {
     iter: SkipMapKeys<'this, Bytes, Bytes>,
 }
 
-impl<'a> Iterator for InMemoryKeyIterator<'a> {
+impl<'a> Iterator for InMemoryEntityKeyBytesIterator<'a> {
     type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let prefix = *self.borrow_prefix();
         self.with_iter_mut(|iter| {
-            iter.next().map(|key| {
-                Ok(BytesOrSlice::from(
-                    InMemoryEntityStorage::make_key_from_parts(prefix, key.as_ref()),
-                ))
-            })
+            iter.next()
+                .map(|key| Ok(BytesOrSlice::from(prefix.join(key.as_ref()))))
         })
     }
 }
 
 #[ouroboros::self_referencing]
-struct InMemoryIterator<'a> {
+struct InMemoryEntityBytesIterator<'a> {
     entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
     prefix: EntityKeyPrefix,
     #[covariant]
@@ -275,7 +266,7 @@ struct InMemoryIterator<'a> {
     iter: SkipMapIter<'this, Bytes, Bytes>,
 }
 
-impl<'a> Iterator for InMemoryIterator<'a> {
+impl<'a> Iterator for InMemoryEntityBytesIterator<'a> {
     type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -283,10 +274,7 @@ impl<'a> Iterator for InMemoryIterator<'a> {
         self.with_iter_mut(|iter| {
             iter.next().map(|(key, bytes)| {
                 Ok((
-                    BytesOrSlice::from(InMemoryEntityStorage::make_key_from_parts(
-                        prefix,
-                        key.as_ref(),
-                    )),
+                    BytesOrSlice::from(prefix.join(key.as_ref())),
                     BytesOrSlice::from(bytes),
                 ))
             })

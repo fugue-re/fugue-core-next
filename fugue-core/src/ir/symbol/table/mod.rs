@@ -13,6 +13,9 @@ use crate::storage::entities::{
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
+pub(crate) const ATTRIBUTE_SYMBOL_CACHE_SIZE: &str = "storage.entities.symbol.cache_size";
+pub(crate) const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
 mod persistent;
 mod transient;
 
@@ -127,14 +130,14 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> SymbolId {
+    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
         match self {
-            Self::Persistent(table) => table.preview_id(offset),
-            Self::Transient(table) => table.preview_id(offset),
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
         }
     }
 
-    pub(crate) fn append_index_writes(
+    pub(crate) fn append_stage_writes(
         &self,
         id: SymbolId,
         entry: Option<&SymbolEntry>,
@@ -142,12 +145,12 @@ impl SymbolTable {
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         if let Self::Persistent(table) = self {
-            table.append_mutation_writes(id, entry, previous, writes)?;
+            table.append_stage_writes(id, entry, previous, writes)?;
         }
         Ok(())
     }
 
-    pub(crate) fn append_allocator_writes(
+    pub(crate) fn append_stage_transition_writes(
         &self,
         reservations: &[SymbolId],
         releases: &[SymbolId],
@@ -156,7 +159,7 @@ impl SymbolTable {
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         if let Self::Persistent(table) = self {
-            table.append_allocator_writes(reservations, releases, added, removed, writes)?;
+            table.append_stage_transition_writes(reservations, releases, added, removed, writes)?;
         }
         Ok(())
     }
@@ -186,10 +189,10 @@ impl SymbolTable {
         id: SymbolId,
         entry: SymbolEntry,
         previous: Option<&SymbolIndexState>,
-        encoded_len: usize,
+        encoded_size: usize,
     ) {
         match self {
-            Self::Persistent(table) => table.publish_upsert(id, entry, encoded_len),
+            Self::Persistent(table) => table.publish_upsert(id, entry, encoded_size),
             Self::Transient(table) => table.publish_upsert(id, entry, previous),
         }
     }
@@ -207,7 +210,7 @@ impl SymbolTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.flush(),
+            Self::Persistent(table) => table.flush(),
             Self::Transient(_) => Ok(()),
         }
     }
@@ -222,24 +225,26 @@ impl SymbolTable {
         let address = address.into();
         let symbol = symbol.into();
         match self {
-            Self::Persistent(p) => p.insert(index, address, symbol, properties),
-            Self::Transient(t) => Ok(t.insert(index, address, symbol, properties)),
+            Self::Persistent(table) => table.insert(index, address, symbol, properties),
+            Self::Transient(table) => Ok(table.insert(index, address, symbol, properties)),
         }
     }
 
     pub fn get(
         &self,
         symbol: impl AsRef<str>,
-    ) -> Option<Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_>> {
+    ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
-            Self::Persistent(p) => p.get(symbol).map(|iter| {
-                Box::new(iter.map(|(id, entry)| (id, EntityRef::cached(entry))))
-                    as Box<dyn Iterator<Item = _>>
-            }),
-            Self::Transient(t) => t.get(symbol).map(|iter| {
-                Box::new(iter.map(|(id, entry)| (id, EntityRef::borrowed(entry))))
-                    as Box<dyn Iterator<Item = _>>
-            }),
+            Self::Persistent(table) => Box::new(
+                table
+                    .get(symbol)
+                    .map(|(id, entry)| (id, EntityRef::cached(entry))),
+            ),
+            Self::Transient(table) => Box::new(
+                table
+                    .get(symbol)
+                    .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
+            ),
         }
     }
 
@@ -253,10 +258,10 @@ impl SymbolTable {
         symbol: impl AsRef<str>,
     ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p
+            Self::Persistent(table) => Ok(table
                 .try_get_first(symbol)?
                 .map(|(id, entry)| (id, EntityRef::cached(entry)))),
-            Self::Transient(t) => Ok(t
+            Self::Transient(table) => Ok(table
                 .get_first(symbol)
                 .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
         }
@@ -269,15 +274,15 @@ impl SymbolTable {
 
     pub fn try_get_by_id(&self, id: SymbolId) -> Result<Option<SymbolRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
     pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         match self {
-            Self::Persistent(p) => p.get_id_by_index(index),
-            Self::Transient(t) => t.get_id_by_index(index),
+            Self::Persistent(table) => table.get_id_by_index(index),
+            Self::Transient(table) => table.get_id_by_index(index),
         }
     }
 
@@ -296,8 +301,8 @@ impl SymbolTable {
         f: impl FnOnce(&mut SymbolEntry) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_id(id, f),
-            Self::Transient(t) => Ok(t.modify_by_id(id, f)),
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
         }
     }
 
@@ -311,10 +316,10 @@ impl SymbolTable {
         index: SymbolIndex,
     ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p
+            Self::Persistent(table) => Ok(table
                 .try_get_by_index(index)?
                 .map(|(id, entry)| (id, EntityRef::cached(entry)))),
-            Self::Transient(t) => Ok(t
+            Self::Transient(table) => Ok(table
                 .get_by_index(index)
                 .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
         }
@@ -326,12 +331,14 @@ impl SymbolTable {
     ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         let address = address.into();
         match self {
-            Self::Persistent(p) => Box::new(
-                p.get_by_address(address)
+            Self::Persistent(table) => Box::new(
+                table
+                    .get_by_address(address)
                     .map(|(id, entry)| (id, EntityRef::cached(entry))),
             ),
-            Self::Transient(t) => Box::new(
-                t.get_by_address(address)
+            Self::Transient(table) => Box::new(
+                table
+                    .get_by_address(address)
                     .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
             ),
         }
@@ -351,10 +358,10 @@ impl SymbolTable {
     ) -> Result<Option<(SymbolId, SymbolRef<'_>)>, EntityStorageError> {
         let address = address.into();
         match self {
-            Self::Persistent(p) => Ok(p
+            Self::Persistent(table) => Ok(table
                 .try_get_first_by_address(address)?
                 .map(|(id, entry)| (id, EntityRef::cached(entry)))),
-            Self::Transient(t) => Ok(t
+            Self::Transient(table) => Ok(table
                 .get_first_by_address(address)
                 .map(|(id, entry)| (id, EntityRef::borrowed(entry)))),
         }
@@ -362,34 +369,38 @@ impl SymbolTable {
 
     pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
         match self {
-            Self::Persistent(p) => p.contains(symbol),
-            Self::Transient(t) => t.contains(symbol),
+            Self::Persistent(table) => table.contains(symbol),
+            Self::Transient(table) => table.contains(symbol),
         }
     }
 
-    pub fn contains_index(&self, index: SymbolIndex) -> bool {
+    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
         match self {
-            Self::Persistent(p) => p.contains_index(index),
-            Self::Transient(t) => t.contains_index(index),
+            Self::Persistent(table) => table.contains_by_index(index),
+            Self::Transient(table) => table.contains_by_index(index),
         }
     }
 
-    pub fn contains_address(&self, address: impl Into<Address>) -> bool {
+    pub fn contains_by_address(&self, address: impl Into<Address>) -> bool {
         let address = address.into();
         match self {
-            Self::Persistent(p) => p.contains_address(address),
-            Self::Transient(t) => t.contains_address(address),
+            Self::Persistent(table) => table.contains_by_address(address),
+            Self::Transient(table) => table.contains_by_address(address),
         }
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
-            Self::Persistent(p) => {
-                Box::new(p.iter().map(|(id, entry)| (id, EntityRef::cached(entry))))
-            }
-            Self::Transient(t) => {
-                Box::new(t.iter().map(|(id, entry)| (id, EntityRef::borrowed(entry))))
-            }
+            Self::Persistent(table) => Box::new(
+                table
+                    .iter()
+                    .map(|(id, entry)| (id, EntityRef::cached(entry))),
+            ),
+            Self::Transient(table) => Box::new(
+                table
+                    .iter()
+                    .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
+            ),
         }
     }
 
@@ -398,12 +409,14 @@ impl SymbolTable {
         selector: SymbolTableSelector,
     ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(
-                p.iter_by_selector(selector)
+            Self::Persistent(table) => Box::new(
+                table
+                    .iter_by_selector(selector)
                     .map(|(id, entry)| (id, EntityRef::cached(entry))),
             ),
-            Self::Transient(t) => Box::new(
-                t.iter_by_selector(selector)
+            Self::Transient(table) => Box::new(
+                table
+                    .iter_by_selector(selector)
                     .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
             ),
         }
@@ -411,12 +424,14 @@ impl SymbolTable {
 
     pub fn iter_by_address(&self) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(
-                p.iter_by_address()
+            Self::Persistent(table) => Box::new(
+                table
+                    .iter_by_address()
                     .map(|(id, entry)| (id, EntityRef::cached(entry))),
             ),
-            Self::Transient(t) => Box::new(
-                t.iter_by_address()
+            Self::Transient(table) => Box::new(
+                table
+                    .iter_by_address()
                     .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
             ),
         }
@@ -430,12 +445,14 @@ impl SymbolTable {
         R: RangeBounds<Address>,
     {
         match self {
-            Self::Persistent(p) => Box::new(
-                p.range_by_address(range)
+            Self::Persistent(table) => Box::new(
+                table
+                    .range_by_address(range)
                     .map(|(id, entry)| (id, EntityRef::cached(entry))),
             ),
-            Self::Transient(t) => Box::new(
-                t.range_by_address(range)
+            Self::Transient(table) => Box::new(
+                table
+                    .range_by_address(range)
                     .map(|(id, entry)| (id, EntityRef::borrowed(entry))),
             ),
         }
@@ -445,12 +462,14 @@ impl SymbolTable {
         &self,
     ) -> Box<dyn Iterator<Item = (SymbolIndex, SymbolId, SymbolRef<'_>)> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(
-                p.iter_by_index()
+            Self::Persistent(table) => Box::new(
+                table
+                    .iter_by_index()
                     .map(|(index, id, entry)| (index, id, EntityRef::cached(entry))),
             ),
-            Self::Transient(t) => Box::new(
-                t.iter_by_index()
+            Self::Transient(table) => Box::new(
+                table
+                    .iter_by_index()
                     .map(|(index, id, entry)| (index, id, EntityRef::borrowed(entry))),
             ),
         }
@@ -458,15 +477,15 @@ impl SymbolTable {
 
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Persistent(p) => p.is_empty(),
-            Self::Transient(t) => t.is_empty(),
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Persistent(p) => p.len(),
-            Self::Transient(t) => t.len(),
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
         }
     }
 
@@ -477,8 +496,8 @@ impl SymbolTable {
 
     pub fn try_remove(&mut self, symbol: impl AsRef<str>) -> Result<usize, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.remove(symbol),
-            Self::Transient(t) => Ok(t.remove(symbol)),
+            Self::Persistent(table) => table.remove(symbol),
+            Self::Transient(table) => Ok(table.remove(symbol)),
         }
     }
 
@@ -493,8 +512,8 @@ impl SymbolTable {
     ) -> Result<usize, EntityStorageError> {
         let address = address.into();
         match self {
-            Self::Persistent(p) => p.remove_by_address(address),
-            Self::Transient(t) => Ok(t.remove_by_address(address)),
+            Self::Persistent(table) => table.remove_by_address(address),
+            Self::Transient(table) => Ok(table.remove_by_address(address)),
         }
     }
 
@@ -505,8 +524,8 @@ impl SymbolTable {
 
     pub fn try_remove_by_id(&mut self, id: SymbolId) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.remove_by_id(id),
-            Self::Transient(t) => Ok(t.remove_by_id(id)),
+            Self::Persistent(table) => table.remove_by_id(id),
+            Self::Transient(table) => Ok(table.remove_by_id(id)),
         }
     }
 
@@ -517,8 +536,8 @@ impl SymbolTable {
 
     pub fn try_remove_by_index(&mut self, index: SymbolIndex) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.remove_by_index(index),
-            Self::Transient(t) => Ok(t.remove_by_index(index)),
+            Self::Persistent(table) => table.remove_by_index(index),
+            Self::Transient(table) => Ok(table.remove_by_index(index)),
         }
     }
 }
@@ -556,7 +575,7 @@ mod test {
     }
 
     #[test]
-    fn test_persistent_free_list_and_referent_merge() {
+    fn persistent_free_list_and_referent_merge() {
         let mut table = persistent_table();
         let sel = SymbolTableSelector::new(0);
 
@@ -634,7 +653,7 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn test_persistent_reopen_sqlite() {
+    fn persistent_reopen_sqlite() {
         let sel = SymbolTableSelector::new(0);
         let dir = TempDir::new().unwrap();
 
@@ -682,6 +701,6 @@ mod test {
         assert_eq!(reloaded.len(), 2);
         assert!(reloaded.get_first("beta").is_some());
         assert!(reloaded.get_first("alpha").is_none());
-        assert!(reloaded.contains_address(Address::from(0x3000u32)));
+        assert!(reloaded.contains_by_address(Address::from(0x3000u32)));
     }
 }

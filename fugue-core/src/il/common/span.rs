@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::il::common::verify::StructureError;
 use crate::il::common::{IlError, IlIndexRange};
 use crate::ir::Address;
 
@@ -99,6 +100,24 @@ impl IlSourceSpan {
 
         Ok(true)
     }
+
+    pub(crate) fn verify(spans: &[Self], node_count: usize) -> Result<(), StructureError> {
+        let mut previous_end = 0usize;
+
+        for span in spans {
+            span.destination.verify_bounds(node_count)?;
+
+            if span.destination.start() < previous_end {
+                return Err(StructureError::OverlappingSourceSpan {
+                    node: span.destination.start() as u32,
+                });
+            }
+
+            previous_end = span.destination.end();
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -126,6 +145,25 @@ impl IlParentSpan {
 
     pub const fn contains_destination(&self, node: usize) -> bool {
         self.destination.start() <= node && node < self.destination.end()
+    }
+
+    pub(crate) fn verify(spans: &[Self], node_count: usize) -> Result<(), StructureError> {
+        let mut previous_end = 0usize;
+
+        for span in spans {
+            span.destination.verify_bounds(node_count)?;
+            span.source.verify_bounds(usize::MAX)?;
+
+            if span.destination.start() < previous_end {
+                return Err(StructureError::OverlappingParentSpan {
+                    node: span.destination.start() as u32,
+                });
+            }
+
+            previous_end = span.destination.end();
+        }
+
+        Ok(())
     }
 
     pub const fn contains_source(&self, node: usize) -> bool {

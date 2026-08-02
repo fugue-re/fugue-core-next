@@ -1,14 +1,16 @@
+use std::mem::size_of;
+
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlError, IlExprId, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId,
     IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan,
 };
-use crate::il::ecode::format::ECodeIrDisplay;
 use crate::il::ecode::{ECodeExpr, ECodeStmt};
 use crate::il::pcode::RegisterId;
 use crate::ir::{Address, FunctionId};
 use crate::storage::entities::schema::ENTITY_IL_ECODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::types::EstimateSize;
 
 pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
 
@@ -25,19 +27,31 @@ pub struct ECodeIr {
     statement_operands: Vec<IlExprId>,
 }
 
+struct ECodeIrParts {
+    metadata: IlMetadata,
+    graph: IlGraph,
+    source_spans: Vec<IlSourceSpan>,
+    parent_spans: Vec<IlParentSpan>,
+    expressions: Vec<ECodeExpr>,
+    expression_operands: Vec<IlExprId>,
+    statements: Vec<ECodeStmt>,
+    statement_operands: Vec<IlExprId>,
+    call_preserved_registers: Vec<RegisterId>,
+}
+
 impl ECodeIr {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        metadata: IlMetadata,
-        graph: IlGraph,
-        source_spans: Vec<IlSourceSpan>,
-        parent_spans: Vec<IlParentSpan>,
-        expressions: Vec<ECodeExpr>,
-        expression_operands: Vec<IlExprId>,
-        statements: Vec<ECodeStmt>,
-        statement_operands: Vec<IlExprId>,
-        mut call_preserved_registers: Vec<RegisterId>,
-    ) -> Self {
+    fn new(parts: ECodeIrParts) -> Self {
+        let ECodeIrParts {
+            metadata,
+            graph,
+            source_spans,
+            parent_spans,
+            expressions,
+            expression_operands,
+            statements,
+            statement_operands,
+            mut call_preserved_registers,
+        } = parts;
         call_preserved_registers.sort_unstable();
         call_preserved_registers.dedup();
         Self {
@@ -105,24 +119,26 @@ impl ECodeIr {
         statement.operands().slice(&self.statement_operands)
     }
 
-    pub const fn display(&self) -> ECodeIrDisplay<'_> {
-        ECodeIrDisplay::new(self)
-    }
-
     pub fn statements_for_source(
         &self,
         address: Address,
-    ) -> impl Iterator<Item = (usize, &ECodeStmt)> + '_ {
+    ) -> impl Iterator<Item = (IlOpId, &ECodeStmt)> + '_ {
         self.source_spans
             .iter()
-            .filter(move |run| run.address() == address)
-            .flat_map(move |run| {
-                let start = run.destination().start();
-                run.destination()
+            .filter(move |span| span.address() == address)
+            .flat_map(move |span| {
+                let start = span.destination().start();
+                span.destination()
                     .slice(&self.statements)
                     .iter()
                     .enumerate()
-                    .map(move |(index, statement)| (start + index, statement))
+                    .map(move |(index, statement)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("statement count fits the operation id space"),
+                            statement,
+                        )
+                    })
             })
     }
 
@@ -164,6 +180,40 @@ impl IlArtefact for ECodeIr {
 
     fn graph(&self) -> &IlGraph {
         &self.graph
+    }
+}
+
+impl EstimateSize for ECodeIr {
+    fn estimate_size(&self) -> usize {
+        [
+            self.graph.estimate_size(),
+            self.call_preserved_registers
+                .capacity()
+                .saturating_mul(size_of::<RegisterId>()),
+            self.source_spans
+                .capacity()
+                .saturating_mul(size_of::<IlSourceSpan>()),
+            self.parent_spans
+                .capacity()
+                .saturating_mul(size_of::<IlParentSpan>()),
+            self.expressions
+                .capacity()
+                .saturating_mul(size_of::<ECodeExpr>()),
+            self.expression_operands
+                .capacity()
+                .saturating_mul(size_of::<IlExprId>()),
+            self.statements
+                .capacity()
+                .saturating_mul(size_of::<ECodeStmt>()),
+            self.statement_operands
+                .capacity()
+                .saturating_mul(size_of::<IlExprId>()),
+        ]
+        .into_iter()
+        .fold(
+            size_of::<Self>().saturating_sub(size_of::<IlGraph>()),
+            usize::saturating_add,
+        )
     }
 }
 
@@ -244,21 +294,21 @@ impl ECodeBuilder {
     pub(crate) fn build(self, cancellation: &CancellationToken) -> Result<ECodeIr, IlError> {
         cancellation.check()?;
 
-        let mut body = ECodeIr::new(
-            self.metadata,
-            self.graph,
-            self.source_spans,
-            self.parent_spans,
-            self.expressions,
-            self.expression_operands.into_values(),
-            self.statements,
-            self.statement_operands.into_values(),
-            self.call_preserved_registers,
-        );
+        let mut ir = ECodeIr::new(ECodeIrParts {
+            metadata: self.metadata,
+            graph: self.graph,
+            source_spans: self.source_spans,
+            parent_spans: self.parent_spans,
+            expressions: self.expressions,
+            expression_operands: self.expression_operands.into_values(),
+            statements: self.statements,
+            statement_operands: self.statement_operands.into_values(),
+            call_preserved_registers: self.call_preserved_registers,
+        });
 
-        body.shrink_to_fit();
+        ir.shrink_to_fit();
 
-        Ok(body)
+        Ok(ir)
     }
 }
 
@@ -296,14 +346,14 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&body).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ir).unwrap();
         let decoded = rkyv::from_bytes::<ECodeIr, rkyv::rancor::Error>(&bytes).unwrap();
 
-        assert!(body.verify().is_ok());
-        assert_eq!(body.expressions().len(), 1);
-        assert_eq!(body.statements().len(), 1);
-        assert_eq!(decoded, body);
+        assert!(ir.verify().is_ok());
+        assert_eq!(ir.expressions().len(), 1);
+        assert_eq!(ir.statements().len(), 1);
+        assert_eq!(decoded, ir);
     }
 
     #[test]
@@ -311,28 +361,28 @@ mod test {
         let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
         let address = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let other = Address::new(AddressSpaceId::new(1), 0x2000u64);
-        let body = ECodeIr::new(
+        let ir = ECodeIr::new(ECodeIrParts {
             metadata,
-            IlGraph::default(),
-            vec![
+            graph: IlGraph::default(),
+            source_spans: vec![
                 IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1),
                 IlSourceSpan::new(IlIndexRange::new(1, 2).unwrap(), other, 0, 1),
             ],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![
+            parent_spans: Vec::new(),
+            expressions: Vec::new(),
+            expression_operands: Vec::new(),
+            statements: vec![
                 ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
                 ECodeStmt::new(ECodeStmtOpcode::Trap, IlIndexRange::EMPTY, None, None, None),
             ],
-            Vec::new(),
-            Vec::new(),
-        );
+            statement_operands: Vec::new(),
+            call_preserved_registers: Vec::new(),
+        });
 
-        let statements = body.statements_for_source(address).collect::<Vec<_>>();
+        let statements = ir.statements_for_source(address).collect::<Vec<_>>();
 
         assert_eq!(statements.len(), 1);
-        assert_eq!(statements[0].0, 0);
+        assert_eq!(statements[0].0, IlOpId::try_from_index(0).unwrap());
         assert_eq!(statements[0].1.opcode(), ECodeStmtOpcode::Trap);
     }
 
@@ -370,10 +420,10 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert!(matches!(
-            body.verify(),
+            ir.verify(),
             Err(VerifyError::Il(IlError::MissingComponent { .. }))
         ));
     }
@@ -397,10 +447,10 @@ mod test {
             .push_expression(ECodeExpr::new(ECodeExprOpcode::Load, 8, operands, 0, None))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert!(matches!(
-            body.verify(),
+            ir.verify(),
             Err(VerifyError::Il(IlError::MissingComponent { .. }))
         ));
     }
@@ -408,12 +458,12 @@ mod test {
     #[test]
     fn ecode_verifier_rejects_non_preceding_expression_operand() {
         let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
-        let body = ECodeIr::new(
+        let ir = ECodeIr::new(ECodeIrParts {
             metadata,
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            vec![
+            graph: IlGraph::default(),
+            source_spans: Vec::new(),
+            parent_spans: Vec::new(),
+            expressions: vec![
                 ECodeExpr::new(
                     ECodeExprOpcode::Copy,
                     64,
@@ -423,14 +473,14 @@ mod test {
                 ),
                 ECodeExpr::new(ECodeExprOpcode::Constant, 64, IlIndexRange::EMPTY, 1, None),
             ],
-            vec![IlExprId::try_from_index(1).unwrap()],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+            expression_operands: vec![IlExprId::try_from_index(1).unwrap()],
+            statements: Vec::new(),
+            statement_operands: Vec::new(),
+            call_preserved_registers: Vec::new(),
+        });
 
         assert!(matches!(
-            body.verify(),
+            ir.verify(),
             Err(VerifyError::InvalidOperandOrdering { expression: 0 })
         ));
     }

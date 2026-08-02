@@ -1,17 +1,76 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use smallvec::SmallVec;
+use smallvec::{IntoIter, SmallVec};
 
-use super::super::{
-    AnalysisPhase, Degradation, DegradationEvent, DegradationReport, Priority, WorkCause,
-};
+use super::super::{AnalysisPhase, Priority, WorkCause};
 use crate::ir::{Address, AddressRange, AddressRangeSet, ProblemScope, RawAddress};
 use crate::storage::segments::space::AddressSpaceId;
 
 pub(crate) const MAX_WORK_ITEMS_PER_ANALYSER: usize = 4096;
 pub(crate) const MAX_WORK_ITEM_CAUSES: usize = 256;
 pub(crate) const WORK_SLICE_BYTES: u64 = 1 << 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(unknown_lints, sorted_enum_variants)]
+pub(crate) enum Degradation {
+    CausesMerged,
+    RangesCollapsed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DegradationEvent {
+    kind: Degradation,
+    scope: ProblemScope,
+}
+
+impl DegradationEvent {
+    pub(crate) fn new(kind: Degradation, scope: ProblemScope) -> Self {
+        Self { kind, scope }
+    }
+
+    pub(crate) fn kind(&self) -> Degradation {
+        self.kind
+    }
+
+    pub(crate) fn scope(&self) -> ProblemScope {
+        self.scope
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DegradationReport {
+    events: SmallVec<[DegradationEvent; 2]>,
+}
+
+impl DegradationReport {
+    pub(crate) fn push(&mut self, event: DegradationEvent) {
+        if let Some(existing) = self
+            .events
+            .iter_mut()
+            .find(|existing| existing.kind == event.kind)
+        {
+            existing.scope = existing.scope.covering(event.scope);
+        } else {
+            self.events.push(event);
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        for event in other.events {
+            self.push(event);
+        }
+    }
+}
+
+impl IntoIterator for DegradationReport {
+    type IntoIter = IntoIter<[DegradationEvent; 2]>;
+    type Item = DegradationEvent;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(unknown_lints, sorted_enum_variants)]
@@ -443,14 +502,55 @@ impl AnalysisWorkQueue {
 
 #[cfg(test)]
 mod test {
-    use super::{AnalysisWorkQueue, MAX_WORK_ITEMS_PER_ANALYSER, WORK_SLICE_BYTES};
+    use super::{
+        AnalysisWorkQueue, Degradation, DegradationEvent, DegradationReport,
+        MAX_WORK_ITEMS_PER_ANALYSER, WORK_SLICE_BYTES,
+    };
     use crate::engine::change::{ChangeKinds, Revision};
-    use crate::engine::{AnalysisPhase, Degradation, Priority, WorkCause};
+    use crate::engine::{AnalysisPhase, Priority, WorkCause};
     use crate::ir::{Address, AddressRange, AddressRangeSet, ProblemScope};
     use crate::storage::segments::space::AddressSpaceId;
 
     fn queue_with(analysers: usize) -> AnalysisWorkQueue {
         AnalysisWorkQueue::with_analysers(analysers)
+    }
+
+    #[test]
+    fn degradation_reports_are_bounded_by_kind_and_coarsen_scope() {
+        let first = AddressSpaceId::from(0u8);
+        let second = AddressSpaceId::from(1u8);
+        let mut report = DegradationReport::default();
+
+        report.push(DegradationEvent::new(
+            Degradation::CausesMerged,
+            ProblemScope::Range(AddressRange::new(first, 0x1000u64.into(), 0x1fffu64.into())),
+        ));
+        report.push(DegradationEvent::new(
+            Degradation::CausesMerged,
+            ProblemScope::Range(AddressRange::new(first, 0x3000u64.into(), 0x3fffu64.into())),
+        ));
+        report.push(DegradationEvent::new(
+            Degradation::CausesMerged,
+            ProblemScope::Range(AddressRange::new(
+                second,
+                0x1000u64.into(),
+                0x1fffu64.into(),
+            )),
+        ));
+        report.push(DegradationEvent::new(
+            Degradation::RangesCollapsed,
+            ProblemScope::AddressSpace(first),
+        ));
+
+        let events = report.into_iter().collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| {
+            event.kind() == Degradation::CausesMerged && event.scope() == ProblemScope::Global
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind() == Degradation::RangesCollapsed
+                && event.scope() == ProblemScope::AddressSpace(first)
+        }));
     }
 
     #[test]
@@ -730,10 +830,10 @@ mod test {
         }
 
         assert!(degradations.iter().any(|event| {
-            event.kind == Degradation::CausesMerged && event.scope == ProblemScope::Global
+            event.kind() == Degradation::CausesMerged && event.scope() == ProblemScope::Global
         }));
         assert!(degradations.iter().any(|event| {
-            event.kind == Degradation::RangesCollapsed && event.scope == ProblemScope::Global
+            event.kind() == Degradation::RangesCollapsed && event.scope() == ProblemScope::Global
         }));
 
         let mut drained = AddressRangeSet::new();

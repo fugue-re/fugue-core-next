@@ -11,11 +11,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ir::cfg::FlowKind;
 use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexHeader};
 use crate::storage::EntityStorage;
-#[cfg(test)]
-use crate::storage::entities::schema::ENTITY_PREFIX_SIZE;
 use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
-    make_key,
 };
 use crate::storage::entities::{
     Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, EntityWrite,
@@ -461,6 +458,35 @@ pub struct ReferenceIndex {
     backing: ReferenceIndexBacking,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReferenceMutation {
+    encoded_size: usize,
+    key: ReferenceKey,
+    reference: Option<Reference>,
+}
+
+impl ReferenceMutation {
+    pub(crate) fn new(
+        key: ReferenceKey,
+        reference: Option<Reference>,
+        encoded_size: usize,
+    ) -> Self {
+        Self {
+            encoded_size,
+            key,
+            reference,
+        }
+    }
+
+    pub(crate) fn key(&self) -> ReferenceKey {
+        self.key
+    }
+
+    pub(crate) fn reference(&self) -> Option<Reference> {
+        self.reference
+    }
+}
+
 #[derive(Clone)]
 enum ReferenceIndexBacking {
     Persistent {
@@ -571,8 +597,8 @@ impl ReferenceIndex {
         })
     }
 
-    pub(crate) fn is_transient(&self) -> bool {
-        matches!(self.backing, ReferenceIndexBacking::Transient(_))
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self.backing, ReferenceIndexBacking::Persistent { .. })
     }
 
     fn persistent(&self) -> Option<PersistentReferenceIndex<'_>> {
@@ -600,8 +626,8 @@ impl ReferenceIndex {
                 forward, inverse, ..
             } => {
                 let record = ReferenceRecord::of(reference);
-                forward.try_put(forward_key, record)?;
-                inverse.try_put(inverse_key, record)?;
+                forward.try_insert(forward_key, record)?;
+                inverse.try_insert(inverse_key, record)?;
             }
             ReferenceIndexBacking::Transient(index) => {
                 index.write().insert(*reference);
@@ -658,25 +684,25 @@ impl ReferenceIndex {
 
     pub(crate) fn encode_mutation(
         key: ReferenceKey,
-        reference: Option<&Reference>,
-    ) -> Result<(usize, [EntityWrite; 2]), EntityStorageError> {
-        let forward = make_key::<ReferenceKey, ReferenceRecord>(&key);
+        reference: Option<Reference>,
+    ) -> Result<(ReferenceMutation, [EntityWrite; 2]), EntityStorageError> {
+        let forward = ReferenceRecord::ID.key_for(&key);
         let inverse_key = InverseReferenceKey::new(key.target(), key.from());
-        let inverse = make_key::<InverseReferenceKey, ReferenceRecord>(&inverse_key);
+        let inverse = ReferenceRecord::ID.key_for(&inverse_key);
         let Some(reference) = reference else {
             return Ok((
-                0,
+                ReferenceMutation::new(key, None, 0),
                 [EntityWrite::remove(forward), EntityWrite::remove(inverse)],
             ));
         };
 
-        let record = ReferenceRecord::of(reference);
+        let record = ReferenceRecord::of(&reference);
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(&record).map_err(EntityStorageError::encode)?;
         let encoded = Bytes::from_owner(encoded);
-        let encoded_len = encoded.len();
+        let encoded_size = encoded.len();
         Ok((
-            encoded_len,
+            ReferenceMutation::new(key, Some(reference), encoded_size),
             [
                 EntityWrite::insert(forward, encoded.clone()),
                 EntityWrite::insert(inverse, encoded),
@@ -684,23 +710,25 @@ impl ReferenceIndex {
         ))
     }
 
-    pub(crate) fn publish_mutations(
-        &self,
-        mutations: impl IntoIterator<Item = (ReferenceKey, Option<Reference>, usize)>,
-    ) {
+    pub(crate) fn publish_mutations(&self, mutations: impl IntoIterator<Item = ReferenceMutation>) {
         match &self.backing {
             ReferenceIndexBacking::Persistent {
                 forward,
                 inverse: inverse_index,
                 ..
             } => {
-                for (key, reference, encoded_len) in mutations {
+                for mutation in mutations {
+                    let ReferenceMutation {
+                        encoded_size,
+                        key,
+                        reference,
+                    } = mutation;
                     let inverse = InverseReferenceKey::new(key.target(), key.from());
                     match reference {
                         Some(reference) => {
                             let record = ReferenceRecord::of(&reference);
-                            forward.publish_put(key, record, encoded_len);
-                            inverse_index.publish_put(inverse, record, encoded_len);
+                            forward.publish_insert(key, record, encoded_size);
+                            inverse_index.publish_insert(inverse, record, encoded_size);
                         }
                         None => {
                             forward.publish_remove(&key);
@@ -711,7 +739,8 @@ impl ReferenceIndex {
             }
             ReferenceIndexBacking::Transient(index) => {
                 let mut index = index.write();
-                for (key, reference, _) in mutations {
+                for mutation in mutations {
+                    let ReferenceMutation { key, reference, .. } = mutation;
                     match reference {
                         Some(reference) => index.insert(reference),
                         None => index.remove(key.from(), key.target()),
@@ -985,8 +1014,11 @@ impl ReferenceIndex {
             .with_origin(record.origin())
     }
 }
+
 #[cfg(test)]
 mod test {
+    use std::io;
+
     use fugue_lifter::runtime::pcode::Inputs;
 
     use super::*;
@@ -996,9 +1028,13 @@ mod test {
         AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
         PCodeBuilder,
     };
-    use crate::ir::{CodeBlock, CodeBlockTableError, Function, FunctionId, FunctionTable, Insn};
-    use crate::lifter::{Language, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::ir::{
+        CodeBlockTable, FunctionId, FunctionTable, FunctionTableStage, IncompleteCodeBlock,
+        IncompleteFunction, Insn, InsnEntry,
+    };
+    use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::entities::InMemoryEntityStorage;
+    use crate::storage::entities::schema::ENTITY_PREFIX_SIZE;
     use crate::storage::segments::space::AddressSpaceId;
 
     fn address(space: u16, offset: u64) -> Address {
@@ -1131,10 +1167,9 @@ mod test {
         let mid = ReferenceTarget::from(address(0, 0x20));
         let high = ReferenceTarget::from(address(1, 0x00));
         let from = Address::MINIMUM;
-        let low_encoded = make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, low));
-        let mid_encoded = make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, mid));
-        let high_encoded =
-            make_key::<ReferenceKey, ReferenceRecord>(&ReferenceKey::new(from, high));
+        let low_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, low));
+        let mid_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, mid));
+        let high_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, high));
 
         assert!(low_encoded < mid_encoded);
         assert!(mid_encoded < high_encoded);
@@ -1447,14 +1482,17 @@ mod test {
         ];
         let read_modify_write = Insn::from_resolved_flow(language, insn_address, 1, &operations)?;
 
+        let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
-        let block_id = blocks.insert(insn_address, |id, address| {
-            CodeBlock::try_new(id, address, 1, vec![read_modify_write])
-                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
-        })?;
-
-        let function = Function::new(FunctionId::default(), insn_address)
-            .with_blocks([(insn_address, block_id)]);
+        let function = insert_function_insns(
+            &mut functions,
+            &mut blocks,
+            insn_address,
+            vec![read_modify_write],
+        )?;
+        let function = functions
+            .get_by_id(function)
+            .expect("materialised function must exist");
         let derived = function.flow_references(&blocks);
 
         assert!(derived.iter().all(|reference| !reference.is_data()));
@@ -1515,15 +1553,37 @@ mod test {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let block_id = blocks.insert(entry, |id, address| {
-            CodeBlock::try_new(id, address, instructions.len().max(1), instructions)
-                .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))
-        })?;
-
-        functions.insert(entry, |id, address| {
-            Ok(Function::new(id, address).with_blocks([(address, block_id)]))
-        })?;
+        insert_function_insns(functions, blocks, entry, instructions)?;
 
         Ok(())
+    }
+
+    fn insert_function_insns(
+        functions: &mut FunctionTable,
+        blocks: &mut CodeBlockTable,
+        entry: Address,
+        insns: Vec<Insn>,
+    ) -> Result<FunctionId, Box<dyn std::error::Error>> {
+        let mut function = IncompleteFunction::new(entry);
+        let ids = insns
+            .into_iter()
+            .map(|insn| match function.insn_entry(insn.address()) {
+                InsnEntry::Vacant(entry) => entry.insert(insn),
+                InsnEntry::Occupied(entry) => entry.id(),
+            })
+            .collect::<Vec<_>>();
+        let block =
+            IncompleteCodeBlock::try_new(entry, ids.len().max(1), ids, ContextSet::default())
+                .ok_or_else(|| io::Error::other("block construction failed"))?;
+        function.push_block(block);
+
+        let mut stage = FunctionTableStage::default();
+        let function = function.prepare_materialisation()?;
+        let mutation = functions.stage_materialisation(blocks, &mut stage, function)?;
+        let id = mutation.id();
+        let (prepared, writes) = stage.prepare(functions, blocks)?;
+        assert!(writes.is_empty());
+        prepared.publish(functions, blocks);
+        Ok(id)
     }
 }

@@ -99,7 +99,7 @@ pub struct AddressSpace {
     kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
-    generation: Revision,
+    revision: Revision,
 }
 
 impl AddressSpace {
@@ -113,7 +113,7 @@ impl AddressSpace {
             kind,
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
-            generation: Revision::default(),
+            revision: Revision::default(),
         }
     }
 
@@ -121,12 +121,12 @@ impl AddressSpace {
         self.id
     }
 
-    pub(crate) fn generation(&self) -> Revision {
-        self.generation
+    pub(crate) fn revision(&self) -> Revision {
+        self.revision
     }
 
     fn touch(&mut self) {
-        self.generation = self.generation.next();
+        self.revision = self.revision.next();
     }
 
     pub fn base(&self) -> Option<AddressSpaceId> {
@@ -368,11 +368,6 @@ impl AddressSpace {
             None => Box::new(self.iter()),
         }
     }
-
-    pub fn clear(&mut self) {
-        self.submaps.clear();
-        self.priority_list.clear();
-    }
 }
 
 #[cfg(test)]
@@ -445,11 +440,9 @@ mod test {
         let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let props = SegmentProperties::default();
 
-        // Add two overlapping mappings: mapping 1 at 0x1000-0x2000, mapping 2 at 0x1500-0x2500
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x1000, props);
         space.add_mapping_top(make_ref(2), 0x1500u64, 0x1000, props);
 
-        // Mapping 2 is on top, so it should be visible at 0x1800
         assert_eq!(
             space
                 .find_containing(0x1800u64)
@@ -459,11 +452,8 @@ mod test {
             SegmentMappingId::new(2)
         );
 
-        // Deprioritise mapping 2 (move to bottom of priority list)
         space.deprioritise(SegmentMappingId::new(2));
 
-        // Rebuild the range where mapping 2 exists (0x1500-0x2500)
-        // Mappings in priority order (lowest first): mapping 2, then mapping 1
         let mappings = vec![
             (make_ref(2), RawAddress::from(0x1500u64), 0x1000u64, props),
             (make_ref(1), RawAddress::from(0x1000u64), 0x1000u64, props),
@@ -474,7 +464,6 @@ mod test {
             mappings,
         );
 
-        // Now mapping 1 should be visible at 0x1800 (overlap region)
         assert_eq!(
             space
                 .find_containing(0x1800u64)
@@ -484,7 +473,6 @@ mod test {
             SegmentMappingId::new(1)
         );
 
-        // Mapping 1 should still be visible at 0x1200 (non-overlap region)
         assert_eq!(
             space
                 .find_containing(0x1200u64)
@@ -494,7 +482,6 @@ mod test {
             SegmentMappingId::new(1)
         );
 
-        // Mapping 2 should be visible at 0x2100 (non-overlap region, past mapping 1's end)
         assert_eq!(
             space
                 .find_containing(0x2100u64)
@@ -510,10 +497,8 @@ mod test {
         let mut space = AddressSpace::new(AddressSpaceId::new(0));
         let props = SegmentProperties::default();
 
-        // Add a mapping at 0x1000-0x3000
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
 
-        // Rebuild only 0x1500-0x2000 with a new mapping
         let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000u64, props)];
         space.rebuild_range(
             RawAddress::from(0x1500u64),
@@ -521,7 +506,6 @@ mod test {
             mappings,
         );
 
-        // Mapping 1 should still be at 0x1200 (before rebuild range)
         assert_eq!(
             space
                 .find_containing(0x1200u64)
@@ -531,7 +515,6 @@ mod test {
             SegmentMappingId::new(1)
         );
 
-        // Mapping 2 should be at 0x1800 (inside rebuild range)
         assert_eq!(
             space
                 .find_containing(0x1800u64)
@@ -541,7 +524,6 @@ mod test {
             SegmentMappingId::new(2)
         );
 
-        // Mapping 1 should still be at 0x2500 (after rebuild range)
         assert_eq!(
             space
                 .find_containing(0x2500u64)

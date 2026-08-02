@@ -22,10 +22,10 @@ pub enum AnalysisError {
     Cancelled(#[from] control::Cancelled),
     #[error("analysis pass forms a cyclic dependency: {0} -> {1}")]
     CyclicDependency(String, String),
-    #[error("analysis pass configuration failed: {0}")]
-    PassConfigurationFailed(String, anyhow::Error),
-    #[error("analysis pass failed: {0}")]
-    PassFailed(String, anyhow::Error),
+    #[error("analysis pass configuration `{name}` failed: {error}")]
+    PassConfigurationFailed { name: String, error: anyhow::Error },
+    #[error("analysis pass `{name}` failed: {error}")]
+    PassFailed { name: String, error: anyhow::Error },
     #[error("analysis pass not found: {0}")]
     PassNotFound(String),
 }
@@ -39,14 +39,20 @@ impl AnalysisError {
     where
         E: StdError + Send + Sync + 'static,
     {
-        AnalysisError::PassFailed(name.into(), error.into())
+        AnalysisError::PassFailed {
+            name: name.into(),
+            error: error.into(),
+        }
     }
 
     pub fn pass_configuration_failed<E>(name: impl Into<String>, error: E) -> Self
     where
         E: StdError + Send + Sync + 'static,
     {
-        AnalysisError::PassConfigurationFailed(name.into(), error.into())
+        AnalysisError::PassConfigurationFailed {
+            name: name.into(),
+            error: error.into(),
+        }
     }
 }
 

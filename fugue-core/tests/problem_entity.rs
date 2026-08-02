@@ -24,10 +24,12 @@ fn transient_project() -> Result<Project, Box<dyn Error>> {
 #[test]
 fn recording_a_problem_emits_a_record() -> Result<(), Box<dyn Error>> {
     let mut project = transient_project()?;
-    let address = project.entry().ok_or("fixture must have an entry point")?;
+    let address = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
     let changes = transaction.commit()?;
 
     assert!(
@@ -52,11 +54,13 @@ fn problem_survives_reopen_and_is_queryable() -> Result<(), Box<dyn Error>> {
         "tests/ls.elf",
         attributes.clone(),
     )?;
-    let address = project.entry().ok_or("fixture must have an entry point")?;
+    let address = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::SwitchUnresolved)?;
-    transaction.insert_problem(address, ProblemKind::WorkCausesMerged)?;
+    transaction.add_problem(address, ProblemKind::SwitchUnresolved)?;
+    transaction.add_problem(address, ProblemKind::WorkCausesMerged)?;
     transaction.commit()?;
     drop(project);
 
@@ -90,7 +94,7 @@ fn repeated_problems_accumulate_attempts() -> Result<(), Box<dyn Error>> {
 
     for _ in 0..3 {
         let mut transaction = project.transaction("test");
-        transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+        transaction.add_problem(address, ProblemKind::DecodeFailed)?;
         transaction.commit()?;
     }
 
@@ -111,7 +115,7 @@ fn semantic_input_change_starts_a_fresh_attempt_budget() -> Result<(), Box<dyn E
 
     for _ in 0..3 {
         let mut transaction = project.transaction("test");
-        transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+        transaction.add_problem(address, ProblemKind::DecodeFailed)?;
         transaction.commit()?;
     }
 
@@ -138,7 +142,7 @@ fn semantic_input_change_starts_a_fresh_attempt_budget() -> Result<(), Box<dyn E
     );
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
     transaction.commit()?;
 
     assert_eq!(
@@ -160,7 +164,7 @@ fn unrelated_input_changes_do_not_reset_attempts() -> Result<(), Box<dyn Error>>
 
     for _ in 0..3 {
         let mut transaction = project.transaction("test");
-        transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+        transaction.add_problem(address, ProblemKind::DecodeFailed)?;
         transaction.commit()?;
     }
 
@@ -169,7 +173,7 @@ fn unrelated_input_changes_do_not_reset_attempts() -> Result<(), Box<dyn Error>>
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
     transaction.commit()?;
 
     assert_eq!(
@@ -190,8 +194,8 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
     let address = Address::from(0x1800u64);
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
-    transaction.insert_problem(address, ProblemKind::WorkCausesMerged)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::WorkCausesMerged)?;
     transaction.commit()?;
 
     assert_eq!(project.problems().len(), 2);
@@ -213,7 +217,7 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
     );
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
     transaction.commit()?;
 
     assert_eq!(
@@ -243,7 +247,7 @@ fn rejecting_a_transaction_preserves_the_previous_problem_state() -> Result<(), 
     let address = Address::from(0x3000u64);
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(address, ProblemKind::DecodeFailed)?;
+    transaction.add_problem(address, ProblemKind::DecodeFailed)?;
     drop(transaction);
 
     assert!(

@@ -158,7 +158,9 @@ fn coverage_survives_reopen() -> Result<(), Box<dyn Error>> {
         "tests/ls.elf",
         attributes.clone(),
     )?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
@@ -211,7 +213,9 @@ fn renamed_analyser_reprocesses_persisted_coverage() -> Result<(), Box<dyn Error
         "tests/ls.elf",
         old_attributes,
     )?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
 

@@ -1,4 +1,4 @@
-use std::mem;
+use std::mem::{self, size_of};
 
 use rustc_hash::FxHashMap;
 
@@ -7,7 +7,6 @@ use crate::il::common::{
     IlArtefact, IlError, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId, IlPool,
     IlSchemaVersion, IlSourceSpan,
 };
-use crate::il::pcode::format::{PCodeIrDisplay, PCodeSourceDisplay};
 use crate::il::pcode::{
     AddressAnnotationRole, AddressAnnotationValue, PCodeAddressContext, PCodeError, PCodeLocation,
     PCodeLocationId, PCodeOp, PCodeOpcode,
@@ -20,6 +19,7 @@ use crate::lifter::{Language, Op, RawPCodeOp, Varnode};
 use crate::storage::entities::schema::ENTITY_IL_PCODE_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::EstimateSize;
 
 pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
 
@@ -87,7 +87,7 @@ impl PCodeIr {
         &self.operations
     }
 
-    pub fn operands(&self) -> &[PCodeLocationId] {
+    pub fn operation_operands(&self) -> &[PCodeLocationId] {
         &self.operands
     }
 
@@ -106,22 +106,14 @@ impl PCodeIr {
         self.locations.get(id.index())
     }
 
-    pub fn operation_operands(&self, operation: &PCodeOp) -> &[PCodeLocationId] {
+    pub fn operation_operands_for(&self, operation: &PCodeOp) -> &[PCodeLocationId] {
         operation.operands().slice(&self.operands)
-    }
-
-    pub const fn display(&self) -> PCodeIrDisplay<'_> {
-        PCodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
-        PCodeSourceDisplay::new(self, address)
     }
 
     pub fn operations_for_source(
         &self,
         address: Address,
-    ) -> impl Iterator<Item = (usize, &PCodeOp)> + '_ {
+    ) -> impl Iterator<Item = (IlOpId, &PCodeOp)> + '_ {
         self.source_spans
             .iter()
             .filter(move |span| span.address() == address)
@@ -131,7 +123,13 @@ impl PCodeIr {
                     .slice(&self.operations)
                     .iter()
                     .enumerate()
-                    .map(move |(index, operation)| (start + index, operation))
+                    .map(move |(index, operation)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("operation count fits the operation id space"),
+                            operation,
+                        )
+                    })
             })
     }
 
@@ -146,12 +144,12 @@ impl PCodeIr {
                     _ => return None,
                 };
                 let from = self.source_span_for(index)?;
-                let pointer = self.operation_operands(operation).first().copied()?;
+                let pointer = self.operation_operands_for(operation).first().copied()?;
                 let pointer = self.location(pointer)?;
                 if !pointer.is_constant() {
                     return None;
                 }
-                let space = operation.effect_space()?;
+                let space = operation.address_space()?;
                 Some(
                     Reference::data(from.address(), Address::new(space, pointer.offset()), props)
                         .with_origin(ReferenceOrigin::Derived),
@@ -201,6 +199,34 @@ impl IlArtefact for PCodeIr {
 
     fn graph(&self) -> &IlGraph {
         &self.graph
+    }
+}
+
+impl EstimateSize for PCodeIr {
+    fn estimate_size(&self) -> usize {
+        [
+            self.graph.estimate_size(),
+            self.source_spans
+                .capacity()
+                .saturating_mul(size_of::<IlSourceSpan>()),
+            self.locations
+                .capacity()
+                .saturating_mul(size_of::<PCodeLocation>()),
+            self.operations
+                .capacity()
+                .saturating_mul(size_of::<PCodeOp>()),
+            self.operands
+                .capacity()
+                .saturating_mul(size_of::<PCodeLocationId>()),
+            self.targets
+                .capacity()
+                .saturating_mul(size_of::<Location>()),
+        ]
+        .into_iter()
+        .fold(
+            size_of::<Self>().saturating_sub(size_of::<IlGraph>()),
+            usize::saturating_add,
+        )
     }
 }
 
@@ -350,7 +376,7 @@ impl PCodeBuilder {
                 .map(|output| PCodeLocation::from_varnode(language, output))
                 .map(|location| self.push_location(location))
                 .transpose()?;
-            let effect_space = self.effect_space_for(opcode, operation_id, context)?;
+            let address_space = self.address_space_for(opcode, operation_id, context)?;
             let immediate = self.immediate_for(operation, opcode, operation_id, context)?;
 
             self.push_operation(PCodeOp::new(
@@ -358,7 +384,7 @@ impl PCodeBuilder {
                 output,
                 operands,
                 immediate,
-                effect_space,
+                address_space,
             ));
 
             ordinal += 1;
@@ -370,13 +396,13 @@ impl PCodeBuilder {
         Ok(())
     }
 
-    fn effect_space_for(
+    fn address_space_for(
         &self,
         opcode: PCodeOpcode,
         ordinal: IlOpId,
         context: &mut PCodeAddressContext<'_>,
     ) -> Result<Option<AddressSpaceId>, PCodeError> {
-        if !opcode.requires_effect_space() {
+        if !opcode.requires_address_space() {
             return Ok(None);
         }
 
@@ -396,7 +422,7 @@ impl PCodeBuilder {
         match operation.op() {
             Op::Load(space) | Op::Store(space) => Ok(u32::from(space)),
             Op::UserOp(user_op, _) => Ok(u32::from(user_op)),
-            _ if opcode.requires_target() => {
+            _ if opcode.requires_address() => {
                 match context.take(ordinal, AddressAnnotationRole::DirectTarget)? {
                     AddressAnnotationValue::DirectTarget(target) => {
                         self.push_target(target).map_err(PCodeError::from)
@@ -511,7 +537,7 @@ mod test {
     }
 
     #[test]
-    fn pcode_verify_rejects_effect_space_on_non_requiring_opcode() {
+    fn pcode_verify_rejects_address_space_on_non_requiring_opcode() {
         let mut builder = PCodeBuilder::new(language(), metadata(), IlGraph::default());
         let location = builder
             .push_location(PCodeLocation::new(
@@ -755,7 +781,7 @@ mod test {
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(ir.locations().len(), 1);
-        assert_eq!(ir.operands().len(), 1);
+        assert_eq!(ir.operation_operands().len(), 1);
     }
 
     #[test]
@@ -799,7 +825,7 @@ mod test {
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(ir.operations().len(), 1);
-        assert_eq!(ir.operands().len(), 3);
+        assert_eq!(ir.operation_operands().len(), 3);
         assert_eq!(ir.operations()[0].immediate(), 7);
     }
 
@@ -827,7 +853,7 @@ mod test {
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
-            ir.operations()[0].effect_space(),
+            ir.operations()[0].address_space(),
             Some(AddressSpaceId::new(9))
         );
         assert_eq!(

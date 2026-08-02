@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use rustc_hash::FxHashSet;
 use ustr::Ustr;
 
 use crate::ir::block::CodeBlockFlowCursor;
@@ -16,12 +17,15 @@ pub(crate) mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
 pub(crate) mod incomplete;
-pub(crate) use incomplete::{CodeBlockMaterialisation, FunctionInsnIndex, FunctionMaterialisation};
+pub(crate) use incomplete::{FunctionInsnIndex, FunctionMaterialisation};
 pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
 
 mod table;
+pub(crate) use table::{
+    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES, FunctionTableStage,
+    PreparedFunctionMutation,
+};
 pub use table::{FunctionMut, FunctionRef, FunctionTable, FunctionTableError};
-pub(crate) use table::FunctionTableStage;
 
 pub type FunctionId = Id<Function>;
 
@@ -112,8 +116,13 @@ impl Function {
         self.id
     }
 
-    pub fn set_id(&mut self, id: FunctionId) {
+    pub(crate) fn set_id(&mut self, id: FunctionId) {
         self.id = id;
+    }
+
+    pub fn with_id(mut self, id: FunctionId) -> Self {
+        self.set_id(id);
+        self
     }
 
     pub fn set_frame(&mut self, frame: FunctionFrame) {
@@ -129,7 +138,7 @@ impl Function {
         &self.frame
     }
 
-    pub fn update_name(&mut self, name: impl Into<Ustr>) {
+    pub fn set_name(&mut self, name: impl Into<Ustr>) {
         self.name = Some(name.into());
     }
 
@@ -142,10 +151,6 @@ impl Function {
     }
 
     pub fn entry(&self) -> Address {
-        self.entry
-    }
-
-    pub fn address(&self) -> Address {
         self.entry
     }
 
@@ -233,15 +238,223 @@ impl Function {
         self.edges.iter().copied()
     }
 
+    fn reachable_blocks(
+        &self,
+        entry: CodeBlockId,
+        boundary: CodeBlockId,
+    ) -> FxHashSet<CodeBlockId> {
+        let mut reachable = FxHashSet::default();
+        let mut pending = vec![entry];
+        while let Some(block) = pending.pop() {
+            if block == boundary || !reachable.insert(block) {
+                continue;
+            }
+            pending.extend(self.successors(block));
+        }
+        reachable
+    }
+
+    fn tail_call_sites_in(
+        &self,
+        blocks: &CodeBlockTable,
+        members: &FxHashSet<CodeBlockId>,
+    ) -> Vec<Address> {
+        let mut sites = Vec::new();
+        for (_, id) in self.blocks().filter(|(_, id)| members.contains(id)) {
+            let block = blocks
+                .get_by_id(id)
+                .expect("function block must exist in the code block table");
+            sites.extend(block.flow_targets().filter_map(|target| {
+                self.tail_call_sites
+                    .binary_search(&target.from())
+                    .is_ok()
+                    .then_some(target.from())
+            }));
+        }
+        sites.sort_unstable();
+        sites.dedup();
+        sites
+    }
+
+    fn unconditional_branch_sites_to(
+        &self,
+        blocks: &CodeBlockTable,
+        sources: &FxHashSet<CodeBlockId>,
+        target: Address,
+    ) -> Option<Vec<Address>> {
+        let mut sites = Vec::new();
+        for &source in sources {
+            let block = blocks
+                .get_by_id(source)
+                .expect("function block must exist in the code block table");
+            let before = sites.len();
+            sites.extend(block.flow_targets().filter_map(|flow| {
+                (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
+            }));
+            if sites.len() == before {
+                return None;
+            }
+        }
+        sites.sort_unstable();
+        sites.dedup();
+        Some(sites)
+    }
+
+    fn tail_call_sources_to(
+        &self,
+        blocks: &CodeBlockTable,
+        members: &FxHashSet<CodeBlockId>,
+        target: Address,
+    ) -> Vec<(CodeBlockId, Address)> {
+        let mut sources = Vec::new();
+        for (_, id) in self.blocks().filter(|(_, id)| members.contains(id)) {
+            let block = blocks
+                .get_by_id(id)
+                .expect("function block must exist in the code block table");
+            sources.extend(block.flow_targets().filter_map(|flow| {
+                (flow.kind() == FlowKind::Branch
+                    && flow.to() == target
+                    && self.tail_call_sites.binary_search(&flow.from()).is_ok())
+                .then_some((id, flow.from()))
+            }));
+        }
+        sources.sort_unstable();
+        sources.dedup();
+        sources
+    }
+
+    fn clear_body_analysis(&mut self) {
+        self.frame = FunctionFrame::default();
+        self.properties = FunctionProperties::NONE;
+    }
+
+    pub(crate) fn split_at_block(
+        &self,
+        new_entry: CodeBlockId,
+        blocks: &CodeBlockTable,
+    ) -> Option<(Self, Self)> {
+        let current_entry = self.entry_block()?;
+        if new_entry == current_entry || !self.blocks.iter().any(|(_, block)| *block == new_entry) {
+            return None;
+        }
+        let split_entry = blocks.get_by_id(new_entry)?.address();
+        let child_members = self.reachable_blocks(new_entry, current_entry);
+        let parent_reachable = self.reachable_blocks(current_entry, new_entry);
+        let exclusive_child = child_members
+            .difference(&parent_reachable)
+            .copied()
+            .collect::<FxHashSet<_>>();
+        let parent_members = self
+            .blocks()
+            .filter_map(|(_, block)| (!exclusive_child.contains(&block)).then_some(block))
+            .collect::<FxHashSet<_>>();
+
+        let parent_blocks = self
+            .blocks()
+            .filter(|(_, block)| parent_members.contains(block))
+            .collect::<Vec<_>>();
+        let child_blocks = self
+            .blocks()
+            .filter(|(_, block)| child_members.contains(block))
+            .collect::<Vec<_>>();
+        if parent_blocks.is_empty() || child_blocks.is_empty() {
+            return None;
+        }
+
+        let parent_edges = self
+            .edges()
+            .filter(|(source, target)| {
+                parent_members.contains(source) && parent_members.contains(target)
+            })
+            .collect::<Vec<_>>();
+        let child_edges = self
+            .edges()
+            .filter(|(source, target)| {
+                child_members.contains(source) && child_members.contains(target)
+            })
+            .collect::<Vec<_>>();
+        let parent_boundary_sources = self
+            .edges()
+            .filter_map(|(source, target)| {
+                (target == new_entry && parent_members.contains(&source)).then_some(source)
+            })
+            .collect::<FxHashSet<_>>();
+        let child_boundary_sources = self
+            .edges()
+            .filter_map(|(source, target)| {
+                (target == current_entry && child_members.contains(&source)).then_some(source)
+            })
+            .collect::<FxHashSet<_>>();
+        let parent_boundary =
+            self.unconditional_branch_sites_to(blocks, &parent_boundary_sources, split_entry)?;
+        let child_boundary =
+            self.unconditional_branch_sites_to(blocks, &child_boundary_sources, self.entry)?;
+
+        let mut parent_tail_calls = self.tail_call_sites_in(blocks, &parent_members);
+        parent_tail_calls.extend(parent_boundary);
+        let mut child_tail_calls = self.tail_call_sites_in(blocks, &child_members);
+        child_tail_calls.extend(child_boundary);
+
+        let mut parent = self
+            .clone()
+            .with_body(parent_blocks, parent_edges, Some(current_entry));
+        parent.clear_body_analysis();
+        parent.set_tail_call_sites(parent_tail_calls);
+        let mut child = Self::new(FunctionId::INVALID, split_entry)
+            .with_origin(self.origin)
+            .with_confidence(self.confidence)
+            .with_body(child_blocks, child_edges, Some(new_entry));
+        child.set_tail_call_sites(child_tail_calls);
+        Some((parent, child))
+    }
+
+    pub(crate) fn merge_with(&self, source: &Self, blocks: &CodeBlockTable) -> Option<Self> {
+        let target_entry = self.entry_block()?;
+        let source_entry = source.entry_block()?;
+        let mut members = self.blocks().chain(source.blocks()).collect::<Vec<_>>();
+        members.sort_unstable();
+        members.dedup();
+        let member_ids = members
+            .iter()
+            .map(|(_, block)| *block)
+            .collect::<FxHashSet<_>>();
+        let target_boundary = self.tail_call_sources_to(blocks, &member_ids, source.entry);
+        let source_boundary = source.tail_call_sources_to(blocks, &member_ids, self.entry);
+
+        let mut edges = self.edges().chain(source.edges()).collect::<Vec<_>>();
+        edges.extend(
+            target_boundary
+                .iter()
+                .map(|(block, _)| (*block, source_entry)),
+        );
+        edges.extend(
+            source_boundary
+                .iter()
+                .map(|(block, _)| (*block, target_entry)),
+        );
+        edges.sort_unstable();
+        edges.dedup();
+
+        let internalised = target_boundary
+            .iter()
+            .chain(&source_boundary)
+            .map(|(_, site)| *site)
+            .collect::<FxHashSet<_>>();
+        let mut tail_call_sites = self.tail_call_sites_in(blocks, &member_ids);
+        tail_call_sites.extend(source.tail_call_sites_in(blocks, &member_ids));
+        tail_call_sites.retain(|site| !internalised.contains(site));
+
+        let mut merged = self.clone().with_body(members, edges, Some(target_entry));
+        merged.clear_body_analysis();
+        merged.set_tail_call_sites(tail_call_sites);
+        Some(merged)
+    }
+
     pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
         self.tail_call_sites.clear();
         self.tail_call_sites.extend(sites);
         self.tail_call_sites.sort_unstable();
         self.tail_call_sites.dedup();
-    }
-
-    pub(crate) fn tail_call_sites(&self) -> impl ExactSizeIterator<Item = Address> + '_ {
-        self.tail_call_sites.iter().copied()
     }
 
     pub(crate) fn classify_flow_target(&self, mut target: FlowTarget) -> FlowTarget {
@@ -277,10 +490,14 @@ impl Function {
     }
 
     pub(crate) fn flow_references(&self, blocks: &CodeBlockTable) -> Vec<Reference> {
+        Self::flow_references_from(self.flow_targets(blocks))
+    }
+
+    fn flow_references_from(targets: impl IntoIterator<Item = FlowTarget>) -> Vec<Reference> {
         let mut coalesced = BTreeMap::<ReferenceKey, ReferenceProperties>::new();
 
-        for target in self
-            .flow_targets(blocks)
+        for target in targets
+            .into_iter()
             .filter(|target| target.kind().is_global())
         {
             let reference = Reference::from_flow(target.from(), target.to(), target.kind());

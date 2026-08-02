@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::{Language, LanguageError, LanguageId};
 use crate::registry::{self, Registration};
 

@@ -16,7 +16,7 @@ pub struct SegmentMappingView<'a> {
     mapping_ref: SegmentMappingRef,
     start: Address,
     size: u64,
-    mapping_version: Revision,
+    mapping_revision: Revision,
 }
 
 impl<'a> SegmentMappingView<'a> {
@@ -31,7 +31,7 @@ impl<'a> SegmentMappingView<'a> {
             mapping_ref: submap.mapping_ref(),
             start: submap.start(),
             size: submap.size(),
-            mapping_version: mapping.version(),
+            mapping_revision: mapping.revision(),
         }
     }
 
@@ -48,7 +48,7 @@ impl<'a> SegmentMappingView<'a> {
             mapping_ref,
             start,
             size,
-            mapping_version: mapping.version(),
+            mapping_revision: mapping.revision(),
         }
     }
 
@@ -90,7 +90,7 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.mapping.version() == self.mapping_version
+        self.mapping.revision() == self.mapping_revision
     }
 
     pub fn name(&self) -> &str {

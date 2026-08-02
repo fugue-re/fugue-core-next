@@ -26,8 +26,8 @@ impl ProblemTable {
         Ok(())
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> ProblemId {
-        self.index.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> ProblemId {
+        self.index.allocator.pending_id(offset)
     }
 
     pub(super) fn publish_upsert(&mut self, problem: Problem, is_new: bool) {
@@ -102,10 +102,10 @@ impl ProblemTable {
     }
 
     pub fn get(&self, address: Address, kind: ProblemKind) -> Option<&Problem> {
-        self.get_key(ProblemKey::new(address, kind))
+        self.get_by_key(ProblemKey::new(address, kind))
     }
 
-    pub fn get_key(&self, key: ProblemKey) -> Option<&Problem> {
+    pub fn get_by_key(&self, key: ProblemKey) -> Option<&Problem> {
         let id = self.index.id(key)?;
         self.get_by_id(id)
     }
@@ -145,10 +145,10 @@ impl ProblemTable {
     }
 
     pub fn remove(&mut self, address: Address, kind: ProblemKind) -> bool {
-        self.remove_key(ProblemKey::new(address, kind))
+        self.remove_by_key(ProblemKey::new(address, kind))
     }
 
-    pub fn remove_key(&mut self, key: ProblemKey) -> bool {
+    pub fn remove_by_key(&mut self, key: ProblemKey) -> bool {
         let Some(id) = self.index.id(key) else {
             return false;
         };

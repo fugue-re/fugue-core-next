@@ -2,14 +2,14 @@ use fugue_bv::BitVec;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use super::SwitchIntervalContext;
+use super::SwitchIntervalRecovery;
 use crate::il::common::IlValueId;
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, RawAddress};
 use crate::storage::AddressSpaceId;
 
-pub(crate) struct SwitchTargetEvaluator<'context, 'analysis> {
-    context: &'context SwitchIntervalContext<'analysis>,
+pub(super) struct SwitchTargetEvaluator<'context, 'analysis> {
+    context: &'context SwitchIntervalRecovery<'analysis>,
     space: AddressSpaceId,
     memo: FxHashMap<IlValueId, BitVec>,
     dependent: FxHashSet<IlValueId>,
@@ -24,8 +24,8 @@ enum EvaluationStep {
 }
 
 impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
-    pub(crate) fn new(
-        context: &'context SwitchIntervalContext<'analysis>,
+    pub(super) fn new(
+        context: &'context SwitchIntervalRecovery<'analysis>,
         space: AddressSpaceId,
     ) -> Self {
         Self {
@@ -37,7 +37,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
         }
     }
 
-    pub(crate) fn evaluate(
+    pub(super) fn evaluate(
         &mut self,
         target: IlValueId,
         index: IlValueId,
@@ -82,7 +82,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                             }
                             continue;
                         }
-                        for &operand in self.context.ssa.operation_operands(operation) {
+                        for &operand in self.context.ssa.operation_operands_for(operation) {
                             if !self.memo.contains_key(&operand) {
                                 self.stack.push(EvaluationStep::Evaluate(operand));
                             }
@@ -94,7 +94,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                         if self
                             .context
                             .ssa
-                            .operation_operands(operation)
+                            .operation_operands_for(operation)
                             .iter()
                             .any(|operand| self.dependent.contains(operand))
                         {
@@ -136,7 +136,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
             }
             opcode => {
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
-                for value in self.context.ssa.operation_operands(operation) {
+                for value in self.context.ssa.operation_operands_for(operation) {
                     operands.push(self.memo.get(value)?);
                 }
                 opcode.evaluate(operation.width(), &operands)

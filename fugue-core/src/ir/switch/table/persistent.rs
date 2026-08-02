@@ -53,8 +53,8 @@ impl SwitchTable {
         self.entries.flush()
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> SwitchId {
-        self.index.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> SwitchId {
+        self.index.allocator.pending_id(offset)
     }
 
     pub(super) fn publish_reservation(&mut self, id: SwitchId) {
@@ -70,12 +70,12 @@ impl SwitchTable {
         &mut self,
         switch: Switch,
         previous_function: Option<FunctionId>,
-        encoded_len: usize,
+        encoded_size: usize,
     ) {
         let id = switch.id();
         let branch = switch.branch();
         let function = switch.function();
-        self.entries.publish_put(id, switch, encoded_len);
+        self.entries.publish_insert(id, switch, encoded_size);
         if let Some(previous_function) = previous_function {
             self.index.remove(previous_function, branch);
         }
@@ -102,7 +102,7 @@ impl SwitchTable {
                 .try_get(&existing)?
                 .map(|previous| previous.function());
             let function = switch.function();
-            self.entries.try_put(existing, switch)?;
+            self.entries.try_insert(existing, switch)?;
             if let Some(previous_function) = previous_function {
                 self.index.remove(previous_function, branch);
             }
@@ -117,7 +117,7 @@ impl SwitchTable {
                 return Err(SwitchTableError::AddressMismatch);
             }
             let function = switch.function();
-            entries.try_put(id, switch)?;
+            entries.try_insert(id, switch)?;
             Ok(function)
         })?;
 
@@ -162,7 +162,7 @@ impl SwitchTable {
         let result = f(&mut switch);
         let function = switch.function();
 
-        self.entries.try_put(id, switch)?;
+        self.entries.try_insert(id, switch)?;
         self.index.remove(previous_function, branch);
         self.index.insert(id, function, branch);
 

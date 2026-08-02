@@ -4,8 +4,8 @@ use crate::il::common::{
     IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaValue,
-    ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaOpcode,
+    ECodeSsaValue, ECodeSsaValueKind,
 };
 
 pub(crate) struct ECodeSsaCompaction;
@@ -76,7 +76,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
                 continue;
             }
             let operand_start = value_operands.len();
-            for &operand in ir.operation_operands(operation) {
+            for &operand in ir.operation_operands_for(operation) {
                 value_operands.push(remap_value(operand));
             }
             let operands = IlIndexRange::new(operand_start, value_operands.len())
@@ -195,7 +195,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
 
         let metadata = *ir.metadata();
         let memory_domains = ir.memory_domains().to_vec();
-        *ir = ECodeSsaIr::new(
+        *ir = ECodeSsaIr::new(ECodeSsaIrParts {
             metadata,
             graph,
             source_spans,
@@ -207,7 +207,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
             operations,
             value_operands,
             memory_domains,
-            constants,
-        );
+            constant_storage: constants,
+        });
     }
 }

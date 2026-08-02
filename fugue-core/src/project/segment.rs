@@ -1,8 +1,9 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
-use crate::ir::{Address, AddressRange, RawAddress};
+use crate::ir::{Address, AddressRange};
 use crate::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance,
@@ -10,7 +11,13 @@ use crate::storage::segments::mapping::{
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
 
-type MappingPlacements = SmallVec<[(AddressSpaceId, (RawAddress, RawAddress)); 4]>;
+type MappingPlacements = SmallVec<[AddressRange; 4]>;
+
+#[derive(Clone, Copy)]
+struct MappingExtent {
+    start: Address,
+    size: u64,
+}
 
 #[derive(Clone, Copy)]
 struct ExistingMapping {
@@ -28,7 +35,7 @@ impl ExistingMapping {
     ) -> Result<Self, SegmentStorageError> {
         let mapping = storage
             .mapping(id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(id))?;
         Ok(Self {
             flags: mapping.flags(),
             kind: mapping.kind(),
@@ -70,12 +77,12 @@ impl SegmentMetadataStage {
         storage: &SegmentStorage,
         builder: SegmentMappingBuilder,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
-        if !storage.has_provider(builder.provider_id()) {
-            return Err(SegmentStorageError::backing_with("provider not found"));
+        if !storage.contains_provider(builder.provider_id()) {
+            return Err(SegmentStorageError::UnknownProvider(builder.provider_id()));
         }
         Self::validate_extent(builder.start(), builder.size())?;
 
-        let id = storage.preview_mapping_id(self.mapping_reservations)?;
+        let id = storage.pending_mapping_id(self.mapping_reservations)?;
         self.mapping_reservations = self
             .mapping_reservations
             .checked_add(1)
@@ -88,7 +95,7 @@ impl SegmentMetadataStage {
         &mut self,
         storage: &SegmentStorage,
     ) -> Result<AddressSpaceId, SegmentStorageError> {
-        let id = storage.preview_space_id(self.created_spaces.len())?;
+        let id = storage.pending_space_id(self.created_spaces.len())?;
         self.created_spaces.insert(id);
         Ok(id)
     }
@@ -150,7 +157,8 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
         start: Address,
     ) -> Result<(), SegmentStorageError> {
-        let size = self.mapping_extent(storage, id)?.1;
+        let extent = self.mapping_extent(storage, id)?;
+        let size = extent.size;
         Self::validate_extent(start, size)?;
         if let Some(builder) = self.created_mappings.get_mut(&id) {
             builder.set_start(start);
@@ -166,7 +174,7 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
         size: u64,
     ) -> Result<(), SegmentStorageError> {
-        let start = self.mapping_extent(storage, id)?.0;
+        let start = self.mapping_extent(storage, id)?.start;
         Self::validate_extent(start, size)?;
         if let Some(builder) = self.created_mappings.get_mut(&id) {
             builder.set_size(size);
@@ -221,11 +229,11 @@ impl SegmentMetadataStage {
         space: AddressSpaceId,
         id: SegmentMappingId,
     ) -> Result<Option<AddressRange>, SegmentStorageError> {
-        let (start, size) = self.mapping_extent(storage, id)?;
-        if size == 0 {
+        let extent = self.mapping_extent(storage, id)?;
+        if extent.size == 0 {
             return Ok(None);
         }
-        AddressRange::from_size(Address::new(space, start.raw_address()), size)
+        AddressRange::from_size(Address::new(space, extent.start.raw_address()), extent.size)
             .map(Some)
             .ok_or(SegmentStorageError::InvalidAddressRange)
     }
@@ -236,14 +244,12 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
     ) -> Result<MappingPlacements, SegmentStorageError> {
         if self.removed_mappings.contains(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
+            return Err(SegmentStorageError::UnknownMapping(id));
         }
-        let (start, size) = self.mapping_extent(storage, id)?;
-        if size == 0 {
+        let extent = self.mapping_extent(storage, id)?;
+        if extent.size == 0 {
             return Ok(SmallVec::new());
         }
-        let range =
-            AddressRange::from_size(start, size).ok_or(SegmentStorageError::InvalidAddressRange)?;
         let mut spaces = SmallVec::<[AddressSpaceId; 4]>::new();
 
         if !self.created_mappings.contains_key(&id) {
@@ -261,10 +267,16 @@ impl SegmentMetadataStage {
             }
         }
 
-        Ok(spaces
+        spaces
             .into_iter()
-            .map(|space| (space, (range.start(), range.end())))
-            .collect())
+            .map(|space| {
+                AddressRange::from_size(
+                    Address::new(space, extent.start.raw_address()),
+                    extent.size,
+                )
+                .ok_or(SegmentStorageError::InvalidAddressRange)
+            })
+            .collect()
     }
 
     pub(super) fn publish(self, storage: &mut SegmentStorage) {
@@ -327,7 +339,7 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
     ) -> Result<ExistingMapping, SegmentStorageError> {
         if self.removed_mappings.contains(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
+            return Err(SegmentStorageError::UnknownMapping(id));
         }
         self.updated_mappings
             .get(&id)
@@ -342,9 +354,9 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
     ) -> Result<&mut ExistingMapping, SegmentStorageError> {
         if self.removed_mappings.contains(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
+            return Err(SegmentStorageError::UnknownMapping(id));
         }
-        if let std::collections::btree_map::Entry::Vacant(entry) = self.updated_mappings.entry(id) {
+        if let Entry::Vacant(entry) = self.updated_mappings.entry(id) {
             entry.insert(ExistingMapping::from_storage(storage, id)?);
         }
         Ok(self
@@ -357,15 +369,21 @@ impl SegmentMetadataStage {
         &self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
-    ) -> Result<(Address, u64), SegmentStorageError> {
+    ) -> Result<MappingExtent, SegmentStorageError> {
         if self.removed_mappings.contains(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
+            return Err(SegmentStorageError::UnknownMapping(id));
         }
         if let Some(mapping) = self.created_mappings.get(&id) {
-            return Ok((mapping.start(), mapping.size()));
+            return Ok(MappingExtent {
+                start: mapping.start(),
+                size: mapping.size(),
+            });
         }
         let mapping = self.existing_mapping(storage, id)?;
-        Ok((mapping.start, mapping.size))
+        Ok(MappingExtent {
+            start: mapping.start,
+            size: mapping.size,
+        })
     }
 
     fn mapping_provenance(
@@ -374,7 +392,7 @@ impl SegmentMetadataStage {
         id: SegmentMappingId,
     ) -> Result<SegmentMappingProvenance, SegmentStorageError> {
         if self.removed_mappings.contains(&id) {
-            return Err(SegmentStorageError::backing_with("mapping not found"));
+            return Err(SegmentStorageError::UnknownMapping(id));
         }
         if let Some(mapping) = self.created_mappings.get(&id) {
             return Ok(mapping.provenance());
@@ -392,7 +410,7 @@ impl SegmentMetadataStage {
         if !self.created_spaces.contains(&space)
             && !storage.spaces().any(|candidate| candidate.id() == space)
         {
-            return Err(SegmentStorageError::backing_with("space not found"));
+            return Err(SegmentStorageError::UnknownSpace(space));
         }
         self.mapping_extent(storage, mapping)?;
 

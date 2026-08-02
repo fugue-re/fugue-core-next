@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{SsaConstruction, SsaDomain, SsaDomains};
+use super::{ECodeSsaConstruction, SsaDomain, SsaDomains};
 use crate::il::common::{IlBlockId, IlDominance, IlError, IlLevel};
 use crate::il::ecode::{ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
 use crate::il::pcode::{FlagId, RegisterId};
 
-impl SsaConstruction<'_, '_> {
+impl ECodeSsaConstruction<'_, '_> {
     pub(crate) fn discover_domains(&self) -> Result<SsaDomains, IlError> {
         let mut domains = SsaDomains::default();
 

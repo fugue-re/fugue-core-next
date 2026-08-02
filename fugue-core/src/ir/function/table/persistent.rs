@@ -2,19 +2,18 @@ use std::collections::BTreeSet;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::{FunctionTableError, PreparedFunctionEntry};
-use crate::ir::persistent::{PersistentIdAllocator, PersistentTable, append_insert, append_remove};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
 use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, RawAddress};
 use crate::storage::entities::schema::{
     ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_FUNCTION_OWNER_INDEX_ID, ENTITY_KEY_FUNCTION_OWNER_ID,
 };
 use crate::storage::entities::{
     CachedMut, CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorage,
-    EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker, schema,
+    EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -124,10 +123,9 @@ impl FunctionTable {
 
         for entry in entries.try_iter()? {
             let (id, function) = entry?;
-            append_insert(&mut writes, &function.entry(), &FunctionEntryRecord { id })?;
+            writes.insert_entity(&function.entry(), &FunctionEntryRecord { id })?;
             for (_, block) in function.blocks() {
-                append_insert(
-                    &mut writes,
+                writes.insert_entity(
                     &FunctionOwnerKey {
                         block,
                         function: id,
@@ -155,9 +153,9 @@ impl FunctionTable {
         self.entries.flush()
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> FunctionId {
+    pub(super) fn pending_id(&self, offset: usize) -> FunctionId {
         self.allocator
-            .preview_id(offset)
+            .pending_id(offset)
             .unwrap_or_else(|error| error.into_fatal())
     }
 
@@ -180,15 +178,12 @@ impl FunctionTable {
                         .as_ref()
                         .is_some_and(|function| function.entry() != previous))
             {
-                append_remove::<_, FunctionEntryRecord>(writes, &previous);
+                writes.remove_entity::<_, FunctionEntryRecord>(&previous);
             }
             match &entry.function {
                 Some(function) => {
-                    append_insert(
-                        writes,
-                        &function.entry(),
-                        &FunctionEntryRecord { id: entry.id },
-                    )?;
+                    writes
+                        .insert_entity(&function.entry(), &FunctionEntryRecord { id: entry.id })?;
                     if entry.previous.is_none() {
                         added += 1;
                     }
@@ -205,20 +200,16 @@ impl FunctionTable {
                 .iter()
                 .filter(|owner| !final_owners.contains(owner))
             {
-                append_remove::<_, FunctionOwnerRecord>(
-                    writes,
-                    &FunctionOwnerKey {
-                        block,
-                        function: *owner,
-                    },
-                );
+                writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
+                    block,
+                    function: *owner,
+                });
             }
             for owner in final_owners
                 .iter()
                 .filter(|owner| !previous.contains(owner))
             {
-                append_insert(
-                    writes,
+                writes.insert_entity(
                     &FunctionOwnerKey {
                         block,
                         function: *owner,
@@ -249,9 +240,9 @@ impl FunctionTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(super) fn publish_upsert(&self, function: Function, encoded_len: usize) {
+    pub(super) fn publish_upsert(&self, function: Function, encoded_size: usize) {
         self.entries
-            .publish_put(function.id(), function, encoded_len);
+            .publish_insert(function.id(), function, encoded_size);
     }
 
     pub(super) fn publish_remove(&self, id: FunctionId) {
@@ -269,7 +260,7 @@ impl FunctionTable {
         let previous = self.try_get_by_address(address)?;
         let id = previous
             .as_ref()
-            .map_or_else(|| self.preview_id(0), |function| function.id());
+            .map_or_else(|| self.pending_id(0), |function| function.id());
         let (function, value) = f(id, address)?;
         if function.entry() != address {
             return Err(FunctionTableError::AddressMismatch);
@@ -290,31 +281,27 @@ impl FunctionTable {
             .collect::<SmallVec<[_; 8]>>();
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(&function).map_err(EntityStorageError::encode)?;
-        let encoded_len = encoded.len();
+        let encoded_size = encoded.len();
         let mut writes = EntityWriteBatch::new();
         writes.push(EntityWrite::insert_archive(
-            schema::make_key::<FunctionId, Function>(&id),
+            Function::ID.key_for(&id),
             encoded,
         ));
-        append_insert(&mut writes, &address, &FunctionEntryRecord { id })?;
+        writes.insert_entity(&address, &FunctionEntryRecord { id })?;
         for block in previous_blocks
             .iter()
             .filter(|block| !blocks.contains(block))
         {
-            append_remove::<_, FunctionOwnerRecord>(
-                &mut writes,
-                &FunctionOwnerKey {
-                    block: *block,
-                    function: id,
-                },
-            );
+            writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
+                block: *block,
+                function: id,
+            });
         }
         for block in blocks
             .iter()
             .filter(|block| !previous_blocks.contains(block))
         {
-            append_insert(
-                &mut writes,
+            writes.insert_entity(
                 &FunctionOwnerKey {
                     block: *block,
                     function: id,
@@ -332,7 +319,7 @@ impl FunctionTable {
             .append_transition(&reservations, &[], added, 0, &mut writes)?;
         self.entries.flush()?;
         self.storage.apply_batch(&writes)?;
-        self.entries.publish_put(id, function, encoded_len);
+        self.entries.publish_insert(id, function, encoded_size);
         self.allocator.publish_transition(&reservations, added, 0);
         Ok((id, value))
     }
@@ -405,16 +392,13 @@ impl FunctionTable {
         drop(function);
 
         let mut writes = EntityWriteBatch::new();
-        append_remove::<_, Function>(&mut writes, &id);
-        append_remove::<_, FunctionEntryRecord>(&mut writes, &address);
+        writes.remove_entity::<_, Function>(&id);
+        writes.remove_entity::<_, FunctionEntryRecord>(&address);
         for block in blocks {
-            append_remove::<_, FunctionOwnerRecord>(
-                &mut writes,
-                &FunctionOwnerKey {
-                    block,
-                    function: id,
-                },
-            );
+            writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
+                block,
+                function: id,
+            });
         }
         self.allocator
             .append_transition(&[], &[id], 0, 1, &mut writes)?;

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use fugue_core::analysis::AnalysisPass;
-use fugue_core::analysis::control::CancellationToken;
-use fugue_core::analysis::function::FunctionRecovery;
+use fugue_core::engine::AnalysisEngine;
+use fugue_core::engine::change::ChangeRecord;
 use fugue_core::il::common::{
     IlArtefact as CoreIlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
@@ -25,6 +25,7 @@ use fugue_core::il::pcode::{
 };
 use fugue_core::ir::{Address as CoreAddress, FunctionId as CoreFunctionId};
 use fugue_core::project::Project as CoreProject;
+use fugue_core::queries::QueryReader;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -34,7 +35,8 @@ use crate::errors::{BindingError, project_error};
 
 #[pyclass(unsendable)]
 pub(crate) struct Project {
-    inner: CoreProject,
+    engine: AnalysisEngine,
+    reader: QueryReader,
 }
 
 impl Project {
@@ -43,6 +45,12 @@ impl Project {
             .parse()
             .map_err(|_| BindingError::invalid_level(level).into())
     }
+
+    fn from_core(inner: CoreProject) -> PyResult<Self> {
+        let engine = AnalysisEngine::new(inner).map_err(project_error)?;
+        let reader = engine.query_reader().map_err(project_error)?;
+        Ok(Self { engine, reader })
+    }
 }
 
 #[pymethods]
@@ -50,102 +58,108 @@ impl Project {
     #[staticmethod]
     fn from_binary(binary: &Binary) -> PyResult<Self> {
         let inner = CoreProject::new_transient(&binary.loader).map_err(project_error)?;
-        Ok(Self { inner })
+        Self::from_core(inner)
     }
 
     #[staticmethod]
     fn from_file(path: PathBuf) -> PyResult<Self> {
         let inner = CoreProject::from_file_transient(path).map_err(project_error)?;
-        Ok(Self { inner })
+        Self::from_core(inner)
     }
 
     #[getter]
-    fn revision(&self) -> u64 {
-        self.inner.revision().value()
+    fn revision(&self) -> PyResult<u64> {
+        self.reader
+            .revision()
+            .map(|revision| revision.value())
+            .map_err(project_error)
     }
 
-    fn functions(&self) -> Vec<Function> {
-        self.inner
+    fn functions(&self) -> PyResult<Vec<Function>> {
+        let project = self.reader.project().map_err(project_error)?;
+        Ok(project
             .functions()
             .iter()
             .map(|function| Function::from_core(function.id(), function.entry()))
-            .collect()
+            .collect())
     }
 
     fn recover_functions(&mut self) -> PyResult<usize> {
-        let before = self.inner.functions().len();
-        let mut recovery = FunctionRecovery::new();
-
-        recovery.analyse(&mut self.inner).map_err(project_error)?;
-
-        Ok(self.inner.functions().len().saturating_sub(before))
+        let before = self
+            .reader
+            .project()
+            .map_err(project_error)?
+            .functions()
+            .len();
+        self.engine.analyse().map_err(project_error)?;
+        let after = self
+            .reader
+            .project()
+            .map_err(project_error)?
+            .functions()
+            .len();
+        Ok(after.saturating_sub(before))
     }
 
     fn pcode(&self, function: &Function) -> PyResult<Option<PCodeIr>> {
-        self.inner
+        self.reader
             .pcode(function.id)
-            .map(|ir| ir.map(PCodeIr::from_core))
+            .map(|ir| ir.map(|ir| PCodeIr::from_core(Arc::unwrap_or_clone(ir))))
             .map_err(project_error)
     }
 
     fn ecode(&self, function: &Function) -> PyResult<Option<ECodeIr>> {
-        self.inner
+        self.reader
             .ecode(function.id)
-            .map(|ir| ir.map(ECodeIr::from_core))
+            .map(|ir| ir.map(|ir| ECodeIr::from_core(Arc::unwrap_or_clone(ir))))
             .map_err(project_error)
     }
 
     fn ecode_ssa(&self, function: &Function) -> PyResult<Option<ECodeSsaIr>> {
-        self.inner
+        self.reader
             .ecode_ssa(function.id)
-            .map(|ir| ir.map(ECodeSsaIr::from_core))
+            .map(|ir| ir.map(|ir| ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))))
             .map_err(project_error)
     }
 
     fn has_lifted(&self, function: &Function, level: &str) -> PyResult<bool> {
         let level = Self::parse_level(level)?;
+        let project = self.reader.project().map_err(project_error)?;
         match level {
-            CoreIlLevel::PCode => self.inner.pcode(function.id).map(|ir| ir.is_some()),
-            CoreIlLevel::ECode => self.inner.ecode(function.id).map(|ir| ir.is_some()),
-            CoreIlLevel::ECodeSsa => self.inner.ecode_ssa(function.id).map(|ir| ir.is_some()),
+            CoreIlLevel::PCode => project.pcode(function.id).map(|ir| ir.is_some()),
+            CoreIlLevel::ECode => project.ecode(function.id).map(|ir| ir.is_some()),
+            CoreIlLevel::ECodeSsa => project.ecode_ssa(function.id).map(|ir| ir.is_some()),
         }
         .map_err(project_error)
     }
 
     fn ensure_lifted(&mut self, function: &Function, level: &str) -> PyResult<bool> {
         let level = Self::parse_level(level)?;
-        let status = CancellationToken::default();
-        let mut transaction = self.inner.transaction("python");
-
-        match transaction.ensure_lifted(function.id, level, &status) {
-            Ok(materialised) => {
-                transaction.commit().map_err(project_error)?;
-                Ok(materialised)
-            }
-            Err(error) => {
-                if let Err(rollback) = transaction.rollback() {
-                    return Err(project_error(rollback));
-                }
-                Err(project_error(error))
-            }
-        }
+        let changes = self
+            .engine
+            .ensure_lifted(function.id, level)
+            .map_err(project_error)?;
+        Ok(changes
+            .records()
+            .iter()
+            .any(|record| matches!(record, ChangeRecord::LiftedMaterialised { .. })))
     }
 
     fn lifted_display(&self, function: &Function, level: &str) -> PyResult<Option<String>> {
         let level = Self::parse_level(level)?;
         match level {
             CoreIlLevel::PCode => self
-                .inner
+                .reader
                 .pcode(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
             CoreIlLevel::ECode => self
-                .inner
+                .reader
                 .ecode(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
             CoreIlLevel::ECodeSsa => self
-                .inner
+                .reader
                 .ecode_ssa(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error),
@@ -156,10 +170,12 @@ impl Project {
         &self,
         function: &Function,
     ) -> PyResult<Option<Vec<ECodeSsaValueUses>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).value_uses().map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .value_uses()
+            .map(Some)
     }
 
     fn ecode_ssa_uses_for_value(
@@ -167,24 +183,30 @@ impl Project {
         function: &Function,
         value: usize,
     ) -> PyResult<Option<Vec<ECodeSsaUse>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).uses_for_value(value).map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .uses_for_value(value)
+            .map(Some)
     }
 
     fn ecode_ssa_liveness(&self, function: &Function) -> PyResult<Option<Vec<ECodeSsaLiveness>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).liveness().map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .liveness()
+            .map(Some)
     }
 
     fn ecode_ssa_live_in(&self, function: &Function, block: usize) -> PyResult<Option<Vec<usize>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).live_in(block).map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .live_in(block)
+            .map(Some)
     }
 
     fn ecode_ssa_live_out(
@@ -192,17 +214,21 @@ impl Project {
         function: &Function,
         block: usize,
     ) -> PyResult<Option<Vec<usize>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).live_out(block).map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .live_out(block)
+            .map(Some)
     }
 
     fn ecode_ssa_dominance(&self, function: &Function) -> PyResult<Option<Vec<IlDominance>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir).dominance().map(Some)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
+            .dominance()
+            .map(Some)
     }
 
     fn ecode_ssa_dominance_frontier(
@@ -210,10 +236,10 @@ impl Project {
         function: &Function,
         block: usize,
     ) -> PyResult<Option<Vec<usize>>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
             .dominance_frontier(block)
             .map(Some)
     }
@@ -224,10 +250,10 @@ impl Project {
         dominator: usize,
         block: usize,
     ) -> PyResult<Option<bool>> {
-        let Some(ir) = self.inner.ecode_ssa(function.id).map_err(project_error)? else {
+        let Some(ir) = self.reader.ecode_ssa(function.id).map_err(project_error)? else {
             return Ok(None);
         };
-        ECodeSsaIr::from_core(ir)
+        ECodeSsaIr::from_core(Arc::unwrap_or_clone(ir))
             .dominates(dominator, block)
             .map(Some)
     }
@@ -428,7 +454,9 @@ impl PCodeIr {
     fn operations_for_source(&self, address: &Address) -> PyResult<Vec<PCodeOperation>> {
         self.inner
             .operations_for_source(address.inner())
-            .map(|(index, operation)| PCodeOperation::from_core(&self.inner, index, operation))
+            .map(|(index, operation)| {
+                PCodeOperation::from_core(&self.inner, index.index(), operation)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
     }
@@ -522,7 +550,7 @@ impl ECodeIr {
     fn statements_for_source(&self, address: &Address) -> PyResult<Vec<ECodeStmt>> {
         self.inner
             .statements_for_source(address.inner())
-            .map(|(index, statement)| ECodeStmt::from_core(&self.inner, index, statement))
+            .map(|(index, statement)| ECodeStmt::from_core(&self.inner, index.index(), statement))
             .collect::<Result<Vec<_>, _>>()
             .map_err(project_error)
     }
@@ -1031,7 +1059,7 @@ pub(crate) struct PCodeOperation {
     operands: Vec<usize>,
     output: Option<usize>,
     immediate: u32,
-    effect_space: Option<usize>,
+    address_space: Option<usize>,
     target: Option<Address>,
 }
 
@@ -1042,7 +1070,7 @@ impl PCodeOperation {
         operation: &CorePCodeOp,
     ) -> Result<Self, CoreIlError> {
         let operands = ir
-            .operation_operands(operation)
+            .operation_operands_for(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();
@@ -1062,7 +1090,7 @@ impl PCodeOperation {
             operands,
             output: operation.output().map(|output| output.index()),
             immediate: operation.immediate(),
-            effect_space: operation.effect_space().map(|space| space.index()),
+            address_space: operation.address_space().map(|space| space.index()),
             target,
         })
     }
@@ -1096,8 +1124,8 @@ impl PCodeOperation {
     }
 
     #[getter]
-    fn effect_space(&self) -> Option<usize> {
-        self.effect_space
+    fn address_space(&self) -> Option<usize> {
+        self.address_space
     }
 
     #[getter]
@@ -1601,7 +1629,7 @@ impl ECodeSsaOp {
         let results = operation.results().start()..operation.results().end();
         let results = results.collect();
         let operands = ir
-            .operation_operands(operation)
+            .operation_operands_for(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();

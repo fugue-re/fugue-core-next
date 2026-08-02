@@ -4,12 +4,30 @@ use crate::loader::Loadable;
 use crate::storage::entities::{EntityStorageProviderFromLoadable, SqliteEntityStorage};
 use crate::storage::segments::InMemorySegmentStorage;
 use crate::storage::{
-    EntityStorage, SegmentStorage, StorageContainer, StoragePersistence, StorageProvider,
-    StorageProviderError, TRANSIENT,
+    EntityStorage, PERSISTENT, PersistentStorageProvider, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError, TRANSIENT,
 };
 use crate::types::AttributeMap;
 
 pub struct SqliteProvider<const PERSISTENCE: StoragePersistence>;
+
+impl StorageProvider for SqliteProvider<PERSISTENT> {
+    fn from_storage(
+        path: impl AsRef<Path>,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        PersistentStorageProvider::<SqliteEntityStorage<PERSISTENT>>::from_storage(path, attributes)
+    }
+
+    fn from_loadable(
+        loadable: &impl Loadable,
+        attributes: &mut AttributeMap,
+    ) -> Result<StorageContainer, StorageProviderError> {
+        PersistentStorageProvider::<SqliteEntityStorage<PERSISTENT>>::from_loadable(
+            loadable, attributes,
+        )
+    }
+}
 
 impl StorageProvider for SqliteProvider<TRANSIENT> {
     fn from_storage(

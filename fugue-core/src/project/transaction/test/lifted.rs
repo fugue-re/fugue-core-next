@@ -107,6 +107,7 @@ fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Err
     let entry = writable_address(&project)?;
     let function = {
         let mut transaction = project.transaction("test");
+        transaction.write_bytes(entry, &[0x90])?;
         let function = transaction.add_function(incomplete_function(entry, 1))?;
         transaction.commit()?;
         function
@@ -118,6 +119,7 @@ fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Err
         transaction.materialise_lifted(body)?;
         transaction.commit()?;
     }
+    assert!(project.pcode(function)?.is_some());
 
     let engine = AnalysisEngine::new(project)?;
     let changes = engine.ensure_lifted(function, IlLevel::ECode)?;
@@ -146,6 +148,7 @@ fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Er
     let entry = writable_address(&project)?;
     let function = {
         let mut transaction = project.transaction("test");
+        transaction.write_bytes(entry, &[0x90])?;
         let function = transaction.add_function(incomplete_function(entry, 1))?;
         transaction.commit()?;
         function

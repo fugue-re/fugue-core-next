@@ -11,7 +11,7 @@ pub struct SegmentMappingCache {
 
 struct CachedMapping {
     submapping: SegmentSubMapping,
-    generation: Revision,
+    revision: Revision,
 }
 
 impl SegmentMappingCache {
@@ -28,7 +28,7 @@ impl SegmentMappingCache {
             .cached
             .as_ref()
             .filter(|cached| cached.submapping.contains(address))
-            && segments.space_generation(address.space()) == Some(cached.generation)
+            && segments.space_revision(address.space()) == Some(cached.revision)
             && let Ok(view) = segments.view_for_submapping(&cached.submapping)
         {
             return Some(view);
@@ -42,14 +42,12 @@ impl SegmentMappingCache {
                 view.size(),
                 view.properties(),
             ),
-            generation: segments
-                .space_generation(address.space())
-                .unwrap_or_default(),
+            revision: segments.space_revision(address.space()).unwrap_or_default(),
         });
         Some(view)
     }
 
-    pub fn segment_properties(
+    pub fn mapping_properties(
         &mut self,
         segments: &SegmentStorage,
         address: Address,

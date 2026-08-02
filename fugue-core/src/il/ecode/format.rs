@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::il::common::IlExprId;
 use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
+use crate::ir::Address;
 
 fn write_operand(f: &mut fmt::Formatter<'_>, operand: IlExprId) -> fmt::Result {
     let index = operand.index();
@@ -30,27 +31,66 @@ impl fmt::Display for ECodeStmtOpcodeDisplay {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ECodeIrDisplay<'a> {
-    body: &'a ECodeIr,
+    ir: &'a ECodeIr,
 }
 
 impl<'a> ECodeIrDisplay<'a> {
-    pub(crate) const fn new(body: &'a ECodeIr) -> Self {
-        Self { body }
+    pub(crate) const fn new(ir: &'a ECodeIr) -> Self {
+        Self { ir }
+    }
+}
+
+impl ECodeIr {
+    pub const fn display(&self) -> ECodeIrDisplay<'_> {
+        ECodeIrDisplay::new(self)
+    }
+
+    pub const fn display_source(&self, address: Address) -> ECodeSourceDisplay<'_> {
+        ECodeSourceDisplay::new(self, address)
     }
 }
 
 impl fmt::Display for ECodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, expression) in self.body.expressions().iter().enumerate() {
-            let display = ECodeExprDisplay::new(self.body, index, expression);
+        for (index, expression) in self.ir.expressions().iter().enumerate() {
+            let display = ECodeExprDisplay::new(self.ir, index, expression);
             writeln!(f, "{display}")?;
         }
 
-        for (index, statement) in self.body.statements().iter().enumerate() {
-            let display = ECodeStmtDisplay::new(self.body, index, statement);
+        for (index, statement) in self.ir.statements().iter().enumerate() {
+            let display = ECodeStmtDisplay::new(self.ir, index, statement);
             write!(f, "{display}")?;
 
-            if index + 1 < self.body.statements().len() {
+            if index + 1 < self.ir.statements().len() {
+                writeln!(f)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ECodeSourceDisplay<'a> {
+    ir: &'a ECodeIr,
+    address: Address,
+}
+
+impl<'a> ECodeSourceDisplay<'a> {
+    const fn new(ir: &'a ECodeIr, address: Address) -> Self {
+        Self { ir, address }
+    }
+}
+
+impl fmt::Display for ECodeSourceDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut statements = self.ir.statements_for_source(self.address).peekable();
+
+        while let Some((id, statement)) = statements.next() {
+            let display = ECodeStmtDisplay::new(self.ir, id.index(), statement);
+            write!(f, "{display}")?;
+
+            if statements.peek().is_some() {
                 writeln!(f)?;
             }
         }
@@ -61,22 +101,22 @@ impl fmt::Display for ECodeIrDisplay<'_> {
 
 #[derive(Debug, Copy, Clone)]
 struct ECodeExprDisplay<'a> {
-    body: &'a ECodeIr,
+    ir: &'a ECodeIr,
     index: usize,
     expression: &'a ECodeExpr,
 }
 
 impl<'a> ECodeExprDisplay<'a> {
-    pub(crate) const fn new(body: &'a ECodeIr, index: usize, expression: &'a ECodeExpr) -> Self {
+    pub(crate) const fn new(ir: &'a ECodeIr, index: usize, expression: &'a ECodeExpr) -> Self {
         Self {
-            body,
+            ir,
             index,
             expression,
         }
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.body.expression_operands_for(self.expression);
+        let operands = self.ir.expression_operands_for(self.expression);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -143,22 +183,22 @@ impl fmt::Display for ECodeExprDisplay<'_> {
 
 #[derive(Debug, Copy, Clone)]
 struct ECodeStmtDisplay<'a> {
-    body: &'a ECodeIr,
+    ir: &'a ECodeIr,
     index: usize,
     statement: &'a ECodeStmt,
 }
 
 impl<'a> ECodeStmtDisplay<'a> {
-    pub(crate) const fn new(body: &'a ECodeIr, index: usize, statement: &'a ECodeStmt) -> Self {
+    pub(crate) const fn new(ir: &'a ECodeIr, index: usize, statement: &'a ECodeStmt) -> Self {
         Self {
-            body,
+            ir,
             index,
             statement,
         }
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.body.statement_operands_for(self.statement);
+        let operands = self.ir.statement_operands_for(self.statement);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 && self.statement.value().is_none() {
@@ -274,10 +314,10 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
-            body.display().to_string(),
+            ir.display().to_string(),
             "%e0:bits<64> = ecode.const 0x2a\n\
              %e1:bits<64> = ecode.const 0x1000\n\
              @s0 ecode.store @fugue_space<3> %e1, %e0\n\

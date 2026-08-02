@@ -12,7 +12,7 @@ use crate::storage::entities::schema::{
 };
 use crate::storage::entities::{
     Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, EntityWrite,
-    EntityWriteBatch, ProjectEntity, WriteBackWorker, schema,
+    EntityWriteBatch, ProjectEntity, WriteBackWorker,
 };
 use crate::types::Revision;
 use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
@@ -203,24 +203,6 @@ impl Iterator for TransientCallGraphEdges {
     }
 }
 
-#[cfg(test)]
-struct TransientInverseCallGraphEdges {
-    index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
-    cursor: Option<InverseCallGraphEdgeKey>,
-}
-
-#[cfg(test)]
-impl Iterator for TransientInverseCallGraphEdges {
-    type Item = Result<CallGraphEdgeKey, EntityStorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = self.cursor.map_or(Bound::Unbounded, Bound::Excluded);
-        let &edge = self.index.inverse.range((start, Bound::Unbounded)).next()?;
-        self.cursor = Some(edge);
-        Some(Ok(CallGraphEdgeKey::new(edge.caller(), edge.callee())))
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct CallGraphStage {
     functions: BTreeMap<Address, StagedFunctionEdges>,
@@ -236,7 +218,7 @@ pub(crate) struct PreparedCallGraphStage {
 }
 
 struct PreparedCallGraphEdge {
-    encoded_len: usize,
+    encoded_size: usize,
     key: CallGraphEdgeKey,
     present: bool,
 }
@@ -334,9 +316,9 @@ impl CallGraphIndex {
                     .map_err(EntityStorageError::encode)
             })
             .transpose()?;
-        let encoded_len = encoded.as_ref().map_or(0, Bytes::len);
+        let encoded_size = encoded.as_ref().map_or(0, Bytes::len);
         let mut edges = Vec::new();
-        let mut writes = Vec::new();
+        let mut writes = EntityWriteBatch::new();
 
         for (&caller, staged) in &stage.functions {
             let current = if staged.base_known_empty {
@@ -347,18 +329,14 @@ impl CallGraphIndex {
             for &target in current.difference(&staged.targets) {
                 let key = CallGraphEdgeKey::new(caller, target);
                 if encoded.is_some() {
-                    writes.push(EntityWrite::remove(schema::make_key::<
-                        CallGraphEdgeKey,
-                        CallGraphEdgeRecord,
-                    >(&key)));
+                    writes.push(EntityWrite::remove(CallGraphEdgeRecord::ID.key_for(&key)));
                     writes.push(EntityWrite::remove(
-                        schema::make_key::<InverseCallGraphEdgeKey, CallGraphEdgeRecord>(
-                            &InverseCallGraphEdgeKey::new(target, caller),
-                        ),
+                        CallGraphEdgeRecord::ID
+                            .key_for(&InverseCallGraphEdgeKey::new(target, caller)),
                     ));
                 }
                 edges.push(PreparedCallGraphEdge {
-                    encoded_len: 0,
+                    encoded_size: 0,
                     key,
                     present: false,
                 });
@@ -367,18 +345,17 @@ impl CallGraphIndex {
                 let key = CallGraphEdgeKey::new(caller, target);
                 if let Some(encoded) = &encoded {
                     writes.push(EntityWrite::insert(
-                        schema::make_key::<CallGraphEdgeKey, CallGraphEdgeRecord>(&key),
+                        CallGraphEdgeRecord::ID.key_for(&key),
                         encoded.clone(),
                     ));
                     writes.push(EntityWrite::insert(
-                        schema::make_key::<InverseCallGraphEdgeKey, CallGraphEdgeRecord>(
-                            &InverseCallGraphEdgeKey::new(target, caller),
-                        ),
+                        CallGraphEdgeRecord::ID
+                            .key_for(&InverseCallGraphEdgeKey::new(target, caller)),
                         encoded.clone(),
                     ));
                 }
                 edges.push(PreparedCallGraphEdge {
-                    encoded_len,
+                    encoded_size,
                     key,
                     present: true,
                 });
@@ -397,8 +374,8 @@ impl CallGraphIndex {
                     let inverse_key =
                         InverseCallGraphEdgeKey::new(edge.key.target(), edge.key.source());
                     if edge.present {
-                        forward.publish_put(edge.key, CallGraphEdgeRecord, edge.encoded_len);
-                        inverse.publish_put(inverse_key, CallGraphEdgeRecord, edge.encoded_len);
+                        forward.publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
+                        inverse.publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
                     } else {
                         forward.publish_remove(&edge.key);
                         inverse.publish_remove(&inverse_key);
@@ -539,28 +516,6 @@ impl CallGraphIndex {
         }
     }
 
-    #[cfg(test)]
-    fn inverse_edges(
-        &self,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent { inverse, .. } => Ok(Box::new(
-                inverse.try_iter_range(Bound::Unbounded)?.map(|result| {
-                    result.map(|(key, _)| CallGraphEdgeKey::new(key.caller(), key.callee()))
-                }),
-            )),
-            CallGraphIndexBacking::Transient(index) => {
-                Ok(Box::new(TransientInverseCallGraphEdges {
-                    index: index.read_arc(),
-                    cursor: None,
-                }))
-            }
-        }
-    }
-
     pub(crate) fn function_call_targets(
         function: &Function,
         blocks: &CodeBlockTable,
@@ -617,8 +572,8 @@ impl CallGraphIndex {
             CallGraphIndexBacking::Persistent {
                 forward, inverse, ..
             } => {
-                forward.try_put(forward_key, CallGraphEdgeRecord)?;
-                inverse.try_put(inverse_key, CallGraphEdgeRecord)?;
+                forward.try_insert(forward_key, CallGraphEdgeRecord)?;
+                inverse.try_insert(inverse_key, CallGraphEdgeRecord)?;
             }
             CallGraphIndexBacking::Transient(index) => {
                 let mut index = index.write();
@@ -666,11 +621,13 @@ impl CallGraphIndex {
 
 #[cfg(test)]
 mod test {
+    use std::io;
+
     use fugue_lifter::runtime::pcode::Inputs;
 
     use super::*;
     use crate::ir::{
-        CodeBlockTableError, FunctionId, FunctionTable, IncompleteCodeBlock, IncompleteFunction,
+        FunctionId, FunctionTable, FunctionTableStage, IncompleteCodeBlock, IncompleteFunction,
         Insn, InsnEntry,
     };
     use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
@@ -679,6 +636,43 @@ mod test {
 
     fn graph() -> Result<CallGraphIndex, EntityStorageError> {
         CallGraphIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), None)
+    }
+
+    struct TransientInverseCallGraphEdges {
+        index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
+        cursor: Option<InverseCallGraphEdgeKey>,
+    }
+
+    impl Iterator for TransientInverseCallGraphEdges {
+        type Item = Result<CallGraphEdgeKey, EntityStorageError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let start = self.cursor.map_or(Bound::Unbounded, Bound::Excluded);
+            let &edge = self.index.inverse.range((start, Bound::Unbounded)).next()?;
+            self.cursor = Some(edge);
+            Some(Ok(CallGraphEdgeKey::new(edge.caller(), edge.callee())))
+        }
+    }
+
+    fn inverse_edges(
+        graph: &CallGraphIndex,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match &graph.backing {
+            CallGraphIndexBacking::Persistent { inverse, .. } => Ok(Box::new(
+                inverse.try_iter_range(Bound::Unbounded)?.map(|result| {
+                    result.map(|(key, _)| CallGraphEdgeKey::new(key.caller(), key.callee()))
+                }),
+            )),
+            CallGraphIndexBacking::Transient(index) => {
+                Ok(Box::new(TransientInverseCallGraphEdges {
+                    index: index.read_arc(),
+                    cursor: None,
+                }))
+            }
+        }
     }
 
     struct CallGraphMismatch {
@@ -702,7 +696,7 @@ mod test {
             })
             .collect::<BTreeSet<_>>();
         let forward = graph.edges(None)?.collect::<Result<BTreeSet<_>, _>>()?;
-        let inverse = graph.inverse_edges()?.collect::<Result<BTreeSet<_>, _>>()?;
+        let inverse = inverse_edges(graph)?.collect::<Result<BTreeSet<_>, _>>()?;
 
         let mismatch = CallGraphMismatch {
             missing: expected.difference(&forward).copied().collect(),
@@ -744,7 +738,7 @@ mod test {
         Ok(Insn::from_resolved_flow(language, address, 1, &operations)?)
     }
 
-    fn build_function(
+    fn insert_function(
         functions: &mut FunctionTable,
         blocks: &mut CodeBlockTable,
         language: &'static Language,
@@ -763,29 +757,19 @@ mod test {
             insns.push(id);
         }
 
-        let len = insns.len().max(1);
-        let block = IncompleteCodeBlock::try_new(entry, len, insns, ContextSet::default())
-            .ok_or_else(|| CodeBlockTableError::other_with("block construction failed"))?;
+        let size = insns.len().max(1);
+        let block = IncompleteCodeBlock::try_new(entry, size, insns, ContextSet::default())
+            .ok_or_else(|| io::Error::other("block construction failed"))?;
         function.push_block(block);
 
-        let mut stage = crate::ir::FunctionTableStage::default();
+        let mut stage = FunctionTableStage::default();
         let function = function.prepare_materialisation()?;
-        let replacement = functions.stage_materialised_replacement(blocks, &mut stage, function)?;
-        let id = replacement.id();
+        let mutation = functions.stage_materialisation(blocks, &mut stage, function)?;
+        let id = mutation.id();
         let (prepared, writes) = stage.prepare(functions, blocks)?;
         assert!(writes.is_empty());
         prepared.publish(functions, blocks);
         Ok(id)
-    }
-
-    fn insert_function(
-        functions: &mut FunctionTable,
-        blocks: &mut CodeBlockTable,
-        language: &'static Language,
-        entry: Address,
-        targets: &[Address],
-    ) -> Result<FunctionId, Box<dyn std::error::Error>> {
-        build_function(functions, blocks, language, entry, targets)
     }
 
     fn update_function(
@@ -796,7 +780,7 @@ mod test {
         entry: Address,
         targets: &[Address],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        build_function(functions, blocks, language, entry, targets)?;
+        insert_function(functions, blocks, language, entry, targets)?;
         assert_eq!(
             functions
                 .get_by_address(entry)
@@ -818,7 +802,7 @@ mod test {
         let entry = function.entry();
         drop(function);
 
-        let mut stage = crate::ir::FunctionTableStage::default();
+        let mut stage = FunctionTableStage::default();
         functions
             .stage_removal(blocks, &mut stage, function_id)
             .map_err(EntityStorageError::backing)?;

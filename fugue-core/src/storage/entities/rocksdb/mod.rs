@@ -9,8 +9,8 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageError,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
@@ -114,11 +114,6 @@ impl EntityStorageProvider for RocksDbEntityStorage {
     }
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        tracing::trace!(
-            "inserting key: {}, value: {}",
-            BytesOrSlice::from(key),
-            value
-        );
         self.database
             .put(key, value)
             .map_err(EntityStorageError::backing)
@@ -135,8 +130,6 @@ impl EntityStorageProvider for RocksDbEntityStorage {
             return Ok(false);
         }
 
-        // TODO: check if there's a more efficient way to check this without
-        // fetching the value
         self.database
             .get_pinned(key)
             .map_err(EntityStorageError::backing)
@@ -147,11 +140,13 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         &self,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-        Ok(RocksDbEntityKeyBytesIterator::new(self, prefix))
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        Ok(RocksDbEntityKeyBytesIterator::boxed(self, prefix))
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        Ok(RocksDbEntityBytesIterator::new(self, prefix))
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        Ok(RocksDbEntityBytesIterator::boxed(self, prefix))
     }
 
     fn iter_range(
@@ -159,7 +154,8 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        Ok(RocksDbEntityRangeBytesIterator::new(self, prefix, start))
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        Ok(RocksDbEntityRangeBytesIterator::boxed(self, prefix, start))
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -171,7 +167,8 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a,
     {
-        Ok(RocksDbEntityBytesAsIterator::new(self, prefix, f))
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        Ok(RocksDbEntityBytesAsIterator::boxed(self, prefix, f))
     }
 
     fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
@@ -189,7 +186,7 @@ struct RocksDbEntityKeyBytesIterator<'a> {
 }
 
 impl<'a> RocksDbEntityKeyBytesIterator<'a> {
-    fn new(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityKeyBytesIterator<'a> {
+    fn boxed(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityKeyBytesIterator<'a> {
         let mut opts = rocksdb::ReadOptions::default();
 
         opts.set_prefix_same_as_start(true);
@@ -237,7 +234,7 @@ struct RocksDbEntityRangeBytesIterator<'a> {
 }
 
 impl<'a> RocksDbEntityRangeBytesIterator<'a> {
-    fn new(
+    fn boxed(
         storage: &'a RocksDbEntityStorage,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -309,7 +306,7 @@ struct RocksDbEntityBytesIterator<'a> {
 }
 
 impl<'a> RocksDbEntityBytesIterator<'a> {
-    fn new(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityBytesIterator<'a> {
+    fn boxed(storage: &'a RocksDbEntityStorage, prefix: &[u8]) -> EntityBytesIterator<'a> {
         Box::new(Self {
             finished: false,
             iter: storage.database.prefix_iterator(prefix),
@@ -346,7 +343,7 @@ impl<'a> Iterator for RocksDbEntityBytesIterator<'a> {
 struct RocksDbEntityBytesAsIterator<'a, T> {
     finished: bool,
     iter: rocksdb::DBIteratorWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
-    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+    f: Box<EntityBytesMapper<'a, T>>,
     prefix: Box<[u8]>,
 }
 
@@ -354,7 +351,7 @@ impl<'a, T> RocksDbEntityBytesAsIterator<'a, T>
 where
     T: 'a,
 {
-    fn new<F>(
+    fn boxed<F>(
         storage: &'a RocksDbEntityStorage,
         prefix: &[u8],
         f: F,

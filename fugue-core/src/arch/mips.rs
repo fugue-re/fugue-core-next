@@ -5,7 +5,7 @@ use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::ir::ExternFunctionTemplate;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::{Language, LanguageError, LanguageId, LanguageLoader, Lifter, Varnode};
 
 #[derive(Clone)]

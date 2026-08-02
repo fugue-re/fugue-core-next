@@ -14,6 +14,9 @@ use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::common::cursor_bound;
 
+pub(crate) const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
+pub(crate) const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
 mod persistent;
 mod transient;
 
@@ -169,10 +172,10 @@ impl SwitchTable {
         matches!(self, Self::Persistent(_))
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> SwitchId {
+    pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
         match self {
-            Self::Persistent(table) => table.preview_id(offset),
-            Self::Transient(table) => table.preview_id(offset),
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
         }
     }
 
@@ -196,10 +199,12 @@ impl SwitchTable {
         &mut self,
         switch: Switch,
         previous_function: Option<FunctionId>,
-        encoded_len: usize,
+        encoded_size: usize,
     ) {
         match self {
-            Self::Persistent(table) => table.publish_upsert(switch, previous_function, encoded_len),
+            Self::Persistent(table) => {
+                table.publish_upsert(switch, previous_function, encoded_size)
+            }
             Self::Transient(table) => table.publish_upsert(switch, previous_function),
         }
     }
@@ -213,8 +218,8 @@ impl SwitchTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.flush(),
-            Self::Transient(t) => t.flush(),
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(table) => table.flush(),
         }
     }
 
@@ -223,8 +228,8 @@ impl SwitchTable {
         F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
     {
         match self {
-            Self::Persistent(p) => p.insert(branch, f),
-            Self::Transient(t) => t.insert(branch, f),
+            Self::Persistent(table) => table.insert(branch, f),
+            Self::Transient(table) => table.insert(branch, f),
         }
     }
 
@@ -235,8 +240,8 @@ impl SwitchTable {
 
     pub fn try_get_by_id(&self, id: SwitchId) -> Result<Option<SwitchRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
@@ -250,8 +255,8 @@ impl SwitchTable {
         branch: Address,
     ) -> Result<Option<SwitchRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_branch(branch)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_branch(branch).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_branch(branch)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_branch(branch).map(EntityRef::borrowed)),
         }
     }
 
@@ -260,15 +265,15 @@ impl SwitchTable {
         function: FunctionId,
     ) -> Box<dyn Iterator<Item = Address> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.branches_of_function(function)),
-            Self::Transient(t) => Box::new(t.branches_of_function(function)),
+            Self::Persistent(table) => Box::new(table.branches_of_function(function)),
+            Self::Transient(table) => Box::new(table.branches_of_function(function)),
         }
     }
 
     pub fn contains(&self, branch: Address) -> bool {
         match self {
-            Self::Persistent(p) => p.contains(branch),
-            Self::Transient(t) => t.contains(branch),
+            Self::Persistent(table) => table.contains(branch),
+            Self::Transient(table) => table.contains(branch),
         }
     }
 
@@ -283,8 +288,8 @@ impl SwitchTable {
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_id(id, f),
-            Self::Transient(t) => Ok(t.modify_by_id(id, f)),
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
         }
     }
 
@@ -303,8 +308,8 @@ impl SwitchTable {
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_branch(branch, f),
-            Self::Transient(t) => Ok(t.modify_by_branch(branch, f)),
+            Self::Persistent(table) => table.try_modify_by_branch(branch, f),
+            Self::Transient(table) => Ok(table.modify_by_branch(branch, f)),
         }
     }
 
@@ -315,8 +320,8 @@ impl SwitchTable {
 
     pub fn try_remove_by_id(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_remove_by_id(id),
-            Self::Transient(t) => Ok(t.remove_by_id(id)),
+            Self::Persistent(table) => table.try_remove_by_id(id),
+            Self::Transient(table) => Ok(table.remove_by_id(id)),
         }
     }
 
@@ -327,15 +332,15 @@ impl SwitchTable {
 
     pub fn try_remove_by_branch(&mut self, branch: Address) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_remove_by_branch(branch),
-            Self::Transient(t) => Ok(t.remove_by_branch(branch)),
+            Self::Persistent(table) => table.try_remove_by_branch(branch),
+            Self::Transient(table) => Ok(table.remove_by_branch(branch)),
         }
     }
 
     pub fn branches(&self) -> Box<dyn Iterator<Item = Address> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.branches()),
-            Self::Transient(t) => Box::new(t.branches()),
+            Self::Persistent(table) => Box::new(table.branches()),
+            Self::Transient(table) => Box::new(table.branches()),
         }
     }
 
@@ -344,29 +349,29 @@ impl SwitchTable {
         after: Option<Address>,
     ) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.entries_after(after).map(EntityRef::cached)),
-            Self::Transient(t) => Box::new(t.entries_after(after).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
         }
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter().map(EntityRef::cached)),
-            Self::Transient(t) => Box::new(t.iter().map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Persistent(p) => p.is_empty(),
-            Self::Transient(t) => t.is_empty(),
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Persistent(p) => p.len(),
-            Self::Transient(t) => t.len(),
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
         }
     }
 }

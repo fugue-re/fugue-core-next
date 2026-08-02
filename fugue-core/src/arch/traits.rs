@@ -108,8 +108,8 @@ pub trait Arch: Send + Sync + 'static {
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 
-    // NOTE: we the lifting context associated should be tied to the address space the address
-    // belongs to.
+    // NOTE: the lifting context should be associated with the address space containing the
+    // address.
     fn canonicalise_address_with(
         &self,
         addr: RawAddress,

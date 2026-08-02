@@ -46,12 +46,13 @@ md-5 = "0.10"
 memmap2 = "0.9"
 object = "0.39"
 ouroboros = "0.18"
-quick_cache = "0.6"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
+quick_cache = "0.6"
 r2d2 = { version = "0.8", optional = true }
 r2d2_sqlite = { version = "0.32", optional = true }
 rangemap = "1.7"
 range-set-blaze = "0.4"
+rayon = "1"
 rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 rocksdb = { version = "0.24", features = ["serde1", "snappy"], optional = true }
 rusqlite = { version = "0.38", features = ["bundled"], optional = true }

@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use thiserror::Error;
 
-use crate::il::common::verify::{StructureVerifierError, verify_parent_spans, verify_source_spans};
+use crate::il::common::verify::StructureVerifierError;
 use crate::il::common::{IlAnalysis, IlError, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
 use crate::ir::FunctionId;
 use crate::storage::entities::MutableEntity;
@@ -167,9 +167,9 @@ pub trait IlArtefact: MutableEntity<Key = FunctionId> {
         self.graph()
             .verify_node_bounds(node_count)
             .map_err(E::from_structure)?;
-        verify_source_spans(source_spans, node_count).map_err(E::from_structure)?;
+        IlSourceSpan::verify(source_spans, node_count).map_err(E::from_structure)?;
         if let Some(parent_spans) = parent_spans {
-            verify_parent_spans(parent_spans, node_count).map_err(E::from_structure)?;
+            IlParentSpan::verify(parent_spans, node_count).map_err(E::from_structure)?;
         }
         Ok(())
     }

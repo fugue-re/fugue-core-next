@@ -1,8 +1,9 @@
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
-use crate::ir::insn::InsnFlowCursor;
-use crate::ir::{Address, AddressRange, AddressRangeSet, FlowTarget, Id, Insn, InsnList};
+use smallvec::SmallVec;
+
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id, Insn, InsnList};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
@@ -13,8 +14,10 @@ pub(crate) mod incomplete;
 pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
-pub use table::{CodeBlockMut, CodeBlockRef, CodeBlockTable, CodeBlockTableError};
-pub(crate) use table::PreparedBlockMutation;
+pub(crate) use table::{
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES, PreparedCodeBlockMutation,
+};
+pub use table::{CodeBlockRef, CodeBlockTable};
 
 pub type CodeBlockId = Id<CodeBlock>;
 
@@ -24,16 +27,101 @@ pub type CodeBlockId = Id<CodeBlock>;
 pub struct CodeBlock {
     id: Id<Self>,
     start: Address,
-    len: u16,
-    instructions: InsnList,
-    properties: CodeBlockProperties,
+    size: u16,
+    flow: CodeBlockFlow,
     context: ContextSet,
+}
+
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+struct CodeBlockFlow {
+    targets: SmallVec<[CodeBlockFlowTarget; 2]>,
+    properties: CodeBlockProperties,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CodeBlockFlowTarget {
+    target: Address,
+    source_offset: u16,
+    kind: FlowKind,
+}
+
+impl CodeBlockFlowTarget {
+    fn from_flow(block: Address, size: usize, flow: FlowTarget) -> Self {
+        assert_eq!(block.space(), flow.from().space());
+        let source_offset = flow
+            .from()
+            .offset()
+            .checked_sub(block.offset())
+            .and_then(|offset| offset.try_into().ok())
+            .expect("flow source must fall within its code block");
+        assert!(
+            usize::from(source_offset) < size,
+            "flow source must fall within its code block"
+        );
+        Self {
+            target: flow.to(),
+            source_offset,
+            kind: flow.kind(),
+        }
+    }
+
+    fn to_flow(&self, block: Address) -> FlowTarget {
+        FlowTarget::new(
+            block + usize::from(self.source_offset),
+            self.target,
+            self.kind,
+        )
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct CodeBlockFlowCursor {
-    instruction: usize,
-    target: InsnFlowCursor,
+    target: usize,
+}
+
+pub(crate) struct CodeBlockMaterialisation {
+    address: Address,
+    context: ContextSet,
+    flow: CodeBlockFlow,
+    size: NonZeroUsize,
+}
+
+impl CodeBlockFlow {
+    fn from_insns(start: Address, size: usize, insns: &[Insn]) -> Self {
+        let targets = insns
+            .iter()
+            .flat_map(Insn::flow_targets)
+            .filter(|target| !target.kind().is_fall_through() || target.to() == start + size)
+            .map(|target| CodeBlockFlowTarget::from_flow(start, size, target))
+            .collect();
+        let mut properties = CodeBlockProperties::NONE;
+        if let Some(terminator) = insns.last() {
+            if terminator.is_call() {
+                properties |= CodeBlockProperties::CALL;
+            }
+            if terminator.is_return() {
+                properties |= CodeBlockProperties::RETURN;
+            }
+            if terminator.is_branch()
+                && terminator.is_indirect()
+                && !terminator.is_call()
+                && !terminator.is_return()
+                && terminator.iter_targets().next().is_none()
+            {
+                properties |= CodeBlockProperties::UNRESOLVED;
+            }
+        }
+        Self {
+            targets,
+            properties,
+        }
+    }
+
+    fn targets(&self, start: Address) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.targets.iter().map(move |target| target.to_flow(start))
+    }
 }
 
 impl AsRef<CodeBlock> for CodeBlock {
@@ -68,67 +156,16 @@ bitflags::bitflags! {
         const CALL       = 0x0000_0001;
         /// The block has unresolved control flow.
         const UNRESOLVED = 0x0000_0002;
+        /// The block ends in a return.
+        const RETURN     = 0x0000_0004;
     }
 }
 
 archived_bitflags!(CodeBlockProperties, ArchivedCodeBlockProperties, u32);
 
 impl CodeBlock {
-    pub fn new(id: Id<Self>, start: Address, len: NonZeroUsize, instructions: InsnList) -> Self {
-        Self::new_with(id, start, len, instructions, ContextSet::default())
-    }
-
-    pub fn new_with(
-        id: Id<Self>,
-        start: Address,
-        len: NonZeroUsize,
-        instructions: InsnList,
-        context: ContextSet,
-    ) -> Self {
-        Self {
-            id,
-            start,
-            len: len
-                .get()
-                .try_into()
-                .expect("basic block length must not exceed 65535 bytes"),
-            instructions,
-            properties: CodeBlockProperties::NONE,
-            context,
-        }
-    }
-
-    pub fn try_new(
-        id: Id<Self>,
-        start: Address,
-        len: usize,
-        instructions: InsnList,
-    ) -> Option<Self> {
-        Self::try_new_with(id, start, len, instructions, ContextSet::default())
-    }
-
-    pub fn try_new_with(
-        id: Id<Self>,
-        start: Address,
-        len: usize,
-        instructions: InsnList,
-        context: ContextSet,
-    ) -> Option<Self> {
-        Some(Self::new_with(
-            id,
-            start,
-            NonZeroUsize::new(len)?,
-            instructions,
-            context,
-        ))
-    }
-
     pub fn id(&self) -> CodeBlockId {
         self.id
-    }
-
-    pub fn start(&self) -> Address {
-        self.start
     }
 
     pub fn address(&self) -> Address {
@@ -136,20 +173,19 @@ impl CodeBlock {
     }
 
     pub fn last_address(&self) -> Address {
-        self.start + self.len() - 1usize
+        self.start + self.size() - 1usize
     }
 
     pub fn next_address(&self) -> Address {
-        self.start + self.len()
+        self.start + self.size()
     }
 
     pub fn space(&self) -> AddressSpaceId {
         self.start.space()
     }
 
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.len as _
+    pub fn size(&self) -> usize {
+        self.size as _
     }
 
     pub fn range(&self) -> RangeInclusive<Address> {
@@ -174,44 +210,103 @@ impl CodeBlock {
         covered.insert_range(self.address_range());
     }
 
-    pub fn instructions(&self) -> &InsnList {
-        &self.instructions
-    }
-
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.instructions.iter().flat_map(Insn::flow_targets)
+        self.flow.targets(self.start)
     }
 
     pub(crate) fn next_flow_target(&self, cursor: &mut CodeBlockFlowCursor) -> Option<FlowTarget> {
-        while let Some(instruction) = self.instructions.get(cursor.instruction) {
-            if let Some(target) = instruction.next_flow_target(&mut cursor.target) {
-                return Some(target);
-            }
-
-            cursor.instruction += 1;
-            cursor.target = InsnFlowCursor::default();
-        }
-
-        None
-    }
-
-    pub fn mark_call(&mut self) {
-        self.properties.insert(CodeBlockProperties::CALL);
-    }
-
-    pub fn mark_unresolved(&mut self) {
-        self.properties.insert(CodeBlockProperties::UNRESOLVED);
+        let target = self.flow.targets.get(cursor.target)?.to_flow(self.start);
+        cursor.target += 1;
+        Some(target)
     }
 
     pub fn is_call(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::CALL)
+        self.flow.properties.contains(CodeBlockProperties::CALL)
+    }
+
+    pub fn is_return(&self) -> bool {
+        self.flow.properties.contains(CodeBlockProperties::RETURN)
+    }
+
+    pub fn is_branch(&self) -> bool {
+        self.flow
+            .targets
+            .iter()
+            .any(|target| target.kind.is_branch())
+    }
+
+    pub fn direct_call_target(&self) -> Option<Address> {
+        self.flow
+            .targets
+            .iter()
+            .find_map(|target| target.kind.is_call().then_some(target.target))
     }
 
     pub fn has_unresolved(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::UNRESOLVED)
+        self.flow
+            .properties
+            .contains(CodeBlockProperties::UNRESOLVED)
     }
 
     pub fn context(&self) -> &ContextSet {
         &self.context
+    }
+}
+
+impl CodeBlockMaterialisation {
+    pub(crate) fn new(
+        address: Address,
+        size: NonZeroUsize,
+        insns: InsnList,
+        context: ContextSet,
+    ) -> Self {
+        let flow = CodeBlockFlow::from_insns(address, size.get(), &insns);
+        Self {
+            address,
+            context,
+            flow,
+            size,
+        }
+    }
+
+    pub(crate) fn address(&self) -> Address {
+        self.address
+    }
+
+    pub(crate) fn context(&self) -> &ContextSet {
+        &self.context
+    }
+
+    pub(crate) fn address_range(&self) -> AddressRange {
+        AddressRange::new(
+            self.address.space(),
+            self.address.raw_address(),
+            (self.address + self.size.get() - 1usize).raw_address(),
+        )
+    }
+
+    pub(crate) fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.flow.targets(self.address)
+    }
+
+    pub(crate) fn matches(&self, block: &CodeBlock) -> bool {
+        block.start == self.address
+            && block.size() == self.size.get()
+            && block.context == self.context
+            && block.flow == self.flow
+    }
+
+    pub(crate) fn into_block(self, id: CodeBlockId) -> CodeBlock {
+        CodeBlock {
+            id,
+            start: self.address,
+            size: self
+                .size
+                .get()
+                .try_into()
+                .expect("basic block size must not exceed 65535 bytes"),
+            flow: self.flow,
+            context: self.context,
+        }
     }
 }

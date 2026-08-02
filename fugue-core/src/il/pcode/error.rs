@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::analysis::control::Cancelled;
 use crate::il::common::IlError;
 use crate::il::pcode::AddressAnnotationRole;
+use crate::ir::Address;
 use crate::lifter::LifterError;
 use crate::storage::SegmentStorageError;
 
@@ -16,12 +17,26 @@ pub enum PCodeError {
         role: AddressAnnotationRole,
     },
     #[error(
+        "block at {address} requires {required} contiguous bytes, but only {available} are available"
+    )]
+    InsufficientBytes {
+        address: Address,
+        available: usize,
+        required: usize,
+    },
+    #[error(
         "operation at ordinal {ordinal} has invalid argument count {found}, expected {expected}"
     )]
     InvalidArgumentCount {
         ordinal: u32,
         expected: u8,
         found: u8,
+    },
+    #[error("instruction at {address} has size {size}, with {remaining} block bytes remaining")]
+    InvalidInsnSize {
+        address: Address,
+        size: usize,
+        remaining: usize,
     },
     #[error("operation at ordinal {ordinal} targets non-semantic PCode position {position}")]
     InvalidLocalTarget { ordinal: u32, position: u16 },
@@ -63,11 +78,27 @@ impl PCodeError {
         Self::DuplicateAnnotation { ordinal, role }
     }
 
+    pub const fn insufficient_bytes(address: Address, available: usize, required: usize) -> Self {
+        Self::InsufficientBytes {
+            address,
+            available,
+            required,
+        }
+    }
+
     pub const fn invalid_argument_count(ordinal: u32, expected: u8, found: u8) -> Self {
         Self::InvalidArgumentCount {
             ordinal,
             expected,
             found,
+        }
+    }
+
+    pub const fn invalid_insn_size(address: Address, size: usize, remaining: usize) -> Self {
+        Self::InvalidInsnSize {
+            address,
+            size,
+            remaining,
         }
     }
 

@@ -530,7 +530,7 @@ mod test {
     }
 
     #[test]
-    fn teat_attrs_macro_with_json() {
+    fn attrs_macro_with_json() {
         let amap = attributes![
             "project" => {
                 "name": "My Project",

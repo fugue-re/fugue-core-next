@@ -192,7 +192,7 @@ fn interrupted_persistent_admission_reopens_at_one_revision() -> Result<(), Box<
     let measurement_path = measurement.path().join("measurement.fdbz");
     let mut project = open_project(&measurement_path)?;
     let first = project
-        .entry()
+        .entry_point()
         .ok_or_else(|| io::Error::other("fixture entry missing"))?
         + 0x6000_0000u64;
     let second = first + 0x100u64;

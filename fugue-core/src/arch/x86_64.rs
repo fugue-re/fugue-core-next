@@ -7,7 +7,7 @@ use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, Flag};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnError, InsnProperties, RawAddress};
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
@@ -50,19 +50,19 @@ fn classify_bytes(bytes: &[u8]) -> BytesProperties {
 
 fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
     let decoder = InstDecoder::default();
-    let mut length = 0usize;
+    let mut size = 0usize;
     let mut properties = BytesProperties::empty();
 
-    while let Some(remaining) = bytes.get(length..) {
+    while let Some(remaining) = bytes.get(size..) {
         let mut reader = U8Reader::new(remaining);
         let Ok(insn) = decoder.decode(&mut reader) else {
             break;
         };
-        let insn_length = insn.len().to_const() as usize;
-        if insn_length == 0 {
+        let insn_size = insn.len().to_const() as usize;
+        if insn_size == 0 {
             break;
         }
-        let Some(insn_bytes) = remaining.get(..insn_length) else {
+        let Some(insn_bytes) = remaining.get(..insn_size) else {
             break;
         };
         let insn_properties = classify_bytes(insn_bytes);
@@ -71,10 +71,10 @@ fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
         }
 
         properties = insn_properties;
-        length += insn_length;
+        size += insn_size;
     }
 
-    (length, properties)
+    (size, properties)
 }
 
 #[derive(Clone)]
@@ -83,7 +83,7 @@ struct ArchData {
     gprs: Vec<Varnode>,
     frame_pointer: Option<Varnode>,
     swi_op: Option<u16>,
-    invalid_instruction_op: Option<u16>,
+    invalid_insn_op: Option<u16>,
 }
 
 impl ArchData {
@@ -117,7 +117,7 @@ impl ArchData {
             gprs,
             frame_pointer: reg("RBP"),
             swi_op: language.user_op_by_name("swi"),
-            invalid_instruction_op: language.user_op_by_name("invalidInstructionException"),
+            invalid_insn_op: language.user_op_by_name("invalidInstructionException"),
         }
     }
 }
@@ -168,12 +168,12 @@ impl ArchT for X86_64 {
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+            || self.data.invalid_insn_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+            || self.data.invalid_insn_op == Some(op)
     }
 
     fn language(&self) -> &'static Language {
@@ -258,7 +258,7 @@ impl LanguageProvider {
 
 struct X86_64Disassembler {
     decoder: InstDecoder,
-    instruction: Instruction,
+    insn: Instruction,
 }
 
 impl X86_64Disassembler {
@@ -266,11 +266,11 @@ impl X86_64Disassembler {
     fn new() -> Disassembler {
         Disassembler::new(Self {
             decoder: InstDecoder::default(),
-            instruction: Instruction::default(),
+            insn: Instruction::default(),
         })
     }
 
-    fn relative_target(address: Address, length: usize, operand: &Operand) -> Option<Address> {
+    fn relative_target(address: Address, size: usize, operand: &Operand) -> Option<Address> {
         let displacement = match operand {
             Operand::ImmediateI8 { imm } => i64::from(*imm),
             Operand::ImmediateI32 { imm } => i64::from(*imm),
@@ -278,7 +278,7 @@ impl X86_64Disassembler {
         };
         let offset = address
             .offset()
-            .wrapping_add(length as u64)
+            .wrapping_add(size as u64)
             .wrapping_add_signed(displacement);
         Some(Address::new(address.space(), offset))
     }
@@ -286,7 +286,7 @@ impl X86_64Disassembler {
     fn resolve_control_flow(
         address: Address,
         insn: &Instruction,
-        length: usize,
+        size: usize,
     ) -> Result<Option<Insn>, InsnError> {
         let opcode = insn.opcode();
 
@@ -297,31 +297,31 @@ impl X86_64Disassembler {
             )
         {
             let operand = insn.operand(0);
-            let target = Self::relative_target(address, length, &operand);
+            let target = Self::relative_target(address, size, &operand);
             return target
-                .map(|target| Insn::from_direct_branch(address, length, target, true))
+                .map(|target| Insn::from_direct_branch(address, size, target, true))
                 .transpose();
         }
 
         match opcode {
             Opcode::JMP | Opcode::CALL => {
                 let operand = insn.operand(0);
-                let target = Self::relative_target(address, length, &operand);
+                let target = Self::relative_target(address, size, &operand);
                 match (opcode, target) {
                     (Opcode::JMP, Some(target)) => {
-                        Insn::from_direct_branch(address, length, target, false)
+                        Insn::from_direct_branch(address, size, target, false)
                     }
                     (Opcode::JMP, None) if matches!(operand, Operand::Register { .. }) => {
-                        Insn::from_indirect_branch(address, length)
+                        Insn::from_indirect_branch(address, size)
                     }
-                    (Opcode::CALL, Some(target)) => Insn::from_direct_call(address, length, target),
+                    (Opcode::CALL, Some(target)) => Insn::from_direct_call(address, size, target),
                     (Opcode::CALL, None) if matches!(operand, Operand::Register { .. }) => {
-                        Insn::from_indirect_call(address, length)
+                        Insn::from_indirect_call(address, size)
                     }
                     _ => return Ok(None),
                 }
             }
-            Opcode::RETURN => Insn::from_return(address, length),
+            Opcode::RETURN => Insn::from_return(address, size),
             _ => return Ok(None),
         }
         .map(Some)
@@ -359,18 +359,16 @@ impl DisassemblerT for X86_64Disassembler {
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
         let mut reader = U8Reader::new(bytes);
-        let insn = match self.decoder.decode_into(&mut self.instruction, &mut reader) {
+        let insn = match self.decoder.decode_into(&mut self.insn, &mut reader) {
             Ok(()) => {
-                let size = self.instruction.len().to_const() as usize;
-                if let Some(resolved) =
-                    Self::resolve_control_flow(address, &self.instruction, size)?
-                {
+                let size = self.insn.len().to_const() as usize;
+                if let Some(resolved) = Self::resolve_control_flow(address, &self.insn, size)? {
                     return Ok(resolved);
                 }
                 Insn::from_disassembly(
                     address,
                     size,
-                    if Self::should_lift(&self.instruction) {
+                    if Self::should_lift(&self.insn) {
                         InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
                         InsnProperties::FALL_THROUGH
@@ -405,8 +403,8 @@ mod test {
 
         let mut lifter = arch.lifter();
         let mut operations = Vec::new();
-        let length = lifter.lift(address, bytes, &mut operations)?;
-        let lifted = Insn::from_resolved_flow(language, address, length, &operations)?;
+        let size = lifter.lift(address, bytes, &mut operations)?;
+        let lifted = Insn::from_resolved_flow(language, address, size, &operations)?;
 
         assert_eq!(
             direct.properties(),

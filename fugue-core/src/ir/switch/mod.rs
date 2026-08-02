@@ -10,6 +10,7 @@ use crate::types::Confidence;
 use crate::types::common::archived_bitflags;
 
 mod table;
+pub(crate) use table::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
 pub use table::{SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;
@@ -65,8 +66,12 @@ impl Switch {
     }
 
     pub fn with_id(mut self, id: SwitchId) -> Self {
-        self.id = id;
+        self.set_id(id);
         self
+    }
+
+    pub(crate) fn set_id(&mut self, id: SwitchId) {
+        self.id = id;
     }
 
     pub fn with_function(mut self, function: FunctionId) -> Self {

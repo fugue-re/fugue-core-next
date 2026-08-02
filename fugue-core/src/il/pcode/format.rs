@@ -4,7 +4,7 @@ use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOp
 use crate::ir::Address;
 
 #[derive(Debug, Copy, Clone)]
-pub struct PCodeOpcodeDisplay(pub PCodeOpcode);
+struct PCodeOpcodeDisplay(PCodeOpcode);
 
 impl fmt::Display for PCodeOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -15,22 +15,32 @@ impl fmt::Display for PCodeOpcodeDisplay {
 
 #[derive(Debug, Copy, Clone)]
 pub struct PCodeIrDisplay<'a> {
-    body: &'a PCodeIr,
+    ir: &'a PCodeIr,
 }
 
 impl<'a> PCodeIrDisplay<'a> {
-    pub(crate) const fn new(body: &'a PCodeIr) -> Self {
-        Self { body }
+    pub(crate) const fn new(ir: &'a PCodeIr) -> Self {
+        Self { ir }
+    }
+}
+
+impl PCodeIr {
+    pub const fn display(&self) -> PCodeIrDisplay<'_> {
+        PCodeIrDisplay::new(self)
+    }
+
+    pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
+        PCodeSourceDisplay::new(self, address)
     }
 }
 
 impl fmt::Display for PCodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, operation) in self.body.operations().iter().enumerate() {
-            let display = PCodeOpDisplay::new(self.body, index, operation);
+        for (index, operation) in self.ir.operations().iter().enumerate() {
+            let display = PCodeOpDisplay::new(self.ir, index, operation);
             write!(f, "{display}")?;
 
-            if index + 1 < self.body.operations().len() {
+            if index + 1 < self.ir.operations().len() {
                 writeln!(f)?;
             }
         }
@@ -41,13 +51,13 @@ impl fmt::Display for PCodeIrDisplay<'_> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct PCodeSourceDisplay<'a> {
-    body: &'a PCodeIr,
+    ir: &'a PCodeIr,
     address: Address,
 }
 
 impl<'a> PCodeSourceDisplay<'a> {
-    pub(crate) const fn new(body: &'a PCodeIr, address: Address) -> Self {
-        Self { body, address }
+    pub(crate) const fn new(ir: &'a PCodeIr, address: Address) -> Self {
+        Self { ir, address }
     }
 }
 
@@ -55,13 +65,13 @@ impl fmt::Display for PCodeSourceDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
 
-        for (index, operation) in self.body.operations_for_source(self.address) {
+        for (index, operation) in self.ir.operations_for_source(self.address) {
             if !first {
                 writeln!(f)?;
             }
 
             first = false;
-            let display = PCodeOpDisplay::new(self.body, index, operation);
+            let display = PCodeOpDisplay::new(self.ir, index.index(), operation);
             write!(f, "{display}")?;
         }
 
@@ -70,7 +80,7 @@ impl fmt::Display for PCodeSourceDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct PCodeLocationDisplay<'a> {
+struct PCodeLocationDisplay<'a> {
     id: PCodeLocationId,
     location: &'a PCodeLocation,
 }
@@ -105,29 +115,29 @@ impl fmt::Display for PCodeLocationDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct PCodeOpDisplay<'a> {
-    body: &'a PCodeIr,
+struct PCodeOpDisplay<'a> {
+    ir: &'a PCodeIr,
     index: usize,
     operation: &'a PCodeOp,
 }
 
 impl<'a> PCodeOpDisplay<'a> {
-    pub(crate) const fn new(body: &'a PCodeIr, index: usize, operation: &'a PCodeOp) -> Self {
+    pub(crate) const fn new(ir: &'a PCodeIr, index: usize, operation: &'a PCodeOp) -> Self {
         Self {
-            body,
+            ir,
             index,
             operation,
         }
     }
 
     fn write_location(&self, f: &mut fmt::Formatter<'_>, id: PCodeLocationId) -> fmt::Result {
-        let location = self.body.location(id).ok_or(fmt::Error)?;
+        let location = self.ir.location(id).ok_or(fmt::Error)?;
         let display = PCodeLocationDisplay::new(id, location);
         write!(f, "{display}")
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.body.operation_operands(self.operation);
+        let operands = self.ir.operation_operands_for(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -143,7 +153,7 @@ impl<'a> PCodeOpDisplay<'a> {
     }
 
     fn write_effects(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(space) = self.operation.effect_space() {
+        if let Some(space) = self.operation.address_space() {
             let space = space.index();
             write!(f, " @fugue_space<{space}>")?;
         }
@@ -165,9 +175,9 @@ impl<'a> PCodeOpDisplay<'a> {
     }
 
     fn write_target(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.operation.opcode().requires_target() {
+        if self.operation.opcode().requires_address() {
             let target = self
-                .body
+                .ir
                 .target(self.operation.immediate())
                 .ok_or(fmt::Error)?;
 
@@ -205,7 +215,7 @@ impl fmt::Display for PCodeOpDisplay<'_> {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
     use crate::il::pcode::{
         LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocationProperties,
     };
@@ -318,7 +328,7 @@ mod test {
         let operations = ir.operations_for_source(second).collect::<Vec<_>>();
 
         assert_eq!(operations.len(), 1);
-        assert_eq!(operations[0].0, 1);
+        assert_eq!(operations[0].0, IlOpId::try_from_index(1).unwrap());
         assert_eq!(operations[0].1.opcode(), PCodeOpcode::IntNeg);
         assert_eq!(
             ir.display_source(second).to_string(),

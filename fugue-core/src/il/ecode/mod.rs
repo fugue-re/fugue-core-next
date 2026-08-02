@@ -10,6 +10,6 @@ mod verify;
 pub(crate) use builder::ECodeBuilder;
 pub use builder::{ECODE_SCHEMA_VERSION, ECodeIr};
 pub use expression::{ECodeExpr, ECodeExprOpcode};
-pub use format::ECodeIrDisplay;
+pub use format::{ECodeIrDisplay, ECodeSourceDisplay};
 pub use operation::{ECodeStmt, ECodeStmtOpcode};
 pub use transform::PCodeToECode;

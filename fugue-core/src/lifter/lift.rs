@@ -1,4 +1,3 @@
-use std::fmt::{Debug, Display};
 use std::str::FromStr;
 
 use fugue_lifter::runtime::context::ContextBitRange;
@@ -9,37 +8,22 @@ use fugue_lifter::{Lifter as FugueLifter, LifterBuilderError};
 use thiserror::Error;
 
 use crate::ir::{Address, Insn, InsnProperties};
-use crate::lifter::disassembler::DisassemblerError;
 use crate::lifter::traits::Disassembler;
-use crate::lifter::{RawPCodeOp, resolve_language};
+use crate::lifter::{DisassemblerError, RawPCodeOp, resolve_language};
 
 #[derive(Debug, Error)]
 pub enum LifterError {
     #[error(transparent)]
     Builder(#[from] LifterBuilderError),
-    #[error("invalid instruction at {0}")]
-    InvalidInstruction(Address),
+    #[error("invalid insn at {0}")]
+    InvalidInsn(Address),
     #[error(transparent)]
     Lifter(anyhow::Error),
 }
 
 impl LifterError {
-    pub fn invalid_instruction(address: Address) -> Self {
-        Self::InvalidInstruction(address)
-    }
-
-    pub fn disassembler<E>(error: E) -> Self
-    where
-        E: std::error::Error + Debug + Display + Send + Sync + 'static,
-    {
-        Self::Lifter(anyhow::Error::new(error))
-    }
-
-    pub fn disassembler_with<M>(msg: M) -> Self
-    where
-        M: Debug + Display + Send + Sync + 'static,
-    {
-        Self::Lifter(anyhow::Error::msg(msg))
+    pub fn invalid_insn(address: Address) -> Self {
+        Self::InvalidInsn(address)
     }
 }
 
@@ -208,7 +192,7 @@ impl Lifter {
     ) -> Result<usize, LifterError> {
         let address = address.into();
         let Some(length) = self.0.lift(address.offset(), bytes, output) else {
-            return Err(LifterError::invalid_instruction(address));
+            return Err(LifterError::invalid_insn(address));
         };
 
         Ok(length)
@@ -233,7 +217,7 @@ impl Disassembler for Lifter {
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
         let Some(size) = self.resolve(address, bytes, true) else {
-            return Err(DisassemblerError::invalid_instruction(address));
+            return Err(DisassemblerError::invalid_insn(address));
         };
 
         Ok(Insn::from_disassembly(

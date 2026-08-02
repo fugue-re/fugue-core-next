@@ -14,3 +14,7 @@ pub use bytes::BytesOrSlice;
 pub use common::{OwnedOrRef, Revision};
 pub use fugue_specs::Confidence;
 pub use memmap::{BytesOrMapping, SharedBytesOrMapping};
+
+pub(crate) trait EstimateSize {
+    fn estimate_size(&self) -> usize;
+}

@@ -7,7 +7,7 @@ use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, Flag};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, RawAddress};
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
@@ -50,19 +50,19 @@ fn classify_bytes(bytes: &[u8]) -> BytesProperties {
 
 fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
     let decoder = InstDecoder::default();
-    let mut length = 0usize;
+    let mut size = 0usize;
     let mut properties = BytesProperties::empty();
 
-    while let Some(remaining) = bytes.get(length..) {
+    while let Some(remaining) = bytes.get(size..) {
         let mut reader = U8Reader::new(remaining);
         let Ok(insn) = decoder.decode(&mut reader) else {
             break;
         };
-        let insn_length = insn.len().to_const() as usize;
-        if insn_length == 0 {
+        let insn_size = insn.len().to_const() as usize;
+        if insn_size == 0 {
             break;
         }
-        let Some(insn_bytes) = remaining.get(..insn_length) else {
+        let Some(insn_bytes) = remaining.get(..insn_size) else {
             break;
         };
         let insn_properties = classify_bytes(insn_bytes);
@@ -71,10 +71,10 @@ fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
         }
 
         properties = insn_properties;
-        length += insn_length;
+        size += insn_size;
     }
 
-    (length, properties)
+    (size, properties)
 }
 #[derive(Clone)]
 struct ArchData {
@@ -82,7 +82,7 @@ struct ArchData {
     gprs: Vec<Varnode>,
     frame_pointer: Option<Varnode>,
     swi_op: Option<u16>,
-    invalid_instruction_op: Option<u16>,
+    invalid_insn_op: Option<u16>,
 }
 
 impl ArchData {
@@ -113,7 +113,7 @@ impl ArchData {
             gprs,
             frame_pointer: reg("EBP"),
             swi_op: language.user_op_by_name("swi"),
-            invalid_instruction_op: language.user_op_by_name("invalidInstructionException"),
+            invalid_insn_op: language.user_op_by_name("invalidInstructionException"),
         }
     }
 }
@@ -164,12 +164,12 @@ impl ArchT for X86 {
 
     fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+            || self.data.invalid_insn_op == Some(op)
     }
 
     fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
         (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+            || self.data.invalid_insn_op == Some(op)
     }
 
     fn language(&self) -> &'static Language {

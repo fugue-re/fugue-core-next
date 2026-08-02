@@ -39,16 +39,16 @@ impl ECodeSsaUses {
 }
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaUses {
-    fn analyse(body: &ECodeSsaIr) -> Self {
+    fn analyse(ir: &ECodeSsaIr) -> Self {
         let entries =
-            body.operations()
+            ir.operations()
                 .iter()
                 .enumerate()
                 .flat_map(|(operation_index, operation)| {
                     let operation_id = IlOpId::try_from_index(operation_index)
                         .expect("operation count fits the operation id space");
 
-                    body.operation_operands(operation).iter().enumerate().map(
+                    ir.operation_operands_for(operation).iter().enumerate().map(
                         move |(operand_index, operand)| {
                             (
                                 operand.index(),
@@ -59,7 +59,7 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaUses {
                 });
 
         Self {
-            uses: IlCsr::from_entries(body.values().len(), entries),
+            uses: IlCsr::from_entries(ir.values().len(), entries),
         }
     }
 }
@@ -82,17 +82,17 @@ impl ECodeSsaBlockArgumentInputs {
 }
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgumentInputs {
-    fn analyse(body: &ECodeSsaIr) -> Self {
-        let block_count = body.graph().blocks().len();
+    fn analyse(ir: &ECodeSsaIr) -> Self {
+        let block_count = ir.graph().blocks().len();
         let arguments = IlCsr::from_entries(
             block_count,
-            body.block_arguments()
+            ir.block_arguments()
                 .iter()
                 .map(|argument| (argument.block().index(), argument.value())),
         );
         let incoming = IlCsr::from_entries(
             block_count,
-            body.graph()
+            ir.graph()
                 .successors()
                 .iter()
                 .enumerate()
@@ -105,7 +105,7 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgumentInputs {
                 let argument_inputs = incoming
                     .row(block)
                     .iter()
-                    .filter_map(|&edge| body.arguments_for_edge(edge).get(position).copied())
+                    .filter_map(|&edge| ir.arguments_for_edge(edge).get(position).copied())
                     .collect();
                 inputs.insert(argument, argument_inputs);
             }
@@ -160,8 +160,8 @@ mod test {
                 64,
             ))
             .unwrap();
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let index = body.analyse::<ECodeSsaUses>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let index = ir.analyse::<ECodeSsaUses>();
 
         assert_eq!(
             index.uses_for(left),

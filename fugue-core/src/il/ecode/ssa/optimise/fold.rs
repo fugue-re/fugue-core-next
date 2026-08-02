@@ -50,14 +50,14 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
                 }
                 let value = {
                     let mut operands = SmallVec::<[&BitVec; 4]>::new();
-                    let all_constant = ir.operation_operands(op).iter().all(|value| match &folded
-                        [value.index()]
-                    {
-                        Some(constant) => {
-                            operands.push(constant);
-                            true
+                    let all_constant = ir.operation_operands_for(op).iter().all(|value| {
+                        match &folded[value.index()] {
+                            Some(constant) => {
+                                operands.push(constant);
+                                true
+                            }
+                            None => false,
                         }
-                        None => false,
                     });
                     if all_constant {
                         op.opcode().evaluate(op.width(), &operands)

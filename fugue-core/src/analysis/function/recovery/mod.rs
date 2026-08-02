@@ -2,10 +2,11 @@ use thiserror::Error;
 
 use crate::analysis::AnalysisError;
 use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId, ProblemKind};
-use crate::lifter::{DisassemblerError, LifterError};
+use crate::lifter::{DisassemblerError, InsnResolverError, LifterError};
 use crate::storage::SegmentStorageError;
 
 pub(crate) mod analysis;
+pub(crate) use analysis::FUNCTION_RECOVERY_ANALYSER;
 pub use analysis::{
     FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension,
     FunctionStructuringContext,
@@ -19,9 +20,6 @@ pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
 pub(crate) mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
-
-pub(crate) mod resolver;
-pub use resolver::InsnResolver;
 
 mod structuring;
 
@@ -47,39 +45,39 @@ pub enum FunctionRecoveryError {
     #[error("initialisation pass failed: {0}")]
     InitialisationPass(AnalysisError),
     #[error(transparent)]
-    Instruction(#[from] InsnError),
+    Insn(#[from] InsnError),
     #[error("invalid block id: {0:?}")]
     InvalidBlockId(IncompleteCodeBlockId),
-    #[error("invalid block length at {address}: {length} bytes exceeds u16 capacity")]
-    InvalidBlockLength { address: Address, length: usize },
     #[error(
-        "invalid block size at {address}; number of instructions ({instructions}) must be non-zero and less than {maximum}"
+        "invalid block at {address}; instruction count ({insn_count}) must be non-zero and less than {maximum_insn_count}"
     )]
-    InvalidBlockSize {
+    InvalidBlockInsnCount {
         address: Address,
-        instructions: usize,
-        maximum: usize,
+        insn_count: usize,
+        maximum_insn_count: usize,
     },
+    #[error("invalid block size at {address}: {size} bytes exceeds u16 capacity")]
+    InvalidBlockSize { address: Address, size: usize },
     #[error("invalid function; failed to lift any instructions")]
     InvalidFunction,
     #[error(
-        "invalid function at {address}; number of instructions ({instructions}) exceeds limit ({maximum})"
+        "invalid function at {address}; block count ({block_count}) must be less than {maximum_block_count}"
     )]
-    InvalidFunctionInstructionCount {
+    InvalidFunctionBlockCount {
         address: Address,
-        instructions: usize,
-        maximum: usize,
+        block_count: usize,
+        maximum_block_count: usize,
     },
     #[error(
-        "invalid function at {address}; number of blocks ({blocks}) must be less than {maximum}"
+        "invalid function at {address}; instruction count ({insn_count}) exceeds limit ({maximum_insn_count})"
     )]
-    InvalidFunctionSize {
+    InvalidFunctionInsnCount {
         address: Address,
-        blocks: usize,
-        maximum: usize,
+        insn_count: usize,
+        maximum_insn_count: usize,
     },
-    #[error("invalid instruction id: {0:?}")]
-    InvalidInstructionId(InsnId),
+    #[error("invalid insn id: {0:?}")]
+    InvalidInsnId(InsnId),
     #[error(transparent)]
     Lifting(#[from] LifterError),
     #[error("post-structuring pass failed: {0}")]
@@ -93,40 +91,48 @@ impl FunctionRecoveryError {
         FunctionRecoveryError::InvalidBlockId(id)
     }
 
-    pub fn invalid_block_length(address: Address, length: usize) -> Self {
-        FunctionRecoveryError::InvalidBlockLength { address, length }
+    pub fn invalid_block_size(address: Address, size: usize) -> Self {
+        Self::InvalidBlockSize { address, size }
     }
 
-    pub fn invalid_block_size(addr: Address, num_insns: usize, max_insns: usize) -> Self {
-        FunctionRecoveryError::InvalidBlockSize {
-            address: addr,
-            instructions: num_insns,
-            maximum: max_insns,
-        }
-    }
-
-    pub fn invalid_function_size(addr: Address, num_blocks: usize, max_blocks: usize) -> Self {
-        FunctionRecoveryError::InvalidFunctionSize {
-            address: addr,
-            blocks: num_blocks,
-            maximum: max_blocks,
-        }
-    }
-
-    pub fn invalid_function_instructions(
+    pub fn invalid_block_insn_count(
         address: Address,
-        instructions: usize,
-        maximum: usize,
+        insn_count: usize,
+        maximum_insn_count: usize,
     ) -> Self {
-        Self::InvalidFunctionInstructionCount {
+        Self::InvalidBlockInsnCount {
             address,
-            instructions,
-            maximum,
+            insn_count,
+            maximum_insn_count,
         }
     }
 
-    pub fn invalid_instruction_id(id: InsnId) -> Self {
-        FunctionRecoveryError::InvalidInstructionId(id)
+    pub fn invalid_function_block_count(
+        address: Address,
+        block_count: usize,
+        maximum_block_count: usize,
+    ) -> Self {
+        Self::InvalidFunctionBlockCount {
+            address,
+            block_count,
+            maximum_block_count,
+        }
+    }
+
+    pub fn invalid_function_insn_count(
+        address: Address,
+        insn_count: usize,
+        maximum_insn_count: usize,
+    ) -> Self {
+        Self::InvalidFunctionInsnCount {
+            address,
+            insn_count,
+            maximum_insn_count,
+        }
+    }
+
+    pub fn invalid_insn_id(id: InsnId) -> Self {
+        Self::InvalidInsnId(id)
     }
 
     pub fn problem_kind(&self) -> ProblemKind {
@@ -134,16 +140,24 @@ impl FunctionRecoveryError {
             Self::CommitHook(_) | Self::InitialisationPass(_) | Self::PostStructuringPass(_) => {
                 ProblemKind::PassFailed
             }
-            Self::Disassembly(_) | Self::Instruction(_) | Self::Lifting(_) => {
-                ProblemKind::DecodeFailed
-            }
-            Self::InvalidBlockLength { .. }
-            | Self::InvalidBlockSize { .. }
-            | Self::InvalidFunctionInstructionCount { .. }
-            | Self::InvalidFunctionSize { .. } => ProblemKind::FunctionTooLarge,
+            Self::Disassembly(_) | Self::Insn(_) | Self::Lifting(_) => ProblemKind::DecodeFailed,
+            Self::InvalidBlockSize { .. }
+            | Self::InvalidBlockInsnCount { .. }
+            | Self::InvalidFunctionInsnCount { .. }
+            | Self::InvalidFunctionBlockCount { .. } => ProblemKind::FunctionTooLarge,
             Self::InvalidFunction => ProblemKind::CannotCreateFunction,
-            Self::InvalidBlockId(_) | Self::InvalidInstructionId(_) => ProblemKind::Unknown,
+            Self::InvalidBlockId(_) | Self::InvalidInsnId(_) => ProblemKind::Unknown,
             Self::SegmentStorage(_) => ProblemKind::AvoidedBytes,
+        }
+    }
+}
+
+impl From<InsnResolverError> for FunctionRecoveryError {
+    fn from(error: InsnResolverError) -> Self {
+        match error {
+            InsnResolverError::Disassembly(error) => Self::Disassembly(error),
+            InsnResolverError::Insn(error) => Self::Insn(error),
+            InsnResolverError::Lifting(error) => Self::Lifting(error),
         }
     }
 }
@@ -180,6 +194,7 @@ pub struct FunctionRecoveryConfig {
     use_segment_mapping_hints: bool,
     // This flag controls whether to use symbol table function hints when recovering functions.
     use_symbol_table_function_hints: bool,
+    use_switch_analysis: bool,
 }
 
 impl Default for FunctionRecoveryConfig {
@@ -194,6 +209,7 @@ impl Default for FunctionRecoveryConfig {
             use_segment_function_hints: true,
             use_segment_mapping_hints: true,
             use_symbol_table_function_hints: true,
+            use_switch_analysis: false,
         }
     }
 }
@@ -300,6 +316,19 @@ impl FunctionRecoveryConfig {
 
     pub fn with_non_returning_analysis(mut self, enabled: bool) -> Self {
         self.enable_non_returning_analysis(enabled);
+        self
+    }
+
+    pub fn use_switch_analysis(&self) -> bool {
+        self.use_switch_analysis
+    }
+
+    pub fn enable_switch_analysis(&mut self, enabled: bool) {
+        self.use_switch_analysis = enabled;
+    }
+
+    pub fn with_switch_analysis(mut self, enabled: bool) -> Self {
+        self.enable_switch_analysis(enabled);
         self
     }
 

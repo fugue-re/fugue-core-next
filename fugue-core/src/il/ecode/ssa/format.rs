@@ -5,6 +5,7 @@ use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
     ECodeSsaValueKind,
 };
+use crate::ir::Address;
 
 #[derive(Debug, Copy, Clone)]
 struct ECodeSsaOpcodeDisplay(ECodeSsaOpcode);
@@ -18,12 +19,12 @@ impl fmt::Display for ECodeSsaOpcodeDisplay {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ECodeSsaIrDisplay<'a> {
-    body: &'a ECodeSsaIr,
+    ir: &'a ECodeSsaIr,
 }
 
 impl<'a> ECodeSsaIrDisplay<'a> {
-    pub(crate) const fn new(body: &'a ECodeSsaIr) -> Self {
-        Self { body }
+    pub(crate) const fn new(ir: &'a ECodeSsaIr) -> Self {
+        Self { ir }
     }
 }
 
@@ -31,31 +32,64 @@ impl ECodeSsaIr {
     pub const fn display(&self) -> ECodeSsaIrDisplay<'_> {
         ECodeSsaIrDisplay::new(self)
     }
+
+    pub const fn display_source(&self, address: Address) -> ECodeSsaSourceDisplay<'_> {
+        ECodeSsaSourceDisplay::new(self, address)
+    }
 }
 
 impl fmt::Display for ECodeSsaIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, value) in self.body.values().iter().enumerate() {
+        for (index, value) in self.ir.values().iter().enumerate() {
             let id = IlValueId::try_from_index(index).map_err(|_| fmt::Error)?;
             let display = ECodeSsaValueDisplay::new(id, value);
             writeln!(f, "{display}")?;
         }
 
-        for (index, argument) in self.body.block_arguments().iter().enumerate() {
+        for (index, argument) in self.ir.block_arguments().iter().enumerate() {
             let display = ECodeSsaBlockArgDisplay::new(index, argument);
             writeln!(f, "{display}")?;
         }
 
-        for (index, domain) in self.body.memory_domains().iter().enumerate() {
+        for (index, domain) in self.ir.memory_domains().iter().enumerate() {
             let display = ECodeSsaMemoryDomainDisplay::new(index, domain);
             writeln!(f, "{display}")?;
         }
 
-        for (index, operation) in self.body.operations().iter().enumerate() {
-            let display = ECodeSsaOpDisplay::new(self.body, index, operation);
+        for (index, operation) in self.ir.operations().iter().enumerate() {
+            let display = ECodeSsaOpDisplay::new(self.ir, index, operation);
             write!(f, "{display}")?;
 
-            if index + 1 < self.body.operations().len() {
+            if index + 1 < self.ir.operations().len() {
+                writeln!(f)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ECodeSsaSourceDisplay<'a> {
+    ir: &'a ECodeSsaIr,
+    address: Address,
+}
+
+impl<'a> ECodeSsaSourceDisplay<'a> {
+    const fn new(ir: &'a ECodeSsaIr, address: Address) -> Self {
+        Self { ir, address }
+    }
+}
+
+impl fmt::Display for ECodeSsaSourceDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut operations = self.ir.operations_for_source(self.address).peekable();
+
+        while let Some((id, operation)) = operations.next() {
+            let display = ECodeSsaOpDisplay::new(self.ir, id.index(), operation);
+            write!(f, "{display}")?;
+
+            if operations.peek().is_some() {
                 writeln!(f)?;
             }
         }
@@ -139,22 +173,22 @@ impl fmt::Display for ECodeSsaMemoryDomainDisplay<'_> {
 
 #[derive(Debug, Copy, Clone)]
 struct ECodeSsaOpDisplay<'a> {
-    body: &'a ECodeSsaIr,
+    ir: &'a ECodeSsaIr,
     index: usize,
     operation: &'a ECodeSsaOp,
 }
 
 impl<'a> ECodeSsaOpDisplay<'a> {
-    pub(crate) const fn new(body: &'a ECodeSsaIr, index: usize, operation: &'a ECodeSsaOp) -> Self {
+    pub(crate) const fn new(ir: &'a ECodeSsaIr, index: usize, operation: &'a ECodeSsaOp) -> Self {
         Self {
-            body,
+            ir,
             index,
             operation,
         }
     }
 
     fn write_result(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
-        let value = self.body.values().get(id.index()).ok_or(fmt::Error)?;
+        let value = self.ir.values().get(id.index()).ok_or(fmt::Error)?;
         let index = id.index();
         let width = value.width();
 
@@ -162,7 +196,7 @@ impl<'a> ECodeSsaOpDisplay<'a> {
     }
 
     fn write_value(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
-        self.body.values().get(id.index()).ok_or(fmt::Error)?;
+        self.ir.values().get(id.index()).ok_or(fmt::Error)?;
         let index = id.index();
 
         write!(f, "%v{index}")
@@ -188,7 +222,7 @@ impl<'a> ECodeSsaOpDisplay<'a> {
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.body.operation_operands(self.operation);
+        let operands = self.ir.operation_operands_for(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -205,6 +239,13 @@ impl<'a> ECodeSsaOpDisplay<'a> {
 
     fn write_metadata(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.operation.opcode() {
+            ECodeSsaOpcode::Constant if self.operation.width() > 64 => {
+                let constant = self
+                    .operation
+                    .constant(self.ir.constant_storage())
+                    .ok_or(fmt::Error)?;
+                write!(f, " 0x{constant:x}")?;
+            }
             ECodeSsaOpcode::Constant | ECodeSsaOpcode::Address => {
                 let immediate = self.operation.immediate();
                 write!(f, " 0x{immediate:x}")?;
@@ -283,10 +324,10 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
-            body.display().to_string(),
+            ir.display().to_string(),
             "%v0:bits<64> = operation<0>\n\
              @o0 %v0:bits<64> = ecode.ssa.const 0x2a\n\
              @o1 ecode.ssa.ret %v0"

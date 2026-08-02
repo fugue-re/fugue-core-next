@@ -6,7 +6,6 @@ use bitflags::bitflags;
 
 use crate::ir::{Address, RawAddress, SegmentProperties};
 use crate::lifter::ContextHint;
-use crate::storage::segments::overlay::OverlayTree;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentStorage, SegmentStorageError};
@@ -130,8 +129,7 @@ pub struct SegmentMapping {
     kind: SegmentMappingKind,
     provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
-    overlay: OverlayTree,
-    version: Revision,
+    revision: Revision,
     name: String,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
@@ -156,8 +154,7 @@ impl SegmentMapping {
             kind: SegmentMappingKind::None,
             provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::NONE,
-            overlay: OverlayTree::new(),
-            version: Revision::default(),
+            revision: Revision::default(),
             name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
@@ -175,8 +172,7 @@ impl SegmentMapping {
             kind: builder.kind,
             provenance: builder.provenance,
             flags: builder.flags,
-            overlay: OverlayTree::new(),
-            version: Revision::default(),
+            revision: Revision::default(),
             name: builder.name,
             mapping_hints: builder.mapping_hints,
             function_hints: builder.function_hints,
@@ -255,20 +251,12 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn overlay(&self) -> &OverlayTree {
-        &self.overlay
-    }
-
-    pub fn overlay_mut(&mut self) -> &mut OverlayTree {
-        &mut self.overlay
-    }
-
-    pub fn version(&self) -> Revision {
-        self.version
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     fn touch(&mut self) {
-        self.version = self.version.next();
+        self.revision = self.revision.next();
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
@@ -348,7 +336,7 @@ impl SegmentMapping {
     pub fn make_ref(&self) -> SegmentMappingRef {
         SegmentMappingRef {
             mapping_id: self.id,
-            version: self.version,
+            revision: self.revision,
         }
     }
 }
@@ -356,7 +344,7 @@ impl SegmentMapping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentMappingRef {
     mapping_id: SegmentMappingId,
-    version: Revision,
+    revision: Revision,
 }
 
 impl SegmentMappingRef {
@@ -364,12 +352,12 @@ impl SegmentMappingRef {
         self.mapping_id
     }
 
-    pub fn version(&self) -> Revision {
-        self.version
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     pub fn is_valid(&self, mapping: &SegmentMapping) -> bool {
-        self.mapping_id == mapping.id() && self.version == mapping.version()
+        self.mapping_id == mapping.id() && self.revision == mapping.revision()
     }
 }
 

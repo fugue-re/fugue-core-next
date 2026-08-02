@@ -17,8 +17,9 @@ mod verify;
 pub(crate) use builder::ECodeSsaBuilder;
 pub(crate) use constants::ECodeSsaConstantInterner;
 pub use def_use::{ECodeSsaBlockArgumentInputs, ECodeSsaUse, ECodeSsaUses};
-pub use format::ECodeSsaIrDisplay;
+pub use format::{ECodeSsaIrDisplay, ECodeSsaSourceDisplay};
 pub use intervals::ECodeSsaStridedIntervals;
+pub(crate) use ir::ECodeSsaIrParts;
 pub use ir::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaIr};
 pub use liveness::ECodeSsaLiveness;
 pub use memory::ECodeSsaMemoryDomain;
@@ -29,4 +30,4 @@ pub use transform::ECodeToSsa;
 pub use value::{ECodeSsaBlockArg, ECodeSsaValue, ECodeSsaValueKind};
 
 #[cfg(test)]
-pub(crate) mod test;
+mod test;

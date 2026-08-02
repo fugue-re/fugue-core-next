@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
-use super::{ExpressionStep, SsaConstruction, SsaDomain};
+use super::{ECodeSsaConstruction, ExpressionStep, SsaDomain};
 use crate::il::common::{IlError, IlExprId, IlIndexRange, IlLevel, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::il::ecode::{ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
 use crate::il::pcode::{FlagId, RegisterId};
 use crate::storage::segments::space::AddressSpaceId;
 
-impl SsaConstruction<'_, '_> {
+impl ECodeSsaConstruction<'_, '_> {
     pub(crate) fn build_statement_at(
         &mut self,
         index: usize,

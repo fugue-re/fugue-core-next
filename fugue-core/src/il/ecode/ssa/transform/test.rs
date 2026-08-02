@@ -12,8 +12,8 @@ use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn empty_ecode_constructs_empty_ssa() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let source = ECodeBuilder::new(source_header, IlGraph::default())
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source = ECodeBuilder::new(source_metadata, IlGraph::default())
         .build(&CancellationToken::default())
         .unwrap();
     let cancellation = CancellationToken::default();
@@ -27,8 +27,8 @@ fn empty_ecode_constructs_empty_ssa() {
 
 #[test]
 fn register_read_after_write_uses_current_value() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let value = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::Constant,
@@ -84,9 +84,9 @@ fn register_read_after_write_uses_current_value() {
 
     assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
     assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::Return);
-    assert_eq!(ssa.value_operands().len(), 1);
+    assert_eq!(ssa.operation_operands().len(), 1);
     assert_eq!(
-        ssa.value_operands()[0],
+        ssa.operation_operands()[0],
         IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap()
     );
     assert_eq!(
@@ -100,8 +100,8 @@ fn register_read_after_write_uses_current_value() {
 
 #[test]
 fn call_preserves_only_declared_register_state() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     builder.set_call_preserved_registers(vec![RegisterId::new(7)]);
     let preserved = builder
         .push_expression(ECodeExpr::new(
@@ -196,7 +196,7 @@ fn call_preserves_only_declared_register_state() {
     assert_eq!(ssa.operations()[3].opcode(), ECodeSsaOpcode::Undefined);
     assert_eq!(ssa.operations()[4].opcode(), ECodeSsaOpcode::Return);
     assert_eq!(
-        ssa.operation_operands(&ssa.operations()[4]),
+        ssa.operation_operands_for(&ssa.operations()[4]),
         &[
             IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap(),
             IlValueId::try_from_index(ssa.operations()[3].results().start()).unwrap(),
@@ -205,9 +205,9 @@ fn call_preserves_only_declared_register_state() {
 }
 
 #[test]
-fn instruction_wide_expression_is_not_rebuilt_after_register_write() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+fn insn_wide_expression_is_not_rebuilt_after_register_write() {
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let register = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::ReadRegister,
@@ -295,13 +295,13 @@ fn instruction_wide_expression_is_not_rebuilt_after_register_write() {
         .iter()
         .find(|operation| operation.opcode() == ECodeSsaOpcode::Store)
         .expect("store must exist");
-    assert_eq!(ssa.operation_operands(store)[0], address_value);
+    assert_eq!(ssa.operation_operands_for(store)[0], address_value);
 }
 
 #[test]
 fn register_read_without_write_becomes_undefined() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let read = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::ReadRegister,
@@ -336,8 +336,8 @@ fn register_read_without_write_becomes_undefined() {
 
 #[test]
 fn load_preserves_fugue_address_space() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let offset = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::Constant,
@@ -395,8 +395,8 @@ fn load_preserves_fugue_address_space() {
 
 #[test]
 fn load_after_store_uses_store_memory_result() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let space = AddressSpaceId::new(3);
     let store_address = builder
         .push_expression(ECodeExpr::new(
@@ -477,7 +477,7 @@ fn load_after_store_uses_store_memory_result() {
         .unwrap();
     let store_memory =
         IlValueId::try_from_index(ssa.operations()[store_index].results().start()).unwrap();
-    let load_operands = ssa.operation_operands(&ssa.operations()[load_index]);
+    let load_operands = ssa.operation_operands_for(&ssa.operations()[load_index]);
 
     assert_eq!(ssa.memory_domains().len(), 1);
     assert_eq!(ssa.memory_domains()[0].space(), space);
@@ -487,8 +487,8 @@ fn load_after_store_uses_store_memory_result() {
 
 #[test]
 fn store_without_load_registers_memory_domain() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let space = AddressSpaceId::new(3);
     let address = builder
         .push_expression(ECodeExpr::new(
@@ -533,8 +533,8 @@ fn store_without_load_registers_memory_domain() {
 
 #[test]
 fn direct_branch_preserves_fugue_address() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
-    let mut builder = ECodeBuilder::new(source_header, IlGraph::default());
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let condition = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::Constant,
@@ -582,7 +582,7 @@ fn direct_branch_preserves_fugue_address() {
 
 #[test]
 fn deep_dominance_chain_constructs_iteratively() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let block_count = 128usize;
     let mut successors = Vec::new();
     let mut blocks = Vec::new();
@@ -611,7 +611,7 @@ fn deep_dominance_chain_constructs_iteratively() {
     }
 
     let graph = IlGraph::new(blocks, successors);
-    let mut builder = ECodeBuilder::new(source_header, graph);
+    let mut builder = ECodeBuilder::new(source_metadata, graph);
 
     for index in 0..block_count {
         let value = builder
@@ -651,7 +651,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
 #[test]
 fn merge_block_register_read_becomes_block_argument() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
         IlBlockId::try_from_index(2).unwrap(),
@@ -683,7 +683,7 @@ fn merge_block_register_read_becomes_block_argument() {
         ],
         successors,
     );
-    let mut builder = ECodeBuilder::new(source_header, graph);
+    let mut builder = ECodeBuilder::new(source_metadata, graph);
     let left = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::Constant,
@@ -758,7 +758,10 @@ fn merge_block_register_read_becomes_block_argument() {
         IlBlockId::try_from_index(3).unwrap()
     );
     assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Return);
-    assert_eq!(ssa.value_operands()[0], ssa.block_arguments()[0].value());
+    assert_eq!(
+        ssa.operation_operands()[0],
+        ssa.block_arguments()[0].value()
+    );
     assert_eq!(ssa.edge_arguments().len(), 4);
     assert_eq!(ssa.edge_argument_values().len(), 2);
     assert!(ssa.edge_arguments()[0].is_empty());
@@ -769,7 +772,7 @@ fn merge_block_register_read_becomes_block_argument() {
 
 #[test]
 fn merge_block_load_uses_memory_block_argument() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let join = IlBlockId::try_from_index(3).unwrap();
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
@@ -802,7 +805,7 @@ fn merge_block_load_uses_memory_block_argument() {
         ],
         successors,
     );
-    let mut builder = ECodeBuilder::new(source_header, graph);
+    let mut builder = ECodeBuilder::new(source_metadata, graph);
     let space = AddressSpaceId::new(3);
     let store_address = builder
         .push_expression(ECodeExpr::new(
@@ -876,7 +879,7 @@ fn merge_block_load_uses_memory_block_argument() {
         .iter()
         .position(|operation| operation.opcode() == ECodeSsaOpcode::Load)
         .unwrap();
-    let load_operands = ssa.operation_operands(&ssa.operations()[load_index]);
+    let load_operands = ssa.operation_operands_for(&ssa.operations()[load_index]);
 
     assert_eq!(ssa.memory_domains().len(), 1);
     assert_eq!(ssa.memory_domains()[0].space(), space);
@@ -898,7 +901,7 @@ fn merge_block_load_uses_memory_block_argument() {
 
 #[test]
 fn loop_carried_register_uses_header_block_argument() {
-    let source_header = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
     let loop_header = IlBlockId::try_from_index(1).unwrap();
     let loop_body = IlBlockId::try_from_index(2).unwrap();
     let exit = IlBlockId::try_from_index(3).unwrap();
@@ -927,7 +930,7 @@ fn loop_carried_register_uses_header_block_argument() {
         ],
         vec![loop_header, loop_body, loop_header, exit],
     );
-    let mut builder = ECodeBuilder::new(source_header, graph);
+    let mut builder = ECodeBuilder::new(source_metadata, graph);
     let read = builder
         .push_expression(ECodeExpr::new(
             ECodeExprOpcode::ReadRegister,
@@ -977,7 +980,10 @@ fn loop_carried_register_uses_header_block_argument() {
 
     assert_eq!(ssa.block_arguments().len(), 1);
     assert_eq!(ssa.block_arguments()[0].block(), loop_header);
-    assert_eq!(ssa.value_operands()[0], ssa.block_arguments()[0].value());
+    assert_eq!(
+        ssa.operation_operands()[0],
+        ssa.block_arguments()[0].value()
+    );
     assert_eq!(ssa.arguments_for_edge(0).len(), 1);
     assert_eq!(ssa.arguments_for_edge(2).len(), 1);
 

@@ -12,6 +12,9 @@ use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::Revision;
 use crate::types::common::cursor_bound;
 
+pub(crate) const ATTRIBUTE_PROBLEM_CACHE_SIZE: &str = "storage.entities.problem.cache_size";
+pub(crate) const DEFAULT_PROBLEM_CACHE_BYTES: usize = 2 * 1024 * 1024;
+
 mod persistent;
 mod transient;
 
@@ -157,16 +160,16 @@ impl ProblemTable {
         matches!(self, Self::Persistent(_))
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> ProblemId {
+    pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
         match self {
-            Self::Persistent(table) => table.preview_id(offset),
-            Self::Transient(table) => table.preview_id(offset),
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
         }
     }
 
-    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_len: usize, is_new: bool) {
+    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
         match self {
-            Self::Persistent(table) => table.publish_upsert(problem, encoded_len, is_new),
+            Self::Persistent(table) => table.publish_upsert(problem, encoded_size, is_new),
             Self::Transient(table) => table.publish_upsert(problem, is_new),
         }
     }
@@ -180,8 +183,8 @@ impl ProblemTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.flush(),
-            Self::Transient(t) => t.flush(),
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(table) => table.flush(),
         }
     }
 
@@ -201,7 +204,7 @@ impl ProblemTable {
         observed_revision: Revision,
     ) -> Result<ProblemId, ProblemTableError> {
         let key = ProblemKey::scoped(scope, kind);
-        if let Some(id) = self.try_get_key(key)?.map(|problem| problem.id()) {
+        if let Some(id) = self.try_get_by_key(key)?.map(|problem| problem.id()) {
             self.try_modify_by_id(id, |problem| {
                 problem.record_attempt(observed_revision);
             })?;
@@ -225,8 +228,8 @@ impl ProblemTable {
         id: ProblemId,
     ) -> Result<Option<ProblemRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
@@ -240,28 +243,28 @@ impl ProblemTable {
         address: Address,
         kind: ProblemKind,
     ) -> Result<Option<ProblemRef<'_>>, EntityStorageError> {
-        self.try_get_key(ProblemKey::new(address, kind))
+        self.try_get_by_key(ProblemKey::new(address, kind))
     }
 
     pub fn get_scoped(&self, scope: ProblemScope, kind: ProblemKind) -> Option<ProblemRef<'_>> {
-        self.try_get_key(ProblemKey::scoped(scope, kind))
+        self.try_get_by_key(ProblemKey::scoped(scope, kind))
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_get_key(
+    pub fn try_get_by_key(
         &self,
         key: ProblemKey,
     ) -> Result<Option<ProblemRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_key(key)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_key(key).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_key(key)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_key(key).map(EntityRef::borrowed)),
         }
     }
 
     pub fn contains(&self, address: Address) -> bool {
         match self {
-            Self::Persistent(p) => p.contains(address),
-            Self::Transient(t) => t.contains(address),
+            Self::Persistent(table) => table.contains(address),
+            Self::Transient(table) => table.contains(address),
         }
     }
 
@@ -275,8 +278,29 @@ impl ProblemTable {
         f: impl FnOnce(&mut Problem) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_id(id, f),
-            Self::Transient(t) => Ok(t.modify_by_id(id, f)),
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
+        }
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: ProblemId,
+        f: impl FnOnce(&mut Problem) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn remove_by_id(&mut self, id: ProblemId) -> bool {
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_id(&mut self, id: ProblemId) -> Result<bool, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_remove_by_id(id),
+            Self::Transient(table) => Ok(table.remove_by_id(id)),
         }
     }
 
@@ -290,20 +314,20 @@ impl ProblemTable {
         address: Address,
         kind: ProblemKind,
     ) -> Result<bool, EntityStorageError> {
-        self.try_remove_key(ProblemKey::new(address, kind))
+        self.try_remove_by_key(ProblemKey::new(address, kind))
     }
 
-    pub fn try_remove_key(&mut self, key: ProblemKey) -> Result<bool, EntityStorageError> {
+    pub fn try_remove_by_key(&mut self, key: ProblemKey) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_remove_key(key),
-            Self::Transient(t) => Ok(t.remove_key(key)),
+            Self::Persistent(table) => table.try_remove_by_key(key),
+            Self::Transient(table) => Ok(table.remove_by_key(key)),
         }
     }
 
     pub fn keys(&self) -> Box<dyn Iterator<Item = ProblemKey> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.keys()),
-            Self::Transient(t) => Box::new(t.keys()),
+            Self::Persistent(table) => Box::new(table.keys()),
+            Self::Transient(table) => Box::new(table.keys()),
         }
     }
 
@@ -323,29 +347,29 @@ impl ProblemTable {
         after: Option<ProblemKey>,
     ) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.entries_after(after).map(EntityRef::cached)),
-            Self::Transient(t) => Box::new(t.entries_after(after).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
         }
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter().map(EntityRef::cached)),
-            Self::Transient(t) => Box::new(t.iter().map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Persistent(p) => p.is_empty(),
-            Self::Transient(t) => t.is_empty(),
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Persistent(p) => p.len(),
-            Self::Transient(t) => t.len(),
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
         }
     }
 }

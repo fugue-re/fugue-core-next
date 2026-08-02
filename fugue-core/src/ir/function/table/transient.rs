@@ -32,8 +32,8 @@ impl FunctionTable {
         Ok(())
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> FunctionId {
-        self.index.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> FunctionId {
+        self.index.allocator.pending_id(offset)
     }
 
     pub(super) fn publish_reservations(&mut self, reservations: &[FunctionId]) {

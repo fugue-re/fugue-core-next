@@ -11,14 +11,14 @@ pub enum DisassemblerError {
     #[error(transparent)]
     Disassembler(anyhow::Error),
     #[error(transparent)]
-    Instruction(#[from] InsnError),
-    #[error("invalid instruction at {0}")]
-    InvalidInstruction(Address),
+    Insn(#[from] InsnError),
+    #[error("invalid insn at {0}")]
+    InvalidInsn(Address),
 }
 
 impl DisassemblerError {
-    pub fn invalid_instruction(address: Address) -> Self {
-        Self::InvalidInstruction(address)
+    pub fn invalid_insn(address: Address) -> Self {
+        Self::InvalidInsn(address)
     }
 
     pub fn disassembler<E>(error: E) -> Self

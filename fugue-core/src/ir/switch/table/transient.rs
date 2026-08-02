@@ -30,8 +30,8 @@ impl SwitchTable {
         self.index.branches_of_function(function)
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> SwitchId {
-        self.index.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> SwitchId {
+        self.index.allocator.pending_id(offset)
     }
 
     pub(super) fn publish_reservation(&mut self, id: SwitchId) {

@@ -415,7 +415,7 @@ fn load_counting_project() -> Result<Project, Box<dyn Error>> {
 fn load_engine() -> Result<(AnalysisEngine, Address), Box<dyn Error>> {
     let project = load_project()?;
     let entry = project
-        .entry()
+        .entry_point()
         .ok_or_else(|| std::io::Error::other("fixture entry missing"))?;
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
@@ -627,7 +627,7 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
     let entry = engine
         .query_reader()?
         .project()?
-        .entry()
+        .entry_point()
         .ok_or_else(|| std::io::Error::other("representative fixture entry missing"))?;
     black_box(engine.query_reader()?.revision()?);
     results.push(result);

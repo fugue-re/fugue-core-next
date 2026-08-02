@@ -93,7 +93,7 @@ impl ExternFunctionTemplate {
         &self.context
     }
 
-    pub fn len(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.bytes.len()
     }
 
@@ -112,10 +112,10 @@ pub struct ExternSegment {
 
 #[derive(Debug, Error)]
 pub enum ExternSegmentError {
-    #[error("extern address {0} out of bounds")]
-    AddressOutOfBounds(RawAddress),
     #[error("extern address {0} is misaligned")]
     AddressMisaligned(RawAddress),
+    #[error("extern address {0} out of bounds")]
+    AddressOutOfBounds(RawAddress),
 }
 
 impl ExternSegment {
@@ -197,7 +197,7 @@ impl ExternSegment {
     }
 
     pub fn aligned_template_size(&self) -> usize {
-        let template_size = self.template.len();
+        let template_size = self.template.size();
         (template_size + self.alignment.wrapping_sub(1)) & !self.alignment.wrapping_sub(1)
     }
 

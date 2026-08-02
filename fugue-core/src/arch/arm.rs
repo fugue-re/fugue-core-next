@@ -15,7 +15,7 @@ use crate::ir::{
     Symbol,
 };
 use crate::lazy_symbol;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
@@ -90,8 +90,8 @@ impl ArchT for Arm {
     }
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
-        let arm = Self::padding_length(bytes, self.language().is_big_endian(), false);
-        let thumb = Self::padding_length(bytes, self.language().is_big_endian(), true);
+        let arm = Self::padding_size(bytes, self.language().is_big_endian(), false);
+        let thumb = Self::padding_size(bytes, self.language().is_big_endian(), true);
         if (arm != 0 && arm == bytes.len()) || (thumb != 0 && thumb == bytes.len()) {
             BytesProperties::PADDING
         } else {
@@ -106,10 +106,10 @@ impl ArchT for Arm {
         bytes: &[u8],
     ) -> (usize, BytesProperties) {
         let thumb = context.get_variable_by_bits(self.data.t_mode, address.offset()) == 1;
-        let length = Self::padding_length(bytes, self.language().is_big_endian(), thumb);
+        let size = Self::padding_size(bytes, self.language().is_big_endian(), thumb);
         (
-            length,
-            if length == 0 {
+            size,
+            if size == 0 {
                 BytesProperties::empty()
             } else {
                 BytesProperties::PADDING
@@ -159,16 +159,16 @@ impl ArchT for Arm {
 }
 
 impl Arm {
-    fn padding_length(bytes: &[u8], big_endian: bool, thumb: bool) -> usize {
+    fn padding_size(bytes: &[u8], big_endian: bool, thumb: bool) -> usize {
         let patterns = match (big_endian, thumb) {
             (false, false) => ARM_PADDING_LE,
             (false, true) => THUMB_PADDING_LE,
             (true, false) => ARM_PADDING_BE,
             (true, true) => THUMB_PADDING_BE,
         };
-        let mut length = 0usize;
+        let mut size = 0usize;
 
-        while let Some(remaining) = bytes.get(length..) {
+        while let Some(remaining) = bytes.get(size..) {
             let Some(pattern) = patterns
                 .iter()
                 .copied()
@@ -176,10 +176,10 @@ impl Arm {
             else {
                 break;
             };
-            length += pattern.len();
+            size += pattern.len();
         }
 
-        length
+        size
     }
 
     fn canonicalise_with_mode(
@@ -402,7 +402,7 @@ impl ArmDisassembler {
     fn resolve_arm_direct_flow(
         address: Address,
         insn: &Instruction,
-        length: usize,
+        size: usize,
     ) -> Result<Option<Insn>, InsnError> {
         match insn.opcode {
             Opcode::B | Opcode::BL => {
@@ -416,27 +416,27 @@ impl ArmDisassembler {
                 if insn.opcode == Opcode::B {
                     Insn::from_direct_branch(
                         address,
-                        length,
+                        size,
                         target,
                         insn.condition != ConditionCode::AL,
                     )
                 } else {
-                    Insn::from_direct_call(address, length, target)
+                    Insn::from_direct_call(address, size, target)
                 }
                 .map(Some)
             }
             _ if insn.condition != ConditionCode::AL => Ok(None),
             Opcode::BLX if matches!(insn.operands[0], Operand::Reg(_)) => {
-                Insn::from_indirect_call(address, length).map(Some)
+                Insn::from_indirect_call(address, size).map(Some)
             }
             Opcode::BX => {
                 let Operand::Reg(register) = insn.operands[0] else {
                     return Ok(None);
                 };
                 if register == Reg::from_u8(14) {
-                    Insn::from_return(address, length)
+                    Insn::from_return(address, size)
                 } else {
-                    Insn::from_indirect_branch(address, length)
+                    Insn::from_indirect_branch(address, size)
                 }
                 .map(Some)
             }
@@ -461,7 +461,7 @@ impl ArmDisassembler {
             | Opcode::LDR
                 if insn.operands[0] == Operand::Reg(Reg::from_u8(15)) =>
             {
-                Insn::from_indirect_branch(address, length).map(Some)
+                Insn::from_indirect_branch(address, size).map(Some)
             }
             _ => Ok(None),
         }
@@ -538,8 +538,8 @@ mod test {
 
         let mut lifter = arch.lifter();
         let mut operations = Vec::new();
-        let length = lifter.lift(address, bytes, &mut operations)?;
-        let lifted = Insn::from_resolved_flow(language, address, length, &operations)?;
+        let size = lifter.lift(address, bytes, &mut operations)?;
+        let lifted = Insn::from_resolved_flow(language, address, size, &operations)?;
 
         assert_eq!(
             direct.properties(),
@@ -594,24 +594,24 @@ mod test {
         let address = Address::in_default_space(0x1000u64);
         let mut lifter = arch.lifter();
 
-        let (length, properties) = arch.classify_contiguous_bytes(
+        let (size, properties) = arch.classify_contiguous_bytes(
             address.raw_address(),
             lifter.context(),
             &[0x00, 0xf0, 0x20, 0xe3, 0x00, 0x00, 0xa0, 0xe1, 0x01],
         );
-        assert_eq!(length, 8);
+        assert_eq!(size, 8);
         assert_eq!(properties, BytesProperties::PADDING);
 
         let (_, thumb) = arch
             .canonicalise_address(RawAddress::from(0x1001u64))
             .expect("thumb address canonicalises");
         thumb.apply(address, lifter.context_mut());
-        let (length, properties) = arch.classify_contiguous_bytes(
+        let (size, properties) = arch.classify_contiguous_bytes(
             address.raw_address(),
             lifter.context(),
             &[0x00, 0xbf, 0xc0, 0x46, 0x01],
         );
-        assert_eq!(length, 4);
+        assert_eq!(size, 4);
         assert_eq!(properties, BytesProperties::PADDING);
     }
 

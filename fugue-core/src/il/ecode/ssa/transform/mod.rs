@@ -49,7 +49,7 @@ impl ECodeToSsa {
             source.metadata().input_revision(),
         );
         let mut builder = ECodeSsaBuilder::new(metadata, source.graph().clone());
-        let mut construction = SsaConstruction::new(
+        let mut construction = ECodeSsaConstruction::new(
             source,
             &mut builder,
             &mut self.expression_operands,
@@ -63,7 +63,7 @@ impl ECodeToSsa {
         builder.build(cancellation)
     }
 
-    pub(crate) fn transform_optimised(
+    pub fn transform_optimised(
         &mut self,
         source: &ECodeIr,
         cancellation: &CancellationToken,
@@ -102,7 +102,7 @@ impl ECodeToSsa {
     }
 }
 
-struct SsaConstruction<'a, 'b> {
+struct ECodeSsaConstruction<'a, 'b> {
     source: &'a ECodeIr,
     builder: &'b mut ECodeSsaBuilder,
     values: Vec<Option<IlValueId>>,
@@ -144,7 +144,7 @@ struct SsaDomains {
     reads: BTreeSet<SsaDomain>,
 }
 
-impl<'a, 'b> SsaConstruction<'a, 'b> {
+impl<'a, 'b> ECodeSsaConstruction<'a, 'b> {
     fn new(
         source: &'a ECodeIr,
         builder: &'b mut ECodeSsaBuilder,

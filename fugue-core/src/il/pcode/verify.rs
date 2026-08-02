@@ -46,7 +46,9 @@ impl PCodeIr {
     }
 
     fn verify_operation(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
-        operation.operands().verify_bounds(self.operands().len())?;
+        operation
+            .operands()
+            .verify_bounds(self.operation_operands().len())?;
 
         if let Some(count) = operation.opcode().fixed_operand_count() {
             let found = operation.operands().len();
@@ -76,25 +78,25 @@ impl PCodeIr {
             ))?;
         }
 
-        for operand in self.operation_operands(operation) {
+        for operand in self.operation_operands_for(operation) {
             self.location(*operand).ok_or(IlError::range_out_of_bounds(
                 operand.value(),
                 self.locations().len(),
             ))?;
         }
 
-        if operation.opcode().requires_effect_space() && operation.effect_space().is_none() {
+        if operation.opcode().requires_address_space() && operation.address_space().is_none() {
             return Err(IlError::missing_component(Self::LEVEL, "address space").into());
         }
-        if !operation.opcode().requires_effect_space() && operation.effect_space().is_some() {
+        if !operation.opcode().requires_address_space() && operation.address_space().is_some() {
             return Err(VerifyError::ForbiddenEffectSpace);
         }
 
-        if operation.opcode().requires_target() && operation.immediate() == 0 {
+        if operation.opcode().requires_address() && operation.immediate() == 0 {
             return Err(IlError::missing_component(Self::LEVEL, "address").into());
         }
 
-        if operation.opcode().requires_target()
+        if operation.opcode().requires_address()
             && operation.immediate() as usize > self.targets().len()
         {
             return Err(
@@ -106,7 +108,7 @@ impl PCodeIr {
     }
 
     fn verify_operation_sizes(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
-        let operands = self.operation_operands(operation);
+        let operands = self.operation_operands_for(operation);
         let output = operation.output().and_then(|output| self.location(output));
 
         if let Some(output) = output

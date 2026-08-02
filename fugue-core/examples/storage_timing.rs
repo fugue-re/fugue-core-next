@@ -1,13 +1,13 @@
-#[cfg(any(feature = "rocksdb", feature = "sqlite"))]
+#[cfg(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite"))]
 use std::error::Error;
-#[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+#[cfg(not(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite")))]
 use std::process;
 
-#[cfg(any(feature = "rocksdb", feature = "sqlite"))]
+#[cfg(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite"))]
 mod benchmark {
     use std::error::Error;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     use std::{env, fs};
 
     use fugue_core::attributes;
@@ -108,6 +108,11 @@ mod benchmark {
         "rocksdb"
     }
 
+    #[cfg(all(feature = "mdbx", not(feature = "rocksdb"), not(feature = "sqlite")))]
+    fn persistent_entity_backend() -> &'static str {
+        "mdbx"
+    }
+
     struct DiskUsage {
         allocated: u64,
         logical: u64,
@@ -116,7 +121,6 @@ mod benchmark {
     struct ProjectCounts {
         blocks: usize,
         functions: usize,
-        instructions: usize,
         memberships: usize,
         problems: usize,
         switches: usize,
@@ -192,10 +196,6 @@ mod benchmark {
         >(project_path)?)
     }
 
-    fn duration_ns(duration: Duration) -> u128 {
-        duration.as_nanos()
-    }
-
     pub(super) fn run() -> Result<(), Box<dyn Error>> {
         if env::var_os("RUST_LOG").is_some() {
             let _ = tracing_subscriber::fmt()
@@ -245,8 +245,8 @@ mod benchmark {
         let analysis_elapsed = analysis_start.elapsed();
         let dispatches = engine.metrics().dispatches();
 
+        let reader = engine.query_reader()?;
         let counts = {
-            let reader = engine.query_reader()?;
             let project = reader.project()?;
             let functions = project.functions().len();
             let blocks = project.blocks().len();
@@ -255,21 +255,16 @@ mod benchmark {
                 .iter()
                 .map(|function| function.blocks().count())
                 .sum::<usize>();
-            let instructions = project
-                .blocks()
-                .iter()
-                .map(|block| block.instructions().len())
-                .sum::<usize>();
             ProjectCounts {
                 blocks,
                 functions,
-                instructions,
                 memberships,
                 problems: project.problems().len(),
                 switches: project.switches().len(),
                 symbols: project.symbols().len(),
             }
         };
+        drop(reader);
 
         let before_close = DiskUsage::measure(&storage_root)?;
         let close_start = Instant::now();
@@ -280,21 +275,20 @@ mod benchmark {
         println!(
             "mode={},entity_backend={},segment_backend={},load_ns={},project_ns={},\
              analysis_ns={},close_ns={},dispatches={},\
-             functions={},blocks={},memberships={},instructions={},problems={},switches={},symbols={},\
+             functions={},blocks={},memberships={},problems={},switches={},symbols={},\
              disk_logical_before={},disk_allocated_before={},\
              disk_logical_after={},disk_allocated_after={}",
             mode.name(),
             mode.entity_backend(),
             mode.segment_backend(),
-            duration_ns(load_elapsed),
-            duration_ns(project_elapsed),
-            duration_ns(analysis_elapsed),
-            duration_ns(close_elapsed),
+            load_elapsed.as_nanos(),
+            project_elapsed.as_nanos(),
+            analysis_elapsed.as_nanos(),
+            close_elapsed.as_nanos(),
             dispatches,
             counts.functions,
             counts.blocks,
             counts.memberships,
-            counts.instructions,
             counts.problems,
             counts.switches,
             counts.symbols,
@@ -308,13 +302,13 @@ mod benchmark {
     }
 }
 
-#[cfg(any(feature = "rocksdb", feature = "sqlite"))]
+#[cfg(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite"))]
 fn main() -> Result<(), Box<dyn Error>> {
     benchmark::run()
 }
 
-#[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+#[cfg(not(any(feature = "mdbx", feature = "rocksdb", feature = "sqlite")))]
 fn main() {
-    eprintln!("the storage timing example requires the `rocksdb` or `sqlite` feature");
+    eprintln!("the storage timing example requires the `mdbx`, `rocksdb`, or `sqlite` feature");
     process::exit(2);
 }

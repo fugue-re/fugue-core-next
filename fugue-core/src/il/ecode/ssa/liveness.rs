@@ -50,24 +50,24 @@ impl LivenessMatrix {
 struct ECodeSsaLivenessBuilder<'a> {
     block_definitions: LivenessMatrix,
     block_uses: LivenessMatrix,
-    body: &'a ECodeSsaIr,
+    ir: &'a ECodeSsaIr,
     edge_uses: LivenessMatrix,
 }
 
 impl<'a> ECodeSsaLivenessBuilder<'a> {
-    fn new(body: &'a ECodeSsaIr) -> Self {
-        let block_count = body.graph().blocks().len();
-        let value_count = body.values().len();
+    fn new(ir: &'a ECodeSsaIr) -> Self {
+        let block_count = ir.graph().blocks().len();
+        let value_count = ir.values().len();
         Self {
             block_definitions: LivenessMatrix::new(block_count, value_count),
             block_uses: LivenessMatrix::new(block_count, value_count),
-            body,
+            ir,
             edge_uses: LivenessMatrix::new(block_count, value_count),
         }
     }
 
     fn build(mut self) -> ECodeSsaLiveness {
-        if self.body.graph().blocks().is_empty() {
+        if self.ir.graph().blocks().is_empty() {
             return ECodeSsaLiveness::default();
         }
 
@@ -75,8 +75,8 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
         self.collect_operation_uses();
         self.collect_edge_uses();
 
-        let block_count = self.body.graph().blocks().len();
-        let value_count = self.body.values().len();
+        let block_count = self.ir.graph().blocks().len();
+        let value_count = self.ir.values().len();
         let mut live_in = LivenessMatrix::new(block_count, value_count);
         let mut live_out = LivenessMatrix::new(block_count, value_count);
         let mut next_live_out = FixedBitSet::with_capacity(value_count);
@@ -86,11 +86,11 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
         while changed {
             changed = false;
 
-            for (block_index, block) in self.body.graph().blocks().iter().enumerate().rev() {
+            for (block_index, block) in self.ir.graph().blocks().iter().enumerate().rev() {
                 next_live_out.clear();
                 next_live_out.union_with(self.edge_uses.row(block_index));
 
-                for successor in block.successors().slice(self.body.graph().successors()) {
+                for successor in block.successors().slice(self.ir.graph().successors()) {
                     next_live_out.union_with(live_in.row(successor.index()));
                 }
 
@@ -118,17 +118,17 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
     }
 
     fn collect_block_arguments(&mut self) {
-        for argument in self.body.block_arguments() {
+        for argument in self.ir.block_arguments() {
             self.block_definitions
                 .insert(argument.block().index(), argument.value().index());
         }
     }
 
     fn collect_edge_uses(&mut self) {
-        for (block_index, block) in self.body.graph().blocks().iter().enumerate() {
+        for (block_index, block) in self.ir.graph().blocks().iter().enumerate() {
             let successors = block.successors();
             for offset in 0..successors.len() {
-                for argument in self.body.arguments_for_edge(successors.start() + offset) {
+                for argument in self.ir.arguments_for_edge(successors.start() + offset) {
                     self.edge_uses.insert(block_index, argument.index());
                 }
             }
@@ -136,9 +136,9 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
     }
 
     fn collect_operation_uses(&mut self) {
-        for (block_index, block) in self.body.graph().blocks().iter().enumerate() {
-            for operation in block.operations().slice(self.body.operations()) {
-                for operand in self.body.operation_operands(operation) {
+        for (block_index, block) in self.ir.graph().blocks().iter().enumerate() {
+            for operation in block.operations().slice(self.ir.operations()) {
+                for operand in self.ir.operation_operands_for(operation) {
                     if !self
                         .block_definitions
                         .contains(block_index, operand.index())
@@ -156,8 +156,8 @@ impl<'a> ECodeSsaLivenessBuilder<'a> {
 }
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaLiveness {
-    fn analyse(body: &ECodeSsaIr) -> Self {
-        ECodeSsaLivenessBuilder::new(body).build()
+    fn analyse(ir: &ECodeSsaIr) -> Self {
+        ECodeSsaLivenessBuilder::new(ir).build()
     }
 }
 
@@ -226,8 +226,8 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let liveness = body.analyse::<ECodeSsaLiveness>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert_eq!(liveness.live_in(block0), &[]);
         assert_eq!(liveness.live_out(block0), &[value]);
@@ -270,8 +270,8 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let liveness = body.analyse::<ECodeSsaLiveness>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert_eq!(liveness.live_in(block), &[]);
         assert_eq!(liveness.live_out(block), &[]);
@@ -302,8 +302,8 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let liveness = body.analyse::<ECodeSsaLiveness>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert_eq!(liveness.live_in(block), &[]);
         assert_eq!(liveness.live_out(block), &[]);
@@ -354,8 +354,8 @@ mod test {
 
         builder.push_edge_arguments([value]).unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let liveness = body.analyse::<ECodeSsaLiveness>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let liveness = ir.analyse::<ECodeSsaLiveness>();
 
         assert_eq!(liveness.live_out(block0), &[value]);
         assert_eq!(liveness.live_in(block0), &[]);

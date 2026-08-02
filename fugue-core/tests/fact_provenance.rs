@@ -19,7 +19,7 @@ struct BlockShape {
     address: Address,
     context: ContextSet,
     flows: Vec<FlowTarget>,
-    instructions: InsnList,
+    insns: InsnList,
     properties: CodeBlockProperties,
 }
 
@@ -59,7 +59,11 @@ fn function_shape(
                 address,
                 context: block.context().clone(),
                 flows: block.flow_targets().collect(),
-                instructions: block.instructions().clone(),
+                insns: reader
+                    .insns(block.id())?
+                    .ok_or("function block insns must exist")?
+                    .as_ref()
+                    .clone(),
                 properties,
             })
         })
@@ -163,7 +167,9 @@ fn assert_byte_change_converges(
 fn committed_functions_carry_discovery_confidence() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
 
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let confidence = Confidence::somewhat_certain();
 
     let mut transaction = project.transaction("test");
@@ -189,7 +195,9 @@ fn committed_functions_carry_discovery_confidence() -> Result<(), Box<dyn Error>
 fn committed_functions_record_the_revision_they_read() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
 
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
     let revision = project.revision();
 
     let mut transaction = project.transaction("test");
@@ -214,7 +222,9 @@ fn committed_functions_record_the_revision_they_read() -> Result<(), Box<dyn Err
 fn asserted_functions_are_distinguishable_from_derived() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
 
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let mut transaction = project.transaction("test");
     let id = transaction.add_function(
@@ -246,7 +256,9 @@ fn middle_byte_change_converges_with_clean_function_recovery() -> Result<(), Box
 #[test]
 fn a_user_removed_function_is_not_rediscovered() -> Result<(), Box<dyn Error>> {
     let project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
@@ -276,10 +288,12 @@ fn a_user_removed_function_is_not_rediscovered() -> Result<(), Box<dyn Error>> {
 #[test]
 fn scheduler_retry_exhaustion_does_not_block_function_recovery() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
-    let entry = project.entry().ok_or("fixture must have an entry point")?;
+    let entry = project
+        .entry_point()
+        .ok_or("fixture must have an entry point")?;
 
     let mut transaction = project.transaction("test");
-    transaction.insert_problem(entry, ProblemKind::RetryBudgetExhausted)?;
+    transaction.add_problem(entry, ProblemKind::RetryBudgetExhausted)?;
     transaction.commit()?;
 
     let engine = AnalysisEngine::new(project)?;

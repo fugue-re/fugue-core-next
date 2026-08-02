@@ -11,6 +11,11 @@ use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::{PCodeError, PCodeIr};
 use crate::il::storage::{IlPersist, IlStorageError};
+use crate::ir::block::{ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES};
+use crate::ir::function::{ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES};
+use crate::ir::problem::{ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES};
+use crate::ir::switch::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
+use crate::ir::symbol::{ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_SYMBOL_CACHE_BYTES};
 use crate::ir::{
     Address, CallGraphIndex, CodeBlockTable, FunctionId, FunctionTable, FunctionTableError,
     IncompleteFunctionError, ProblemTable, ProblemTableError, ReferenceIndex, SwitchTable,
@@ -24,11 +29,8 @@ use crate::storage::entities::{Entity, EntityId, EntityStorageError, ProjectEnti
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::SegmentStorage;
 use crate::storage::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, ATTRIBUTE_FUNCTION_CACHE_SIZE, ATTRIBUTE_PROBLEM_CACHE_SIZE,
-    ATTRIBUTE_SWITCH_CACHE_SIZE, ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES,
-    DEFAULT_FUNCTION_CACHE_BYTES, DEFAULT_PROBLEM_CACHE_BYTES, DEFAULT_SWITCH_CACHE_BYTES,
-    DEFAULT_SYMBOL_CACHE_BYTES, DefaultProjectStorageProvider, SegmentStorageError,
-    StorageContainer, StorageProvider, StorageProviderError, TransientStorageProvider,
+    DefaultProjectStorageProvider, SegmentStorageError, StorageContainer, StorageProvider,
+    StorageProviderError, TransientStorageProvider,
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
@@ -191,7 +193,7 @@ impl Project {
         tracing::trace!("loading project architecture and lifter");
 
         let Some(arch) = storage
-            .entities
+            .entities()
             .get(&ProjectEntity::Architecture)?
             .or_else(|| loadable.map(|l| l.architecture()))
         else {
@@ -203,19 +205,19 @@ impl Project {
         let platform = loadable
             .map(Loadable::platform)
             .or(storage
-                .entities
+                .entities()
                 .get::<ProjectEntity, Platform>(&ProjectEntity::Platform)?)
             .unwrap_or_else(|| arch.platform());
 
         tracing::trace!("loading project attributes");
 
-        if let Some(nattributes) = storage.entities.get(&ProjectEntity::Attributes)? {
+        if let Some(nattributes) = storage.entities().get(&ProjectEntity::Attributes)? {
             // NOTE: we prefer the most recently set attributes, and use the persisted
             // attributes for vacant keys.
             attributes.merge_vacant(&nattributes);
         }
 
-        if let (Some(loadable), Some(resolution)) = (loadable, storage.image_resolution.as_ref())
+        if let (Some(loadable), Some(resolution)) = (loadable, storage.image_resolution())
             && let Some(entry) = loadable
                 .entry_point()
                 .and_then(|entry| resolution.resolve_address(entry))
@@ -236,14 +238,14 @@ impl Project {
             "symbol",
         )?;
 
-        if !SymbolTable::persisted(&storage.entities)? {
+        if !SymbolTable::persisted(storage.entities())? {
             let Some(loadable) = loadable else {
                 tracing::error!("project not standalone and no loadable instance available");
                 return Err(StorageProviderError::NotAStandaloneProject.into());
             };
 
             if let (Some(loadable_symbols), Some(resolution)) =
-                (loadable.image_symbols(), storage.image_resolution.as_ref())
+                (loadable.image_symbols(), storage.image_resolution())
             {
                 tracing::trace!(
                     "transfering {} symbols from loadable",
@@ -311,22 +313,22 @@ impl Project {
             "problem",
         )?;
 
-        let coverage = AnalysisCoverage::from_storage(&storage.entities)?;
+        let coverage = AnalysisCoverage::from_storage(storage.entities())?;
 
         let revision_record = storage
-            .entities
+            .entities()
             .get::<ProjectEntity, ProjectRevisionState>(&ProjectEntity::Revision)?;
         let revisions = revision_record
             .unwrap_or_else(|| ProjectRevisionState::new(Revision::default(), Revision::default()));
 
         let call_graph = match storage.write_back() {
-            Some(worker) => CallGraphIndex::new(storage.entities.clone(), Some(worker.clone()))?,
+            Some(worker) => CallGraphIndex::new(storage.entities().clone(), Some(worker.clone()))?,
             None => CallGraphIndex::new_transient(),
         };
         call_graph.ensure_current(functions.iter(), &blocks, revisions.revision())?;
 
         let references = match storage.write_back() {
-            Some(worker) => ReferenceIndex::new(storage.entities.clone(), Some(worker.clone()))?,
+            Some(worker) => ReferenceIndex::new(storage.entities().clone(), Some(worker.clone()))?,
             None => ReferenceIndex::new_transient(),
         };
         references.ensure_current(functions.iter(), &blocks, revisions.revision())?;
@@ -522,7 +524,7 @@ impl Project {
         self.language
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry_point(&self) -> Option<Address> {
         self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
     }
 
@@ -599,7 +601,7 @@ impl Project {
     }
 
     pub fn segments(&self) -> &SegmentStorage {
-        &self.storage.segments
+        self.storage.segments()
     }
 
     pub fn attributes(&self) -> &AttributeMap {
@@ -616,7 +618,7 @@ impl Project {
             return Ok(());
         }
 
-        if self.storage.entities.is_transient() {
+        if self.storage.entities().is_transient() {
             tracing::debug!("entity storage is transient; skipping persistence");
             return Ok(());
         }
@@ -625,36 +627,36 @@ impl Project {
 
         tracing::debug!("persisting project architecture and lifter");
         self.storage
-            .entities
+            .entities()
             .insert(&ProjectEntity::Architecture, &self.arch)?;
 
         tracing::debug!("persisting project platform");
         self.storage
-            .entities
+            .entities()
             .insert(&ProjectEntity::Platform, &self.platform)?;
 
         tracing::debug!("persisting project attributes");
         self.storage
-            .entities
+            .entities()
             .insert(&ProjectEntity::Attributes, &self.attributes)?;
 
         tracing::debug!("persisting symbol table");
-        self.symbols.persist(&self.storage.entities)?;
+        self.symbols.persist(self.storage.entities())?;
 
         tracing::debug!("persisting function table");
-        self.functions.persist(&self.storage.entities)?;
+        self.functions.persist(self.storage.entities())?;
 
         tracing::debug!("persisting code block table");
-        self.blocks.persist(&self.storage.entities)?;
+        self.blocks.persist(self.storage.entities())?;
 
         tracing::debug!("persisting switch table");
-        self.switches.persist(&self.storage.entities)?;
+        self.switches.persist(self.storage.entities())?;
 
         tracing::debug!("persisting problem table");
-        self.problems.persist(&self.storage.entities)?;
+        self.problems.persist(self.storage.entities())?;
 
         tracing::debug!("persisting analysis coverage");
-        self.coverage.persist(&self.storage.entities)?;
+        self.coverage.persist(self.storage.entities())?;
 
         if let Some(worker) = self.storage.write_back() {
             tracing::debug!("draining write-back worker");
@@ -668,11 +670,11 @@ impl Project {
         self.references.mark_current(self.revision())?;
 
         tracing::debug!("persisting segment metadata");
-        self.storage.segments.persist_storage()?;
+        self.storage.segments_mut().persist_storage()?;
 
         tracing::debug!("persisting project revision");
         self.storage
-            .entities
+            .entities()
             .insert(&ProjectEntity::Revision, &self.revisions)?;
 
         Ok(())

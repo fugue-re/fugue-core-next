@@ -10,10 +10,10 @@ pub struct ECodeSsaStridedIntervals {
 }
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
-    fn analyse(body: &ECodeSsaIr) -> Self {
-        let block_argument_inputs = body.analyse::<ECodeSsaBlockArgumentInputs>();
+    fn analyse(ir: &ECodeSsaIr) -> Self {
+        let block_argument_inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
         let mut this = Self {
-            intervals: body
+            intervals: ir
                 .values()
                 .iter()
                 .map(|value| StridedInterval::empty(value.width()))
@@ -21,7 +21,7 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
         };
 
         let dependents = IlCsr::from_entries(
-            body.values().len(),
+            ir.values().len(),
             block_argument_inputs.iter().flat_map(|(argument, inputs)| {
                 inputs
                     .iter()
@@ -29,21 +29,21 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
             }),
         );
 
-        let uses = body.analyse::<ECodeSsaUses>();
-        let mut worklist = (0..body.values().len()).rev().collect::<Vec<_>>();
+        let uses = ir.analyse::<ECodeSsaUses>();
+        let mut worklist = (0..ir.values().len()).rev().collect::<Vec<_>>();
 
         while let Some(index) = worklist.pop() {
             let value = IlValueId::try_from_index(index).expect("value id is representable");
             let next = match block_argument_inputs.inputs_for(value) {
-                Some([]) => StridedInterval::full(body.value_width(value).unwrap_or(0)),
+                Some([]) => StridedInterval::full(ir.value_width(value).unwrap_or(0)),
                 Some(inputs) => {
                     let joined = inputs.iter().fold(
-                        StridedInterval::empty(body.value_width(value).unwrap_or(0)),
+                        StridedInterval::empty(ir.value_width(value).unwrap_or(0)),
                         |accumulated, input| accumulated.join(&this.intervals[input.index()]),
                     );
                     this.intervals[index].widen(&joined)
                 }
-                None => this.evaluate(body, value),
+                None => this.evaluate(ir, value),
             };
 
             if next == this.intervals[index] {
@@ -52,7 +52,7 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
             this.intervals[index] = next;
 
             for use_site in uses.uses_for(value) {
-                let user = &body.operations()[use_site.user().index()];
+                let user = &ir.operations()[use_site.user().index()];
                 worklist.extend(user.results().start()..user.results().end());
             }
             worklist.extend(dependents.row(index));
@@ -63,23 +63,23 @@ impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
 }
 
 impl ECodeSsaStridedIntervals {
-    pub fn get(&self, value: IlValueId) -> Option<&StridedInterval> {
+    pub fn interval_for(&self, value: IlValueId) -> Option<&StridedInterval> {
         self.intervals.get(value.index())
     }
 
-    fn evaluate(&self, body: &ECodeSsaIr, value: IlValueId) -> StridedInterval {
-        let width = body.value_width(value).unwrap_or(0);
+    fn evaluate(&self, ir: &ECodeSsaIr, value: IlValueId) -> StridedInterval {
+        let width = ir.value_width(value).unwrap_or(0);
         if width == 0 {
             return StridedInterval::empty(0);
         }
-        if let Some(constant) = body.constant_value(value) {
+        if let Some(constant) = ir.constant_value(value) {
             return StridedInterval::single(constant);
         }
 
-        let Some(operation) = body.defining_operation(value) else {
+        let Some(operation) = ir.defining_operation(value) else {
             return StridedInterval::full(width);
         };
-        let operands = body.operation_operands(operation);
+        let operands = ir.operation_operands_for(operation);
         let operand = |index: usize| {
             operands
                 .get(index)
@@ -175,11 +175,11 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let intervals = ir.analyse::<ECodeSsaStridedIntervals>();
 
         assert_eq!(
-            intervals.get(index),
+            intervals.interval_for(index),
             Some(&StridedInterval::masked(&BitVec::from_u64(0xff, 32)))
         );
     }
@@ -224,11 +224,11 @@ mod test {
             ))
             .unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let intervals = ir.analyse::<ECodeSsaStridedIntervals>();
 
         assert_eq!(
-            intervals.get(sum),
+            intervals.interval_for(sum),
             Some(&StridedInterval::single(BitVec::from_u64(15, 32)))
         );
     }
@@ -303,9 +303,12 @@ mod test {
         builder.push_edge_arguments([next]).unwrap();
         builder.push_edge_arguments([]).unwrap();
 
-        let body = builder.build(&CancellationToken::default()).unwrap();
-        let intervals = body.analyse::<ECodeSsaStridedIntervals>();
+        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let intervals = ir.analyse::<ECodeSsaStridedIntervals>();
 
-        assert_eq!(intervals.get(counter), Some(&StridedInterval::full(32)));
+        assert_eq!(
+            intervals.interval_for(counter),
+            Some(&StridedInterval::full(32))
+        );
     }
 }

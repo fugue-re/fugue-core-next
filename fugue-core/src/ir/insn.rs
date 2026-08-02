@@ -1,10 +1,12 @@
 use std::fmt;
+use std::mem::size_of;
 
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
 use crate::lifter::{Language, Op, RawPCodeOp};
+use crate::types::EstimateSize;
 use crate::types::common::archived_bitflags;
 
 pub type InsnId = Id<Insn>;
@@ -13,13 +15,13 @@ pub type InsnList = Vec<Insn>;
 
 #[derive(Debug, Error)]
 pub enum InsnError {
-    #[error("instruction length {length} exceeds retained limit")]
-    InstructionTooLong { length: usize },
+    #[error("instruction size {size} exceeds retained limit")]
+    InsnTooLarge { size: usize },
 }
 
 impl InsnError {
-    pub const fn instruction_too_long(length: usize) -> Self {
-        Self::InstructionTooLong { length }
+    pub const fn insn_too_large(size: usize) -> Self {
+        Self::InsnTooLarge { size }
     }
 }
 
@@ -39,51 +41,46 @@ pub struct Insn {
     address: Address,
     properties: InsnProperties,
     targets: SmallVec<[(u16, InsnTarget); 1]>,
-    length: u8,
-}
-
-#[derive(Default)]
-pub(crate) struct InsnFlowCursor {
-    target: usize,
+    size: u8,
 }
 
 impl Insn {
     pub(crate) fn from_direct_branch(
         address: Address,
-        length: usize,
+        size: usize,
         target: Address,
         conditional: bool,
     ) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, length, InsnTarget::InterBlk(target), conditional)
+        Self::from_direct_flow(address, size, InsnTarget::InterBlk(target), conditional)
     }
 
     pub(crate) fn from_direct_call(
         address: Address,
-        length: usize,
+        size: usize,
         target: Address,
     ) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, length, InsnTarget::InterSub(Some(target)), true)
+        Self::from_direct_flow(address, size, InsnTarget::InterSub(Some(target)), true)
     }
 
-    pub(crate) fn from_indirect_branch(address: Address, length: usize) -> Result<Self, InsnError> {
+    pub(crate) fn from_indirect_branch(address: Address, size: usize) -> Result<Self, InsnError> {
         let mut targets = SmallVec::new();
         targets.push((0, InsnTarget::Unresolved));
-        Self::from_flow_targets(address, length, targets)
+        Self::from_flow_targets(address, size, targets)
     }
 
-    pub(crate) fn from_indirect_call(address: Address, length: usize) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, length, InsnTarget::InterSub(None), true)
+    pub(crate) fn from_indirect_call(address: Address, size: usize) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, size, InsnTarget::InterSub(None), true)
     }
 
-    pub(crate) fn from_return(address: Address, length: usize) -> Result<Self, InsnError> {
+    pub(crate) fn from_return(address: Address, size: usize) -> Result<Self, InsnError> {
         let mut targets = SmallVec::new();
         targets.push((0, InsnTarget::InterRet(None, true)));
-        Self::from_flow_targets(address, length, targets)
+        Self::from_flow_targets(address, size, targets)
     }
 
     fn from_direct_flow(
         address: Address,
-        length: usize,
+        size: usize,
         target: InsnTarget,
         fall_through: bool,
     ) -> Result<Self, InsnError> {
@@ -92,15 +89,15 @@ impl Insn {
         if fall_through {
             targets.push((
                 0,
-                InsnTarget::IntraBlk(Location::new(address + length, 0), true),
+                InsnTarget::IntraBlk(Location::new(address + size, 0), true),
             ));
         }
-        Self::from_flow_targets(address, length, targets)
+        Self::from_flow_targets(address, size, targets)
     }
 
     fn from_flow_targets(
         address: Address,
-        length: usize,
+        size: usize,
         targets: SmallVec<[(u16, InsnTarget); 1]>,
     ) -> Result<Self, InsnError> {
         let properties = InsnProperties::from_targets(&targets) | InsnProperties::FLOW_RESOLVED;
@@ -109,18 +106,18 @@ impl Insn {
             address,
             properties,
             targets,
-            length: Self::checked_length(length)?,
+            size: Self::checked_size(size)?,
         })
     }
 
     pub(crate) fn from_resolved_flow(
         language: &'static Language,
         address: Address,
-        length: usize,
+        size: usize,
         operations: &[RawPCodeOp],
     ) -> Result<Self, InsnError> {
         let mut targets = SmallVec::new();
-        Self::push_targets_for_operations(language, address, length, operations, &mut targets);
+        Self::push_targets_for_operations(language, address, size, operations, &mut targets);
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
             properties |= InsnProperties::NOP;
@@ -132,48 +129,46 @@ impl Insn {
             address,
             properties,
             targets,
-            length: Self::checked_length(length)?,
+            size: Self::checked_size(size)?,
         })
     }
 
     pub(crate) fn resolve_flow(
         &mut self,
         language: &'static Language,
-        length: usize,
+        size: usize,
         operations: &[RawPCodeOp],
     ) -> Result<(), InsnError> {
-        *self = Self::from_resolved_flow(language, self.address, length, operations)?;
+        *self = Self::from_resolved_flow(language, self.address, size, operations)?;
         Ok(())
     }
 
     pub(crate) fn from_disassembly(
         address: Address,
-        length: usize,
+        size: usize,
         properties: InsnProperties,
     ) -> Result<Self, InsnError> {
         Ok(Self {
             address,
             properties,
             targets: SmallVec::new(),
-            length: Self::checked_length(length)?,
+            size: Self::checked_size(size)?,
         })
     }
 
-    fn checked_length(length: usize) -> Result<u8, InsnError> {
-        length
-            .try_into()
-            .map_err(|_| InsnError::instruction_too_long(length))
+    fn checked_size(size: usize) -> Result<u8, InsnError> {
+        size.try_into().map_err(|_| InsnError::insn_too_large(size))
     }
 
     pub(crate) fn push_targets_for_operations(
         language: &'static Language,
         address: Address,
-        length: usize,
+        size: usize,
         operations: &[RawPCodeOp],
         targets: &mut SmallVec<[(u16, InsnTarget); 1]>,
     ) {
         let op_count = operations.len() as u16;
-        let next_address = address + length;
+        let next_address = address + size;
 
         let is_local = |location: &Location| -> bool { location.address() == address };
         let is_fall_through = |location: &Location| -> bool { location.address() == next_address };
@@ -290,7 +285,7 @@ impl Insn {
     }
 
     pub fn next_address(&self) -> Address {
-        self.address + self.length as usize
+        self.address + self.size as usize
     }
 
     pub fn properties(&self) -> InsnProperties {
@@ -443,12 +438,8 @@ impl Insn {
             .intersects(InsnProperties::NEEDS_FLOW_RESOLUTION)
     }
 
-    pub fn len(&self) -> usize {
-        self.length as _
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.length == 0
+    pub fn size(&self) -> usize {
+        self.size as _
     }
 
     pub fn iter_targets<'a>(
@@ -467,20 +458,6 @@ impl Insn {
     pub fn direct_call_target(&self) -> Option<Address> {
         self.flow_targets()
             .find_map(|target| target.kind().is_call().then_some(target.to()))
-    }
-
-    pub(crate) fn next_flow_target(&self, cursor: &mut InsnFlowCursor) -> Option<FlowTarget> {
-        while let Some((_, target)) = self.targets.get(cursor.target) {
-            cursor.target += 1;
-
-            if let Some((_, to)) = Self::resolved_target(target)
-                && let Some(target) = FlowTarget::from_insn_target(self, target, to)
-            {
-                return Some(target);
-            }
-        }
-
-        None
     }
 
     pub fn flow_references(&self) -> impl Iterator<Item = Reference> + '_ {
@@ -505,6 +482,33 @@ impl Insn {
             InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((Global, taken)),
             _ => None,
         }
+    }
+}
+
+impl EstimateSize for Insn {
+    fn estimate_size(&self) -> usize {
+        let mut size = size_of::<Self>();
+        if self.targets.spilled() {
+            size = size.saturating_add(
+                self.targets
+                    .capacity()
+                    .saturating_mul(size_of::<(u16, InsnTarget)>()),
+            );
+        }
+        size
+    }
+}
+
+impl EstimateSize for InsnList {
+    fn estimate_size(&self) -> usize {
+        self.iter()
+            .map(EstimateSize::estimate_size)
+            .fold(size_of::<Self>(), usize::saturating_add)
+            .saturating_add(
+                self.capacity()
+                    .saturating_sub(self.len())
+                    .saturating_mul(size_of::<Insn>()),
+            )
     }
 }
 
@@ -599,8 +603,8 @@ impl InsnProperties {
     rkyv::Deserialize,
 )]
 pub enum InsnTargetKind {
-    Local,
     Global,
+    Local,
 }
 
 impl InsnTargetKind {
@@ -626,11 +630,11 @@ impl InsnTargetKind {
     rkyv::Deserialize,
 )]
 pub enum InsnTarget {
-    IntraIns(Location, bool),
-    IntraBlk(Location, bool),
     InterBlk(Address),
-    InterSub(Option<Address>),
     InterRet(Option<Address>, bool),
+    InterSub(Option<Address>),
+    IntraBlk(Location, bool),
+    IntraIns(Location, bool),
     Intrinsic,
     Unresolved,
 }

@@ -163,7 +163,7 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
 
         for (run, chunk) in self.overlay.iter() {
             if let Some(o) =
-                SegmentRangeOverlap::new(run.offset() as usize, chunk.len(), offset, end)
+                SegmentRangeOverlap::new(run.offset() as usize, chunk.size(), offset, end)
             {
                 view.push(o.window_offset() as u64, &chunk.data()[o.source()]);
             }
@@ -213,7 +213,7 @@ mod test {
         store.write_bytes(8, b"CCCC")?;
 
         assert!(
-            store.overlay.is_empty(),
+            store.overlay.iter().next().is_none(),
             "contiguous writes stay in the chunk"
         );
         assert_eq!(store.chunk.len(), 12);
@@ -233,7 +233,7 @@ mod test {
         store.write_bytes(0, b"AAAAAAAA")?;
         store.write_bytes(2, b"xx")?;
 
-        assert!(store.overlay.is_empty());
+        assert!(store.overlay.iter().next().is_none());
         assert_eq!(store.chunk.len(), 8, "overwrite does not grow the chunk");
 
         let mut buf = [0u8; 8];
@@ -248,7 +248,7 @@ mod test {
         store.write_bytes(0x100, b"data")?;
 
         assert_eq!(store.base, 0x100);
-        assert!(store.overlay.is_empty());
+        assert!(store.overlay.iter().next().is_none());
         assert_eq!(store.chunk.len(), 4);
 
         let mut buf = [0xffu8; 4];
@@ -281,7 +281,7 @@ mod test {
         store.write_bytes(0x8000, b"world")?;
 
         assert!(
-            !store.overlay.is_empty(),
+            store.overlay.iter().next().is_some(),
             "disjoint write goes to the overlay"
         );
 

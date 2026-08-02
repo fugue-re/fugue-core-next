@@ -3,6 +3,7 @@ use std::fmt::{self, Debug, Formatter, LowerHex, UpperHex};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
+pub use fugue_bytes::Endian;
 use tinyset::SetU64;
 
 use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
@@ -17,10 +18,10 @@ pub use address::{
 
 pub(crate) mod block;
 pub use block::{
-    CodeBlock, CodeBlockId, CodeBlockMut, CodeBlockProperties, CodeBlockRef, CodeBlockTable,
-    CodeBlockTableError, IncompleteCodeBlock, IncompleteCodeBlockId,
+    CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockRef, CodeBlockTable, IncompleteCodeBlock,
+    IncompleteCodeBlockId,
 };
-pub(crate) use block::PreparedBlockMutation;
+pub(crate) use block::{CodeBlockMaterialisation, PreparedCodeBlockMutation};
 
 pub(crate) mod call_graph;
 pub(crate) use call_graph::CallGraphStage;
@@ -28,20 +29,16 @@ pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
 pub(crate) mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
-pub use fugue_bytes::Endian;
 
 pub(crate) mod function;
 pub use function::{
     Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
     FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
 };
-pub(crate) use function::{FunctionMaterialisation, FunctionTableStage};
+pub(crate) use function::{FunctionMaterialisation, FunctionTableStage, PreparedFunctionMutation};
 
 pub(crate) mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
-
-pub(crate) mod module;
-pub use module::{Module, ModuleId};
 
 pub(crate) mod location;
 pub use location::Location;
@@ -55,13 +52,14 @@ pub use problem::{
 pub(crate) mod persistent;
 
 pub(crate) mod reference;
+pub(crate) use reference::ReferenceMutation;
 pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
 };
 
 pub(crate) mod segment;
-pub use segment::{ExternFunctionTemplate, ExternSegment, SegmentProperties};
+pub use segment::{ExternFunctionTemplate, ExternSegment, ExternSegmentError, SegmentProperties};
 
 pub(crate) mod switch;
 pub use switch::{
@@ -262,7 +260,7 @@ impl<T> IdAllocator<T> {
             .unwrap_or_else(|| Id::from_index(self.next_index))
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> Id<T> {
+    pub(crate) fn pending_id(&self, offset: usize) -> Id<T> {
         if offset < self.free_ids.len() {
             self.free_ids[self.free_ids.len() - offset - 1]
         } else {
@@ -302,7 +300,7 @@ impl<T> IdAllocator<T> {
             .retain(|free_id| free_id.index() != id.index());
     }
 
-    pub(crate) fn free_len(&self) -> usize {
+    pub(crate) fn free_count(&self) -> usize {
         self.free_ids.len()
     }
 }

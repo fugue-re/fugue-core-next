@@ -14,7 +14,7 @@ use crate::types::common::archived_bitflags;
 
 mod table;
 
-pub(crate) use table::SymbolIndexState;
+pub(crate) use table::{ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_SYMBOL_CACHE_BYTES, SymbolIndexState};
 pub use table::{SymbolInsertion, SymbolRef, SymbolTable, TransientSymbolTable};
 
 pub type SymbolId = Id<Symbol>;
@@ -239,14 +239,11 @@ bitflags::bitflags! {
         const DATA          = 0b0001_0000;
         const NON_RETURNING = 0b0010_0000;
 
-        // aliases
         const IMPORT = Self::EXTERN.bits();
 
-        // groups
         const KIND       = Self::FUNCTION.bits() | Self::DATA.bits();
         const VISIBILITY = Self::EXTERN.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
 
-        // invalid (marker)
         const INVALID = 0b1111_1111;
     }
 }
@@ -379,20 +376,20 @@ mod test {
 
     #[test]
     #[should_panic(expected = "invalid selector bits")]
-    fn test_symbol_index_invalid_selector() {
+    fn symbol_index_invalid_selector() {
         let sel = SymbolTableSelector::new(0xffff);
         let _ = SymbolIndex::new(sel, 1);
     }
 
     #[test]
     #[should_panic(expected = "symbol index out of range")]
-    fn test_symbol_index_invalid_index() {
+    fn symbol_index_invalid_index() {
         let sel = SymbolTableSelector::new(1);
         let _ = SymbolIndex::new(sel, usize::MAX);
     }
 
     #[test]
-    fn test_symbol_index_valid() {
+    fn symbol_index_valid() {
         let sel = SymbolTableSelector::new(1);
         let index = SymbolIndex::new(sel, 42);
         assert_eq!(index.index(), 42);

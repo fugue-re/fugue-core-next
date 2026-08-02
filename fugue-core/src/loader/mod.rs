@@ -246,7 +246,7 @@ pub trait LoadableFromBytes<'a>: Loadable {
 }
 
 pub trait LoadableFromFile: Loadable {
-    fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError>
+    fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError>
     where
         Self: Sized,
     {
@@ -254,7 +254,7 @@ pub trait LoadableFromFile: Loadable {
     }
 
     fn from_file_with(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
@@ -385,7 +385,7 @@ impl<'a> Loader<'a> {
         <Self as LoadableFromFile>::from_file_with(path, attributes)
     }
 
-    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError> {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
         Self::from_file_with(path, AttributeMap::new())
     }
 }

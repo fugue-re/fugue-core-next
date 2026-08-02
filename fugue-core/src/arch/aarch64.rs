@@ -8,7 +8,7 @@ use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
 use crate::lazy_symbol;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,

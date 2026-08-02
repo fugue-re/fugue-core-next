@@ -14,14 +14,10 @@ use crate::ir::{Address, IdAllocator};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable<A = Address> {
     allocator: IdAllocator<Symbol>,
-    // all known symbols
     symbols: Vec<SymbolEntry<A>>,
     generations: Vec<u32>,
-    // map from each original symbol table to its symbols
     indices: BTreeMap<SymbolIndex, SymbolId>,
-    // map of symbol names to known symbols
     names: SymbolMap<SmallVec<[SymbolId; 2]>>,
-    // map of addresses to known symbols
     addresses: BTreeMap<A, SmallVec<[SymbolId; 2]>>,
 }
 
@@ -132,8 +128,8 @@ where
         true
     }
 
-    pub(super) fn preview_id(&self, offset: usize) -> SymbolId {
-        self.allocator.preview_id(offset)
+    pub(super) fn pending_id(&self, offset: usize) -> SymbolId {
+        self.allocator.pending_id(offset)
     }
 
     pub(super) fn publish_reservation(&mut self, id: SymbolId) {
@@ -185,10 +181,11 @@ where
     pub fn get<'a>(
         &'a self,
         symbol: impl AsRef<str>,
-    ) -> Option<impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a> {
-        let symbol = Symbol::from_existing(symbol.as_ref())?;
-        let ids = self.names.get(&symbol)?;
-        Some(SymbolEntryIter::new(ids, &self.symbols))
+    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
+        let ids = Symbol::from_existing(symbol.as_ref())
+            .and_then(|symbol| self.names.get(&symbol))
+            .map_or(&[] as &[SymbolId], SmallVec::as_slice);
+        SymbolEntryIter::new(ids, &self.symbols)
     }
 
     pub fn get_mut<'a>(
@@ -201,7 +198,7 @@ where
     }
 
     pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(SymbolId, &SymbolEntry<A>)> {
-        self.get(symbol).and_then(|mut iter| iter.next())
+        self.get(symbol).next()
     }
 
     pub fn get_first_mut(
@@ -299,11 +296,11 @@ where
         self.names.contains_key(&symbol)
     }
 
-    pub fn contains_index(&self, index: SymbolIndex) -> bool {
+    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
         self.indices.contains_key(&index)
     }
 
-    pub fn contains_address(&self, address: impl Into<A>) -> bool {
+    pub fn contains_by_address(&self, address: impl Into<A>) -> bool {
         self.addresses.contains_key(&address.into())
     }
 
@@ -524,7 +521,7 @@ where
     }
 
     pub fn len(&self) -> usize {
-        self.symbols.len() - self.allocator.free_len()
+        self.symbols.len() - self.allocator.free_count()
     }
 
     pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {
@@ -667,7 +664,7 @@ mod test {
     use crate::ir::symbol::SymbolTableSelector;
 
     #[test]
-    fn test_symbol_index_free_list() {
+    fn symbol_index_free_list() {
         let mut table = SymbolTable::<Address>::new();
         let sel = SymbolTableSelector::new(0);
 

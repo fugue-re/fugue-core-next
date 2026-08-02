@@ -24,7 +24,39 @@ pub struct PCodeCanonicaliser {
     block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
 }
 
-struct PCodeFunctionBuilder<'a> {
+pub struct PCodeFunctionInput<'a> {
+    language: &'static Language,
+    functions: &'a FunctionTable,
+    blocks: &'a CodeBlockTable,
+    segments: &'a SegmentStorage,
+    function: FunctionId,
+    input_revision: Revision,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'a> PCodeFunctionInput<'a> {
+    pub fn new(
+        language: &'static Language,
+        functions: &'a FunctionTable,
+        blocks: &'a CodeBlockTable,
+        segments: &'a SegmentStorage,
+        function: FunctionId,
+        input_revision: Revision,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            language,
+            functions,
+            blocks,
+            segments,
+            function,
+            input_revision,
+            cancellation,
+        }
+    }
+}
+
+struct PCodeConstruction<'a> {
     language: &'static Language,
     builder: PCodeBuilder,
     mapping_cache: SegmentMappingCache,
@@ -39,19 +71,9 @@ struct PCodeFunctionBuilder<'a> {
 }
 
 impl PCodeCanonicaliser {
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_function(
-        &mut self,
-        language: &'static Language,
-        functions: &FunctionTable,
-        blocks: &CodeBlockTable,
-        segments: &SegmentStorage,
-        function: FunctionId,
-        input_revision: Revision,
-        cancellation: &CancellationToken,
-    ) -> Result<PCodeIr, PCodeError> {
-        let Some(function_body) = functions.get_by_id(function) else {
-            return Err(IlError::missing_artefact(function, IlLevel::PCode).into());
+    pub fn build_function(&mut self, input: PCodeFunctionInput<'_>) -> Result<PCodeIr, PCodeError> {
+        let Some(function_body) = input.functions.get_by_id(input.function) else {
+            return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
         };
 
         self.code_block_ids.clear();
@@ -63,16 +85,16 @@ impl PCodeCanonicaliser {
             self.code_block_ids.push(code_block);
         }
 
-        let metadata = IlMetadata::new(function, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeFunctionBuilder::new(language, metadata, segments);
+        let metadata = IlMetadata::new(input.function, PCODE_SCHEMA_VERSION, input.input_revision);
+        let mut construction = PCodeConstruction::new(input.language, metadata, input.segments);
         let mut successors = Vec::new();
 
         for index in 0..self.code_block_ids.len() {
-            cancellation.check()?;
+            input.cancellation.check()?;
 
             let code_block_id = self.code_block_ids[index];
-            let Some(code_block) = blocks.get_by_id(code_block_id) else {
-                return Err(IlError::missing_artefact(function, IlLevel::PCode).into());
+            let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
+                return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
             };
 
             successors.clear();
@@ -81,10 +103,10 @@ impl PCodeCanonicaliser {
                     .successors(code_block_id)
                     .filter_map(|successor| self.block_id_by_code_block.get(&successor).copied()),
             );
-            builder.append_block(
+            construction.append_block(
                 code_block.address(),
                 code_block.context(),
-                code_block.instructions(),
+                code_block.size(),
                 &successors,
                 code_block.address() == function_body.entry(),
             )?;
@@ -92,7 +114,7 @@ impl PCodeCanonicaliser {
 
         self.code_block_ids.clear();
 
-        builder.build(cancellation)
+        construction.build(input.cancellation)
     }
 
     pub fn build_incomplete_function(
@@ -104,7 +126,7 @@ impl PCodeCanonicaliser {
         cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
         let metadata = IlMetadata::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
-        let mut builder = PCodeFunctionBuilder::new(language, metadata, segments);
+        let mut construction = PCodeConstruction::new(language, metadata, segments);
         let mut successors = Vec::new();
 
         for block in function.blocks() {
@@ -114,23 +136,20 @@ impl PCodeCanonicaliser {
             for successor in block.successors().iter() {
                 successors.push(IlBlockId::try_from_index(successor.index())?);
             }
-            builder.append_block(
+            construction.append_block(
                 block.address(),
                 block.context(),
-                block
-                    .insns()
-                    .iter()
-                    .map(|&insn| function.insn(insn).expect("block instruction must exist")),
+                block.size(),
                 &successors,
                 block.address() == function.entry(),
             )?;
         }
 
-        builder.build(cancellation)
+        construction.build(cancellation)
     }
 }
 
-impl<'a> PCodeFunctionBuilder<'a> {
+impl<'a> PCodeConstruction<'a> {
     fn new(
         language: &'static Language,
         metadata: IlMetadata,
@@ -151,17 +170,26 @@ impl<'a> PCodeFunctionBuilder<'a> {
         }
     }
 
-    fn append_block<'i>(
+    fn append_block(
         &mut self,
         source: Address,
         context: &ContextSet,
-        instructions: impl IntoIterator<Item = &'i Insn>,
+        size: usize,
         successors: &[IlBlockId],
         is_entry: bool,
     ) -> Result<(), PCodeError> {
         let operation_start = self.builder.operation_count();
         context.apply(source, self.lifter.context_mut());
-        self.append_instructions(instructions)?;
+        let view = self
+            .mapping_cache
+            .contiguous_view_from(self.segments, source)?;
+        let available = view
+            .as_contiguous()
+            .ok_or_else(|| PCodeError::insufficient_bytes(source, 0, size))?;
+        let bytes = available
+            .get(..size)
+            .ok_or_else(|| PCodeError::insufficient_bytes(source, available.len(), size))?;
+        self.append_extent(source, bytes)?;
 
         let successor_start = self.successors.len();
         self.successors.extend_from_slice(successors);
@@ -184,44 +212,45 @@ impl<'a> PCodeFunctionBuilder<'a> {
         Ok(())
     }
 
-    fn append_instructions<'i>(
-        &mut self,
-        instructions: impl IntoIterator<Item = &'i Insn>,
-    ) -> Result<(), PCodeError> {
-        for insn in instructions {
+    fn append_extent(&mut self, mut address: Address, bytes: &[u8]) -> Result<(), PCodeError> {
+        let mut offset = 0usize;
+        while offset < bytes.len() {
             self.operations.clear();
-
-            let view = self
-                .mapping_cache
-                .contiguous_view_from(self.segments, insn.address())?;
-            let bytes = view
-                .as_contiguous()
-                .expect("contiguous mapping view must contain bytes");
-
-            let lifted_len = self
+            let remaining = bytes.len() - offset;
+            let lifted_size = self
                 .lifter
-                .lift(insn.address(), bytes, &mut self.operations)?;
+                .lift(address, &bytes[offset..], &mut self.operations)?;
+            if lifted_size == 0 || lifted_size > remaining {
+                return Err(PCodeError::invalid_insn_size(
+                    address,
+                    lifted_size,
+                    remaining,
+                ));
+            }
             let source_start = self.builder.operation_count();
 
             self.annotations.clear();
             let emitted = Self::push_address_annotations(
                 self.language,
-                insn.address(),
-                lifted_len,
+                address,
+                lifted_size,
                 &self.operations,
                 source_start,
                 &mut self.annotations,
             )?;
-            let mut context = PCodeAddressContext::new(insn.address(), &self.annotations);
+            let mut context = PCodeAddressContext::new(address, &self.annotations);
             self.builder
                 .push_lifted_operations(&self.operations, &mut context)?;
 
             self.source_spans.push(IlSourceSpan::new(
                 IlIndexRange::new(source_start, self.builder.operation_count())?,
-                insn.address(),
+                address,
                 0,
                 u32::try_from(emitted).expect("instruction pcode count fits in u32"),
             ));
+
+            address += lifted_size;
+            offset += lifted_size;
         }
 
         Ok(())
@@ -251,7 +280,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
             let opcode = PCodeOpcode::from_op(operation.op())
                 .ok_or_else(|| PCodeError::invalid_opcode(ordinal.value()))?;
 
-            if opcode.requires_target() {
+            if opcode.requires_address() {
                 if let Some(target) = targets
                     .iter()
                     .find(|(target_index, _)| usize::from(*target_index) == index)
@@ -277,7 +306,7 @@ impl<'a> PCodeFunctionBuilder<'a> {
                         AddressAnnotationValue::DirectTarget(target),
                     ));
                 }
-            } else if opcode.requires_effect_space() {
+            } else if opcode.requires_address_space() {
                 annotations.push(AddressAnnotation::new(
                     ordinal,
                     AddressAnnotationValue::ComputedSpace(address.space()),

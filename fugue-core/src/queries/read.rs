@@ -1,14 +1,20 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
-use super::{CallEdge, MappingRow, ProblemRow, QueryPage, SwitchRow, SymbolRow};
+use super::{
+    CallEdge, MAX_QUERY_PAGE_LIMIT, MappingRow, ProblemRow, QueryError, QueryPage, SwitchRow,
+    SymbolRow,
+};
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{
-    Address, CallGraphEdgeKey, FunctionRef, ProblemKey, ProblemKind, RawAddress, Reference,
-    ReferenceTarget,
+    Address, CallGraphEdgeKey, CodeBlockId, FunctionRef, InsnList, ProblemKey, ProblemKind,
+    Reference, ReferenceTarget,
 };
+use crate::lifter::InsnResolver;
 use crate::project::Project;
+use crate::project::ProjectError;
 use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::{SegmentMappingCache, SegmentStorageError};
 
 pub(crate) struct ProjectRead<'p> {
     project: &'p Project,
@@ -82,16 +88,42 @@ impl<'p> ProjectRead<'p> {
         Arc::new(FlowTargets::new(targets))
     }
 
+    pub(crate) fn insns(
+        &self,
+        block: CodeBlockId,
+        mappings: &mut SegmentMappingCache,
+        resolver: &mut InsnResolver,
+    ) -> Result<Option<InsnList>, QueryError> {
+        let Some(block) = self.project.blocks().get_by_id(block) else {
+            return Ok(None);
+        };
+
+        let view = mappings
+            .contiguous_view_from(self.project.segments(), block.address())
+            .map_err(ProjectError::from)?;
+        let bytes = view
+            .as_contiguous()
+            .ok_or(SegmentStorageError::InvalidAddressRange)
+            .map_err(ProjectError::from)?;
+
+        Ok(Some(resolver.resolve_extent(
+            block.address(),
+            block.size(),
+            block.context(),
+            bytes,
+        )?))
+    }
+
     pub(crate) fn function_page(
         &self,
         space: AddressSpaceId,
-        after: Option<RawAddress>,
+        after: Option<Address>,
         limit: usize,
     ) -> QueryPage<Address> {
         Self::page(
             self.project
                 .functions()
-                .addresses_in_space_after(space, after),
+                .addresses_in_space_after(space, after.map(|address| address.raw_address())),
             limit,
         )
     }
@@ -101,37 +133,18 @@ impl<'p> ProjectRead<'p> {
         space: AddressSpaceId,
         after: Option<MappingRow>,
         limit: usize,
-    ) -> QueryPage<MappingRow> {
-        let limit = Self::limit(limit);
-        let Ok(views) = self
+    ) -> Result<QueryPage<MappingRow>, ProjectError> {
+        let views = self
             .project
             .segments()
-            .iter_views_from(space, after.map(|row| row.start()))
-        else {
-            return QueryPage::new(Vec::new(), None);
-        };
+            .iter_views_from(space, after.map(|row| row.start()))?;
 
-        let mut rows = Vec::with_capacity(limit + 1);
-        let mut group = Vec::new();
-        let mut current_start = None;
-
-        for row in views.map(|view| MappingRow::from_view(&view)) {
-            if current_start.is_some_and(|start| start != row.start()) {
-                Self::push_ordered_group(&mut rows, &mut group, after, limit);
-                if rows.len() > limit {
-                    break;
-                }
-            }
-
-            current_start = Some(row.start());
-            group.push(row);
-        }
-
-        if rows.len() <= limit {
-            Self::push_ordered_group(&mut rows, &mut group, after, limit);
-        }
-
-        Self::page(rows, limit)
+        Ok(Self::page_grouped(
+            views.map(|view| MappingRow::from_view(&view)),
+            after,
+            limit,
+            MappingRow::start,
+        ))
     }
 
     pub(crate) fn symbol_page(
@@ -139,7 +152,6 @@ impl<'p> ProjectRead<'p> {
         after: Option<SymbolRow>,
         limit: usize,
     ) -> QueryPage<SymbolRow> {
-        let limit = Self::limit(limit);
         let start = after.map_or(Bound::Unbounded, |after| Bound::Included(after.address()));
         let symbols = self
             .project
@@ -147,27 +159,7 @@ impl<'p> ProjectRead<'p> {
             .range_by_address((start, Bound::Unbounded))
             .map(|(_, entry)| SymbolRow::from_entry(&entry));
 
-        let mut rows = Vec::with_capacity(limit + 1);
-        let mut group = Vec::new();
-        let mut current_address = None;
-
-        for row in symbols {
-            if current_address.is_some_and(|address| address != row.address()) {
-                Self::push_ordered_group(&mut rows, &mut group, after, limit);
-                if rows.len() > limit {
-                    break;
-                }
-            }
-
-            current_address = Some(row.address());
-            group.push(row);
-        }
-
-        if rows.len() <= limit {
-            Self::push_ordered_group(&mut rows, &mut group, after, limit);
-        }
-
-        Self::page(rows, limit)
+        Self::page_grouped(symbols, after, limit, SymbolRow::address)
     }
 
     pub(crate) fn problem_at(&self, address: Address, kind: ProblemKind) -> Option<ProblemRow> {
@@ -279,7 +271,7 @@ impl<'p> ProjectRead<'p> {
     }
 
     fn limit(limit: usize) -> usize {
-        limit.clamp(1, super::MAX_QUERY_PAGE_COUNT)
+        limit.clamp(1, MAX_QUERY_PAGE_LIMIT)
     }
 
     fn push_ordered_group<T>(rows: &mut Vec<T>, group: &mut Vec<T>, after: Option<T>, limit: usize)
@@ -293,6 +285,41 @@ impl<'p> ProjectRead<'p> {
                 .filter(|row| after.is_none_or(|after| *row > after))
                 .take(limit + 1 - rows.len()),
         );
+    }
+
+    fn page_grouped<T, K>(
+        source: impl IntoIterator<Item = T>,
+        after: Option<T>,
+        limit: usize,
+        group_key: impl Fn(&T) -> K,
+    ) -> QueryPage<T>
+    where
+        K: Copy + Eq,
+        T: Clone + Copy + Ord,
+    {
+        let limit = Self::limit(limit);
+        let mut rows = Vec::with_capacity(limit + 1);
+        let mut group = Vec::new();
+        let mut current_key = None;
+
+        for row in source {
+            let key = group_key(&row);
+            if current_key.is_some_and(|current| current != key) {
+                Self::push_ordered_group(&mut rows, &mut group, after, limit);
+                if rows.len() > limit {
+                    break;
+                }
+            }
+
+            current_key = Some(key);
+            group.push(row);
+        }
+
+        if rows.len() <= limit {
+            Self::push_ordered_group(&mut rows, &mut group, after, limit);
+        }
+
+        Self::page(rows, limit)
     }
 
     fn page<T>(source: impl IntoIterator<Item = T>, limit: usize) -> QueryPage<T>

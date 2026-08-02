@@ -280,9 +280,6 @@ pub struct RocksDbOptions {
     pub delete_obsolete_files_period_micros: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_checking_sst_file_sizes_on_db_open: Option<bool>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_stats_update_on_db_open: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -672,19 +669,20 @@ pub struct BlockBasedTableOptions {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockBasedIndexType {
-    BinarySearch,
-    HashSearch,
-    TwoLevelIndexSearch,
+    #[serde(rename = "binary_search")]
+    Binary,
+    #[serde(rename = "hash_search")]
+    Hash,
+    #[serde(rename = "two_level_index_search")]
+    TwoLevel,
 }
 
 impl From<BlockBasedIndexType> for rocksdb::BlockBasedIndexType {
     fn from(index_type: BlockBasedIndexType) -> Self {
         match index_type {
-            BlockBasedIndexType::BinarySearch => rocksdb::BlockBasedIndexType::BinarySearch,
-            BlockBasedIndexType::HashSearch => rocksdb::BlockBasedIndexType::HashSearch,
-            BlockBasedIndexType::TwoLevelIndexSearch => {
-                rocksdb::BlockBasedIndexType::TwoLevelIndexSearch
-            }
+            BlockBasedIndexType::Binary => rocksdb::BlockBasedIndexType::BinarySearch,
+            BlockBasedIndexType::Hash => rocksdb::BlockBasedIndexType::HashSearch,
+            BlockBasedIndexType::TwoLevel => rocksdb::BlockBasedIndexType::TwoLevelIndexSearch,
         }
     }
 }
@@ -692,11 +690,9 @@ impl From<BlockBasedIndexType> for rocksdb::BlockBasedIndexType {
 impl From<rocksdb::BlockBasedIndexType> for BlockBasedIndexType {
     fn from(index_type: rocksdb::BlockBasedIndexType) -> Self {
         match index_type {
-            rocksdb::BlockBasedIndexType::BinarySearch => BlockBasedIndexType::BinarySearch,
-            rocksdb::BlockBasedIndexType::HashSearch => BlockBasedIndexType::HashSearch,
-            rocksdb::BlockBasedIndexType::TwoLevelIndexSearch => {
-                BlockBasedIndexType::TwoLevelIndexSearch
-            }
+            rocksdb::BlockBasedIndexType::BinarySearch => BlockBasedIndexType::Binary,
+            rocksdb::BlockBasedIndexType::HashSearch => BlockBasedIndexType::Hash,
+            rocksdb::BlockBasedIndexType::TwoLevelIndexSearch => BlockBasedIndexType::TwoLevel,
         }
     }
 }
@@ -1151,9 +1147,6 @@ impl RocksDbOptions {
         }
         if let Some(v) = self.delete_obsolete_files_period_micros {
             opts.set_delete_obsolete_files_period_micros(v);
-        }
-        if let Some(v) = self.skip_checking_sst_file_sizes_on_db_open {
-            opts.set_skip_checking_sst_file_sizes_on_db_open(v);
         }
         if let Some(v) = self.skip_stats_update_on_db_open {
             opts.set_skip_stats_update_on_db_open(v);

@@ -476,7 +476,7 @@ fn compact_removes_dead_operations_and_remaps_indices() {
         .iter()
         .find(|operation| operation.opcode() == ECodeSsaOpcode::Add)
         .unwrap();
-    let operands = ssa.operation_operands(add);
+    let operands = ssa.operation_operands_for(add);
     assert_eq!(
         ssa.constant_value(operands[0]),
         Some(BitVec::from_u64(5, 64))
@@ -740,7 +740,7 @@ fn compact_preserves_live_phi_and_remaps_edge_arguments() {
         .iter()
         .find(|operation| operation.opcode() == ECodeSsaOpcode::Return)
         .unwrap();
-    let consumed = ssa.operation_operands(return_op)[0];
+    let consumed = ssa.operation_operands_for(return_op)[0];
     assert_eq!(
         ssa.values()[consumed.index()].definition_kind(),
         ECodeSsaValueKind::BlockArgument
@@ -927,7 +927,7 @@ fn fold_then_compact_collapses_constant_expression() {
         .iter()
         .find(|operation| operation.opcode() == ECodeSsaOpcode::Return)
         .unwrap();
-    let sum_value = ssa.operation_operands(returned)[0];
+    let sum_value = ssa.operation_operands_for(returned)[0];
     assert_eq!(
         ssa.constant_value(sum_value),
         Some(BitVec::from_u64(12, 64))

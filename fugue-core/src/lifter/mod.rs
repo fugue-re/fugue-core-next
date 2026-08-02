@@ -14,17 +14,21 @@ use thiserror::Error;
 
 use crate::ir::Address;
 
-pub(crate) mod disassembler;
+mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
-pub(crate) mod dynamic;
+mod dynamic;
 pub use dynamic::{
-    LanguageLoader, resolve_language, resolve_language_id, resolve_language_id_with,
-    resolve_language_with,
+    LanguageLoader, LanguageSource, resolve_language, resolve_language_id,
+    resolve_language_id_with, resolve_language_with,
 };
 
 mod lift;
 pub use lift::{Lifter, LifterError};
+
+mod resolver;
+pub(crate) use resolver::InsnResolver;
+pub use resolver::{InsnExtentError, InsnResolverError};
 
 pub(crate) mod traits;
 
@@ -32,22 +36,22 @@ pub const MAX_CONTEXT_UPDATES: usize = 2;
 
 #[derive(Debug, Error)]
 pub enum LanguageError {
+    #[error("ambiguous language provider for `{0}`")]
+    AmbiguousProvider(String),
     #[error("ambiguous `.sla` `{}`: multiple variants match and none is `default`", path.display())]
     AmbiguousSla { path: PathBuf },
     #[error(transparent)]
     Database(#[from] SleighLanguageError),
     #[error("environment variable `{0}` is not set")]
     Environment(&'static str),
-    #[error("ambiguous language provider for `{0}`")]
-    AmbiguousProvider(String),
     #[error(transparent)]
     Load(#[from] LanguageLoadError),
     #[error(transparent)]
     Parse(#[from] LanguageParseError),
-    #[error("unsupported file extension for `{}`", path.display())]
-    UnsupportedExtension { path: PathBuf },
     #[error("unsupported architecture")]
     Unsupported,
+    #[error("unsupported file extension for `{}`", path.display())]
+    UnsupportedExtension { path: PathBuf },
 }
 
 impl LanguageError {
@@ -207,7 +211,7 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn push(&mut self, value: ContextUpdate) {
+    pub fn insert(&mut self, value: ContextUpdate) {
         for update in self.0.iter_mut() {
             if update.bits == value.bits {
                 *update = value;
@@ -233,7 +237,7 @@ impl ContextSet {
         }
 
         for update in other.0.iter() {
-            self.push(update.to_owned());
+            self.insert(update.to_owned());
         }
     }
 
@@ -343,16 +347,7 @@ pub struct ContextHint {
 
 impl Display for ContextHint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            ContextHintKind::Code(bits) => {
-                if *bits != 0 {
-                    write!(f, "code ({bits}-bit)")
-                } else {
-                    f.write_str("code")
-                }
-            }
-            ContextHintKind::Data => f.write_str("data"),
-        }?;
+        self.kind.fmt(f)?;
 
         if let Some((first, rest)) = &self
             .context
@@ -410,7 +405,11 @@ impl ContextHint {
     }
 
     pub fn with_context(mut self, context: ContextSet) -> Self {
-        self.context = Some(context);
+        self.set_context(context);
         self
+    }
+
+    pub fn set_context(&mut self, context: ContextSet) {
+        self.context = Some(context);
     }
 }

@@ -3,15 +3,13 @@ use std::marker::PhantomData;
 use std::ops::Bound;
 use std::sync::Mutex;
 
-use bytes::Bytes;
-
 use super::Id;
 use crate::storage::entities::schema::{
-    ENTITY_FREE_ID_ID, ENTITY_KEY_FREE_ID_ID, ENTITY_TABLE_INDEX_STATE_ID,
+    ENTITY_FREE_ID_RECORD_ID, ENTITY_KEY_FREE_ID, ENTITY_TABLE_INDEX_STATE_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityId, EntityKey, EntityKeyId, EntityStorage, EntityStorageError, EntityWrite,
-    EntityWriteBatch, ProjectEntity, schema,
+    Entity, EntityId, EntityKey, EntityKeyId, EntityStorage, EntityStorageError, EntityWriteBatch,
+    ProjectEntity,
 };
 
 const TABLE_INDEX_SCHEMA: u32 = 1;
@@ -63,7 +61,7 @@ impl FreeIdKey {
 }
 
 impl EntityKey for FreeIdKey {
-    const ID: EntityKeyId = ENTITY_KEY_FREE_ID_ID;
+    const ID: EntityKeyId = ENTITY_KEY_FREE_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
         let (&table, index) = buf.split_first()?;
@@ -86,7 +84,7 @@ struct FreeIdRecord {
 }
 
 impl Entity for FreeIdRecord {
-    const ID: EntityId = ENTITY_FREE_ID_ID;
+    const ID: EntityId = ENTITY_FREE_ID_RECORD_ID;
 }
 
 #[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -122,14 +120,14 @@ impl Entity for TableIndexState {
     const ID: EntityId = ENTITY_TABLE_INDEX_STATE_ID;
 }
 
-struct AllocationPreview<T> {
+struct PendingAllocations<T> {
     free_exhausted: bool,
     ids: Vec<Id<T>>,
     last_free: Option<u32>,
     next_index: usize,
 }
 
-impl<T> AllocationPreview<T> {
+impl<T> PendingAllocations<T> {
     fn new(next_index: usize) -> Self {
         Self {
             free_exhausted: false,
@@ -148,7 +146,7 @@ impl<T> AllocationPreview<T> {
 }
 
 pub(crate) struct PersistentIdAllocator<T> {
-    preview: Mutex<AllocationPreview<T>>,
+    pending: Mutex<PendingAllocations<T>>,
     state: TableIndexState,
     storage: EntityStorage,
     table: PersistentTable,
@@ -183,7 +181,7 @@ impl<T> PersistentIdAllocator<T> {
 
     fn new(storage: EntityStorage, table: PersistentTable, state: TableIndexState) -> Self {
         Self {
-            preview: Mutex::new(AllocationPreview::new(state.next_index())),
+            pending: Mutex::new(PendingAllocations::new(state.next_index())),
             state,
             storage,
             table,
@@ -191,27 +189,27 @@ impl<T> PersistentIdAllocator<T> {
         }
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> Result<Id<T>, EntityStorageError> {
-        let mut preview = self
-            .preview
+    pub(crate) fn pending_id(&self, offset: usize) -> Result<Id<T>, EntityStorageError> {
+        let mut pending = self
+            .pending
             .lock()
-            .expect("allocator preview lock poisoned");
-        if offset >= preview.ids.len() {
-            self.extend_preview(&mut preview, offset + 1)?;
+            .expect("pending allocations lock poisoned");
+        if offset >= pending.ids.len() {
+            self.extend_pending(&mut pending, offset + 1)?;
         }
-        Ok(preview.ids[offset])
+        Ok(pending.ids[offset])
     }
 
-    fn extend_preview(
+    fn extend_pending(
         &self,
-        preview: &mut AllocationPreview<T>,
+        pending: &mut PendingAllocations<T>,
         required: usize,
     ) -> Result<(), EntityStorageError> {
-        while !preview.free_exhausted && preview.ids.len() < required {
+        while !pending.free_exhausted && pending.ids.len() < required {
             let requested = required
-                .saturating_sub(preview.ids.len())
+                .saturating_sub(pending.ids.len())
                 .max(FREE_ID_PREVIEW_BATCH);
-            let start = preview.last_free.map_or_else(
+            let start = pending.last_free.map_or_else(
                 || Bound::Included(FreeIdKey::first(self.table)),
                 |index| {
                     Bound::Excluded(FreeIdKey {
@@ -229,20 +227,20 @@ impl<T> PersistentIdAllocator<T> {
                 if key.table != self.table || read == requested {
                     break;
                 }
-                preview
+                pending
                     .ids
                     .push(Id::with_generation(key.index, record.generation));
-                preview.last_free = Some(key.index);
+                pending.last_free = Some(key.index);
                 read += 1;
             }
             if read < requested {
-                preview.free_exhausted = true;
+                pending.free_exhausted = true;
             }
         }
 
-        while preview.ids.len() < required {
-            preview.ids.push(Id::from_index(preview.next_index));
-            preview.next_index += 1;
+        while pending.ids.len() < required {
+            pending.ids.push(Id::from_index(pending.next_index));
+            pending.next_index += 1;
         }
 
         Ok(())
@@ -278,8 +276,8 @@ impl<T> PersistentIdAllocator<T> {
                 index,
             };
             match generation {
-                Some(generation) => append_insert(writes, &key, &FreeIdRecord { generation })?,
-                None => append_remove::<_, FreeIdRecord>(writes, &key),
+                Some(generation) => writes.insert_entity(&key, &FreeIdRecord { generation })?,
+                None => writes.remove_entity::<_, FreeIdRecord>(&key),
             }
         }
 
@@ -289,8 +287,7 @@ impl<T> PersistentIdAllocator<T> {
             .checked_add(added)
             .and_then(|live| live.checked_sub(removed))
             .expect("persistent entity count remains valid");
-        append_insert(
-            writes,
+        writes.insert_entity(
             &self.table.project_entity(),
             &TableIndexState::new(next_index, live),
         )
@@ -313,39 +310,13 @@ impl<T> PersistentIdAllocator<T> {
             .and_then(|live| live.checked_sub(removed))
             .expect("persistent entity count remains valid");
         self.state = TableIndexState::new(next_index, live);
-        self.preview
+        self.pending
             .get_mut()
-            .expect("allocator preview lock poisoned")
+            .expect("pending allocations lock poisoned")
             .clear(next_index);
     }
 
     pub(crate) fn len(&self) -> usize {
         self.state.live()
     }
-}
-
-pub(crate) fn append_insert<K, E>(
-    writes: &mut EntityWriteBatch,
-    key: &K,
-    entity: &E,
-) -> Result<(), EntityStorageError>
-where
-    K: EntityKey,
-    E: Entity,
-{
-    let encoded =
-        rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
-    writes.push(EntityWrite::insert_archive(
-        schema::make_key::<K, E>(key),
-        encoded,
-    ));
-    Ok(())
-}
-
-pub(crate) fn append_remove<K, E>(writes: &mut EntityWriteBatch, key: &K)
-where
-    K: EntityKey,
-    E: Entity,
-{
-    writes.push(EntityWrite::remove(schema::make_key::<K, E>(key)));
 }

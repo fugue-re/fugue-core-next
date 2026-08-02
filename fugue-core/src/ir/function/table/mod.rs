@@ -1,29 +1,32 @@
+use std::collections::hash_map::Iter as HashMapIter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::{fmt, mem, slice};
 
-use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use super::CodeBlockMaterialisation;
 use crate::ir::function::FunctionMaterialisation;
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockTable, Function,
-    FunctionId, Id, IdAllocator, IncompleteFunctionError, PreparedBlockMutation, RawAddress,
-    Reference, ReferenceOrigin,
+    Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockMaterialisation,
+    CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator,
+    IncompleteFunctionError, PreparedCodeBlockMutation, RawAddress, Reference, ReferenceOrigin,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityMut, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity,
-    WriteBackWorker, schema,
+    WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
+use crate::types::Revision;
 use crate::types::common::cursor_bound;
+
+pub(crate) const ATTRIBUTE_FUNCTION_CACHE_SIZE: &str = "storage.entities.function.cache_size";
+pub(crate) const DEFAULT_FUNCTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 mod persistent;
 mod transient;
@@ -246,7 +249,7 @@ impl<T, V> StagedEntities<T, V> {
 enum StagedEntityIter<'a, T, V> {
     Empty,
     Ordered(slice::Iter<'a, (Id<T>, V)>),
-    Sparse(std::collections::hash_map::Iter<'a, Id<T>, V>),
+    Sparse(HashMapIter<'a, Id<T>, V>),
 }
 
 impl<'a, T, V> Iterator for StagedEntityIter<'a, T, V> {
@@ -287,7 +290,7 @@ struct StagedBlock {
 
 pub(crate) struct PreparedFunctionTables {
     block_reservations: Vec<CodeBlockId>,
-    blocks: Vec<PreparedBlockMutation>,
+    blocks: Vec<PreparedCodeBlockMutation>,
     blocks_are_new: bool,
     cancelled_blocks: BTreeSet<CodeBlockId>,
     cancelled_functions: BTreeSet<FunctionId>,
@@ -296,7 +299,7 @@ pub(crate) struct PreparedFunctionTables {
     owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
 }
 
-pub(crate) struct PreparedFunctionReplacement {
+pub(crate) struct PreparedFunctionMutation {
     affected_blocks: SmallVec<[CodeBlockId; 16]>,
     call_targets: BTreeSet<Address>,
     coverage: AddressRangeSet,
@@ -306,9 +309,28 @@ pub(crate) struct PreparedFunctionReplacement {
     replaces_existing: bool,
 }
 
-impl PreparedFunctionReplacement {
-    pub(crate) fn call_targets(&mut self) -> BTreeSet<Address> {
-        std::mem::take(&mut self.call_targets)
+pub(crate) struct RemovedFunction {
+    coverage: AddressRangeSet,
+    function: Function,
+}
+
+impl RemovedFunction {
+    fn new(function: Function, coverage: AddressRangeSet) -> Self {
+        Self { coverage, function }
+    }
+
+    pub(crate) fn take_coverage(&mut self) -> AddressRangeSet {
+        mem::take(&mut self.coverage)
+    }
+
+    pub(crate) fn into_function(self) -> Function {
+        self.function
+    }
+}
+
+impl PreparedFunctionMutation {
+    pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
+        mem::take(&mut self.call_targets)
     }
 
     pub(crate) fn id(&self) -> FunctionId {
@@ -316,15 +338,15 @@ impl PreparedFunctionReplacement {
     }
 
     pub(crate) fn take_coverage(&mut self) -> AddressRangeSet {
-        std::mem::take(&mut self.coverage)
+        mem::take(&mut self.coverage)
     }
 
     pub(crate) fn take_previous_coverage(&mut self) -> AddressRangeSet {
-        std::mem::take(&mut self.previous_coverage)
+        mem::take(&mut self.previous_coverage)
     }
 
-    pub(crate) fn references(&mut self) -> Vec<Reference> {
-        std::mem::take(&mut self.references)
+    pub(crate) fn take_references(&mut self) -> Vec<Reference> {
+        mem::take(&mut self.references)
     }
 
     pub(crate) fn replaces_existing(&self) -> bool {
@@ -333,7 +355,7 @@ impl PreparedFunctionReplacement {
 }
 
 struct PreparedFunctionEntry {
-    encoded_len: usize,
+    encoded_size: usize,
     function: Option<Function>,
     id: FunctionId,
     previous: Option<Address>,
@@ -346,19 +368,19 @@ impl FunctionTableStage {
         self.function_reservations.reserve(additional);
     }
 
-    fn replace_materialisation(
+    fn stage_materialisation(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         mut function: FunctionMaterialisation,
-    ) -> Result<PreparedFunctionReplacement, IncompleteFunctionError> {
+    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
         self.load_existing_block_locations(blocks, &function)?;
         let entry = function.entry();
         let previous = self.function_by_address(functions, entry)?;
         let (id, is_new) = match previous.as_ref() {
             Some(previous) => (previous.id(), self.new_function(previous.id())),
             None => {
-                let id = functions.preview_id(self.function_reservations.len());
+                let id = functions.pending_id(self.function_reservations.len());
                 self.function_reservations.push(id);
                 (id, true)
             }
@@ -367,7 +389,7 @@ impl FunctionTableStage {
         let coverage = function.take_coverage();
         let references = function.take_references();
         let function = function.materialise(id, |block| self.resolve_block(blocks, block))?;
-        let mut replacement = PreparedFunctionReplacement {
+        let mutation = PreparedFunctionMutation {
             affected_blocks: SmallVec::new(),
             call_targets,
             coverage,
@@ -376,13 +398,84 @@ impl FunctionTableStage {
             references,
             replaces_existing: !is_new,
         };
+        self.stage_mutation(functions, blocks, function, previous, is_new, mutation)
+    }
+
+    fn stage_membership(
+        &mut self,
+        functions: &FunctionTable,
+        blocks: &CodeBlockTable,
+        mut function: Function,
+    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        let entry = function.entry();
+        let previous = self.function_by_address(functions, entry)?;
+        let (id, is_new) = match previous.as_ref() {
+            Some(previous) => (previous.id(), self.new_function(previous.id())),
+            None => {
+                let id = functions.pending_id(self.function_reservations.len());
+                self.function_reservations.push(id);
+                (id, true)
+            }
+        };
+        function.set_id(id);
+
+        let mut coverage = AddressRangeSet::new();
+        let mut targets = Vec::new();
+        for (address, block_id) in function.blocks() {
+            let found = self.with_block(blocks, block_id, |block| {
+                assert_eq!(
+                    block.address(),
+                    address,
+                    "function block address must match its code block"
+                );
+                block.coverage_into(&mut coverage);
+                targets.extend(
+                    block
+                        .flow_targets()
+                        .map(|target| function.classify_flow_target(target)),
+                );
+            })?;
+            if found.is_none() {
+                return Err(IncompleteFunctionError::missing_code_block(block_id));
+            }
+        }
+
+        let call_targets = targets
+            .iter()
+            .filter(|target| target.kind().is_call())
+            .map(|target| target.to())
+            .collect();
+        let references = Function::flow_references_from(targets);
+        let mutation = PreparedFunctionMutation {
+            affected_blocks: SmallVec::new(),
+            call_targets,
+            coverage,
+            id,
+            previous_coverage: AddressRangeSet::new(),
+            references,
+            replaces_existing: !is_new,
+        };
+        self.stage_mutation(functions, blocks, function, previous, is_new, mutation)
+    }
+
+    fn stage_mutation(
+        &mut self,
+        functions: &FunctionTable,
+        blocks: &CodeBlockTable,
+        function: Function,
+        previous: Option<Function>,
+        is_new: bool,
+        mut mutation: PreparedFunctionMutation,
+    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        let entry = function.entry();
+        let id = function.id();
 
         let replaces_existing = previous.is_some();
         if let Some(previous) = &previous {
             for (_, block) in previous.blocks() {
-                replacement.affected_blocks.push(block);
+                mutation.affected_blocks.push(block);
                 self.with_block(blocks, block, |block| {
-                    block.coverage_into(&mut replacement.previous_coverage);
+                    block.coverage_into(&mut mutation.previous_coverage);
                 })?;
                 Self::remove_owner(self.owners_mut(functions, block), id);
             }
@@ -392,7 +485,7 @@ impl FunctionTableStage {
         }
 
         for (_, block) in function.blocks() {
-            replacement.affected_blocks.push(block);
+            mutation.affected_blocks.push(block);
             Self::insert_owner(self.owners_mut(functions, block), id);
             if self
                 .block_mutations
@@ -403,10 +496,10 @@ impl FunctionTableStage {
             }
         }
 
-        replacement.affected_blocks.sort_unstable();
-        replacement.affected_blocks.dedup();
+        mutation.affected_blocks.sort_unstable();
+        mutation.affected_blocks.dedup();
         if replaces_existing {
-            for &block in &replacement.affected_blocks {
+            for &block in &mutation.affected_blocks {
                 if self.owners_mut(functions, block).is_empty() {
                     self.stage_block_removal(blocks, block)?;
                 }
@@ -422,7 +515,7 @@ impl FunctionTableStage {
             },
         );
 
-        Ok(replacement)
+        Ok(mutation)
     }
 
     fn set_properties(
@@ -430,8 +523,8 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         entry: Address,
-        properties: crate::ir::FunctionProperties,
-        input_revision: crate::types::Revision,
+        properties: FunctionProperties,
+        input_revision: Revision,
     ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
         let Some(mut function) = self.function_by_address(functions, entry)? else {
             return Ok(None);
@@ -453,7 +546,7 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         id: FunctionId,
-    ) -> Result<Option<(Function, AddressRangeSet)>, IncompleteFunctionError> {
+    ) -> Result<Option<RemovedFunction>, IncompleteFunctionError> {
         let Some(function) = self.function_by_id(functions, id)? else {
             return Ok(None);
         };
@@ -463,7 +556,7 @@ impl FunctionTableStage {
             self.function_mutations.remove(&id);
             self.cancelled_functions.insert(id);
         }
-        Ok(Some((function, coverage)))
+        Ok(Some(RemovedFunction::new(function, coverage)))
     }
 
     fn function_by_address(
@@ -563,7 +656,7 @@ impl FunctionTableStage {
             return Ok(id);
         }
 
-        let id = blocks.preview_id(self.block_reservations.len());
+        let id = blocks.pending_id(self.block_reservations.len());
         self.block_reservations.push(id);
         let address = materialisation.address();
         let block = materialisation.into_block(id);
@@ -939,7 +1032,7 @@ impl FunctionTableStage {
         } = self;
         let mut prepared_blocks = Vec::with_capacity(block_mutations.len());
         let mut prepared_functions = Vec::with_capacity(function_mutations.len());
-        let mut writes = Vec::with_capacity(
+        let mut writes = EntityWriteBatch::with_capacity(
             block_mutations
                 .len()
                 .saturating_add(function_mutations.len()),
@@ -957,7 +1050,7 @@ impl FunctionTableStage {
                     .expect("new block batch contains only insertions");
                 (
                     block.space(),
-                    block.start().raw_address(),
+                    block.address().raw_address(),
                     block.last_address().raw_address(),
                     *id,
                 )
@@ -982,29 +1075,31 @@ impl FunctionTableStage {
                 continue;
             }
             let previous = previous.map(|block| block.address_range());
-            let encoded_len = match &block {
+            let encoded_size = match &block {
                 Some(block) if blocks.is_persistent() => {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(block)
                         .map_err(EntityStorageError::encode)?;
-                    let encoded_len = encoded.len();
+                    let encoded_size = encoded.len();
                     writes.push(EntityWrite::insert_archive(
-                        schema::make_key::<CodeBlockId, CodeBlock>(&id),
+                        CodeBlock::ID.key_for(&id),
                         encoded,
                     ));
-                    encoded_len
+                    encoded_size
                 }
                 Some(_) => 0,
                 None => {
                     if previous.is_some() && blocks.is_persistent() {
-                        writes.push(EntityWrite::remove(schema::make_key::<
-                            CodeBlockId,
-                            CodeBlock,
-                        >(&id)));
+                        writes.push(EntityWrite::remove(CodeBlock::ID.key_for(&id)));
                     }
                     0
                 }
             };
-            prepared_blocks.push(PreparedBlockMutation::new(id, block, previous, encoded_len));
+            prepared_blocks.push(PreparedCodeBlockMutation::new(
+                id,
+                block,
+                previous,
+                encoded_size,
+            ));
         }
 
         let (mut function_mutations, function_mutations_ordered) =
@@ -1029,29 +1124,27 @@ impl FunctionTableStage {
                 continue;
             }
             let previous = previous.map(|function| function.entry());
-            let encoded_len = match &function {
+            let encoded_size = match &function {
                 Some(function) if functions.is_persistent() => {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(function)
                         .map_err(EntityStorageError::encode)?;
-                    let encoded_len = encoded.len();
+                    let encoded_size = encoded.len();
                     writes.push(EntityWrite::insert_archive(
-                        schema::make_key::<FunctionId, Function>(&id),
+                        Function::ID.key_for(&id),
                         encoded,
                     ));
-                    encoded_len
+                    encoded_size
                 }
                 Some(_) => 0,
                 None => {
                     if previous.is_some() && functions.is_persistent() {
-                        writes.push(EntityWrite::remove(schema::make_key::<FunctionId, Function>(
-                            &id,
-                        )));
+                        writes.push(EntityWrite::remove(Function::ID.key_for(&id)));
                     }
                     0
                 }
             };
             prepared_functions.push(PreparedFunctionEntry {
-                encoded_len,
+                encoded_size,
                 function,
                 id,
                 previous,
@@ -1122,11 +1215,11 @@ impl PreparedFunctionTables {
         );
         let blocks_added = block_entries
             .iter()
-            .filter(|entry| entry.block().is_some() && entry.previous().is_none())
+            .filter(|entry| entry.is_addition())
             .count();
         let blocks_removed = block_entries
             .iter()
-            .filter(|entry| entry.block().is_none() && entry.previous().is_some())
+            .filter(|entry| entry.is_removal())
             .count();
         blocks.publish_prepared(
             &block_reservations,
@@ -1137,25 +1230,19 @@ impl PreparedFunctionTables {
 
         if blocks_are_new {
             blocks.publish_new_batch(block_entries.into_iter().map(|entry| {
-                let (_, block, _, _) = entry.into_parts();
-                block.expect("new block batch contains only insertions")
+                entry
+                    .into_block()
+                    .expect("new block batch contains only insertions")
             }));
         } else {
             for entry in block_entries {
-                let (id, block, previous, encoded_len) = entry.into_parts();
-                match block {
-                    Some(block) => blocks.publish_upsert(block, encoded_len),
-                    None => blocks.publish_remove(
-                        id,
-                        previous.expect("prepared block removal has a previous range"),
-                    ),
-                }
+                blocks.publish_mutation(entry);
             }
         }
         for entry in function_entries {
             match entry.function {
                 Some(function) => {
-                    functions.publish_upsert(function, entry.previous, entry.encoded_len)
+                    functions.publish_upsert(function, entry.previous, entry.encoded_size)
                 }
                 None => functions.publish_remove(
                     entry.id,
@@ -1226,25 +1313,34 @@ impl FunctionTable {
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.flush(),
-            Self::Transient(t) => t.flush(),
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(table) => table.flush(),
         }
     }
 
-    pub(crate) fn preview_id(&self, offset: usize) -> FunctionId {
+    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
         match self {
-            Self::Persistent(p) => p.preview_id(offset),
-            Self::Transient(t) => t.preview_id(offset),
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
         }
     }
 
-    pub(crate) fn stage_materialised_replacement(
+    pub(crate) fn stage_materialisation(
         &self,
         blocks: &CodeBlockTable,
         stage: &mut FunctionTableStage,
         function: FunctionMaterialisation,
-    ) -> Result<PreparedFunctionReplacement, IncompleteFunctionError> {
-        stage.replace_materialisation(self, blocks, function)
+    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        stage.stage_materialisation(self, blocks, function)
+    }
+
+    pub(crate) fn stage_membership(
+        &self,
+        blocks: &CodeBlockTable,
+        stage: &mut FunctionTableStage,
+        function: Function,
+    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        stage.stage_membership(self, blocks, function)
     }
 
     pub(crate) fn stage_properties(
@@ -1252,8 +1348,8 @@ impl FunctionTable {
         blocks: &CodeBlockTable,
         stage: &mut FunctionTableStage,
         entry: Address,
-        properties: crate::ir::FunctionProperties,
-        input_revision: crate::types::Revision,
+        properties: FunctionProperties,
+        input_revision: Revision,
     ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
         stage.set_properties(self, blocks, entry, properties, input_revision)
     }
@@ -1263,7 +1359,7 @@ impl FunctionTable {
         blocks: &CodeBlockTable,
         stage: &mut FunctionTableStage,
         id: FunctionId,
-    ) -> Result<Option<(Function, AddressRangeSet)>, IncompleteFunctionError> {
+    ) -> Result<Option<RemovedFunction>, IncompleteFunctionError> {
         stage.remove(self, blocks, id)
     }
 
@@ -1335,25 +1431,25 @@ impl FunctionTable {
         &mut self,
         function: Function,
         previous_entry: Option<Address>,
-        encoded_len: usize,
+        encoded_size: usize,
     ) {
         match self {
-            Self::Persistent(p) => p.publish_upsert(function, encoded_len),
-            Self::Transient(t) => t.publish_upsert(function, previous_entry),
+            Self::Persistent(table) => table.publish_upsert(function, encoded_size),
+            Self::Transient(table) => table.publish_upsert(function, previous_entry),
         }
     }
 
     fn publish_remove(&mut self, id: FunctionId, entry: Address) {
         match self {
-            Self::Persistent(p) => p.publish_remove(id),
-            Self::Transient(t) => t.publish_remove(id, entry),
+            Self::Persistent(table) => table.publish_remove(id),
+            Self::Transient(table) => table.publish_remove(id, entry),
         }
     }
 
     fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>) {
         match self {
             Self::Persistent(_) => {}
-            Self::Transient(t) => t.publish_owners(owners),
+            Self::Transient(table) => table.publish_owners(owners),
         }
     }
 
@@ -1376,8 +1472,8 @@ impl FunctionTable {
         F: FnOnce(Id<Function>, Address) -> Result<(Function, R), FunctionTableError>,
     {
         match self {
-            Self::Persistent(p) => p.insert_with(addr, f),
-            Self::Transient(t) => t.insert_with(addr, f),
+            Self::Persistent(table) => table.insert_with(addr, f),
+            Self::Transient(table) => table.insert_with(addr, f),
         }
     }
 
@@ -1391,8 +1487,8 @@ impl FunctionTable {
         id: Id<Function>,
     ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_id(id).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
         }
     }
 
@@ -1406,8 +1502,8 @@ impl FunctionTable {
         addr: Address,
     ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_address(addr)?.map(EntityRef::cached)),
-            Self::Transient(t) => Ok(t.get_by_address(addr).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_address(addr)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_address(addr).map(EntityRef::borrowed)),
         }
     }
 
@@ -1421,8 +1517,8 @@ impl FunctionTable {
         id: Id<Function>,
     ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_id_mut(id)?.map(EntityMut::cached)),
-            Self::Transient(t) => Ok(t.get_by_id_mut(id).map(EntityMut::borrowed)),
+            Self::Persistent(table) => Ok(table.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(table) => Ok(table.get_by_id_mut(id).map(EntityMut::borrowed)),
         }
     }
 
@@ -1436,8 +1532,10 @@ impl FunctionTable {
         addr: Address,
     ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => Ok(p.try_get_by_address_mut(addr)?.map(EntityMut::cached)),
-            Self::Transient(t) => Ok(t.get_by_address_mut(addr).map(EntityMut::borrowed)),
+            Self::Persistent(table) => {
+                Ok(table.try_get_by_address_mut(addr)?.map(EntityMut::cached))
+            }
+            Self::Transient(table) => Ok(table.get_by_address_mut(addr).map(EntityMut::borrowed)),
         }
     }
 
@@ -1456,8 +1554,8 @@ impl FunctionTable {
         f: impl FnOnce(&mut Function) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_id(id, f),
-            Self::Transient(t) => Ok(t.modify_by_id(id, f)),
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
         }
     }
 
@@ -1476,8 +1574,8 @@ impl FunctionTable {
         f: impl FnOnce(&mut Function) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_modify_by_address(addr, f),
-            Self::Transient(t) => Ok(t.modify_by_address(addr, f)),
+            Self::Persistent(table) => table.try_modify_by_address(addr, f),
+            Self::Transient(table) => Ok(table.modify_by_address(addr, f)),
         }
     }
 
@@ -1488,8 +1586,8 @@ impl FunctionTable {
 
     pub fn try_remove_by_id(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_remove_by_id(id),
-            Self::Transient(t) => Ok(t.remove_by_id(id)),
+            Self::Persistent(table) => table.try_remove_by_id(id),
+            Self::Transient(table) => Ok(table.remove_by_id(id)),
         }
     }
 
@@ -1500,22 +1598,22 @@ impl FunctionTable {
 
     pub fn try_remove_by_address(&mut self, addr: Address) -> Result<bool, EntityStorageError> {
         match self {
-            Self::Persistent(p) => p.try_remove_by_address(addr),
-            Self::Transient(t) => Ok(t.remove_by_address(addr)),
+            Self::Persistent(table) => table.try_remove_by_address(addr),
+            Self::Transient(table) => Ok(table.remove_by_address(addr)),
         }
     }
 
     pub fn contains(&self, addr: Address) -> bool {
         match self {
-            Self::Persistent(p) => p.contains(addr),
-            Self::Transient(t) => t.contains(addr),
+            Self::Persistent(table) => table.contains(addr),
+            Self::Transient(table) => table.contains(addr),
         }
     }
 
     pub fn addresses(&self) -> Box<dyn Iterator<Item = Address> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.addresses()),
-            Self::Transient(t) => Box::new(t.addresses()),
+            Self::Persistent(table) => Box::new(table.addresses()),
+            Self::Transient(table) => Box::new(table.addresses()),
         }
     }
 
@@ -1528,8 +1626,8 @@ impl FunctionTable {
         R: RangeBounds<RawAddress>,
     {
         match self {
-            Self::Persistent(p) => Box::new(p.addresses_in_range(space, range)),
-            Self::Transient(t) => Box::new(t.addresses_in_range(space, range)),
+            Self::Persistent(table) => Box::new(table.addresses_in_range(space, range)),
+            Self::Transient(table) => Box::new(table.addresses_in_range(space, range)),
         }
     }
 
@@ -1585,36 +1683,36 @@ impl FunctionTable {
 
     fn block_owners(&self, block: CodeBlockId) -> SmallVec<[FunctionId; 2]> {
         match self {
-            Self::Persistent(p) => p.block_owners(block),
-            Self::Transient(t) => t.block_owners(block).into(),
+            Self::Persistent(table) => table.block_owners(block),
+            Self::Transient(table) => table.block_owners(block).into(),
         }
     }
 
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter().map(EntityRef::cached)),
-            Self::Transient(t) => Box::new(t.iter().map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
 
     pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
         match self {
-            Self::Persistent(p) => Box::new(p.iter_mut().map(EntityMut::cached)),
-            Self::Transient(t) => Box::new(t.iter_mut().map(EntityMut::borrowed)),
+            Self::Persistent(table) => Box::new(table.iter_mut().map(EntityMut::cached)),
+            Self::Transient(table) => Box::new(table.iter_mut().map(EntityMut::borrowed)),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Persistent(p) => p.is_empty(),
-            Self::Transient(t) => t.is_empty(),
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Persistent(p) => p.len(),
-            Self::Transient(t) => t.len(),
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
         }
     }
 }
@@ -1699,7 +1797,7 @@ mod test {
     }
 
     #[test]
-    fn test_basic_operations() {
+    fn basic_operations() {
         let mut table = table();
 
         let addr = Address::from(0x1000);
@@ -1720,7 +1818,7 @@ mod test {
     }
 
     #[test]
-    fn test_removal_operations() {
+    fn removal_operations() {
         let mut table = table();
 
         let addr1 = Address::from(0x1000);
@@ -1766,7 +1864,7 @@ mod test {
     }
 
     #[test]
-    fn test_index_rebuild_on_open() {
+    fn index_rebuild_on_open() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         {
@@ -1790,7 +1888,7 @@ mod test {
     }
 
     #[test]
-    fn test_worker_round_trip() {
+    fn worker_round_trip() {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         {
@@ -1818,7 +1916,7 @@ mod test {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn test_free_id_reuse_after_reopen_sqlite() {
+    fn free_id_reuse_after_reopen_sqlite() {
         let dir = TempDir::new().unwrap();
 
         {
@@ -1875,7 +1973,7 @@ mod test {
     }
 
     #[test]
-    fn test_transient_basic_operations() {
+    fn transient_basic_operations() {
         let mut table = FunctionTable::new_transient();
 
         let addr = Address::from(0x1000);
@@ -1918,7 +2016,7 @@ mod test {
     }
 
     #[test]
-    fn test_transient_iter_mut_mutate_reload() {
+    fn transient_iter_mut_mutate_reload() {
         let mut table = FunctionTable::new_transient();
 
         let addrs = [0x1000u64, 0x2000, 0x3000].map(Address::from);
@@ -1932,7 +2030,7 @@ mod test {
             .collect::<Vec<_>>();
 
         for mut function in table.iter_mut() {
-            function.update_name("renamed");
+            function.set_name("renamed");
         }
 
         for &id in &ids {

@@ -9,8 +9,8 @@ use crate::il::common::{
 };
 use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaMemoryDomain,
-    ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
+    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaIrParts,
+    ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::FunctionId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -69,27 +69,27 @@ impl SsaFixture {
     }
 
     fn build(self, metadata: IlMetadata, graph: IlGraph) -> ECodeSsaIr {
-        ECodeSsaIr::new(
+        ECodeSsaIr::new(ECodeSsaIrParts {
             metadata,
             graph,
-            Vec::new(),
-            Vec::new(),
-            self.values,
-            self.block_arguments,
-            self.edge_arguments,
-            self.edge_argument_values,
-            self.operations,
-            self.value_operands,
-            self.memory_domains,
-            self.constant_storage,
-        )
+            source_spans: Vec::new(),
+            parent_spans: Vec::new(),
+            values: self.values,
+            block_arguments: self.block_arguments,
+            edge_arguments: self.edge_arguments,
+            edge_argument_values: self.edge_argument_values,
+            operations: self.operations,
+            value_operands: self.value_operands,
+            memory_domains: self.memory_domains,
+            constant_storage: self.constant_storage,
+        })
     }
 }
 
 #[test]
 fn ssa_verifier_rejects_invalid_value_definition() {
     let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
             Vec::new(),
@@ -97,7 +97,7 @@ fn ssa_verifier_rejects_invalid_value_definition() {
         .build(metadata, IlGraph::default());
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::InvalidValueDefinition)
     ));
 }
@@ -106,7 +106,7 @@ fn ssa_verifier_rejects_invalid_value_definition() {
 fn ssa_verifier_rejects_duplicate_memory_domains() {
     let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
     let space = AddressSpaceId::new(7);
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_memory_domains(vec![
             ECodeSsaMemoryDomain::new(space),
             ECodeSsaMemoryDomain::new(space),
@@ -114,7 +114,7 @@ fn ssa_verifier_rejects_duplicate_memory_domains() {
         .build(metadata, IlGraph::default());
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::DuplicateMemoryDomain)
     ));
 }
@@ -133,10 +133,10 @@ fn ssa_verifier_rejects_load_without_memory_domain() {
         )
         .unwrap();
 
-    let body = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder.build(&CancellationToken::default()).unwrap();
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::Il(IlError::MissingComponent { .. }))
     ));
 }
@@ -188,10 +188,10 @@ fn ssa_verifier_reports_invalid_store_result_count() {
         )
         .unwrap();
 
-    let body = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder.build(&CancellationToken::default()).unwrap();
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::InvalidResultCount {
             operation: 4,
             expected: 1,
@@ -213,10 +213,10 @@ fn ssa_verifier_rejects_wide_constant_beyond_pool() {
         )
         .unwrap();
 
-    let body = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder.build(&CancellationToken::default()).unwrap();
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::Il(IlError::RangeOutOfBounds { .. }))
     ));
 }
@@ -247,10 +247,10 @@ fn ssa_verifier_rejects_operand_width_mismatch() {
         ))
         .unwrap();
 
-    let body = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder.build(&CancellationToken::default()).unwrap();
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::Il(IlError::WidthMismatch { .. }))
     ));
 }
@@ -294,14 +294,14 @@ fn ssa_verifier_accepts_wide_constant_within_pool() {
         ))
         .unwrap();
 
-    let mut body = builder.build(&CancellationToken::default()).unwrap();
-    body.verify().unwrap();
+    let mut ir = builder.build(&CancellationToken::default()).unwrap();
+    ir.verify().unwrap();
 
-    body.rewrite(ECodeSsaConstantFolding);
+    ir.rewrite(ECodeSsaConstantFolding);
 
-    body.verify().unwrap();
+    ir.verify().unwrap();
     assert_eq!(
-        body.constant_value(widened),
+        ir.constant_value(widened),
         Some(BitVec::from_u64(0xabc, 64).unsigned_cast(128))
     );
 }
@@ -348,7 +348,7 @@ fn ssa_verifier_rejects_non_dominating_linear_use() {
     let value = IlValueId::try_from_index(0).unwrap();
     let result = IlIndexRange::new(0, 1).unwrap();
     let operands = IlIndexRange::new(0, 1).unwrap();
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -365,7 +365,7 @@ fn ssa_verifier_rejects_non_dominating_linear_use() {
         )
         .build(metadata, IlGraph::default());
 
-    let result = body.verify();
+    let result = ir.verify();
     assert!(
         matches!(result, Err(VerifyError::NonDominatingUse { .. })),
         "{result:?}"
@@ -398,7 +398,7 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
         ],
         vec![left, right],
     );
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -426,7 +426,7 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
         .with_edge_argument_storage(vec![IlIndexRange::EMPTY; 2], Vec::new())
         .build(metadata, graph);
 
-    let result = body.verify();
+    let result = ir.verify();
     assert!(
         matches!(result, Err(VerifyError::NonDominatingUse { .. })),
         "{result:?}"
@@ -453,7 +453,7 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
         ],
         vec![successor],
     );
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::block_argument(32, 0)],
             vec![ECodeSsaBlockArg::new(successor, argument_value, 32)],
@@ -462,7 +462,7 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
         .build(metadata, graph);
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::BlockArgumentCount { .. })
     ));
 }
@@ -494,7 +494,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
         ],
         vec![left, right],
     );
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![
                 ECodeSsaValue::operation_result(32, IlOpId::try_from_index(0).unwrap()),
@@ -518,7 +518,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
         .build(metadata, graph);
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::NonDominatingEdgeArgument { .. })
     ));
 }
@@ -541,7 +541,7 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
         ],
         Vec::new(),
     );
-    let body = SsaFixture::default()
+    let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::operation_result(
                 32,
@@ -561,7 +561,7 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
         .build(metadata, graph);
 
     assert!(matches!(
-        body.verify(),
+        ir.verify(),
         Err(VerifyError::Structure(
             StructureError::OverlappingBlockOperations { .. }
         ))

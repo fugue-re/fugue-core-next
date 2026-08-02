@@ -31,6 +31,7 @@ use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 
 mod derived_references;
+mod function_partition;
 mod invalidation;
 mod lifted;
 
@@ -167,7 +168,7 @@ fn flow_resolved_load_function(
 fn calling_function(
     entry: Address,
     callee: Address,
-    length: usize,
+    size: usize,
 ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
     let language = resolve_language("x86:LE:64")?;
     let operation = RawPCodeOp {
@@ -176,7 +177,7 @@ fn calling_function(
         output: Varnode::INVALID,
     };
     let operations = [operation];
-    let insn = Insn::from_resolved_flow(language, entry, length, &operations)?;
+    let insn = Insn::from_resolved_flow(language, entry, size, &operations)?;
     let mut function = IncompleteFunction::new(entry);
 
     let insn = match function.insn_entry(entry) {
@@ -187,8 +188,8 @@ fn calling_function(
     };
 
     function.push_block(
-        IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
-            .expect("test block length must be valid"),
+        IncompleteCodeBlock::try_new(entry, size, vec![insn], ContextSet::default())
+            .expect("test block size must be valid"),
     );
 
     Ok(function)
@@ -196,9 +197,9 @@ fn calling_function(
 
 fn disassembled_function(
     entry: Address,
-    length: usize,
+    size: usize,
 ) -> Result<IncompleteFunction, Box<dyn std::error::Error>> {
-    let insn = Insn::from_disassembly(entry, length, InsnProperties::NEEDS_FLOW_RESOLUTION)?;
+    let insn = Insn::from_disassembly(entry, size, InsnProperties::NEEDS_FLOW_RESOLUTION)?;
     let mut function = IncompleteFunction::new(entry);
 
     let insn = match function.insn_entry(entry) {
@@ -209,8 +210,8 @@ fn disassembled_function(
     };
 
     function.push_block(
-        IncompleteCodeBlock::try_new(entry, length, vec![insn], ContextSet::default())
-            .expect("test block length must be valid"),
+        IncompleteCodeBlock::try_new(entry, size, vec![insn], ContextSet::default())
+            .expect("test block size must be valid"),
     );
 
     Ok(function)
@@ -229,7 +230,7 @@ fn incomplete_function(entry: Address, len: usize) -> IncompleteFunction {
     let mut function = IncompleteFunction::new(entry);
     function.push_block(
         IncompleteCodeBlock::try_new(entry, len, Vec::new(), ContextSet::default())
-            .expect("test block length must be valid"),
+            .expect("test block size must be valid"),
     );
 
     function
@@ -241,7 +242,7 @@ fn tagged_source_spans(payload: &[u8]) -> Vec<IlSourceSpan> {
         IlIndexRange::EMPTY,
         Address::new(DEFAULT_SPACE_ID, u64::from(tag)),
         u32::from(tag),
-        u32::try_from(payload.len()).expect("test payload length should fit"),
+        u32::try_from(payload.len()).expect("test payload size should fit"),
     )]
 }
 

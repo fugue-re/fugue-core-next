@@ -4,13 +4,14 @@ use std::ops::ControlFlow;
 
 use indexmap::{IndexMap, IndexSet};
 use itertools::Either;
+use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 
 use super::structuring::CodeBlockStructurer;
-use super::{FunctionRecoveryConfig, FunctionRecoveryError, InsnResolver};
+use super::{FUNCTION_RECOVERY_ANALYSER, FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::analysis::control::{CancellationToken, Cancelled};
-use crate::analysis::non_returning::analyse_non_returning_thunk;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::engine::{ProjectView, ReadSet};
@@ -19,7 +20,7 @@ use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget, IncompleteCodeBlockId,
     IncompleteFunction, InsnEntry, ProblemKind,
 };
-use crate::lifter::ContextSet;
+use crate::lifter::{ContextSet, InsnResolver};
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 use crate::types::Confidence;
 
@@ -62,7 +63,8 @@ impl<'a> FunctionBuilderInputs<'a> {
     }
 }
 
-struct InstructionResolution<'a, 'p> {
+struct InsnResolution<'a, 'p> {
+    avoidance_baseline: Option<&'a AddressRangeSet>,
     config: &'a FunctionRecoveryConfig,
     inputs: FunctionBuilderInputs<'a>,
     project: &'a ProjectView<'p>,
@@ -249,6 +251,7 @@ pub struct FunctionBuilderContext {
 }
 
 pub struct FunctionBuilder {
+    candidate_pool: Option<ThreadPool>,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
     initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
@@ -258,6 +261,7 @@ pub struct FunctionBuilder {
 impl FunctionBuilder {
     pub fn new(config: FunctionRecoveryConfig) -> Self {
         FunctionBuilder {
+            candidate_pool: None,
             config,
             context: FunctionBuilderContext::new(),
             initialisation_passes: AnalysisGroup::new(),
@@ -363,40 +367,47 @@ impl FunctionBuilder {
         debug_assert!(workers > 1);
         debug_assert!(self.initialisation_passes.is_empty());
 
+        if self
+            .candidate_pool
+            .as_ref()
+            .is_none_or(|pool| pool.current_num_threads() != workers)
+        {
+            self.candidate_pool = Some(
+                ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .thread_name(|index| format!("fugue-recovery-{index}"))
+                    .build()
+                    .map_err(|error| {
+                        AnalysisError::pass_configuration_failed(FUNCTION_RECOVERY_ANALYSER, error)
+                    })?,
+            );
+        }
+
+        let avoidance_baseline = &self.context.avoids;
         let mut tasks = candidates
             .into_iter()
-            .map(|candidate| {
-                FunctionCandidateState::new(
-                    project.with_independent_reads(),
-                    candidate,
-                    self.context.avoids.clone(),
-                    &self.config,
-                )
-            })
+            .map(|candidate| FunctionCandidateState::new(project.fork(), candidate, &self.config))
             .collect::<Vec<_>>();
+        let pool = self
+            .candidate_pool
+            .as_ref()
+            .expect("candidate pool must be initialised");
+        let config = &self.config;
 
         loop {
             let chunk = tasks.len().div_ceil(workers);
-            std::thread::scope(|scope| {
-                for tasks in tasks.chunks_mut(chunk) {
-                    let config = &self.config;
-                    scope.spawn(move || {
-                        let mut resolver = InsnResolver::new(tasks[0].view.arch());
-                        for task in tasks {
-                            task.resolve(config, inputs, token, &mut resolver);
-                        }
-                    });
-                }
+            pool.install(|| {
+                tasks.par_chunks_mut(chunk).for_each(|tasks| {
+                    let mut resolver = InsnResolver::new(tasks[0].view.arch());
+                    for task in tasks {
+                        task.resolve(config, inputs, token, &mut resolver, avoidance_baseline);
+                    }
+                });
             });
 
             let mut pending = false;
             for task in &mut tasks {
-                task.run_post_structuring(
-                    &self.config,
-                    &mut self.post_structuring_passes,
-                    inputs.non_returning_targets,
-                    token,
-                );
+                task.run_post_structuring(&self.config, &mut self.post_structuring_passes, token);
                 pending |= !task.is_complete();
             }
             if !pending {
@@ -532,7 +543,7 @@ impl FunctionBuilderContext {
         }
     }
 
-    pub fn report_problem(&mut self, address: impl Into<Address>, kind: ProblemKind) {
+    pub fn add_problem(&mut self, address: impl Into<Address>, kind: ProblemKind) {
         self.problems.push((address.into(), kind));
     }
 
@@ -570,7 +581,7 @@ impl FunctionBuilderContext {
         self.structurer.clear();
     }
 
-    pub(super) fn skip_padding(
+    pub(super) fn function_entry_after_padding(
         &mut self,
         segments: &SegmentStorage,
         arch: &Arch,
@@ -580,34 +591,42 @@ impl FunctionBuilderContext {
         let mut address = address;
 
         loop {
-            let Ok(bytes_view) = self.mapping_cache.contiguous_view_from(segments, address) else {
+            let view = self.mapping_cache.view_containing(segments, address)?;
+            if !view.properties().is_executable() {
                 return None;
-            };
-            let bytes = bytes_view
-                .as_contiguous()
-                .expect("contiguous mapping view must contain bytes");
-            let (length, properties) =
+            }
+            let bytes_view = view.bytes_from(address)?;
+            let bytes = bytes_view.as_contiguous()?;
+            if bytes.is_empty() {
+                return None;
+            }
+            let (size, properties) =
                 arch.classify_contiguous_bytes(address.raw_address(), resolver.context(), bytes);
-            if length == 0 || !properties.is_padding() {
+            if size == 0 || !properties.is_padding() {
                 return Some(address);
             }
 
-            address += length;
+            address += size;
         }
     }
 
     fn resolve_insns(
         &mut self,
-        resolution: &InstructionResolution<'_, '_>,
+        resolution: &InsnResolution<'_, '_>,
         resolver: &mut InsnResolver,
         f: &mut IncompleteFunction,
     ) -> Result<ControlFlow<Cancelled>, FunctionRecoveryError> {
-        let InstructionResolution {
+        let InsnResolution {
+            avoidance_baseline,
             config,
             inputs,
             project,
             token,
         } = resolution;
+        let is_avoided = |additions: &AddressRangeSet, address| {
+            additions.contains(address)
+                || avoidance_baseline.is_some_and(|baseline| baseline.contains(address))
+        };
         let function_entries = inputs.function_entries;
         let non_returning_targets = inputs.non_returning_targets;
         let arch = project.arch();
@@ -656,7 +675,7 @@ impl FunctionBuilderContext {
                 }
             }
 
-            if self.avoids.contains(block) {
+            if is_avoided(&self.avoids, block) {
                 tracing::trace!("skipping {block}: in avoidance set");
                 continue 'outer;
             }
@@ -749,7 +768,7 @@ impl FunctionBuilderContext {
                     }
                 };
 
-                if self.avoids.contains(address) {
+                if is_avoided(&self.avoids, address) {
                     tracing::trace!("skipping {address}: in avoidance set");
                     continue 'outer;
                 }
@@ -757,21 +776,25 @@ impl FunctionBuilderContext {
                 let bytes = &bytes[offset..];
 
                 match resolver.resolve(address, bytes) {
-                    Ok(insn) => {
-                        let insn_id = entry.insert(insn);
+                    Ok(resolved) => {
+                        let insn = resolved.as_ref();
+                        let indirect = (insn.is_call() && insn.is_indirect())
+                            .then(|| {
+                                resolved.resolve_indirect_target(|address, bytes| {
+                                    self.mapping_cache
+                                        .read_bytes_exact(segments, address, bytes)
+                                        .is_ok()
+                                })
+                            })
+                            .flatten();
+                        let insn_id = entry.insert(resolved.into_insn());
                         let num_insns = f.insns().len();
                         let max_insns = config.max_function_insns();
                         if num_insns > max_insns {
-                            return Err(FunctionRecoveryError::invalid_function_instructions(
+                            return Err(FunctionRecoveryError::invalid_function_insn_count(
                                 self.entry, num_insns, max_insns,
                             ));
                         }
-                        let insn = f.insn(insn_id).expect("inserted instruction must exist");
-
-                        let indirect = (insn.is_call() && insn.is_indirect())
-                            .then(|| resolver.resolve_indirect_target(segments, insn))
-                            .flatten();
-
                         if let Some(target) = indirect {
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
@@ -806,7 +829,7 @@ impl FunctionBuilderContext {
                                 arch.canonicalise_address(fall_through)
                         {
                             let fall_through = Address::new(address.space(), fall_through);
-                            if !self.avoids.contains(fall_through) {
+                            if !is_avoided(&self.avoids, fall_through) {
                                 self.global_targets
                                     .insert(AddressWithContext::new(fall_through, context));
                             }
@@ -848,7 +871,7 @@ impl FunctionBuilderContext {
                                             FlowKind::TailCallBranch,
                                         ));
                                     }
-                                    if !self.avoids.contains(addr) {
+                                    if !is_avoided(&self.avoids, addr) {
                                         self.global_targets
                                             .insert(AddressWithContext::new(addr, context));
                                     }
@@ -864,7 +887,7 @@ impl FunctionBuilderContext {
                                             addr, context,
                                         ));
                                     }
-                                } else if !self.avoids.contains(addr) {
+                                } else if !is_avoided(&self.avoids, addr) {
                                     self.global_targets
                                         .insert(AddressWithContext::new(addr, context));
                                 }
@@ -879,7 +902,7 @@ impl FunctionBuilderContext {
                             continue 'outer;
                         }
 
-                        offset += insn.len();
+                        offset += insn.size();
                     }
                     Err(e) => {
                         // Flows into bad data; we skip this block and remove its context
@@ -1026,7 +1049,8 @@ impl FunctionBuilderContext {
                 .expect("function builder resolver must be initialised");
 
             match self.resolve_insns(
-                &InstructionResolution {
+                &InsnResolution {
+                    avoidance_baseline: None,
                     config: analysis.config,
                     inputs: analysis.inputs,
                     project: analysis.project,
@@ -1057,20 +1081,9 @@ impl FunctionBuilderContext {
             };
 
             // Run post-structuring passes
-            let result = if analysis.config.use_non_returning_analysis() {
-                analyse_non_returning_thunk(
-                    analysis.project,
-                    &mut state,
-                    analysis.inputs.non_returning_targets,
-                )
-            } else {
-                Ok(())
-            }
-            .and_then(|()| {
-                analysis
-                    .post_structuring_passes
-                    .analyse_with(analysis.project, &mut state)
-            });
+            let result = analysis
+                .post_structuring_passes
+                .analyse_with(analysis.project, &mut state);
 
             *self = state.context;
             incomplete = state.function;
@@ -1110,11 +1123,9 @@ impl<'p> FunctionCandidateState<'p> {
     fn new(
         view: ProjectView<'p>,
         mut candidate: AddressWithContext,
-        avoids: AddressRangeSet,
         config: &FunctionRecoveryConfig,
     ) -> Self {
         let mut context = FunctionBuilderContext::new();
-        context.avoids = avoids;
         context.entry = candidate.address();
         let confidence = candidate.confidence();
 
@@ -1158,6 +1169,7 @@ impl<'p> FunctionCandidateState<'p> {
         inputs: FunctionBuilderInputs<'_>,
         token: &CancellationToken,
         resolver: &mut InsnResolver,
+        avoidance_baseline: &AddressRangeSet,
     ) {
         if self.is_complete() || self.structured {
             return;
@@ -1168,7 +1180,8 @@ impl<'p> FunctionCandidateState<'p> {
         }
 
         match self.context.resolve_insns(
-            &InstructionResolution {
+            &InsnResolution {
+                avoidance_baseline: Some(avoidance_baseline),
                 config,
                 inputs,
                 project: &self.view,
@@ -1204,7 +1217,6 @@ impl<'p> FunctionCandidateState<'p> {
         &mut self,
         config: &FunctionRecoveryConfig,
         passes: &mut AnalysisGroup<FunctionRecoveryState>,
-        non_returning_targets: &[Address],
         token: &CancellationToken,
     ) {
         if !self.structured || self.is_complete() {
@@ -1218,12 +1230,7 @@ impl<'p> FunctionCandidateState<'p> {
             function: mem::take(&mut self.function),
             resolver: None,
         };
-        let result = if config.use_non_returning_analysis() {
-            analyse_non_returning_thunk(&self.view, &mut state, non_returning_targets)
-        } else {
-            Ok(())
-        }
-        .and_then(|()| passes.analyse_with(&self.view, &mut state));
+        let result = passes.analyse_with(&self.view, &mut state);
         self.context = state.context;
         self.function = state.function;
         self.structured = false;

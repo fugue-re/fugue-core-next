@@ -7,7 +7,7 @@ use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::FunctionId;
-use crate::storage::entities::{EntityWrite, EntityWriteBatch, schema};
+use crate::storage::entities::{EntityWrite, EntityWriteBatch};
 use crate::storage::{EntityStorageError, StorageContainer};
 use crate::types::common::Revision;
 
@@ -166,7 +166,7 @@ impl IlStage {
             .len()
             .saturating_add(self.ecode.len())
             .saturating_add(self.ecode_ssa.len());
-        let mut writes = Vec::with_capacity(capacity);
+        let mut writes = EntityWriteBatch::with_capacity(capacity);
         self.prepare_level::<PCodeIr>(&mut writes)?;
         self.prepare_level::<ECodeIr>(&mut writes)?;
         self.prepare_level::<ECodeSsaIr>(&mut writes)?;
@@ -189,7 +189,7 @@ impl IlStage {
                         .map_err(EntityStorageError::encode)
                 })
                 .transpose()?;
-            let key = schema::make_key::<FunctionId, T>(&function);
+            let key = T::ID.key_for(&function);
             writes.push(match value {
                 Some(value) => EntityWrite::insert_archive(key, value),
                 None => EntityWrite::remove(key),
@@ -263,7 +263,7 @@ mod test {
 
         let writes = stage.prepare().expect("stage should prepare");
         assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].1.as_deref(), Some(encoded.as_slice()));
+        assert_eq!(writes[0].value(), Some(encoded.as_slice()));
 
         let mut changes = Vec::new();
         stage.for_each_change(|function, level, present| {

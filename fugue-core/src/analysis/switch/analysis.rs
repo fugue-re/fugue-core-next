@@ -1,8 +1,10 @@
 use crate::analysis::control::Cancelled;
-use crate::analysis::function::recovery::FunctionRecoveryState;
+use crate::analysis::function::recovery::{
+    FunctionRecovery, FunctionRecoveryExtension, FunctionRecoveryState,
+};
 use crate::analysis::switch::SwitchRecoveryConfig;
 use crate::analysis::switch::idiom::SwitchIdiomRecovery;
-use crate::analysis::switch::interval::SwitchIntervalContext;
+use crate::analysis::switch::interval::SwitchIntervalRecovery;
 use crate::analysis::switch::resolver::SwitchTargetResolver;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
@@ -10,7 +12,10 @@ use crate::il::common::IlError;
 use crate::il::ecode::ssa::ECodeToSsa;
 use crate::il::pcode::PCodeError;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
+use crate::project::Project;
 use crate::types::common::Revision;
+
+pub(crate) const SWITCH_RECOVERY_ANALYSER: &str = "switch-recovery";
 
 #[derive(Default)]
 pub struct SwitchRecovery {
@@ -124,13 +129,13 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                         PCodeError::Common(IlError::Cancelled) => {
                             AnalysisError::Cancelled(Cancelled)
                         }
-                        error => AnalysisError::pass_failed("switch-recovery", error),
+                        error => AnalysisError::pass_failed(SWITCH_RECOVERY_ANALYSER, error),
                     })?;
-                let mut interval_context = SwitchIntervalContext::new(&ssa, self.config);
+                let mut interval_recovery = SwitchIntervalRecovery::new(&ssa, self.config);
 
                 for (block_id, site) in unresolved {
                     let block = function.block(block_id).expect("switch block must exist");
-                    if let Some(recovered) = interval_context.recover(
+                    if let Some(recovered) = interval_recovery.recover(
                         site,
                         block.context(),
                         resolver,
@@ -148,7 +153,7 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
 
                 for (block_id, site) in retry {
                     let block = function.block(block_id).expect("switch block must exist");
-                    let Some(recovered) = interval_context.recover(
+                    let Some(recovered) = interval_recovery.recover(
                         site,
                         block.context(),
                         resolver,
@@ -190,6 +195,20 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
 
             let switch = recovered.into_switch(SwitchId::INVALID, FunctionId::INVALID, site);
             state.function_mut().add_pending_switch(switch);
+        }
+
+        Ok(())
+    }
+}
+
+#[fugue_core::extension]
+impl FunctionRecoveryExtension {
+    const NAME: &str = "switch";
+
+    fn apply(_project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+        if recovery.config().use_switch_analysis() {
+            recovery
+                .add_builder_post_structuring_pass(SWITCH_RECOVERY_ANALYSER, SwitchRecovery::new());
         }
 
         Ok(())

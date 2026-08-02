@@ -5,13 +5,14 @@ use crate::ir::{Address, Insn};
 use crate::project::Project;
 
 pub mod externs;
-pub use externs::NonReturningFromExterns;
+pub use externs::NonReturningExterns;
 
 pub mod propagation;
+use propagation::NON_RETURNING_PROPAGATION_ANALYSER;
 pub use propagation::NonReturningPropagation;
 
-pub(crate) mod thunks;
-pub(in crate::analysis) use thunks::analyse_non_returning_thunk;
+mod thunks;
+use thunks::{NON_RETURNING_THUNK_ANALYSER, NonReturningThunk};
 
 pub(crate) struct NonReturningTargets<'a> {
     project: &'a ProjectView<'a>,
@@ -49,9 +50,10 @@ impl FunctionRecoveryExtension {
         }
 
         recovery.add_inter_function_structuring_pass(
-            "non-returning-propagation",
+            NON_RETURNING_PROPAGATION_ANALYSER,
             NonReturningPropagation::new(),
         );
+        recovery.add_builder_post_structuring_pass(NON_RETURNING_THUNK_ANALYSER, NonReturningThunk);
 
         Ok(())
     }

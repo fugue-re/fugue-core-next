@@ -10,7 +10,7 @@ use crate::ir::{
 };
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
-pub use crate::types::common::Revision;
+pub(crate) use crate::types::common::Revision;
 
 pub(crate) const MAX_DETAILED_CHANGE_RECORDS: usize = 8192;
 

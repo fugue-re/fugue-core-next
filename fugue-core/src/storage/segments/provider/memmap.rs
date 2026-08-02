@@ -512,16 +512,9 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
 mod test {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fugue-memmap-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     #[test]
     fn test_pack_roundtrip_sparse() -> Result<(), SegmentStorageError> {
-        let dir = scratch("sparse");
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let logical = 0x10_0000u64;
 
         {
@@ -530,7 +523,7 @@ mod test {
             store.write_bytes(0x8_0000, b"world")?;
         }
 
-        let data_path = dir.join(PROJECT_MEMORY_MAPPING_DATA);
+        let data_path = dir.path().join(PROJECT_MEMORY_MAPPING_DATA);
         let packed_len = fs::metadata(&data_path).unwrap().len();
         assert!(
             packed_len < 0x1000,
@@ -553,13 +546,12 @@ mod test {
         assert!(gap.iter().all(|byte| *byte == 0), "gap must read zero");
 
         drop(store);
-        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn test_pack_post_load_write() -> Result<(), SegmentStorageError> {
-        let dir = scratch("post-load");
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let logical = 0x10_0000u64;
 
         {
@@ -583,13 +575,12 @@ mod test {
         assert!(gap.iter().all(|byte| *byte == 0));
 
         drop(store);
-        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn test_pack_fully_initialised() -> Result<(), SegmentStorageError> {
-        let dir = scratch("full");
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let payload = (0..0x20u8).collect::<Vec<_>>();
 
         {
@@ -604,13 +595,12 @@ mod test {
         assert_eq!(&buf[..], &payload[..]);
 
         drop(store);
-        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn test_pack_empty() -> Result<(), SegmentStorageError> {
-        let dir = scratch("empty");
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
 
         {
             MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(&dir, 0x1000)?;
@@ -623,15 +613,14 @@ mod test {
         assert!(buf.iter().all(|byte| *byte == 0));
 
         drop(store);
-        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
     fn test_segment_ranges_use_distinct_provider_storage() -> Result<(), SegmentStorageError> {
-        let dir = scratch("multiple-providers");
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let mut attributes = AttributeMap::new();
-        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, dir.clone());
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, dir.path().to_path_buf());
 
         {
             let mut first = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_segment_range(
@@ -649,10 +638,10 @@ mod test {
         }
 
         let first = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
-            SegmentStorageProviderId::new(0).path_in(&dir),
+            SegmentStorageProviderId::new(0).path_in(dir.path()),
         )?;
         let second = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
-            SegmentStorageProviderId::new(1).path_in(&dir),
+            SegmentStorageProviderId::new(1).path_in(dir.path()),
         )?;
         let mut first_bytes = [0u8; 5];
         let mut second_bytes = [0u8; 6];
@@ -666,7 +655,6 @@ mod test {
 
         drop(first);
         drop(second);
-        let _ = fs::remove_dir_all(&dir);
         Ok(())
     }
 }

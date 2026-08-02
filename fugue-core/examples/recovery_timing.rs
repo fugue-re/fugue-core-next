@@ -5,15 +5,27 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
-use fugue_core::ir::{CodeBlock, Insn, InsnTarget};
+use fugue_core::ir::{CodeBlock, FlowTarget};
 use fugue_core::lifter::{ContextSet, ContextUpdate};
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Default)]
+struct ProjectCounts {
+    functions: usize,
+    blocks: usize,
+    memberships: usize,
+    flow_blocks: usize,
+    flow_targets: usize,
+    flow_with_fall_through: usize,
+    blocks_with_context: usize,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     if env::var_os("RUST_LOG").is_some() {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_env_filter(EnvFilter::from_default_env())
             .try_init();
     }
 
@@ -44,40 +56,66 @@ fn main() -> Result<(), Box<dyn Error>> {
         engine.analyse()?;
         let analysis_elapsed = analysis_start.elapsed();
         let metrics = engine.metrics();
+
+        let inspection_start = Instant::now();
         let reader = engine.query_reader()?;
-        let project = reader.project()?;
-        let functions = project.functions().len();
-        let blocks = project.blocks().len();
-        let memberships = project
-            .functions()
-            .iter()
-            .map(|function| function.blocks().count())
-            .sum::<usize>();
-        let mut flow_insns = 0usize;
-        let mut flow_with_fall_through = 0usize;
-        let mut insns = 0usize;
-        let mut blocks_with_context = 0usize;
-        for block in project.blocks().iter() {
-            blocks_with_context += usize::from(!block.context().is_empty());
-            insns += block.instructions().len();
-            for insn in block.instructions() {
-                if insn.is_flow() {
-                    flow_insns += 1;
-                    flow_with_fall_through += usize::from(insn.has_fall_through());
-                }
+        let counts = {
+            let project = reader.project()?;
+            let mut counts = ProjectCounts {
+                functions: project.functions().len(),
+                blocks: project.blocks().len(),
+                memberships: project
+                    .functions()
+                    .iter()
+                    .map(|function| function.blocks().count())
+                    .sum::<usize>(),
+                ..ProjectCounts::default()
+            };
+            for block in project.blocks().iter() {
+                counts.blocks_with_context += usize::from(!block.context().is_empty());
+                counts.flow_blocks += usize::from(
+                    block.is_branch()
+                        || block.is_call()
+                        || block.is_return()
+                        || block.has_unresolved(),
+                );
+                counts.flow_targets += block.flow_targets().count();
+                counts.flow_with_fall_through += usize::from(
+                    block
+                        .flow_targets()
+                        .any(|target| target.kind().is_fall_through()),
+                );
             }
-        }
+            counts
+        };
+        let inspection_elapsed = inspection_start.elapsed();
+
+        drop(reader);
+        let close_start = Instant::now();
+        drop(engine);
+        let close_elapsed = close_start.elapsed();
+
         println!(
-            "run={run},workers={worker_limit},project_ns={},analysis_ns={},dispatches={},\
-             functions={functions},blocks={blocks},memberships={memberships},insns={insns},\
-             flow_insns={flow_insns},flow_with_fall_through={flow_with_fall_through},\
-             blocks_with_context={blocks_with_context},insn_bytes={},target_bytes={},\
+            "run={run},workers={worker_limit},project_ns={},analysis_ns={},inspection_ns={},\
+             close_ns={},dispatches={},\
+             functions={},blocks={},memberships={},\
+             flow_blocks={},flow_targets={},\
+             flow_with_fall_through={},\
+             blocks_with_context={},flow_target_bytes={},\
              block_bytes={},context_bytes={},context_update_bytes={}",
             project_elapsed.as_nanos(),
             analysis_elapsed.as_nanos(),
+            inspection_elapsed.as_nanos(),
+            close_elapsed.as_nanos(),
             metrics.dispatches(),
-            size_of::<Insn>(),
-            size_of::<InsnTarget>(),
+            counts.functions,
+            counts.blocks,
+            counts.memberships,
+            counts.flow_blocks,
+            counts.flow_targets,
+            counts.flow_with_fall_through,
+            counts.blocks_with_context,
+            size_of::<FlowTarget>(),
             size_of::<CodeBlock>(),
             size_of::<ContextSet>(),
             size_of::<ContextUpdate>(),

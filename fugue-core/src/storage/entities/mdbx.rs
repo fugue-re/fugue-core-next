@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_with::{FromInto, serde_as};
 
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityStorageError,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesTransactionalReader,
+    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
     EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
 };
@@ -83,7 +83,6 @@ impl From<MdbxOptions> for mdbx::DatabaseOptions {
                 max_size: options.size_upper,
                 growth_step: options.growth_step,
                 shrink_threshold: options.shrink_threshold,
-                ..Default::default()
             }),
             ..Default::default()
         }
@@ -200,11 +199,13 @@ impl EntityStorageProvider for MdbxEntityStorage {
         &self,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
-        MdbxEntityKeyBytesIterator::new(self, prefix)
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        MdbxEntityKeyBytesIterator::boxed(self, prefix)
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        MdbxEntityBytesIterator::new(self, prefix)
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        MdbxEntityBytesIterator::boxed(self, prefix)
     }
 
     fn iter_range(
@@ -212,7 +213,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
         prefix: &[u8],
         start: Bound<&[u8]>,
     ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
-        MdbxEntityBytesIterator::new_range(self, prefix, start)
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        MdbxEntityBytesIterator::boxed_range(self, prefix, start)
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -224,19 +226,20 @@ impl EntityStorageProvider for MdbxEntityStorage {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a,
     {
-        MdbxEntityBytesAsIterator::new(self, prefix, f)
+        EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeySize)?;
+        MdbxEntityBytesAsIterator::boxed(self, prefix, f)
     }
 
     fn transactional_reader(
         &self,
     ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
-        MdbxEntityReader::new(self)
+        MdbxEntityReader::boxed(self)
     }
 
     fn transactional_writer(
         &self,
     ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
-        MdbxEntityWriter::new(self)
+        MdbxEntityWriter::boxed(self)
     }
 }
 
@@ -254,7 +257,7 @@ struct MdbxEntityKeyBytesIterator<'a> {
 }
 
 impl<'a> MdbxEntityKeyBytesIterator<'a> {
-    fn new(
+    fn boxed(
         database: &'a MdbxEntityStorage,
         prefix: &[u8],
     ) -> Result<EntityKeyBytesIterator<'a>, EntityStorageError> {
@@ -317,7 +320,7 @@ struct MdbxEntityBytesIterator<'a> {
 }
 
 impl<'a> MdbxEntityBytesIterator<'a> {
-    fn new(
+    fn boxed(
         database: &'a MdbxEntityStorage,
         prefix: &[u8],
     ) -> Result<EntityBytesIterator<'a>, EntityStorageError> {
@@ -336,7 +339,7 @@ impl<'a> MdbxEntityBytesIterator<'a> {
         }))
     }
 
-    fn new_range(
+    fn boxed_range(
         database: &'a MdbxEntityStorage,
         prefix: &[u8],
         start: Bound<&[u8]>,
@@ -410,14 +413,14 @@ impl<'a> Iterator for MdbxEntityBytesIterator<'a> {
 struct MdbxEntityBytesAsIterator<'a, T> {
     inner: MdbxEntityBytesIteratorInner<'a>,
     prefix: Option<Box<[u8]>>,
-    f: Box<dyn FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a>,
+    f: Box<EntityBytesMapper<'a, T>>,
 }
 
 impl<'a, T> MdbxEntityBytesAsIterator<'a, T>
 where
     T: 'a,
 {
-    fn new<F>(
+    fn boxed<F>(
         database: &'a MdbxEntityStorage,
         prefix: &[u8],
         f: F,
@@ -473,7 +476,7 @@ struct MdbxEntityReader<'a> {
 }
 
 impl<'a> MdbxEntityReader<'a> {
-    fn new(
+    fn boxed(
         storage: &'a MdbxEntityStorage,
     ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
         let txn = storage.database.begin_ro_txn()?;
@@ -500,7 +503,7 @@ struct MdbxEntityWriter<'a> {
 }
 
 impl<'a> MdbxEntityWriter<'a> {
-    fn new(
+    fn boxed(
         storage: &'a MdbxEntityStorage,
     ) -> Result<EntityBytesTransactionalWriter<'a>, EntityStorageError> {
         let txn = storage.database.begin_rw_txn()?;

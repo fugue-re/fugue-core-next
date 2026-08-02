@@ -20,7 +20,7 @@ fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error
         Vec::new(),
         Vec::new(),
     );
-    project.storage.entities.insert(&function, &ir)?;
+    project.storage.entities().insert(&function, &ir)?;
 
     assert!(matches!(
         project.pcode(function),
@@ -48,7 +48,7 @@ fn project_pcode_rejects_schema_mismatch() -> Result<(), Box<dyn std::error::Err
         Vec::new(),
     );
 
-    project.storage.entities.insert(&function, &ir)?;
+    project.storage.entities().insert(&function, &ir)?;
 
     assert!(matches!(
         project.pcode(function),

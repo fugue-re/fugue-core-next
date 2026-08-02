@@ -21,13 +21,13 @@ struct ECodeSsaRequiredDefinitionsBuilder {
 }
 
 impl ECodeSsaRequiredDefinitionsBuilder {
-    fn new(body: &ECodeSsaIr) -> Self {
+    fn new(ir: &ECodeSsaIr) -> Self {
         let mut this = Self {
-            required_block_arguments: FixedBitSet::with_capacity(body.block_arguments().len()),
-            required_operations: FixedBitSet::with_capacity(body.operations().len()),
+            required_block_arguments: FixedBitSet::with_capacity(ir.block_arguments().len()),
+            required_operations: FixedBitSet::with_capacity(ir.operations().len()),
             worklist: Vec::new(),
         };
-        for (index, operation) in body.operations().iter().enumerate() {
+        for (index, operation) in ir.operations().iter().enumerate() {
             if operation.opcode().has_side_effect() {
                 this.required_operations.insert(index);
                 this.worklist.push(RequiredEntity::Operation(index));
@@ -36,21 +36,21 @@ impl ECodeSsaRequiredDefinitionsBuilder {
         this
     }
 
-    fn build(mut self, body: &ECodeSsaIr) -> ECodeSsaRequiredDefinitions {
-        let inputs = body.analyse::<ECodeSsaBlockArgumentInputs>();
+    fn build(mut self, ir: &ECodeSsaIr) -> ECodeSsaRequiredDefinitions {
+        let inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
         while let Some(entity) = self.worklist.pop() {
             match entity {
                 RequiredEntity::Operation(operation_index) => {
-                    let operation = &body.operations()[operation_index];
-                    for &operand in body.operation_operands(operation) {
-                        self.mark_value_required(body, operand);
+                    let operation = &ir.operations()[operation_index];
+                    for &operand in ir.operation_operands_for(operation) {
+                        self.mark_value_required(ir, operand);
                     }
                 }
                 RequiredEntity::BlockArgument(argument_index) => {
-                    let value = body.block_arguments()[argument_index].value();
+                    let value = ir.block_arguments()[argument_index].value();
                     if let Some(argument_inputs) = inputs.inputs_for(value) {
                         for &input in argument_inputs {
-                            self.mark_value_required(body, input);
+                            self.mark_value_required(ir, input);
                         }
                     }
                 }
@@ -63,8 +63,8 @@ impl ECodeSsaRequiredDefinitionsBuilder {
         }
     }
 
-    fn mark_value_required(&mut self, body: &ECodeSsaIr, value: IlValueId) {
-        let Some(record) = body.values().get(value.index()) else {
+    fn mark_value_required(&mut self, ir: &ECodeSsaIr, value: IlValueId) {
+        let Some(record) = ir.values().get(value.index()) else {
             return;
         };
         let index = record.definition_index() as usize;
@@ -84,8 +84,8 @@ impl ECodeSsaRequiredDefinitionsBuilder {
 }
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaRequiredDefinitions {
-    fn analyse(body: &ECodeSsaIr) -> Self {
-        ECodeSsaRequiredDefinitionsBuilder::new(body).build(body)
+    fn analyse(ir: &ECodeSsaIr) -> Self {
+        ECodeSsaRequiredDefinitionsBuilder::new(ir).build(ir)
     }
 }
 

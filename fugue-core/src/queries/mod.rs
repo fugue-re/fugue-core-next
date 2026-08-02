@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -9,19 +10,21 @@ use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
-use crate::engine::{EngineError, Intake};
+use crate::engine::{EngineError, Intake, on_analysis_thread};
 use crate::il::common::{IlError, IlLevel};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, Problem, ProblemKey, ProblemKind, ProblemScope,
-    RawAddress, Reference, ReferenceTarget, SegmentProperties, Switch, Symbol, SymbolEntry,
+    Address, AddressRangeSet, CodeBlockId, FunctionId, InsnList, Problem, ProblemKey, ProblemKind,
+    ProblemScope, Reference, ReferenceTarget, SegmentProperties, Switch, Symbol, SymbolEntry,
     SymbolProperties,
 };
+use crate::lifter::{InsnExtentError, InsnResolver};
 use crate::project::{Project, ProjectError};
 use crate::queries::read::ProjectRead;
+use crate::storage::SegmentMappingCache;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::view::SegmentMappingView;
@@ -32,11 +35,50 @@ mod cached;
 mod index;
 mod read;
 
-use cache::{QueryCache, QueryCachedIl};
+use cache::QueryCache;
+pub(crate) use cache::{CacheLookup, QueryCachedIl};
 pub use cached::{Cached, Dependency};
 use index::ChangeIndex;
 
-const MAX_QUERY_PAGE_COUNT: usize = 4096;
+const MAX_QUERY_PAGE_LIMIT: usize = 4096;
+
+thread_local! {
+    static INSN_QUERY_CONTEXT: RefCell<Option<InsnQueryContext>> = const { RefCell::new(None) };
+}
+
+struct InsnQueryContext {
+    project: *const Project,
+    mapping_cache: SegmentMappingCache,
+    resolver: InsnResolver,
+}
+
+impl InsnQueryContext {
+    fn new(project: &Project) -> Self {
+        Self {
+            project,
+            mapping_cache: SegmentMappingCache::new(),
+            resolver: InsnResolver::new(project.arch()),
+        }
+    }
+
+    fn for_project<'a>(slot: &'a mut Option<Self>, project: &Project) -> &'a mut Self {
+        let identity = project as *const Project;
+        if slot
+            .as_ref()
+            .is_none_or(|context| context.project != identity)
+        {
+            *slot = Some(Self::new(project));
+        }
+        slot.as_mut()
+            .expect("instruction query context must be initialised")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiftedLookup {
+    Current,
+    Persisted,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueryPage<T, C = T> {
@@ -66,6 +108,10 @@ pub enum QueryError {
     #[error(transparent)]
     Engine(Box<EngineError>),
     #[error(transparent)]
+    InsnExtent(#[from] InsnExtentError),
+    #[error("analysis worker returned the wrong IL type for {0}")]
+    InvalidGeneratedIlType(IlLevel),
+    #[error(transparent)]
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
@@ -85,9 +131,9 @@ impl From<EngineError> for QueryError {
     }
 }
 
-const WALK_PAGE_COUNT: usize = 256;
+const WALK_PAGE_LIMIT: usize = 256;
 
-pub struct Paged<T, F, C = T> {
+struct Paged<T, F, C = T> {
     fetch: F,
     buffer: VecDeque<T>,
     cursor: Option<C>,
@@ -232,6 +278,14 @@ impl SwitchRow {
     }
 }
 
+impl From<&Switch> for SwitchRow {
+    fn from(switch: &Switch) -> Self {
+        Self {
+            switch: switch.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProblemRow {
     problem: Problem,
@@ -267,14 +321,6 @@ impl From<&Problem> for ProblemRow {
     fn from(problem: &Problem) -> Self {
         Self {
             problem: problem.clone(),
-        }
-    }
-}
-
-impl From<&Switch> for SwitchRow {
-    fn from(switch: &Switch) -> Self {
-        Self {
-            switch: switch.clone(),
         }
     }
 }
@@ -407,8 +453,10 @@ impl QueryReader {
     pub fn flow_targets(&self, entry: Address) -> Result<Option<Arc<FlowTargets>>, QueryError> {
         let _query_guard = self.enter_query()?;
 
-        if let Some(cached) = self.cache.flow_targets(entry) {
-            return Ok(cached);
+        match self.cache.flow_targets(entry) {
+            CacheLookup::Hit(cached) => return Ok(Some(cached)),
+            CacheLookup::Absent => return Ok(None),
+            CacheLookup::Miss => {}
         }
 
         let targets = {
@@ -422,16 +470,35 @@ impl QueryReader {
         Ok(targets)
     }
 
+    pub fn insns(&self, block: CodeBlockId) -> Result<Option<Arc<InsnList>>, QueryError> {
+        let _query_guard = self.enter_query()?;
+        match self.cache.insns(block) {
+            CacheLookup::Hit(cached) => return Ok(Some(cached)),
+            CacheLookup::Absent => return Ok(None),
+            CacheLookup::Miss => {}
+        }
+
+        let project = self.project.read();
+        let read = ProjectRead::new(&project);
+        let insns = INSN_QUERY_CONTEXT.with_borrow_mut(|slot| {
+            let context = InsnQueryContext::for_project(slot, &project);
+            read.insns(block, &mut context.mapping_cache, &mut context.resolver)
+        })?;
+        let Some(insns) = insns else {
+            self.cache.insert_missing_insns(block);
+            return Ok(None);
+        };
+        let insns = Arc::new(insns);
+        self.cache.insert_insns(block, insns.clone());
+        Ok(Some(insns))
+    }
+
     pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
         if let Some(cached) = self.cached_il::<PCodeIr>(function)? {
             return Ok(Some(cached));
         }
 
-        if !self.ensure_lifted(function, IlLevel::PCode)? {
-            return Ok(None);
-        }
-
-        self.cached_il::<PCodeIr>(function)
+        self.request_generated::<PCodeIr>(function)
     }
 
     pub fn ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
@@ -439,11 +506,7 @@ impl QueryReader {
             return Ok(Some(cached));
         }
 
-        if !self.ensure_lifted(function, IlLevel::ECode)? {
-            return Ok(None);
-        }
-
-        self.cached_il::<ECodeIr>(function)
+        self.request_generated::<ECodeIr>(function)
     }
 
     pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
@@ -451,11 +514,7 @@ impl QueryReader {
             return Ok(Some(cached));
         }
 
-        if !self.ensure_lifted(function, IlLevel::ECodeSsa)? {
-            return Ok(None);
-        }
-
-        self.cached_il::<ECodeSsaIr>(function)
+        self.request_generated::<ECodeSsaIr>(function)
     }
 
     fn cached_il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
@@ -464,37 +523,39 @@ impl QueryReader {
     {
         let _query_guard = self.enter_query()?;
 
-        if let Some(cached) = T::cached(&self.cache, function) {
-            return Ok(cached);
-        }
-
-        let ir = { self.project.read().lifted::<T>(function)? }.map(Arc::new);
-        T::insert_cached(&self.cache, function, ir.clone());
-        Ok(ir)
+        let project = self.project.read();
+        QueryEngine::resolve_lifted(&self.cache, &project, function, LiftedLookup::Current)
+            .map_err(QueryError::from)
     }
 
-    fn ensure_lifted(&self, function: FunctionId, level: IlLevel) -> Result<bool, QueryError> {
+    fn request_generated<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
+    where
+        T: QueryCachedIl + Send + Sync + 'static,
+    {
         let Some(intake) = &self.intake else {
-            return Ok(false);
+            return Ok(None);
         };
 
-        if crate::engine::on_analysis_thread() {
+        if on_analysis_thread() {
             return Err(QueryError::WouldDeadlock);
         }
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         intake
-            .send(Intake::EnsureLifted {
+            .send(Intake::GenerateLifted {
                 function,
-                level,
+                level: T::LEVEL,
                 reply: reply_tx,
             })
             .map_err(|_| QueryError::Stopped)?;
 
         match reply_rx.recv().map_err(|_| QueryError::Stopped)? {
-            Ok(_) => Ok(true),
+            Ok(Some(generated)) => Arc::downcast::<T>(generated)
+                .map(Some)
+                .map_err(|_| QueryError::InvalidGeneratedIlType(T::LEVEL)),
+            Ok(None) => Ok(None),
             Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
-                Ok(false)
+                Ok(None)
             }
             Err(error) => Err(QueryError::from(error)),
         }
@@ -533,7 +594,7 @@ impl QueryReader {
     pub fn function_page(
         &self,
         space: AddressSpaceId,
-        after: Option<RawAddress>,
+        after: Option<Address>,
         limit: usize,
     ) -> Result<QueryPage<Address>, QueryError> {
         self.with_project(|read| read.function_page(space, after, limit))
@@ -574,7 +635,8 @@ impl QueryReader {
         after: Option<MappingRow>,
         limit: usize,
     ) -> Result<QueryPage<MappingRow>, QueryError> {
-        self.with_project(|read| read.mapping_page(space, after, limit))
+        self.with_project(|read| read.mapping_page(space, after, limit))?
+            .map_err(QueryError::from)
     }
 
     pub fn symbol_page(
@@ -616,7 +678,7 @@ impl QueryReader {
 
     pub fn problems(&self) -> impl Iterator<Item = Result<ProblemRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.problem_page(cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.problem_page(cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn switch_page(
@@ -629,7 +691,7 @@ impl QueryReader {
 
     pub fn switches(&self) -> impl Iterator<Item = Result<SwitchRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.switch_page(cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.switch_page(cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn functions(
@@ -637,18 +699,12 @@ impl QueryReader {
         space: AddressSpaceId,
     ) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor: Option<Address>| {
-            reader.function_page(
-                space,
-                cursor.map(|address| address.raw_address()),
-                WALK_PAGE_COUNT,
-            )
-        })
+        Paged::new(move |cursor| reader.function_page(space, cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.symbol_page(cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn mappings(
@@ -656,22 +712,22 @@ impl QueryReader {
         space: AddressSpaceId,
     ) -> impl Iterator<Item = Result<MappingRow, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.mapping_page(space, cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn call_edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.call_edge_page(cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.call_edge_page(cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.caller_page(entry, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.caller_page(entry, cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.callee_page(entry, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.callee_page(entry, cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn outgoing_references(
@@ -679,7 +735,7 @@ impl QueryReader {
         from: Address,
     ) -> impl Iterator<Item = Result<Reference, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.outgoing_reference_page(from, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.outgoing_reference_page(from, cursor, WALK_PAGE_LIMIT))
     }
 
     pub fn incoming_references(
@@ -687,7 +743,7 @@ impl QueryReader {
         to: Address,
     ) -> impl Iterator<Item = Result<Reference, QueryError>> {
         let reader = self.clone();
-        Paged::new(move |cursor| reader.incoming_reference_page(to, cursor, WALK_PAGE_COUNT))
+        Paged::new(move |cursor| reader.incoming_reference_page(to, cursor, WALK_PAGE_LIMIT))
     }
 
     fn with_project<T>(&self, query: impl FnOnce(ProjectRead<'_>) -> T) -> Result<T, QueryError> {
@@ -728,15 +784,68 @@ pub(crate) struct QueryEngine {
 }
 
 impl QueryEngine {
-    pub(crate) fn new(project: Arc<RwLock<Project>>) -> Self {
+    pub(crate) fn new(
+        project: Arc<RwLock<Project>>,
+        insn_cache_bytes: usize,
+        lifted_cache_bytes: usize,
+    ) -> Self {
         let revision = project.read().revision();
         Self {
             active: Arc::new(AtomicBool::new(true)),
             gate: Arc::new(RwLock::new(())),
             project,
-            cache: Arc::new(QueryCache::new()),
+            cache: Arc::new(QueryCache::new(insn_cache_bytes, lifted_cache_bytes)),
             changes: Arc::new(RwLock::new(ChangeIndex::new(revision))),
         }
+    }
+
+    fn resolve_lifted<T>(
+        cache: &QueryCache,
+        project: &Project,
+        function: FunctionId,
+        lookup: LiftedLookup,
+    ) -> Result<Option<Arc<T>>, ProjectError>
+    where
+        T: QueryCachedIl,
+    {
+        if lookup == LiftedLookup::Current {
+            match T::cached(cache, function) {
+                CacheLookup::Hit(cached) => return Ok(Some(cached)),
+                CacheLookup::Absent => return Ok(None),
+                CacheLookup::Miss => {}
+            }
+        }
+
+        let ir = match project.lifted::<T>(function) {
+            Ok(ir) => ir.map(Arc::new),
+            Err(ProjectError::Il(
+                IlError::SchemaMismatch { .. } | IlError::StaleArtefact { .. },
+            )) => None,
+            Err(error) => return Err(error),
+        };
+        if lookup == LiftedLookup::Current {
+            T::insert_cached(cache, function, ir.clone());
+        }
+        Ok(ir)
+    }
+
+    pub(crate) fn current_lifted<T>(
+        &self,
+        project: &Project,
+        function: FunctionId,
+        lookup: LiftedLookup,
+    ) -> Result<Option<Arc<T>>, ProjectError>
+    where
+        T: QueryCachedIl,
+    {
+        Self::resolve_lifted(&self.cache, project, function, lookup)
+    }
+
+    pub(crate) fn insert_lifted<T>(&self, function: FunctionId, ir: Arc<T>)
+    where
+        T: QueryCachedIl,
+    {
+        T::insert_cached(&self.cache, function, Some(ir));
     }
 
     pub(crate) fn reader(&self) -> QueryReader {
@@ -753,7 +862,7 @@ impl QueryEngine {
         self.gate.write_arc()
     }
 
-    pub(crate) fn apply_changes(&mut self, changes: &ChangeSet) -> bool {
+    pub(crate) fn apply_changes(&self, changes: &ChangeSet) -> bool {
         let collapsed = self.changes.write().apply(changes);
 
         for record in changes.records() {
@@ -761,17 +870,18 @@ impl QueryEngine {
                 ChangeRecord::FunctionAdded { entry, .. }
                 | ChangeRecord::FunctionChanged { entry, .. }
                 | ChangeRecord::FunctionRemoved { entry, .. } => {
-                    self.cache.evict_flow_targets(*entry);
+                    self.cache.remove_flow_targets(*entry);
                 }
                 ChangeRecord::LiftedMaterialised { function, level }
                 | ChangeRecord::LiftedRemoved { function, level } => {
-                    self.cache.evict_lifted(*function, *level);
+                    self.cache.remove_lifted(*function, *level);
                 }
                 ChangeRecord::Resynchronise { .. } => self.cache.clear(),
                 _ => {}
             }
 
             if record.affects_lifted_inputs() {
+                self.cache.clear_insns();
                 self.cache.clear_lifted();
             }
         }
@@ -813,7 +923,10 @@ mod test {
     use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
     use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
     use crate::il::storage::StagedIl;
-    use crate::ir::{AddressRange, IncompleteCodeBlock, IncompleteFunction, ReferenceKind};
+    use crate::ir::{
+        AddressRange, IncompleteCodeBlock, IncompleteFunction, RawAddress, ReferenceKind,
+        ReferenceOrigin,
+    };
     use crate::loader::Loader;
     use crate::project::ProjectTransaction;
     use crate::queries::index::{ChangeIndex, MAX_CHANGE_RUNS};
@@ -841,7 +954,7 @@ mod test {
         fn new() -> Result<Self, Box<dyn Error>> {
             let loader = Loader::from_file("tests/ls.elf")?;
             let project = Arc::new(RwLock::new(Project::new_transient(&loader)?));
-            let queries = QueryEngine::new(project.clone());
+            let queries = QueryEngine::new(project.clone(), 32 * 1024 * 1024, 64 * 1024 * 1024);
             Ok(Self { project, queries })
         }
 
@@ -885,8 +998,10 @@ mod test {
         }
 
         fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn Error>> {
-            self.commit_with(|transaction| transaction.remove_function(entry))
-                .map(drop)
+            self.commit_with(|transaction| {
+                transaction.remove_function(entry, ReferenceOrigin::Derived)
+            })
+            .map(drop)
         }
 
         fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn Error>>
@@ -903,14 +1018,14 @@ mod test {
         }
 
         fn function_at(entry: Address) -> IncompleteFunction {
-            Self::function_with_len(entry, 1)
+            Self::function_with_size(entry, 1)
         }
 
-        fn function_with_len(entry: Address, len: usize) -> IncompleteFunction {
+        fn function_with_size(entry: Address, size: usize) -> IncompleteFunction {
             let mut function = IncompleteFunction::new(entry);
             function.push_block(
-                IncompleteCodeBlock::try_new(entry, len, Vec::new(), Default::default())
-                    .expect("test block length must be valid"),
+                IncompleteCodeBlock::try_new(entry, size, Vec::new(), Default::default())
+                    .expect("test block size must be valid"),
             );
             function
         }
@@ -1014,7 +1129,7 @@ mod test {
             .expect("cached pcode should be visible");
         assert!(Arc::ptr_eq(&first, &second));
 
-        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+        fixture.commit_function(Fixture::function_with_size(entry, 2))?;
         assert!(reader.pcode(function)?.is_none());
 
         Ok(())
@@ -1034,7 +1149,7 @@ mod test {
             .pcode(function)?
             .expect("pcode should be visible to query reader");
 
-        fixture.commit_function(Fixture::function_with_len(entry, 2))?;
+        fixture.commit_function(Fixture::function_with_size(entry, 2))?;
 
         assert!(reader.pcode(function)?.is_none());
         assert_eq!(snapshot.as_ref(), &ir);
@@ -1111,7 +1226,7 @@ mod test {
             .ok_or("neighbour missing")?;
         let distant_before = reader.flow_targets(distant)?.ok_or("distant missing")?;
 
-        fixture.commit_function(Fixture::function_with_len(edited, 2))?;
+        fixture.commit_function(Fixture::function_with_size(edited, 2))?;
 
         let edited_after = reader.flow_targets(edited)?.ok_or("edited missing after")?;
         let neighbour_after = reader
@@ -1147,7 +1262,7 @@ mod test {
                 .map(|entry| Ok(reader.flow_targets(*entry)?.ok_or("function missing")?))
                 .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
-            fixture.commit_function(Fixture::function_with_len(
+            fixture.commit_function(Fixture::function_with_size(
                 entries[edited_index],
                 2 + edited_index,
             ))?;
@@ -1233,7 +1348,7 @@ mod test {
         let mut fixture = Fixture::new()?;
         let entry = Address::from(0x1_0000_0000u64);
 
-        fixture.commit_function(Fixture::function_with_len(entry, 4))?;
+        fixture.commit_function(Fixture::function_with_size(entry, 4))?;
 
         let reader = fixture.reader();
         let before = reader.flow_targets(entry)?.ok_or("function missing")?;

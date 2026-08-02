@@ -1,7 +1,6 @@
 use fugue_bv::BitVec;
 use rustc_hash::FxHashMap;
 
-use crate::analysis::function::recovery::InsnResolver;
 use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTargetResolver};
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlValueId};
@@ -13,6 +12,7 @@ use crate::ir::{
     SwitchProperties,
 };
 use crate::lifter::ContextSet;
+use crate::lifter::InsnResolver;
 
 mod evaluator;
 mod guard;
@@ -22,7 +22,7 @@ use evaluator::SwitchTargetEvaluator;
 use guard::SwitchGuard;
 use layout::{SwitchInlineTableLayout, SwitchTableLayout};
 
-pub(crate) struct SwitchIntervalContext<'analysis> {
+pub(super) struct SwitchIntervalRecovery<'analysis> {
     ssa: &'analysis ECodeSsaIr,
     blocks_by_source: FxHashMap<Address, IlBlockId>,
     config: SwitchRecoveryConfig,
@@ -73,8 +73,8 @@ impl SwitchCaseEnumeration {
     }
 }
 
-impl<'analysis> SwitchIntervalContext<'analysis> {
-    pub(crate) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
+impl<'analysis> SwitchIntervalRecovery<'analysis> {
+    pub(super) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
         let mut blocks_by_source = FxHashMap::default();
         for (block, source) in ssa.graph().blocks_with_sources() {
             blocks_by_source.entry(source).or_insert(block);
@@ -90,7 +90,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         }
     }
 
-    pub(crate) fn recover(
+    pub(super) fn recover(
         &mut self,
         branch: Address,
         context: &ContextSet,
@@ -101,7 +101,9 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             .ssa
             .operations_for_source(branch)
             .find(|(_, operation)| operation.opcode() == ECodeSsaOpcode::BranchIndirect)
-            .and_then(|(_, operation)| self.ssa.operation_operands(operation).first().copied())?;
+            .and_then(|(_, operation)| {
+                self.ssa.operation_operands_for(operation).first().copied()
+            })?;
         context.apply(branch, insn_resolver.context_mut());
         if let Some(layout) = self.table_layout(target) {
             return self.recover_loaded(
@@ -214,7 +216,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         let width = self.ssa.value_width(index)?;
         let mut interval = self
             .intervals
-            .get(index)
+            .interval_for(index)
             .filter(|interval| !interval.is_empty())
             .cloned()
             .unwrap_or_else(|| StridedInterval::full(width));
@@ -257,7 +259,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         let Some(operation) = self.ssa.defining_operation(index) else {
             return 0;
         };
-        let operands = self.ssa.operation_operands(operation);
+        let operands = self.ssa.operation_operands_for(operation);
         match operation.opcode() {
             ECodeSsaOpcode::Sub => operands
                 .get(1)

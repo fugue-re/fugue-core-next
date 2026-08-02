@@ -855,7 +855,7 @@ where
             return Ok(None);
         };
 
-        let extern_padding = externs.aligned_template_size() - externs.template().len();
+        let extern_padding = externs.aligned_template_size() - externs.template().size();
         let address = externs.address();
         let last_address = externs.last_address().expect("not empty");
 

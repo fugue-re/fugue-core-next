@@ -224,7 +224,7 @@ fn project_removing_function_removes_its_switches() -> Result<(), Box<dyn std::e
 
     {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_function_by_id(function_id)?);
+        assert!(transaction.remove_function_by_id(function_id, ReferenceOrigin::Derived)?);
         transaction.commit()?;
     }
 
@@ -455,7 +455,7 @@ fn project_ensure_pcode_resolves_default_space_load() -> Result<(), Box<dyn std:
         .iter()
         .find(|operation| operation.opcode() == PCodeOpcode::Load)
         .expect("load survives canonicalisation");
-    assert_eq!(load.effect_space(), Some(entry.space()));
+    assert_eq!(load.address_space(), Some(entry.space()));
 
     Ok(())
 }

@@ -7,7 +7,7 @@ use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
 use crate::ir::{Endian, RawAddress};
 use crate::lifter::LanguageId;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::loader::pe::PeFileRepr;
 use crate::loader::{ImageSegmentContents, LoaderError, Pe};
 use crate::platform::{CallingConvention, Platform};

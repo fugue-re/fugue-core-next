@@ -18,7 +18,6 @@ use fugue_core::loader::{
     ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable, LoadableAnalysers,
     LoadableFromFile, LoadableMetadata, LoaderError,
 };
-use fugue_core::project::Project;
 use fugue_core::storage::{SegmentMappingProvenance, DEFAULT_SPACE_ID};
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
@@ -355,16 +354,16 @@ impl Loadable for IDABinary {
             }
 
             if type_.is_extern() {
-                let template_len = template.len();
-                let aligned_template_len = template_len.next_multiple_of(address_size);
+                let template_size = template.size();
+                let aligned_template_size = template_size.next_multiple_of(address_size);
 
-                if aligned_template_len > address_size {
+                if aligned_template_size > address_size {
                     tracing::warn!(
                         "external thunk template is larger than available space in extern segment; skipping"
                     );
                 } else {
-                    for chunk in bytes.chunks_exact_mut(aligned_template_len) {
-                        chunk[..template_len].copy_from_slice(template.bytes());
+                    for chunk in bytes.chunks_exact_mut(aligned_template_size) {
+                        chunk[..template_size].copy_from_slice(template.bytes());
                     }
                 }
             }

@@ -6,6 +6,7 @@ use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::types::Revision;
 
 mod table;
+pub(crate) use table::{ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES};
 pub use table::{ProblemRef, ProblemTable, ProblemTableError};
 
 pub type ProblemId = Id<Problem>;
@@ -24,7 +25,6 @@ pub type ProblemId = Id<Problem>;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
-#[allow(unknown_lints, sorted_enum_variants)]
 pub enum ProblemKind {
     AnalysisCoverageInvalidated,
     AvoidedBytes,
@@ -39,14 +39,14 @@ pub enum ProblemKind {
     RetryBudgetExhausted,
     SwitchBoundExceeded,
     SwitchUnresolved,
-    WorkCausesMerged,
     #[default]
     Unknown,
+    WorkCausesMerged,
 }
 
 impl ProblemKind {
     pub(crate) const MIN: Self = Self::AnalysisCoverageInvalidated;
-    pub(crate) const MAX: Self = Self::Unknown;
+    pub(crate) const MAX: Self = Self::WorkCausesMerged;
 
     pub fn class(self) -> ProblemClass {
         match self {
@@ -122,10 +122,10 @@ pub enum ProblemClass {
     rkyv::Deserialize,
 )]
 pub enum ProblemScope {
+    Address(Address),
+    AddressSpace(AddressSpaceId),
     #[default]
     Global,
-    AddressSpace(AddressSpaceId),
-    Address(Address),
     Range(AddressRange),
 }
 
@@ -256,8 +256,12 @@ impl Problem {
     }
 
     pub fn with_id(mut self, id: ProblemId) -> Self {
-        self.id = id;
+        self.set_id(id);
         self
+    }
+
+    pub(crate) fn set_id(&mut self, id: ProblemId) {
+        self.id = id;
     }
 
     pub fn id(&self) -> ProblemId {

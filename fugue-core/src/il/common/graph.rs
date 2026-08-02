@@ -1,6 +1,9 @@
+use std::mem::size_of;
+
 use crate::il::common::verify::StructureError;
 use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexRange};
 use crate::ir::Address;
+use crate::types::EstimateSize;
 use crate::types::common::archived_bitflags;
 
 bitflags::bitflags! {
@@ -62,6 +65,23 @@ pub struct IlGraph {
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
     block_sources: Vec<Address>,
+}
+
+impl EstimateSize for IlGraph {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.blocks.capacity().saturating_mul(size_of::<IlBlock>()))
+            .saturating_add(
+                self.successors
+                    .capacity()
+                    .saturating_mul(size_of::<IlBlockId>()),
+            )
+            .saturating_add(
+                self.block_sources
+                    .capacity()
+                    .saturating_mul(size_of::<Address>()),
+            )
+    }
 }
 
 impl IlGraph {

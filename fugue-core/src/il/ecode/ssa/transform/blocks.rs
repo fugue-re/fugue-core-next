@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use super::{SsaConstruction, SsaDomain};
+use super::{ECodeSsaConstruction, SsaDomain};
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlBlock, IlBlockId, IlDominance, IlError, IlGraph, IlIndexRange, IlValueId,
 };
 
-impl SsaConstruction<'_, '_> {
+impl ECodeSsaConstruction<'_, '_> {
     pub(crate) fn build(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
         match self.source.graph().entry_block() {
             Some(entry) => self.build_blocks(entry, cancellation),

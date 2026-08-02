@@ -4,7 +4,7 @@ use crate::il::common::{
     IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaValue,
+    ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaValue,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -146,23 +146,23 @@ impl ECodeSsaBuilder {
             self.edge_arguments = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }
 
-        let mut body = ECodeSsaIr::new(
-            self.metadata,
-            self.graph,
-            self.source_spans,
-            self.parent_spans,
-            self.values,
-            self.block_arguments,
-            self.edge_arguments,
-            self.edge_argument_values.into_values(),
-            self.operations,
-            self.value_operands.into_values(),
-            self.memory_domains,
-            self.constant_storage,
-        );
+        let mut ir = ECodeSsaIr::new(ECodeSsaIrParts {
+            metadata: self.metadata,
+            graph: self.graph,
+            source_spans: self.source_spans,
+            parent_spans: self.parent_spans,
+            values: self.values,
+            block_arguments: self.block_arguments,
+            edge_arguments: self.edge_arguments,
+            edge_argument_values: self.edge_argument_values.into_values(),
+            operations: self.operations,
+            value_operands: self.value_operands.into_values(),
+            memory_domains: self.memory_domains,
+            constant_storage: self.constant_storage,
+        });
 
-        body.shrink_to_fit();
+        ir.shrink_to_fit();
 
-        Ok(body)
+        Ok(ir)
     }
 }

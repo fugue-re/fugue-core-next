@@ -1,16 +1,16 @@
 use fugue_bv::BitVec;
 use rustc_hash::FxHashSet;
 
-use super::SwitchIntervalContext;
-use crate::analysis::function::recovery::InsnResolver;
+use super::SwitchIntervalRecovery;
 use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::ContextSet;
+use crate::lifter::InsnResolver;
 
-pub(crate) struct SwitchGuard {
+pub(super) struct SwitchGuard {
     interval: StridedInterval,
     default_block: Option<IlBlockId>,
 }
@@ -84,13 +84,13 @@ impl Relation {
 }
 
 impl SwitchGuard {
-    pub(crate) fn interval(&self) -> &StridedInterval {
+    pub(super) fn interval(&self) -> &StridedInterval {
         &self.interval
     }
 }
 
-impl<'analysis> SwitchIntervalContext<'analysis> {
-    pub(crate) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
+impl<'analysis> SwitchIntervalRecovery<'analysis> {
+    pub(super) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
         if let Some(guard) = self.guard_within_branch_instruction(index, branch) {
             tracing::trace!("switch at {branch}: using intra-instruction guard");
             return Some(guard);
@@ -104,7 +104,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                 if operation.opcode() != ECodeSsaOpcode::ConditionalBranch {
                     continue;
                 }
-                let Some(&condition) = self.ssa.operation_operands(operation).first() else {
+                let Some(&condition) = self.ssa.operation_operands_for(operation).first() else {
                     continue;
                 };
                 let Some(taken) = operation
@@ -168,7 +168,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
         let operation = self.conditional_branch_within_instruction(branch)?;
-        let condition = *self.ssa.operation_operands(operation).first()?;
+        let condition = *self.ssa.operation_operands_for(operation).first()?;
         let interval = self.index_interval_from_condition(
             condition,
             index,
@@ -224,7 +224,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                         intervals.push(None);
                         continue;
                     };
-                    let operands = self.ssa.operation_operands(operation);
+                    let operands = self.ssa.operation_operands_for(operation);
 
                     match operation.opcode() {
                         ECodeSsaOpcode::BoolNot => {
@@ -302,7 +302,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             ECodeSsaOpcode::IntNotEqual => Relation::NotEqual,
             _ => return None,
         };
-        let operands = self.ssa.operation_operands(operation);
+        let operands = self.ssa.operation_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
 
         let (relation, offset, constant) =
@@ -338,7 +338,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
             return Some(BitVec::zero(width));
         }
         let operation = self.ssa.defining_operation(value)?;
-        let operands = self.ssa.operation_operands(operation);
+        let operands = self.ssa.operation_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         match operation.opcode() {
             ECodeSsaOpcode::Sub if self.matches_index(a, index) => {
@@ -406,8 +406,8 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
                 return false;
             }
 
-            let a_operands = self.ssa.operation_operands(oa);
-            let b_operands = self.ssa.operation_operands(ob);
+            let a_operands = self.ssa.operation_operands_for(oa);
+            let b_operands = self.ssa.operation_operands_for(ob);
             if a_operands.len() != b_operands.len() {
                 return false;
             }
@@ -438,7 +438,7 @@ impl<'analysis> SwitchIntervalContext<'analysis> {
         current
     }
 
-    pub(crate) fn resolve_default_branch_target(
+    pub(super) fn resolve_default_branch_target(
         &self,
         guard: Option<&SwitchGuard>,
         branch: Address,

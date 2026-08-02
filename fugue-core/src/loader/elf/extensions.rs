@@ -6,7 +6,7 @@ use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
 use crate::ir::RawAddress;
 use crate::lifter::LanguageId;
-use crate::lifter::dynamic::LanguageSource;
+use crate::lifter::LanguageSource;
 use crate::loader::elf::ElfFileRepr;
 use crate::loader::{Elf, ImageSegmentContents, LoaderError};
 use crate::platform::{CallingConvention, Platform};

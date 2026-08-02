@@ -77,7 +77,13 @@ pub enum SegmentStorageError {
     #[error("image references undeclared bank {0}")]
     UnknownBank(ImageBankHandle),
     #[error("image references undeclared space {0}")]
-    UnknownSpace(ImageSpaceHandle),
+    UnknownImageSpace(ImageSpaceHandle),
+    #[error("unknown mapping {0}")]
+    UnknownMapping(SegmentMappingId),
+    #[error("unknown provider {0}")]
+    UnknownProvider(SegmentStorageProviderId),
+    #[error("unknown address space {0}")]
+    UnknownSpace(AddressSpaceId),
 }
 
 impl SegmentStorageError {
@@ -318,7 +324,7 @@ impl SegmentStorage {
                 ImageSpaceKind::Overlay { base } => AddressSpaceKind::Overlay {
                     base: resolution
                         .resolve_space(base)
-                        .ok_or(SegmentStorageError::UnknownSpace(base))?,
+                        .ok_or(SegmentStorageError::UnknownImageSpace(base))?,
                 },
             };
             storage
@@ -365,9 +371,9 @@ impl SegmentStorage {
         let mut segments = loader.image_segments();
 
         while let Some(segment) = segments.next()? {
-            let address = resolution
-                .resolve_address(segment.address())
-                .ok_or(SegmentStorageError::UnknownSpace(segment.address().space()))?;
+            let address = resolution.resolve_address(segment.address()).ok_or(
+                SegmentStorageError::UnknownImageSpace(segment.address().space()),
+            )?;
             let (provider_bank, backing_offset) = match segment.backing() {
                 Some(backing) => (backing.bank(), backing.offset().offset()),
                 None => {
@@ -779,7 +785,7 @@ impl SegmentStorage {
 
         self.providers
             .remove(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
+            .ok_or(SegmentStorageError::UnknownProvider(id))?;
         self.touch();
 
         Ok(())
@@ -794,7 +800,7 @@ impl SegmentStorage {
         properties: SegmentProperties,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
         if !self.providers.contains_key(&provider_id) {
-            return Err(SegmentStorageError::backing_with("provider not found"));
+            return Err(SegmentStorageError::UnknownProvider(provider_id));
         }
 
         let id = SegmentMappingId::new(self.mapping_ctr);
@@ -812,7 +818,7 @@ impl SegmentStorage {
         builder: SegmentMappingBuilder,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
         if !self.providers.contains_key(&builder.provider_id()) {
-            return Err(SegmentStorageError::backing_with("provider not found"));
+            return Err(SegmentStorageError::UnknownProvider(builder.provider_id()));
         }
 
         let id = SegmentMappingId::new(self.mapping_ctr);
@@ -831,7 +837,7 @@ impl SegmentStorage {
         builder: SegmentMappingBuilder,
     ) -> Result<(), SegmentStorageError> {
         if !self.providers.contains_key(&builder.provider_id()) {
-            return Err(SegmentStorageError::backing_with("provider not found"));
+            return Err(SegmentStorageError::UnknownProvider(builder.provider_id()));
         }
         if self.mappings.contains_key(&id) {
             return Err(SegmentStorageError::backing_with("mapping already exists"));
@@ -844,11 +850,11 @@ impl SegmentStorage {
         Ok(())
     }
 
-    pub(crate) fn has_provider(&self, id: SegmentStorageProviderId) -> bool {
+    pub(crate) fn contains_provider(&self, id: SegmentStorageProviderId) -> bool {
         self.providers.contains_key(&id)
     }
 
-    pub(crate) fn preview_mapping_id(
+    pub(crate) fn pending_mapping_id(
         &self,
         offset: usize,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
@@ -867,7 +873,7 @@ impl SegmentStorage {
 
         self.mappings
             .remove(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(id))?;
         self.touch();
 
         Ok(())
@@ -919,7 +925,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get_mut(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(id))?;
 
         let old_size = mapping.size();
         mapping.set_start(new_start);
@@ -945,7 +951,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get_mut(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(id))?;
 
         let start = mapping.start();
         mapping.set_size(new_size);
@@ -973,7 +979,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get_mut(&id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(id))?;
 
         mapping.set_kind(kind);
         mapping.set_provenance(provenance);
@@ -1007,7 +1013,7 @@ impl SegmentStorage {
         Ok(())
     }
 
-    pub(crate) fn preview_space_id(
+    pub(crate) fn pending_space_id(
         &self,
         offset: usize,
     ) -> Result<AddressSpaceId, SegmentStorageError> {
@@ -1026,7 +1032,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(mapping_id))?;
 
         match mapping.provenance() {
             SegmentMappingProvenance::Segment
@@ -1063,7 +1069,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(mapping_id))?;
 
         let mapping_ref = mapping.make_ref();
         let start = mapping.start();
@@ -1073,7 +1079,7 @@ impl SegmentStorage {
         let space = self
             .spaces
             .get_mut(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
+            .ok_or(SegmentStorageError::UnknownSpace(space_id))?;
 
         match priority {
             SpacePriority::Top => space.add_mapping_top(mapping_ref, start, size, properties),
@@ -1100,7 +1106,7 @@ impl SegmentStorage {
         let space = self
             .spaces
             .get_mut(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
+            .ok_or(SegmentStorageError::UnknownSpace(space_id))?;
 
         space.deprioritise(mapping_id);
         self.touch();
@@ -1116,7 +1122,7 @@ impl SegmentStorage {
         let mapping = self
             .mappings
             .get(&mapping_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping not found"))?;
+            .ok_or(SegmentStorageError::UnknownMapping(mapping_id))?;
 
         let range_start = mapping.start().raw_address();
         let range_end = mapping.end().raw_address();
@@ -1124,7 +1130,7 @@ impl SegmentStorage {
         let space = self
             .spaces
             .get(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
+            .ok_or(SegmentStorageError::UnknownSpace(space_id))?;
 
         let overlapping = space
             .priority_list()
@@ -1163,7 +1169,7 @@ impl SegmentStorage {
     pub fn read_bytes_in_space(
         &self,
         space_id: AddressSpaceId,
-        addr: impl Into<Address>,
+        addr: impl Into<RawAddress>,
         bytes: &mut [u8],
     ) -> Result<usize, SegmentStorageError> {
         if bytes.is_empty() {
@@ -1175,7 +1181,7 @@ impl SegmentStorage {
         let space = self
             .spaces
             .get(&space_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
+            .ok_or(SegmentStorageError::UnknownSpace(space_id))?;
 
         let addr = Address::new(space_id, addr.into());
         let mut current_addr = addr;
@@ -1250,7 +1256,7 @@ impl SegmentStorage {
         let provider = self
             .providers
             .get(&provider_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
+            .ok_or(SegmentStorageError::UnknownProvider(provider_id))?;
 
         provider.provider().read_bytes(offset, bytes)
     }
@@ -1267,7 +1273,7 @@ impl SegmentStorage {
     pub fn write_bytes_in_space(
         &mut self,
         space_id: AddressSpaceId,
-        addr: impl Into<Address>,
+        addr: impl Into<RawAddress>,
         bytes: &[u8],
     ) -> Result<usize, SegmentStorageError> {
         self.write_bytes_to_space_with_revert(space_id, addr, bytes, None)
@@ -1276,7 +1282,7 @@ impl SegmentStorage {
     pub(crate) fn write_bytes_to_space_tracked(
         &mut self,
         space_id: AddressSpaceId,
-        addr: impl Into<Address>,
+        addr: impl Into<RawAddress>,
         bytes: &[u8],
     ) -> Result<(usize, SegmentWriteRevert), SegmentStorageError> {
         let mut revert = SegmentWriteRevert::new();
@@ -1292,7 +1298,7 @@ impl SegmentStorage {
     fn write_bytes_to_space_with_revert(
         &mut self,
         space_id: AddressSpaceId,
-        addr: impl Into<Address>,
+        addr: impl Into<RawAddress>,
         bytes: &[u8],
         mut revert: Option<&mut SegmentWriteRevert>,
     ) -> Result<usize, SegmentStorageError> {
@@ -1310,7 +1316,7 @@ impl SegmentStorage {
                 let space = self
                     .spaces
                     .get(&space_id)
-                    .ok_or_else(|| SegmentStorageError::backing_with("space not found"))?;
+                    .ok_or(SegmentStorageError::UnknownSpace(space_id))?;
 
                 match space.find_containing(current_addr) {
                     Some(v) => v,
@@ -1401,7 +1407,7 @@ impl SegmentStorage {
         let provider = self
             .providers
             .get_mut(&provider_id)
-            .ok_or_else(|| SegmentStorageError::backing_with("provider not found"))?;
+            .ok_or(SegmentStorageError::UnknownProvider(provider_id))?;
 
         provider.provider_mut().write_bytes(offset, bytes)
     }
@@ -1479,7 +1485,7 @@ impl SegmentStorage {
         Some((mapping.provider_id(), offset))
     }
 
-    pub fn contains_segment(&self, at: impl Into<Address>) -> bool {
+    pub fn contains_mapping(&self, at: impl Into<Address>) -> bool {
         let at = at.into();
         if let Some(space) = self.spaces.get(&at.space()) {
             space.find_containing(at).is_some()
@@ -1488,7 +1494,12 @@ impl SegmentStorage {
         }
     }
 
-    pub fn contains_segment_in_space(&self, space_id: AddressSpaceId, at: Address) -> bool {
+    pub fn contains_mapping_in_space(
+        &self,
+        space_id: AddressSpaceId,
+        at: impl Into<RawAddress>,
+    ) -> bool {
+        let at = Address::new(space_id, at.into());
         if let Some(space) = self.spaces.get(&space_id) {
             space.find_containing(at).is_some()
         } else {
@@ -1496,16 +1507,17 @@ impl SegmentStorage {
         }
     }
 
-    pub fn segment_properties(&self, at: impl Into<Address>) -> Option<SegmentProperties> {
+    pub fn mapping_properties(&self, at: impl Into<Address>) -> Option<SegmentProperties> {
         let at = at.into();
-        self.segment_properties_in_space(at.space(), at)
+        self.mapping_properties_in_space(at.space(), at)
     }
 
-    pub fn segment_properties_in_space(
+    pub fn mapping_properties_in_space(
         &self,
         space_id: AddressSpaceId,
-        at: Address,
+        at: impl Into<RawAddress>,
     ) -> Option<SegmentProperties> {
+        let at = Address::new(space_id, at.into());
         let space = self.spaces.get(&space_id)?;
         let submap = space.find_containing(at)?;
         let mapping = self.mappings.get(&submap.mapping_ref().mapping_id())?;
@@ -1526,7 +1538,7 @@ impl SegmentStorage {
     pub fn view_containing_in_space(
         &self,
         space_id: AddressSpaceId,
-        address: impl Into<Address>,
+        address: impl Into<RawAddress>,
     ) -> Result<SegmentMappingView<'_>, SegmentStorageError> {
         let address = address.into();
 
@@ -1552,8 +1564,8 @@ impl SegmentStorage {
         Ok(SegmentMappingView::new(mapping, provider, mapping_view))
     }
 
-    pub(crate) fn space_generation(&self, space_id: AddressSpaceId) -> Option<Revision> {
-        self.spaces.get(&space_id).map(AddressSpace::generation)
+    pub(crate) fn space_revision(&self, space_id: AddressSpaceId) -> Option<Revision> {
+        self.spaces.get(&space_id).map(AddressSpace::revision)
     }
 
     fn view_for_submapping(
@@ -1854,7 +1866,7 @@ mod test {
     }
 
     #[test]
-    fn test_segment_properties_fast_path() -> Result<(), SegmentStorageError> {
+    fn mapping_properties_fast_path() -> Result<(), SegmentStorageError> {
         let mut storage = SegmentStorage::empty();
 
         let text_provider = storage.open_provider(
@@ -1882,9 +1894,9 @@ mod test {
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, text_id)?;
         storage.add_mapping_to_space(DEFAULT_SPACE_ID, data_id)?;
 
-        assert_eq!(storage.segment_properties(0x1000u64), Some(text));
-        assert_eq!(storage.segment_properties(0x2003u64), Some(data));
-        assert_eq!(storage.segment_properties(0x3000u64), None);
+        assert_eq!(storage.mapping_properties(0x1000u64), Some(text));
+        assert_eq!(storage.mapping_properties(0x2003u64), Some(data));
+        assert_eq!(storage.mapping_properties(0x3000u64), None);
 
         Ok(())
     }

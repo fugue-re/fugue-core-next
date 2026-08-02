@@ -329,14 +329,14 @@ impl PCodeOpcode {
         }
     }
 
-    pub const fn requires_effect_space(&self) -> bool {
+    pub const fn requires_address_space(&self) -> bool {
         matches!(
             self,
             Self::Load | Self::Store | Self::IBranch | Self::ICall | Self::Return
         )
     }
 
-    pub const fn requires_target(&self) -> bool {
+    pub const fn requires_address(&self) -> bool {
         matches!(self, Self::Branch | Self::CBranch | Self::Call)
     }
 
@@ -495,7 +495,7 @@ pub struct PCodeOp {
     operands: IlIndexRange,
     output: Option<PCodeLocationId>,
     immediate: u32,
-    effect_space: Option<AddressSpaceId>,
+    address_space: Option<AddressSpaceId>,
 }
 
 impl PCodeOp {
@@ -504,14 +504,14 @@ impl PCodeOp {
         output: Option<PCodeLocationId>,
         operands: IlIndexRange,
         immediate: u32,
-        effect_space: Option<AddressSpaceId>,
+        address_space: Option<AddressSpaceId>,
     ) -> Self {
         Self {
             opcode,
             operands,
             output,
             immediate,
-            effect_space,
+            address_space,
         }
     }
 
@@ -531,8 +531,8 @@ impl PCodeOp {
         self.immediate
     }
 
-    pub const fn effect_space(&self) -> Option<AddressSpaceId> {
-        self.effect_space
+    pub const fn address_space(&self) -> Option<AddressSpaceId> {
+        self.address_space
     }
 }
 

@@ -19,12 +19,8 @@ impl OverlayChunk {
         &self.data
     }
 
-    pub fn len(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.data.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
     }
 }
 
@@ -36,10 +32,6 @@ pub struct OverlayTree {
 impl OverlayTree {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
     }
 
     pub fn write(&mut self, addr: impl Into<RawAddress>, data: impl Into<Vec<u8>>) {
@@ -54,13 +46,13 @@ impl OverlayTree {
         self.merge_adjacent(addr);
     }
 
-    pub fn clear_range(&mut self, addr: impl Into<RawAddress>, len: usize) {
-        if len == 0 {
+    pub fn clear_range(&mut self, addr: impl Into<RawAddress>, size: usize) {
+        if size == 0 {
             return;
         }
 
         let addr = addr.into();
-        let write_end = u128::from(addr.offset()) + len as u128;
+        let write_end = u128::from(addr.offset()) + size as u128;
         let first = self
             .chunks
             .range(..=addr)
@@ -71,7 +63,7 @@ impl OverlayTree {
             .range(first..)
             .take_while(|(start, _)| u128::from(start.offset()) < write_end)
             .filter_map(|(&start, chunk)| {
-                let chunk_end = u128::from(start.offset()) + chunk.len() as u128;
+                let chunk_end = u128::from(start.offset()) + chunk.size() as u128;
                 (chunk_end > u128::from(addr.offset())).then_some(start)
             })
             .collect::<SmallVec<[_; 4]>>();
@@ -81,11 +73,11 @@ impl OverlayTree {
                 .chunks
                 .remove(&start)
                 .expect("overlapping overlay chunk exists");
-            let chunk_end = u128::from(start.offset()) + chunk.len() as u128;
+            let chunk_end = u128::from(start.offset()) + chunk.size() as u128;
 
             if chunk_end > write_end {
                 let right_offset = usize::try_from(write_end - u128::from(start.offset()))
-                    .expect("overlay split offset fits the chunk length");
+                    .expect("overlay split offset fits the chunk size");
                 let right = chunk.data.split_off(right_offset);
                 let right_start =
                     RawAddress::from(u64::try_from(write_end).expect("overlay address is valid"));
@@ -102,7 +94,7 @@ impl OverlayTree {
         let Some(chunk) = self.chunks.get(&addr) else {
             return;
         };
-        let chunk_end = addr + chunk.len();
+        let chunk_end = addr + chunk.size();
 
         if let Some((&next_start, _)) = self
             .chunks
@@ -125,7 +117,7 @@ impl OverlayTree {
             .chunks
             .range(..addr)
             .next_back()
-            .and_then(|(&start, chunk)| (start + chunk.len() == addr).then_some(start));
+            .and_then(|(&start, chunk)| (start + chunk.size() == addr).then_some(start));
 
         if let Some(prev_start) = prev_start {
             let current = self
@@ -156,7 +148,7 @@ impl OverlayTree {
             .map_or(addr, |(&start, _)| start);
 
         for (&chunk_start, chunk) in self.chunks.range(first..read_end) {
-            let chunk_end = chunk_start + chunk.len();
+            let chunk_end = chunk_start + chunk.size();
 
             if chunk_end <= addr {
                 continue;
@@ -168,18 +160,14 @@ impl OverlayTree {
             let buf_start = usize::from(overlap_start - addr);
             let buf_end = usize::from(overlap_end - addr);
             let chunk_offset = usize::from(overlap_start - chunk_start);
-            let chunk_len = usize::from(overlap_end - overlap_start);
+            let chunk_size = usize::from(overlap_end - overlap_start);
 
             buf[buf_start..buf_end]
-                .copy_from_slice(&chunk.data[chunk_offset..chunk_offset + chunk_len]);
-            bytes_applied += chunk_len;
+                .copy_from_slice(&chunk.data[chunk_offset..chunk_offset + chunk_size]);
+            bytes_applied += chunk_size;
         }
 
         bytes_applied
-    }
-
-    pub fn clear(&mut self) {
-        self.chunks.clear();
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &OverlayChunk)> {
@@ -195,12 +183,8 @@ impl OverlayTree {
             .range(..=addr)
             .next_back()
             .and_then(|(&start, chunk)| {
-                (addr.checked_offset_from(start)? < chunk.len() as u64).then_some((start, chunk))
+                (addr.checked_offset_from(start)? < chunk.size() as u64).then_some((start, chunk))
             })
-    }
-
-    pub fn total_size(&self) -> usize {
-        self.chunks.values().map(|c| c.len()).sum()
     }
 }
 
@@ -250,15 +234,6 @@ mod test {
         let read = tree.read(6u64, &mut buf);
         assert_eq!(read, 5);
         assert_eq!(&buf, b"world");
-    }
-
-    #[test]
-    fn test_clear() {
-        let mut tree = OverlayTree::new();
-        tree.write(0u64, &b"hello"[..]);
-        assert!(!tree.is_empty());
-        tree.clear();
-        assert!(tree.is_empty());
     }
 
     #[test]

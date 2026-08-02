@@ -4,7 +4,9 @@ use crate::analysis::function::recovery::FunctionStructuringContext;
 use crate::analysis::non_returning::NonReturningTargets;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
-use crate::ir::{Address, FunctionProperties, Insn};
+use crate::ir::{Address, CodeBlock, FunctionProperties, Insn};
+
+pub(super) const NON_RETURNING_PROPAGATION_ANALYSER: &str = "non-returning-propagation";
 
 enum BlockExit {
     Returns,
@@ -22,6 +24,17 @@ impl BlockExit {
             .flow_targets()
             .find_map(|target| target.kind().is_call().then_some(target.to()))
         {
+            Some(target) => Self::Via(target),
+            None => Self::Unknown,
+        }
+    }
+
+    fn from_block(block: &CodeBlock) -> Self {
+        if block.is_return() {
+            return Self::Returns;
+        }
+
+        match block.direct_call_target() {
             Some(target) => Self::Via(target),
             None => Self::Unknown,
         }
@@ -58,7 +71,7 @@ impl ExitGraph {
         let mut graph = Self::default();
 
         for function in project.functions().iter() {
-            let caller = function.address();
+            let caller = function.entry();
             let mut exits = FunctionExits::default();
 
             for (_, id) in function.blocks() {
@@ -66,12 +79,11 @@ impl ExitGraph {
                     continue;
                 };
 
-                graph.visit_block(
-                    &targets,
+                graph.visit_committed_block(
                     &mut exits,
                     caller,
                     !function.has_successors(id),
-                    block.instructions().last(),
+                    &block,
                 );
             }
 
@@ -82,7 +94,7 @@ impl ExitGraph {
             let mut exits = FunctionExits::default();
 
             for block in function.blocks() {
-                graph.visit_block(
+                graph.visit_pending_block(
                     &targets,
                     &mut exits,
                     caller,
@@ -122,7 +134,27 @@ impl ExitGraph {
         graph
     }
 
-    fn visit_block(
+    fn visit_committed_block(
+        &mut self,
+        exits: &mut FunctionExits,
+        caller: Address,
+        is_exit: bool,
+        block: &CodeBlock,
+    ) {
+        if is_exit {
+            exits.add(BlockExit::from_block(block));
+            return;
+        }
+
+        if block.is_call()
+            && !block.is_branch()
+            && let Some(target) = block.direct_call_target()
+        {
+            self.calls.insert(StaleCall { caller, target });
+        }
+    }
+
+    fn visit_pending_block(
         &mut self,
         targets: &NonReturningTargets<'_>,
         exits: &mut FunctionExits,
@@ -224,7 +256,7 @@ impl AnalysisPass<FunctionStructuringContext> for NonReturningPropagation {
                     function.mark_non_returning();
                     Ok(())
                 })
-                .map_err(|e| AnalysisError::pass_failed("non-returning-propagation", e))?;
+                .map_err(|e| AnalysisError::pass_failed(NON_RETURNING_PROPAGATION_ANALYSER, e))?;
         }
 
         let targets = NonReturningTargets::new(project);
@@ -245,15 +277,16 @@ mod test {
 
     use super::*;
     use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryExtension};
-    use crate::analysis::non_returning::NonReturningFromExterns;
-    use crate::analysis::switch::SwitchRecovery;
+    use crate::analysis::non_returning::NonReturningExterns;
+    use crate::lifter::InsnResolver;
     use crate::loader::{Loadable, LoadableAnalysers, Loader};
     use crate::project::Project;
     use crate::registry;
+    use crate::storage::{SegmentMappingCache, SegmentStorageError};
 
     struct Recovered {
         project: Project,
-        instructions: BTreeMap<Address, usize>,
+        insns: BTreeMap<Address, usize>,
         largest: usize,
     }
 
@@ -262,22 +295,24 @@ mod test {
         let mut project = Project::new_transient(&loader)?;
 
         if enabled {
-            NonReturningFromExterns::new(loader.platform().os()).analyse(&mut project)?;
+            NonReturningExterns::new(loader.platform().os()).analyse(&mut project)?;
         }
 
-        let config = FunctionRecoveryConfig::default().with_non_returning_analysis(enabled);
+        let config = FunctionRecoveryConfig::default()
+            .with_non_returning_analysis(enabled)
+            .with_switch_analysis(true);
         let mut recovery = loader.analysers().function_recovery_with(config)?;
 
         for extension in registry::iter::<FunctionRecoveryExtension>() {
             extension.apply(&project, &mut recovery)?;
         }
 
-        recovery.add_builder_post_structuring_pass("switch-recovery", SwitchRecovery::new());
-
         recovery.analyse(&mut project)?;
 
-        let mut instructions = BTreeMap::new();
+        let mut insns = BTreeMap::new();
         let mut largest = 0;
+        let mut mappings = SegmentMappingCache::new();
+        let mut resolver = InsnResolver::new(project.arch());
 
         for function in project.functions().iter() {
             largest = largest.max(function.blocks().len());
@@ -287,18 +322,27 @@ mod test {
                     continue;
                 };
 
-                instructions.extend(
-                    block
-                        .instructions()
-                        .iter()
-                        .map(|insn| (insn.address(), insn.len())),
+                let view = mappings.contiguous_view_from(project.segments(), block.address())?;
+                let bytes = view
+                    .as_contiguous()
+                    .ok_or(SegmentStorageError::InvalidAddressRange)?;
+                let resolved = resolver.resolve_extent(
+                    block.address(),
+                    block.size(),
+                    block.context(),
+                    bytes,
+                )?;
+                insns.extend(
+                    resolved
+                        .into_iter()
+                        .map(|insn| (insn.address(), insn.size())),
                 );
             }
         }
 
         Ok(Recovered {
             project,
-            instructions,
+            insns,
             largest,
         })
     }
@@ -313,9 +357,9 @@ mod test {
             let arch = bounded.project.arch();
             let mut buffer = [0u8; 32];
             let lost = baseline
-                .instructions
+                .insns
                 .iter()
-                .filter(|(address, _)| !bounded.instructions.contains_key(address))
+                .filter(|(address, _)| !bounded.insns.contains_key(address))
                 .filter(|(address, size)| {
                     let Ok(read) = bounded
                         .project
@@ -411,11 +455,7 @@ mod test {
                     continue;
                 };
 
-                let Some(target) = block
-                    .instructions()
-                    .last()
-                    .and_then(|terminator| terminator.direct_call_target())
-                else {
+                let Some(target) = block.direct_call_target() else {
                     continue;
                 };
 
@@ -453,13 +493,12 @@ mod test {
                         continue;
                     };
 
-                    let Some(terminator) = block.instructions().last() else {
+                    let Some(target) = block.direct_call_target() else {
                         continue;
                     };
 
-                    let is_non_returning = targets
-                        .suppressible_call(terminator)
-                        .is_some_and(|target| targets.is_non_returning(target));
+                    let is_non_returning =
+                        block.is_call() && !block.is_branch() && targets.is_non_returning(target);
 
                     if !is_non_returning {
                         continue;
@@ -468,7 +507,7 @@ mod test {
                     assert!(
                         !function.has_successors(id),
                         "call to a non-returning function at {} in {path} kept its fall-through",
-                        terminator.address()
+                        block.last_address()
                     );
 
                     suppressed += 1;
@@ -496,7 +535,7 @@ mod test {
                     .project
                     .functions()
                     .iter()
-                    .map(|function| (function.address(), function.blocks().len()))
+                    .map(|function| (function.entry(), function.blocks().len()))
                     .collect::<BTreeSet<_>>()
             };
 
@@ -507,7 +546,7 @@ mod test {
             );
 
             assert_eq!(
-                first.instructions, second.instructions,
+                first.insns, second.insns,
                 "recovery of {path} covers different code on a second run"
             );
         }

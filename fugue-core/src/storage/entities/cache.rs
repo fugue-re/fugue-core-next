@@ -8,8 +8,8 @@ use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 
 use super::{
-    Entity, EntityIterator, EntityKey, EntityStorage, EntityStorageError, WriteBackAction,
-    WriteBackWorker, decode_entity, schema,
+    Entity, EntityIterator, EntityKey, EntityKeyPrefix, EntityStorage, EntityStorageError,
+    WriteBackAction, WriteBackWorker, decode_entity,
 };
 use crate::types::BytesOrSlice;
 
@@ -30,8 +30,8 @@ struct Cached<E> {
 struct ByteWeighter;
 
 impl ByteWeighter {
-    fn entry_weight(encoded_len: usize) -> u32 {
-        u32::try_from(encoded_len)
+    fn entry_weight(encoded_size: usize) -> u32 {
+        u32::try_from(encoded_size)
             .unwrap_or(u32::MAX)
             .saturating_add(ENTITY_CACHE_ENTRY_OVERHEAD)
     }
@@ -149,7 +149,7 @@ where
 
         if self.dirty {
             let key = self.entity.entity_key();
-            self.cache.put(key, Arc::clone(&self.entity));
+            self.cache.insert(key, Arc::clone(&self.entity));
         }
     }
 }
@@ -306,7 +306,7 @@ where
         }
 
         if let WriteSink::Worker(worker) = &self.sink {
-            let key_bytes = schema::make_key::<K, E>(key);
+            let key_bytes = E::ID.key_for(key);
             if let Some(pending) = worker.pending(&key_bytes) {
                 return match pending {
                     WriteBackAction::Insert(bytes) => {
@@ -345,7 +345,7 @@ where
         self.try_get(key).unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_put(
+    pub fn try_insert(
         &self,
         key: K,
         entity: impl Into<Arc<E>>,
@@ -356,25 +356,25 @@ where
         Ok(self.admit(key, entity, weight))
     }
 
-    pub fn put(&self, key: K, entity: impl Into<Arc<E>>) -> CachedRef<'_, E> {
-        self.try_put(key, entity)
+    pub fn insert(&self, key: K, entity: impl Into<Arc<E>>) -> CachedRef<'_, E> {
+        self.try_insert(key, entity)
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub(crate) fn publish_put(
+    pub(crate) fn publish_insert(
         &self,
         key: K,
         entity: impl Into<Arc<E>>,
-        encoded_len: usize,
+        encoded_size: usize,
     ) -> CachedRef<'_, E> {
-        self.admit(key, entity.into(), ByteWeighter::entry_weight(encoded_len))
+        self.admit(key, entity.into(), ByteWeighter::entry_weight(encoded_size))
     }
 
     pub fn try_remove(&self, key: &K) -> Result<(), EntityStorageError> {
         match &self.sink {
             WriteSink::WriteThrough => self.storage.remove::<K, E>(key)?,
             WriteSink::Worker(worker) => {
-                let key_bytes = schema::make_key::<K, E>(key);
+                let key_bytes = E::ID.key_for(key);
                 worker.enqueue(key_bytes, None)?;
             }
         }
@@ -412,10 +412,10 @@ where
         match &self.sink {
             WriteSink::WriteThrough => self.iter_backing_range(start),
             WriteSink::Worker(worker) => {
-                let prefix = schema::make_prefix::<K, E>();
+                let prefix = EntityKeyPrefix::of::<K, E>();
                 let start_key = Self::range_start_key(start);
                 let pending_start = start_key.as_ref().map(|key| key.as_ref());
-                let pending = worker.pending_range(&prefix, pending_start)?;
+                let pending = worker.pending_range(prefix.as_ref(), pending_start)?;
                 let pending = self.decode_pending_range(pending)?;
                 let backing = self.storage.iter_range::<K, E>(start)?;
 
@@ -482,8 +482,8 @@ where
 
     fn range_start_key(start: Bound<&K>) -> Bound<Bytes> {
         match start {
-            Bound::Included(key) => Bound::Included(schema::make_key::<K, E>(key)),
-            Bound::Excluded(key) => Bound::Excluded(schema::make_key::<K, E>(key)),
+            Bound::Included(key) => Bound::Included(E::ID.key_for(key)),
+            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key)),
             Bound::Unbounded => Bound::Unbounded,
         }
     }
@@ -495,7 +495,7 @@ where
         pending
             .into_iter()
             .map(|(key, action)| {
-                let key = schema::extract_key::<K, E>(BytesOrSlice::from(key))
+                let key = EntityKeyPrefix::extract::<K, E>(BytesOrSlice::from(key))
                     .ok_or(EntityStorageError::InvalidKeyFormat)?;
                 let value = match action {
                     WriteBackAction::Insert(bytes) => {
@@ -597,7 +597,7 @@ where
                     .insert_bytes::<K, E>(key, BytesOrSlice::from(encoded.as_ref()))?;
             }
             WriteSink::Worker(worker) => {
-                let key_bytes = schema::make_key::<K, E>(key);
+                let key_bytes = E::ID.key_for(key);
                 worker.enqueue(key_bytes, Some(Bytes::from_owner(encoded)))?;
             }
         }
@@ -611,23 +611,6 @@ where
     K: EntityKey,
     E: MutableEntity<Key = K>,
 {
-    pub(crate) fn iter_disjoint_mut<'a>(
-        &'a self,
-        keys: impl IntoIterator<Item = K> + 'a,
-    ) -> impl Iterator<Item = CachedMut<'a, E>> + 'a {
-        keys.into_iter().filter_map(move |key| {
-            let current = self
-                .try_get(&key)
-                .unwrap_or_else(|error| error.into_fatal())?;
-
-            Some(CachedMut {
-                cache: self,
-                entity: current.into_arc(),
-                dirty: false,
-            })
-        })
-    }
-
     pub fn try_get_mut(&mut self, key: &K) -> Result<Option<CachedMut<'_, E>>, EntityStorageError> {
         let Some(current) = self.try_get(key)? else {
             return Ok(None);
@@ -640,21 +623,28 @@ where
         }))
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = CachedMut<'_, E>> + '_ {
+    pub fn try_iter_mut(
+        &mut self,
+    ) -> Result<
+        impl Iterator<Item = Result<CachedMut<'_, E>, EntityStorageError>> + '_,
+        EntityStorageError,
+    > {
         let cache = &*self;
 
-        cache
-            .try_iter()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(move |entry| {
-                let (_, current) = entry.unwrap_or_else(|error| error.into_fatal());
-
-                CachedMut {
-                    cache,
-                    entity: current.into_arc(),
-                    dirty: false,
-                }
+        Ok(cache.try_iter()?.map(move |entry| {
+            let (_, current) = entry?;
+            Ok(CachedMut {
+                cache,
+                entity: current.into_arc(),
+                dirty: false,
             })
+        }))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = CachedMut<'_, E>> + '_ {
+        self.try_iter_mut()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()))
     }
 
     pub fn try_modify<R>(
@@ -790,10 +780,10 @@ mod test {
         let cache = EntityCache::<Address, CacheEntity>::new(storage.clone(), 128).unwrap();
 
         let key = Address::from(1u64);
-        cache.put(key, cache_entity(1, "one"));
+        cache.insert(key, cache_entity(1, "one"));
 
         for i in 100u64..200 {
-            cache.put(Address::from(i), cache_entity(i, "filler"));
+            cache.insert(Address::from(i), cache_entity(i, "filler"));
         }
 
         let retrieved = cache
@@ -808,7 +798,7 @@ mod test {
         let cache = EntityCache::<Address, CacheEntity>::new(storage, 128).unwrap();
 
         for value in 1..=4 {
-            cache.put(Address::from(value), cache_entity(value, "entry"));
+            cache.insert(Address::from(value), cache_entity(value, "entry"));
         }
 
         let values = cache
@@ -828,7 +818,7 @@ mod test {
             EntityCache::<Address, CacheEntity>::new(storage.clone(), 64 * 1024).unwrap();
 
         let key = Address::from(7u64);
-        cache.put(key, cache_entity(7, "before"));
+        cache.insert(key, cache_entity(7, "before"));
 
         let outcome = cache
             .try_modify(&key, |entity| {
@@ -861,7 +851,7 @@ mod test {
             EntityCache::<Address, CacheEntity>::new(storage.clone(), 64 * 1024).unwrap();
 
         let key = Address::from(13u64);
-        cache.put(key, cache_entity(13, "before"));
+        cache.insert(key, cache_entity(13, "before"));
 
         {
             let mut guard = cache.try_get_mut(&key).unwrap().expect("entry exists");
@@ -878,7 +868,7 @@ mod test {
         let cache = EntityCache::<Address, CacheEntity>::new(storage.clone(), 64 * 1024).unwrap();
 
         let key = Address::from(9u64);
-        cache.put(key, cache_entity(9, "nine"));
+        cache.insert(key, cache_entity(9, "nine"));
         cache.try_remove(&key).unwrap();
 
         assert!(cache.get(&key).is_none());
@@ -894,7 +884,7 @@ mod test {
             EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
 
         for i in 0u64..50 {
-            cache.put(Address::from(i), cache_entity(i, "entry"));
+            cache.insert(Address::from(i), cache_entity(i, "entry"));
         }
         cache.flush().unwrap();
 
@@ -913,10 +903,10 @@ mod test {
         let cache = EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 128);
 
         let key = Address::from(1u64);
-        cache.put(key, cache_entity(1, "one"));
+        cache.insert(key, cache_entity(1, "one"));
 
         for i in 100u64..200 {
-            cache.put(Address::from(i), cache_entity(i, "filler"));
+            cache.insert(Address::from(i), cache_entity(i, "filler"));
         }
 
         let retrieved = cache
@@ -934,9 +924,9 @@ mod test {
         let cache =
             EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
 
-        cache.put(Address::from(1u64), cache_entity(1, "one"));
-        cache.put(Address::from(2u64), cache_entity(2, "two"));
-        cache.put(Address::from(3u64), cache_entity(3, "three"));
+        cache.insert(Address::from(1u64), cache_entity(1, "one"));
+        cache.insert(Address::from(2u64), cache_entity(2, "two"));
+        cache.insert(Address::from(3u64), cache_entity(3, "three"));
         cache.try_remove(&Address::from(2u64)).unwrap();
 
         let values = cache
@@ -969,7 +959,7 @@ mod test {
             EntityCache::<Address, CacheEntity>::with_worker(storage.clone(), worker, 64 * 1024);
 
         let key = Address::from(9u64);
-        cache.put(key, cache_entity(9, "nine"));
+        cache.insert(key, cache_entity(9, "nine"));
         cache.flush().unwrap();
         assert!(storage.get::<Address, CacheEntity>(&key).unwrap().is_some());
 
@@ -992,7 +982,7 @@ mod test {
                 worker,
                 64 * 1024,
             );
-            cache.put(key, cache_entity(5, "five"));
+            cache.insert(key, cache_entity(5, "five"));
         }
 
         let stored = storage.get::<Address, CacheEntity>(&key).unwrap();
@@ -1005,12 +995,12 @@ mod test {
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
         let cache = EntityCache::<Address, CacheEntity>::with_worker(storage, worker, 64 * 1024);
 
-        cache.put(Address::from(1u64), cache_entity(1, "one"));
+        cache.insert(Address::from(1u64), cache_entity(1, "one"));
 
         assert!(cache.flush().is_err());
         assert!(
             cache
-                .try_put(Address::from(2u64), cache_entity(2, "two"))
+                .try_insert(Address::from(2u64), cache_entity(2, "two"))
                 .is_err()
         );
     }

@@ -433,7 +433,7 @@ impl SegmentStorage {
     fn contains(&self, address: &Bound<'_, PyAny>, space: usize) -> PyResult<bool> {
         Ok(self
             .inner
-            .contains_segment(address_from_any(address, space)?))
+            .contains_mapping(address_from_any(address, space)?))
     }
 }
 

@@ -2,19 +2,19 @@ use crate::ir::symbol::{Symbol, SymbolSet};
 use crate::platform::OperatingSystem;
 use crate::registry::{self, Registration};
 
-type NonReturningExternsFn = fn() -> &'static SymbolSet;
+type NonReturningExternSetFn = fn() -> &'static SymbolSet;
 
-pub struct NonReturningExterns {
+pub struct NonReturningExternSet {
     name: &'static str,
     operating_systems: &'static [OperatingSystem],
-    externs: NonReturningExternsFn,
+    externs: NonReturningExternSetFn,
 }
 
-impl NonReturningExterns {
+impl NonReturningExternSet {
     pub const fn new(
         name: &'static str,
         operating_systems: &'static [OperatingSystem],
-        externs: NonReturningExternsFn,
+        externs: NonReturningExternSetFn,
     ) -> Self {
         Self {
             name,
@@ -36,16 +36,16 @@ impl NonReturningExterns {
     }
 }
 
-impl Registration for NonReturningExterns {
+impl Registration for NonReturningExternSet {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-registry::collect!(NonReturningExterns);
+registry::collect!(NonReturningExternSet);
 
 pub fn is_non_returning_extern(os: OperatingSystem, symbol: Symbol) -> bool {
-    registry::iter::<NonReturningExterns>()
+    registry::iter::<NonReturningExternSet>()
         .filter(|registration| registration.covers(os))
         .any(|registration| registration.externs().contains(&symbol))
 }

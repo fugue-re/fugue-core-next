@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use fallible_iterator::FallibleIterator;
-use fugue_core::analysis::AnalysisPass;
 use fugue_core::attributes;
 use fugue_core::loader::{Loadable, LoadableAnalysers, LoadableFromFile};
 use fugue_core::project::Project;

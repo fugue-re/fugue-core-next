@@ -42,7 +42,7 @@ impl PCodeToECode {
             source.metadata().input_revision(),
         );
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let mut lifting = ECodeLifting::new(
+        let mut construction = ECodeConstruction::new(
             source,
             arch,
             &mut builder,
@@ -50,7 +50,7 @@ impl PCodeToECode {
             &mut self.operands,
         )?;
 
-        let offsets = lifting.lift(cancellation)?;
+        let offsets = construction.lift(cancellation)?;
         let compiler = platform.compiler_spec_id();
         let preserved_slices = arch
             .language()
@@ -60,11 +60,11 @@ impl PCodeToECode {
             .iter()
             .map(|register| {
                 let location = PCodeLocation::from_varnode(arch.language(), register);
-                lifting.register_bank.slice(&location, arch.endian())
+                construction.register_bank.slice(&location, arch.endian())
             })
             .collect::<Result<Vec<_>, _>>()?;
         let call_preserved_registers = RegisterBank::preserved_roots(preserved_slices);
-        drop(lifting);
+        drop(construction);
 
         builder.set_call_preserved_registers(call_preserved_registers);
         builder.set_graph(self.remap_graph(source, &offsets)?);
@@ -357,7 +357,7 @@ enum LocationRole {
     Value,
 }
 
-struct ECodeLifting<'a, 'b> {
+struct ECodeConstruction<'a, 'b> {
     arch: &'a Arch,
     source: &'a PCodeIr,
     builder: &'b mut ECodeBuilder,
@@ -371,7 +371,7 @@ struct ECodeLifting<'a, 'b> {
     operands: &'b mut Vec<IlExprId>,
 }
 
-impl<'a, 'b> ECodeLifting<'a, 'b> {
+impl<'a, 'b> ECodeConstruction<'a, 'b> {
     fn new(
         source: &'a PCodeIr,
         arch: &'a Arch,
@@ -462,7 +462,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             )
         };
         self.builder.push_statement(
-            ECodeStmt::new(opcode, operands, None, None, operation.effect_space())
+            ECodeStmt::new(opcode, operands, None, None, operation.address_space())
                 .with_immediate(u64::from(operation.immediate())),
         )?;
 
@@ -471,7 +471,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
 
     fn is_trap_intrinsic(&mut self, operation: &PCodeOp) -> bool {
         self.intrinsic_args.clear();
-        for operand in self.source.operation_operands(operation) {
+        for operand in self.source.operation_operands_for(operation) {
             let location = self.location(*operand);
             self.intrinsic_args.push(Varnode::new(
                 location.lifter_space().value(),
@@ -496,8 +496,8 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         };
         let output_width = self.location(output).bits();
         if opcode == PCodeOpcode::Subpiece {
-            let source = self.source.operation_operands(operation)[0];
-            let offset = self.source.operation_operands(operation)[1];
+            let source = self.source.operation_operands_for(operation)[0];
+            let offset = self.source.operation_operands_for(operation)[1];
             let source = self.lift_location(source, LocationRole::Value)?;
             let location = *self.location(offset);
             if !location.is_constant() {
@@ -532,7 +532,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             output_width,
             operands,
             u64::from(operation.immediate()),
-            operation.effect_space(),
+            operation.address_space(),
         );
         let expression = self.builder.push_expression(expression)?;
 
@@ -625,7 +625,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             operands,
             None,
             None,
-            operation.effect_space(),
+            operation.address_space(),
         ))?;
 
         Ok(())
@@ -665,7 +665,7 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
             operands,
             None,
             None,
-            operation.effect_space(),
+            operation.address_space(),
         ))?;
 
         Ok(())
@@ -684,8 +684,8 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
 
     fn lift_direct_flow_operands(&mut self, operation: &PCodeOp) -> Result<IlIndexRange, IlError> {
         self.operands.clear();
-        for operand_index in 1..self.source.operation_operands(operation).len() {
-            let operand = self.source.operation_operands(operation)[operand_index];
+        for operand_index in 1..self.source.operation_operands_for(operation).len() {
+            let operand = self.source.operation_operands_for(operation)[operand_index];
             let operand = self.lift_location(operand, LocationRole::Value)?;
             self.operands.push(operand);
         }
@@ -700,8 +700,8 @@ impl<'a, 'b> ECodeLifting<'a, 'b> {
         address_operand: Option<usize>,
     ) -> Result<(), IlError> {
         self.operands.clear();
-        for operand_index in 0..self.source.operation_operands(operation).len() {
-            let operand = self.source.operation_operands(operation)[operand_index];
+        for operand_index in 0..self.source.operation_operands_for(operation).len() {
+            let operand = self.source.operation_operands_for(operation)[operand_index];
             let role = if address_operand == Some(operand_index) {
                 LocationRole::Address
             } else {
@@ -925,8 +925,8 @@ mod test {
 
     #[test]
     fn empty_pcode_lifts_to_empty_ecode() {
-        let source_header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11);
-        let source = PCodeBuilder::new(language(), source_header, IlGraph::default())
+        let pcode_metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11);
+        let source = PCodeBuilder::new(language(), pcode_metadata, IlGraph::default())
             .build(&CancellationToken::default())
             .unwrap();
         let cancellation = CancellationToken::default();
@@ -942,7 +942,7 @@ mod test {
 
     #[test]
     fn empty_source_span_does_not_desynchronise_instruction_cache_clears() {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let constant = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1039,7 +1039,7 @@ mod test {
 
     #[test]
     fn large_subpiece_offset_is_not_truncated_to_operand_width() {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1093,7 +1093,7 @@ mod test {
         let al = language.register_by_name("AL").expect("AL should exist");
         let ah = language.register_by_name("AH").expect("AH should exist");
         let ax = language.register_by_name("AX").expect("AX should exist");
-        let mut builder = PCodeBuilder::new(language, pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
         let constant = builder
             .push_location(PCodeLocation::from_varnode(
                 language,
@@ -1192,7 +1192,7 @@ mod test {
         let language = language();
         let cf = language.register_by_name("CF").expect("CF should exist");
         let wide_register = Varnode::new(cf.space(), cf.offset(), cf.size + 1);
-        let mut builder = PCodeBuilder::new(language, pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
         let flag = builder
             .push_location(PCodeLocation::from_varnode(language, &cf))
             .unwrap();
@@ -1287,7 +1287,7 @@ mod test {
     #[test]
     fn unresolved_unique_input_lifts_to_undefined() {
         let language = language();
-        let mut builder = PCodeBuilder::new(language, pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::from_varnode(
                 language,
@@ -1324,7 +1324,7 @@ mod test {
         let trap = language
             .user_op_by_name("invalidInstructionException")
             .expect("x86 trap intrinsic should exist");
-        let mut builder = PCodeBuilder::new(language, pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
         builder.push_operation(PCodeOp::new(
             PCodeOpcode::UserOp,
             None,
@@ -1362,7 +1362,7 @@ mod test {
 
     #[test]
     fn user_op_result_preserves_operands() {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1432,7 +1432,7 @@ mod test {
 
     #[test]
     fn constant_cache_distinguishes_address_and_value_roles() {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let constant = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1487,7 +1487,7 @@ mod test {
 
     #[test]
     fn indirect_branch_preserves_recovered_successors() {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let target = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(1),
@@ -1558,12 +1558,12 @@ mod test {
         );
     }
 
-    fn pcode_header() -> IlMetadata {
+    fn pcode_metadata() -> IlMetadata {
         IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11)
     }
 
     fn copy_source() -> PCodeIr {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1594,7 +1594,7 @@ mod test {
     }
 
     fn unique_copy_source() -> PCodeIr {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1625,7 +1625,7 @@ mod test {
     }
 
     fn store_source() -> PCodeIr {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let offset = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1656,7 +1656,7 @@ mod test {
     }
 
     fn branch_source(target: Address) -> PCodeIr {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let target_location = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),
@@ -1680,7 +1680,7 @@ mod test {
     }
 
     fn return_source(space: AddressSpaceId) -> PCodeIr {
-        let mut builder = PCodeBuilder::new(language(), pcode_header(), IlGraph::default());
+        let mut builder = PCodeBuilder::new(language(), pcode_metadata(), IlGraph::default());
         let target = builder
             .push_location(PCodeLocation::new(
                 LifterSpaceHandle::new(0),

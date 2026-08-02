@@ -88,7 +88,7 @@ impl CodeBlockStructurer {
             tracing::debug!(
                 "number of blocks ({num_blocks}) exceeds limit ({max_blocks}); skipping",
             );
-            return Err(FunctionRecoveryError::invalid_function_size(
+            return Err(FunctionRecoveryError::invalid_function_block_count(
                 function.entry(),
                 num_blocks,
                 max_blocks,
@@ -106,7 +106,7 @@ impl CodeBlockStructurer {
             let mut next_cut_index = cut_index + 1;
             let mut next_cut = self.next_cut_point(next_cut_index, num_insns);
             let mut expected = address;
-            let mut length = 0usize;
+            let mut size = 0usize;
             let mut insns = Vec::with_capacity(next_cut.saturating_sub(start).min(max_insns));
 
             tracing::trace!("structuring block at {address}; start: {start}");
@@ -119,7 +119,7 @@ impl CodeBlockStructurer {
                     tracing::debug!(
                         "block at {address} exceeds maximum instruction count ({max_insns})",
                     );
-                    return Err(FunctionRecoveryError::invalid_block_size(
+                    return Err(FunctionRecoveryError::invalid_block_insn_count(
                         address,
                         insns.len(),
                         max_insns,
@@ -136,7 +136,7 @@ impl CodeBlockStructurer {
                         next_cut_index += 1;
                         next_cut = self.next_cut_point(next_cut_index, num_insns);
                     } else {
-                        self.push_block(function, address, length, insns, block_context);
+                        self.push_block(function, address, size, insns, block_context);
                         continue 'cuts;
                     }
                 }
@@ -149,16 +149,16 @@ impl CodeBlockStructurer {
                     );
                     insns.push(function.insn_id(current).expect("instruction must exist"));
                     expected = insn.next_address();
-                    length = length.checked_add(insn.len()).ok_or_else(|| {
-                        FunctionRecoveryError::invalid_block_length(address, usize::MAX)
+                    size = size.checked_add(insn.size()).ok_or_else(|| {
+                        FunctionRecoveryError::invalid_block_size(address, usize::MAX)
                     })?;
-                    if length > u16::MAX as usize {
-                        return Err(FunctionRecoveryError::invalid_block_length(address, length));
+                    if size > u16::MAX as usize {
+                        return Err(FunctionRecoveryError::invalid_block_size(address, size));
                     }
                 }
             }
 
-            self.push_block(function, address, length, insns, block_context);
+            self.push_block(function, address, size, insns, block_context);
         }
 
         self.connect_local_targets(function, local_targets);
@@ -175,7 +175,7 @@ impl CodeBlockStructurer {
         &mut self,
         function: &mut IncompleteFunction,
         address: Address,
-        length: usize,
+        size: usize,
         insns: Vec<InsnId>,
         context: ContextSet,
     ) {
@@ -185,8 +185,8 @@ impl CodeBlockStructurer {
             .expect("instruction must exist")
             .address();
         let block = function.push_block(
-            IncompleteCodeBlock::try_new(address, length, insns, context)
-                .expect("block length must be validated"),
+            IncompleteCodeBlock::try_new(address, size, insns, context)
+                .expect("block size must be validated"),
         );
 
         let previous_start = self.block_starts.insert(address, block);
