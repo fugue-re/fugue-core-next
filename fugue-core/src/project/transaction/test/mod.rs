@@ -254,6 +254,7 @@ fn single_block_graph() -> IlGraph {
             IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
         )],
         Vec::new(),
+        Vec::new(),
     )
 }
 

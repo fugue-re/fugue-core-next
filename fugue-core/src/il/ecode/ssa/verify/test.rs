@@ -4,8 +4,8 @@ use super::VerifyError;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::verify::StructureError;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlMetadata,
-    IlOpId, IlValueId,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
+    IlMetadata, IlOpId, IlValueId,
 };
 use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
@@ -397,6 +397,7 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
             ),
         ],
         vec![left, right],
+        vec![IlEdgeKinds::UNCONDITIONAL; 2],
     );
     let ir = SsaFixture::default()
         .with_values(
@@ -452,6 +453,7 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
             ),
         ],
         vec![successor],
+        vec![IlEdgeKinds::UNCONDITIONAL; 1],
     );
     let ir = SsaFixture::default()
         .with_values(
@@ -493,6 +495,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
             ),
         ],
         vec![left, right],
+        vec![IlEdgeKinds::UNCONDITIONAL; 2],
     );
     let ir = SsaFixture::default()
         .with_values(
@@ -539,6 +542,7 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
                 IlBlockProperties::empty(),
             ),
         ],
+        Vec::new(),
         Vec::new(),
     );
     let ir = SsaFixture::default()

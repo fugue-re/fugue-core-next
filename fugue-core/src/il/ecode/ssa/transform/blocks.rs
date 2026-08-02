@@ -26,6 +26,7 @@ impl ECodeSsaConstruction<'_, '_> {
         let graph = IlGraph::new(
             self.source.graph().blocks().to_vec(),
             self.source.graph().successors().to_vec(),
+            self.source.graph().successor_kinds().to_vec(),
         );
         let graph = if self.source.graph().block_sources().is_empty() {
             graph
@@ -78,6 +79,7 @@ impl ECodeSsaConstruction<'_, '_> {
                 .collect::<Option<Vec<_>>>()
                 .expect("every block is constructed before the graph is replaced"),
             source_graph.successors().to_vec(),
+            source_graph.successor_kinds().to_vec(),
         );
         let graph = if source_graph.block_sources().is_empty() {
             graph

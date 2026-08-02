@@ -186,7 +186,11 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
                 )
             })
             .collect::<Vec<_>>();
-        let graph = IlGraph::new(blocks, ir.graph().successors().to_vec());
+        let graph = IlGraph::new(
+            blocks,
+            ir.graph().successors().to_vec(),
+            ir.graph().successor_kinds().to_vec(),
+        );
         let graph = if ir.graph().block_sources().is_empty() {
             graph
         } else {

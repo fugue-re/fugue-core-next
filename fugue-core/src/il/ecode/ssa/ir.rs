@@ -238,9 +238,8 @@ impl ECodeSsaIr {
         if extract.opcode() != ECodeSsaOpcode::Extract {
             return None;
         }
-        let operands = self.operation_operands_for(extract);
-        let (&source, &offset) = (operands.first()?, operands.get(1)?);
-        let offset = self.constant_value(offset)?.to_u64()?;
+        let &source = self.operation_operands_for(extract).first()?;
+        let offset = extract.immediate();
 
         if let Some(insert) = self.defining_operation(source)
             && insert.opcode() == ECodeSsaOpcode::Insert

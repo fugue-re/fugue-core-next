@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use crate::il::common::verify::StructureError;
 use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexRange};
-use crate::ir::Address;
+use crate::ir::{Address, FlowKind};
 use crate::types::EstimateSize;
 use crate::types::common::archived_bitflags;
 
@@ -15,6 +15,46 @@ bitflags::bitflags! {
 }
 
 archived_bitflags!(IlBlockProperties, ArchivedIlBlockProperties, u16);
+
+bitflags::bitflags! {
+    #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+    pub struct IlEdgeKinds: u8 {
+        const COMPUTED      = 0x01;
+        const FALL_THROUGH  = 0x02;
+        const TAKEN         = 0x04;
+        const UNCONDITIONAL = 0x08;
+    }
+}
+
+archived_bitflags!(IlEdgeKinds, ArchivedIlEdgeKinds, u8);
+
+impl IlEdgeKinds {
+    pub const fn from_flow(kind: FlowKind) -> Option<Self> {
+        match kind {
+            FlowKind::Branch | FlowKind::TailCallBranch => Some(Self::UNCONDITIONAL),
+            FlowKind::CBranch => Some(Self::TAKEN),
+            FlowKind::Fall => Some(Self::FALL_THROUGH),
+            FlowKind::IBranch | FlowKind::SwitchBranch => Some(Self::COMPUTED),
+            FlowKind::Call
+            | FlowKind::ICall
+            | FlowKind::Return
+            | FlowKind::ServiceCall
+            | FlowKind::SwitchCall => None,
+        }
+    }
+
+    pub const fn is_computed(self) -> bool {
+        self.contains(Self::COMPUTED)
+    }
+
+    pub const fn is_fall_through(self) -> bool {
+        self.contains(Self::FALL_THROUGH)
+    }
+
+    pub const fn is_taken(self) -> bool {
+        self.contains(Self::TAKEN)
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -64,6 +104,7 @@ impl IlBlock {
 pub struct IlGraph {
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
+    successor_kinds: Vec<IlEdgeKinds>,
     block_sources: Vec<Address>,
 }
 
@@ -77,6 +118,11 @@ impl EstimateSize for IlGraph {
                     .saturating_mul(size_of::<IlBlockId>()),
             )
             .saturating_add(
+                self.successor_kinds
+                    .capacity()
+                    .saturating_mul(size_of::<IlEdgeKinds>()),
+            )
+            .saturating_add(
                 self.block_sources
                     .capacity()
                     .saturating_mul(size_of::<Address>()),
@@ -85,7 +131,11 @@ impl EstimateSize for IlGraph {
 }
 
 impl IlGraph {
-    pub(crate) fn new(blocks: Vec<IlBlock>, successors: Vec<IlBlockId>) -> Self {
+    pub(crate) fn new(
+        blocks: Vec<IlBlock>,
+        successors: Vec<IlBlockId>,
+        successor_kinds: Vec<IlEdgeKinds>,
+    ) -> Self {
         for block in &blocks {
             debug_assert!(
                 block.successors().end() <= successors.len(),
@@ -100,9 +150,16 @@ impl IlGraph {
             );
         }
 
+        debug_assert_eq!(
+            successors.len(),
+            successor_kinds.len(),
+            "each successor edge carries its own kind set"
+        );
+
         Self {
             blocks,
             successors,
+            successor_kinds,
             block_sources: Vec::new(),
         }
     }
@@ -130,6 +187,17 @@ impl IlGraph {
             return &[];
         };
         block.successors().slice(&self.successors)
+    }
+
+    pub fn successor_kinds(&self) -> &[IlEdgeKinds] {
+        &self.successor_kinds
+    }
+
+    pub fn successor_kinds_for(&self, block: IlBlockId) -> &[IlEdgeKinds] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successor_kinds)
     }
 
     pub fn block_sources(&self) -> &[Address] {
@@ -169,6 +237,7 @@ impl IlGraph {
     pub fn shrink_to_fit(&mut self) {
         self.blocks.shrink_to_fit();
         self.successors.shrink_to_fit();
+        self.successor_kinds.shrink_to_fit();
         self.block_sources.shrink_to_fit();
     }
 
@@ -203,6 +272,13 @@ impl IlGraph {
                 });
             }
             previous_operation_end = operations.end();
+        }
+
+        if self.successor_kinds.len() != self.successors.len() {
+            return Err(StructureError::EdgeKindCount {
+                expected: self.successors.len(),
+                found: self.successor_kinds.len(),
+            });
         }
 
         if !self.block_sources.is_empty() && self.block_sources.len() != self.blocks.len() {
@@ -303,6 +379,7 @@ mod test {
                 ),
             ],
             Vec::new(),
+            Vec::new(),
         );
 
         assert_eq!(graph.entry_block(), IlBlockId::try_from_index(1).ok());
@@ -339,6 +416,49 @@ mod test {
     }
 
     #[test]
+    fn interprocedural_flow_has_no_edge_kind() {
+        assert_eq!(IlEdgeKinds::from_flow(FlowKind::Call), None);
+        assert_eq!(IlEdgeKinds::from_flow(FlowKind::Return), None);
+        assert_eq!(
+            IlEdgeKinds::from_flow(FlowKind::CBranch),
+            Some(IlEdgeKinds::TAKEN)
+        );
+        assert_eq!(
+            IlEdgeKinds::from_flow(FlowKind::Fall),
+            Some(IlEdgeKinds::FALL_THROUGH)
+        );
+    }
+
+    #[test]
+    fn edge_kinds_combine_for_a_collapsed_conditional_edge() {
+        let collapsed = IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH;
+
+        assert!(collapsed.is_taken());
+        assert!(collapsed.is_fall_through());
+        assert!(!collapsed.is_computed());
+    }
+
+    #[test]
+    fn structural_verifier_rejects_edge_kind_count_mismatch() {
+        let block = IlBlockId::try_from_index(0).unwrap();
+        let graph = IlGraph {
+            blocks: vec![IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::new(0, 1).unwrap(),
+                IlBlockProperties::empty(),
+            )],
+            successors: vec![block],
+            successor_kinds: Vec::new(),
+            block_sources: Vec::new(),
+        };
+
+        assert!(matches!(
+            graph.verify(),
+            Err(StructureError::EdgeKindCount { .. })
+        ));
+    }
+
+    #[test]
     fn structural_verifier_rejects_duplicate_successor() {
         let block = IlBlockId::try_from_index(0).unwrap();
         let graph = IlGraph::new(
@@ -348,6 +468,7 @@ mod test {
                 IlBlockProperties::empty(),
             )],
             vec![block, block],
+            vec![IlEdgeKinds::UNCONDITIONAL; 2],
         );
 
         assert!(matches!(
@@ -364,6 +485,7 @@ mod test {
                 IlIndexRange::EMPTY,
                 IlBlockProperties::empty(),
             )],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -382,6 +504,7 @@ mod test {
                 IlBlockProperties::empty(),
             )],
             successors: vec![IlBlockId::try_from_index(1).unwrap()],
+            successor_kinds: vec![IlEdgeKinds::UNCONDITIONAL],
             block_sources: Vec::new(),
         };
 
@@ -406,6 +529,7 @@ mod test {
                     IlBlockProperties::empty(),
                 ),
             ],
+            Vec::new(),
             Vec::new(),
         );
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlParentSpan, IlSourceSpan,
+    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlParentSpan, IlSourceSpan,
 };
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::il::ecode::{
@@ -610,7 +610,8 @@ fn deep_dominance_chain_constructs_iteratively() {
         ));
     }
 
-    let graph = IlGraph::new(blocks, successors);
+    let successor_kinds = vec![IlEdgeKinds::UNCONDITIONAL; successors.len()];
+    let graph = IlGraph::new(blocks, successors, successor_kinds);
     let mut builder = ECodeBuilder::new(source_metadata, graph);
 
     for index in 0..block_count {
@@ -681,7 +682,8 @@ fn merge_block_register_read_becomes_block_argument() {
                 IlBlockProperties::EXIT,
             ),
         ],
-        successors,
+        successors.clone(),
+        vec![IlEdgeKinds::UNCONDITIONAL; successors.len()],
     );
     let mut builder = ECodeBuilder::new(source_metadata, graph);
     let left = builder
@@ -803,7 +805,8 @@ fn merge_block_load_uses_memory_block_argument() {
                 IlBlockProperties::EXIT,
             ),
         ],
-        successors,
+        successors.clone(),
+        vec![IlEdgeKinds::UNCONDITIONAL; successors.len()],
     );
     let mut builder = ECodeBuilder::new(source_metadata, graph);
     let space = AddressSpaceId::new(3);
@@ -929,6 +932,7 @@ fn loop_carried_register_uses_header_block_argument() {
             ),
         ],
         vec![loop_header, loop_body, loop_header, exit],
+        vec![IlEdgeKinds::UNCONDITIONAL; 4],
     );
     let mut builder = ECodeBuilder::new(source_metadata, graph);
     let read = builder

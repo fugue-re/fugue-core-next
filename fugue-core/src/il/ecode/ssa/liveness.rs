@@ -176,7 +176,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlArtefact, IlBlock, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata,
+        IlArtefact, IlBlock, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
     };
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
@@ -202,6 +202,7 @@ mod test {
                 ),
             ],
             vec![block1],
+            vec![IlEdgeKinds::UNCONDITIONAL; 1],
         );
         let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let (value, results) = builder.push_result_value(64).unwrap();
@@ -246,6 +247,7 @@ mod test {
                 IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
             )],
             Vec::new(),
+            Vec::new(),
         );
         let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let (value, results) = builder.push_result_value(32).unwrap();
@@ -288,6 +290,7 @@ mod test {
                 IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
             )],
             Vec::new(),
+            Vec::new(),
         );
         let mut builder = ECodeSsaBuilder::new(metadata, graph);
         let argument = builder.push_block_argument_value(block, 32).unwrap();
@@ -328,6 +331,7 @@ mod test {
                 ),
             ],
             vec![block1],
+            vec![IlEdgeKinds::UNCONDITIONAL; 1],
         );
         let mut builder = ECodeSsaBuilder::new(metadata, graph);
 

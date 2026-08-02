@@ -126,7 +126,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata,
+        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
     };
     use crate::il::ecode::ssa::{
         ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
@@ -258,6 +258,7 @@ mod test {
                 ),
             ],
             vec![block1, block1, block2],
+            vec![IlEdgeKinds::UNCONDITIONAL; 3],
         ));
 
         let (seed, seed_results) = builder.push_result_value(32).unwrap();

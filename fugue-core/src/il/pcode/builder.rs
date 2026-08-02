@@ -749,6 +749,7 @@ mod test {
                 IlBlockProperties::empty(),
             )],
             Vec::new(),
+            Vec::new(),
         );
         let ir = PCodeIr::new(
             metadata(),

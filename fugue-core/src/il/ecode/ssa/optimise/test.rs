@@ -3,7 +3,8 @@ use fugue_bv::BitVec;
 use super::{ECodeSsaCompaction, ECodeSsaConstantFolding};
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange,
+    IlMetadata,
 };
 use crate::il::ecode::ssa::{
     ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind,
@@ -83,6 +84,7 @@ fn fold_constants_propagates_through_block_argument() {
             ),
         ],
         vec![block1, block2, block3, block3],
+        vec![IlEdgeKinds::UNCONDITIONAL; 4],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -192,6 +194,7 @@ fn fold_constants_leaves_disagreeing_block_argument_unfolded() {
             ),
         ],
         vec![block1, block2, block3, block3],
+        vec![IlEdgeKinds::UNCONDITIONAL; 4],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -282,6 +285,7 @@ fn fold_constants_leaves_sourceless_block_argument_unfolded() {
             IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
         )],
         Vec::new(),
+        Vec::new(),
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -343,6 +347,7 @@ fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
             ),
         ],
         vec![block1, block1, block2],
+        vec![IlEdgeKinds::UNCONDITIONAL; 3],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -508,6 +513,7 @@ fn compact_preserves_sources_for_operation_empty_blocks() {
             ),
         ],
         vec![exit],
+        vec![IlEdgeKinds::UNCONDITIONAL; 1],
     )
     .with_block_sources(vec![entry_source, exit_source]);
     let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
@@ -567,6 +573,7 @@ fn compact_drops_dead_loop_phi_and_sources() {
             ),
         ],
         vec![block1, block1, block2],
+        vec![IlEdgeKinds::UNCONDITIONAL; 3],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -665,6 +672,7 @@ fn compact_preserves_live_phi_and_remaps_edge_arguments() {
             ),
         ],
         vec![block1, block2, block3, block3],
+        vec![IlEdgeKinds::UNCONDITIONAL; 4],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
@@ -777,6 +785,7 @@ fn compact_drops_one_of_two_phis_by_position() {
             ),
         ],
         vec![block1, block2, block3, block3],
+        vec![IlEdgeKinds::UNCONDITIONAL; 4],
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 

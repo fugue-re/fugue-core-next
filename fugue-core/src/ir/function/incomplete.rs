@@ -592,6 +592,20 @@ impl IncompleteFunction {
             })
     }
 
+    pub fn block_flow_targets<'a>(
+        &'a self,
+        block: &'a IncompleteCodeBlock,
+    ) -> impl Iterator<Item = FlowTarget> + 'a {
+        let start = block.address();
+        let end = start + block.size();
+        block
+            .insns()
+            .iter()
+            .filter_map(|id| self.insn(*id))
+            .flat_map(Insn::flow_targets)
+            .filter(move |target| !target.kind().is_fall_through() || target.to() == end)
+    }
+
     pub fn insn(&self, id: InsnId) -> Option<&Insn> {
         (!id.is_invalid() && id.generation() == self.insn_generation)
             .then(|| id.index())

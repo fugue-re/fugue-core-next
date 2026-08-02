@@ -3,16 +3,16 @@ use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlLevel, IlMetadata,
-    IlOpId, IlSourceSpan,
+    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange, IlLevel,
+    IlMetadata, IlOpId, IlSourceSpan,
 };
 use crate::il::pcode::{
     AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
     PCodeBuilder, PCodeError, PCodeIr, PCodeOpcode,
 };
 use crate::ir::{
-    Address, CodeBlockId, CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction, Insn,
-    InsnTarget, Location,
+    Address, CodeBlockId, CodeBlockTable, FlowTarget, FunctionId, FunctionTable,
+    IncompleteFunction, Insn, InsnTarget, Location,
 };
 use crate::lifter::{ContextSet, Language, Lifter, RawPCodeOp};
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
@@ -22,6 +22,36 @@ use crate::types::common::Revision;
 pub struct PCodeCanonicaliser {
     code_block_ids: Vec<CodeBlockId>,
     block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
+    block_addresses: Vec<Address>,
+}
+
+impl PCodeCanonicaliser {
+    fn edge_kinds_into(
+        &self,
+        flows: impl Iterator<Item = FlowTarget>,
+        successors: &[IlBlockId],
+        kinds: &mut Vec<IlEdgeKinds>,
+    ) {
+        let mut by_target = SmallVec::<[(Address, IlEdgeKinds); 4]>::new();
+        for flow in flows {
+            let Some(kind) = IlEdgeKinds::from_flow(flow.kind()) else {
+                continue;
+            };
+            match by_target.iter_mut().find(|(to, _)| *to == flow.to()) {
+                Some((_, kinds)) => *kinds |= kind,
+                None => by_target.push((flow.to(), kind)),
+            }
+        }
+
+        kinds.clear();
+        kinds.extend(successors.iter().map(|successor| {
+            let target = self.block_addresses.get(successor.index()).copied();
+            by_target
+                .iter()
+                .find(|(to, _)| Some(*to) == target)
+                .map_or(IlEdgeKinds::UNCONDITIONAL, |(_, kinds)| *kinds)
+        }));
+    }
 }
 
 pub struct PCodeFunctionInput<'a> {
@@ -64,6 +94,7 @@ struct PCodeConstruction<'a> {
     lifter: Lifter,
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
+    successor_kinds: Vec<IlEdgeKinds>,
     block_sources: Vec<Address>,
     source_spans: Vec<IlSourceSpan>,
     annotations: Vec<AddressAnnotation>,
@@ -78,6 +109,7 @@ impl PCodeCanonicaliser {
 
         self.code_block_ids.clear();
         self.block_id_by_code_block.clear();
+        self.block_addresses.clear();
 
         for (_, code_block) in function_body.blocks() {
             let block_id = IlBlockId::try_from_index(self.code_block_ids.len())?;
@@ -85,9 +117,17 @@ impl PCodeCanonicaliser {
             self.code_block_ids.push(code_block);
         }
 
+        for &code_block_id in &self.code_block_ids {
+            let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
+                return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
+            };
+            self.block_addresses.push(code_block.address());
+        }
+
         let metadata = IlMetadata::new(input.function, PCODE_SCHEMA_VERSION, input.input_revision);
         let mut construction = PCodeConstruction::new(input.language, metadata, input.segments);
         let mut successors = Vec::new();
+        let mut successor_kinds = Vec::new();
 
         for index in 0..self.code_block_ids.len() {
             input.cancellation.check()?;
@@ -103,16 +143,19 @@ impl PCodeCanonicaliser {
                     .successors(code_block_id)
                     .filter_map(|successor| self.block_id_by_code_block.get(&successor).copied()),
             );
+            self.edge_kinds_into(code_block.flow_targets(), &successors, &mut successor_kinds);
             construction.append_block(
                 code_block.address(),
                 code_block.context(),
                 code_block.size(),
                 &successors,
+                &successor_kinds,
                 code_block.address() == function_body.entry(),
             )?;
         }
 
         self.code_block_ids.clear();
+        self.block_addresses.clear();
 
         construction.build(input.cancellation)
     }
@@ -128,6 +171,11 @@ impl PCodeCanonicaliser {
         let metadata = IlMetadata::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
         let mut construction = PCodeConstruction::new(language, metadata, segments);
         let mut successors = Vec::new();
+        let mut successor_kinds = Vec::new();
+
+        self.block_addresses.clear();
+        self.block_addresses
+            .extend(function.blocks().iter().map(|block| block.address()));
 
         for block in function.blocks() {
             cancellation.check()?;
@@ -136,14 +184,22 @@ impl PCodeCanonicaliser {
             for successor in block.successors().iter() {
                 successors.push(IlBlockId::try_from_index(successor.index())?);
             }
+            self.edge_kinds_into(
+                function.block_flow_targets(block),
+                &successors,
+                &mut successor_kinds,
+            );
             construction.append_block(
                 block.address(),
                 block.context(),
                 block.size(),
                 &successors,
+                &successor_kinds,
                 block.address() == function.entry(),
             )?;
         }
+
+        self.block_addresses.clear();
 
         construction.build(cancellation)
     }
@@ -163,6 +219,7 @@ impl<'a> PCodeConstruction<'a> {
             lifter: Lifter::new(language),
             blocks: Vec::new(),
             successors: Vec::new(),
+            successor_kinds: Vec::new(),
             block_sources: Vec::new(),
             source_spans: Vec::new(),
             annotations: Vec::new(),
@@ -176,8 +233,15 @@ impl<'a> PCodeConstruction<'a> {
         context: &ContextSet,
         size: usize,
         successors: &[IlBlockId],
+        successor_kinds: &[IlEdgeKinds],
         is_entry: bool,
     ) -> Result<(), PCodeError> {
+        debug_assert_eq!(
+            successors.len(),
+            successor_kinds.len(),
+            "each successor edge carries exactly one kind"
+        );
+
         let operation_start = self.builder.operation_count();
         context.apply(source, self.lifter.context_mut());
         let view = self
@@ -193,6 +257,7 @@ impl<'a> PCodeConstruction<'a> {
 
         let successor_start = self.successors.len();
         self.successors.extend_from_slice(successors);
+        self.successor_kinds.extend_from_slice(successor_kinds);
 
         let mut properties = IlBlockProperties::empty();
         if is_entry {
@@ -344,7 +409,8 @@ impl<'a> PCodeConstruction<'a> {
 
     fn build(mut self, cancellation: &CancellationToken) -> Result<PCodeIr, PCodeError> {
         self.builder.set_graph(
-            IlGraph::new(self.blocks, self.successors).with_block_sources(self.block_sources),
+            IlGraph::new(self.blocks, self.successors, self.successor_kinds)
+                .with_block_sources(self.block_sources),
         );
         self.builder.set_source_spans(self.source_spans);
 

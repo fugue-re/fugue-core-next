@@ -161,7 +161,8 @@ impl ECodeExprOpcode {
             | Self::FloatIsNan
             | Self::FloatToInt
             | Self::FloatToFloat
-            | Self::IntToFloat => Some(1),
+            | Self::IntToFloat
+            | Self::Extract => Some(1),
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -187,7 +188,6 @@ impl ECodeExprOpcode {
             | Self::Carry
             | Self::SignedCarry
             | Self::SignedBorrow
-            | Self::Extract
             | Self::Insert
             | Self::FloatAdd
             | Self::FloatSub

@@ -54,58 +54,25 @@ fn exact_insert_extract_pair_recovers_only_the_inserted_value() {
         )
         .unwrap();
 
-    let (matching_offset, matching_offset_results) = builder.push_result_value(64).unwrap();
+    let exact_operands = builder.push_value_operands([combined]).unwrap();
+    let (exact, exact_results) = builder.push_result_value(32).unwrap();
     builder
         .push_operation(
-            ECodeSsaOp::new(
-                ECodeSsaOpcode::Constant,
-                matching_offset_results,
-                IlIndexRange::EMPTY,
-                64,
-            )
-            .with_immediate(8),
+            ECodeSsaOp::new(ECodeSsaOpcode::Extract, exact_results, exact_operands, 32)
+                .with_immediate(8),
         )
         .unwrap();
 
-    let exact_operands = builder
-        .push_value_operands([combined, matching_offset])
-        .unwrap();
-    let (exact, exact_results) = builder.push_result_value(32).unwrap();
-    builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Extract,
-            exact_results,
-            exact_operands,
-            32,
-        ))
-        .unwrap();
-
-    let narrow_operands = builder
-        .push_value_operands([combined, matching_offset])
-        .unwrap();
+    let narrow_operands = builder.push_value_operands([combined]).unwrap();
     let (narrow, narrow_results) = builder.push_result_value(8).unwrap();
     builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Extract,
-            narrow_results,
-            narrow_operands,
-            8,
-        ))
+        .push_operation(
+            ECodeSsaOp::new(ECodeSsaOpcode::Extract, narrow_results, narrow_operands, 8)
+                .with_immediate(8),
+        )
         .unwrap();
 
-    let (different_offset, different_offset_results) = builder.push_result_value(64).unwrap();
-    builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Constant,
-            different_offset_results,
-            IlIndexRange::EMPTY,
-            64,
-        ))
-        .unwrap();
-
-    let shifted_operands = builder
-        .push_value_operands([combined, different_offset])
-        .unwrap();
+    let shifted_operands = builder.push_value_operands([combined]).unwrap();
     let (shifted, shifted_results) = builder.push_result_value(32).unwrap();
     builder
         .push_operation(ECodeSsaOp::new(

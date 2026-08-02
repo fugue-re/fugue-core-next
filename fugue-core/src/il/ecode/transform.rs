@@ -4,8 +4,8 @@ use smallvec::SmallVec;
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlError, IlExprId, IlGraph, IlIndexRange, IlLevel,
-    IlMetadata, IlParentSpan, IlSourceSpan,
+    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlExprId, IlGraph, IlIndexRange,
+    IlLevel, IlMetadata, IlParentSpan, IlSourceSpan,
 };
 use crate::il::ecode::{
     ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt,
@@ -18,6 +18,42 @@ use crate::il::pcode::{
 use crate::ir::Address;
 use crate::lifter::Varnode;
 use crate::platform::Platform;
+
+#[derive(Debug, Default)]
+struct BlockSuccessors {
+    targets: SmallVec<[IlBlockId; 2]>,
+    kinds: SmallVec<[IlEdgeKinds; 2]>,
+}
+
+impl BlockSuccessors {
+    fn push(&mut self, target: IlBlockId, kind: IlEdgeKinds) {
+        match self.targets.iter().position(|entry| *entry == target) {
+            Some(index) => self.kinds[index] |= kind,
+            None => {
+                self.targets.push(target);
+                self.kinds.push(kind);
+            }
+        }
+    }
+
+    fn extend_mapped_within(
+        &mut self,
+        additions: &[IlBlockId],
+        addition_kinds: &[IlEdgeKinds],
+        first_blocks: &[IlBlockId],
+        permitted: IlEdgeKinds,
+    ) {
+        for (successor, kind) in additions.iter().zip(addition_kinds) {
+            let narrowed = *kind & permitted;
+            let kind = if narrowed.is_empty() {
+                permitted
+            } else {
+                narrowed
+            };
+            self.push(first_blocks[successor.index()], kind);
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct PCodeToECode {
@@ -129,6 +165,7 @@ impl PCodeToECode {
 
         let mut blocks = Vec::with_capacity(refined_block_count);
         let mut successors = Vec::new();
+        let mut successor_kinds = Vec::new();
         let mut block_sources = (!source.graph().block_sources().is_empty())
             .then(|| Vec::with_capacity(refined_block_count));
 
@@ -141,13 +178,16 @@ impl PCodeToECode {
         {
             let ranges = ranges.slice(&partitions);
             for (range_index, range) in ranges.iter().copied().enumerate() {
-                let mut block_successors = SmallVec::<[IlBlockId; 2]>::new();
+                let mut block_successors = BlockSuccessors::default();
                 let next = (range_index + 1 < ranges.len()).then(|| {
                     IlBlockId::try_from_index(first_blocks[block_index].index() + range_index + 1)
                         .expect("refined block id was validated while partitioning")
                 });
                 let original_successors =
                     source_block.successors().slice(source.graph().successors());
+                let original_kinds = source_block
+                    .successors()
+                    .slice(source.graph().successor_kinds());
 
                 match range.end().checked_sub(1).and_then(|index| {
                     source
@@ -161,6 +201,13 @@ impl PCodeToECode {
                             PCodeOpcode::Branch | PCodeOpcode::CBranch
                         ) =>
                     {
+                        let conditional = operation.opcode() == PCodeOpcode::CBranch;
+                        let permitted = if conditional {
+                            IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH
+                        } else {
+                            IlEdgeKinds::UNCONDITIONAL
+                        };
+
                         if let Some(target) = self
                             .internal_target(
                                 source,
@@ -172,49 +219,57 @@ impl PCodeToECode {
                                 Self::refined_target(first_blocks[block_index], ranges, target)
                             })
                         {
-                            Self::push_successor(&mut block_successors, target);
+                            let taken = if conditional {
+                                IlEdgeKinds::TAKEN
+                            } else {
+                                IlEdgeKinds::UNCONDITIONAL
+                            };
+                            block_successors.push(target, taken);
                         } else {
-                            Self::push_mapped_successors(
-                                &mut block_successors,
+                            block_successors.extend_mapped_within(
                                 original_successors,
+                                original_kinds,
                                 &first_blocks,
+                                permitted,
                             );
                         }
-                        if operation.opcode() == PCodeOpcode::CBranch {
-                            if let Some(next) = next {
-                                Self::push_successor(&mut block_successors, next);
-                            } else {
-                                Self::push_mapped_successors(
-                                    &mut block_successors,
+                        if conditional {
+                            match next {
+                                Some(next) => {
+                                    block_successors.push(next, IlEdgeKinds::FALL_THROUGH)
+                                }
+                                None => block_successors.extend_mapped_within(
                                     original_successors,
+                                    original_kinds,
                                     &first_blocks,
-                                );
+                                    permitted,
+                                ),
                             }
                         }
                     }
                     Some((_, operation)) if operation.opcode() == PCodeOpcode::IBranch => {
-                        Self::push_mapped_successors(
-                            &mut block_successors,
+                        block_successors.extend_mapped_within(
                             original_successors,
+                            original_kinds,
                             &first_blocks,
+                            IlEdgeKinds::COMPUTED,
                         );
                     }
                     Some((_, operation)) if operation.opcode() == PCodeOpcode::Return => {}
-                    _ => {
-                        if let Some(next) = next {
-                            Self::push_successor(&mut block_successors, next);
-                        } else {
-                            Self::push_mapped_successors(
-                                &mut block_successors,
-                                original_successors,
-                                &first_blocks,
-                            );
-                        }
-                    }
+                    _ => match next {
+                        Some(next) => block_successors.push(next, IlEdgeKinds::FALL_THROUGH),
+                        None => block_successors.extend_mapped_within(
+                            original_successors,
+                            original_kinds,
+                            &first_blocks,
+                            IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::UNCONDITIONAL,
+                        ),
+                    },
                 }
 
                 let successor_start = successors.len();
-                successors.extend(block_successors);
+                successors.extend(block_successors.targets);
+                successor_kinds.extend(block_successors.kinds);
                 let mut properties = IlBlockProperties::empty();
                 if source_block.is_entry() && range_index == 0 {
                     properties |= IlBlockProperties::ENTRY;
@@ -244,27 +299,11 @@ impl PCodeToECode {
             }
         }
 
-        let graph = IlGraph::new(blocks, successors);
+        let graph = IlGraph::new(blocks, successors, successor_kinds);
         Ok(match block_sources {
             Some(block_sources) => graph.with_block_sources(block_sources),
             None => graph,
         })
-    }
-
-    fn push_successor(successors: &mut SmallVec<[IlBlockId; 2]>, successor: IlBlockId) {
-        if !successors.contains(&successor) {
-            successors.push(successor);
-        }
-    }
-
-    fn push_mapped_successors(
-        successors: &mut SmallVec<[IlBlockId; 2]>,
-        additions: &[IlBlockId],
-        first_blocks: &[IlBlockId],
-    ) {
-        for successor in additions {
-            Self::push_successor(successors, first_blocks[successor.index()]);
-        }
     }
 
     fn refined_target(
@@ -495,6 +534,7 @@ impl<'a, 'b> ECodeConstruction<'a, 'b> {
             return Err(IlError::missing_component(IlLevel::PCode, "output"));
         };
         let output_width = self.location(output).bits();
+        let mut immediate = u64::from(operation.immediate());
         if opcode == PCodeOpcode::Subpiece {
             let source = self.source.operation_operands_for(operation)[0];
             let offset = self.source.operation_operands_for(operation)[1];
@@ -506,19 +546,12 @@ impl<'a, 'b> ECodeConstruction<'a, 'b> {
                     "constant subpiece offset",
                 ));
             }
-            let bits = location
+            immediate = location
                 .offset()
                 .checked_mul(8)
                 .ok_or(IlError::integer_overflow("subpiece offset"))?;
-            let offset = self.builder.push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Constant,
-                u64::BITS,
-                IlIndexRange::EMPTY,
-                bits,
-                None,
-            ))?;
             self.operands.clear();
-            self.operands.extend([source, offset]);
+            self.operands.push(source);
         } else {
             let address_operand = (opcode == PCodeOpcode::Load).then_some(0);
             self.lift_operand_values(operation, address_operand)?;
@@ -531,7 +564,7 @@ impl<'a, 'b> ECodeConstruction<'a, 'b> {
             expression_opcode,
             output_width,
             operands,
-            u64::from(operation.immediate()),
+            immediate,
             operation.address_space(),
         );
         let expression = self.builder.push_expression(expression)?;
@@ -785,19 +818,12 @@ impl<'a, 'b> ECodeConstruction<'a, 'b> {
         let expression = if slice.is_root() {
             root
         } else {
-            let offset = self.builder.push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Constant,
-                u64::BITS,
-                IlIndexRange::EMPTY,
-                u64::from(slice.offset()) * 8,
-                None,
-            ))?;
-            let operands = self.builder.push_expression_operands([root, offset])?;
+            let operands = self.builder.push_expression_operands([root])?;
             self.builder.push_expression(ECodeExpr::new(
                 ECodeExprOpcode::Extract,
                 slice.bits(),
                 operands,
-                0,
+                u64::from(slice.offset()) * 8,
                 None,
             ))?
         };
@@ -1078,12 +1104,11 @@ mod test {
             .transform(&source, &arch(), &platform(), &CancellationToken::default())
             .unwrap();
 
-        assert_eq!(lifted.expressions().len(), 3);
-        let offset = &lifted.expressions()[1];
-        assert_eq!(offset.opcode(), ECodeExprOpcode::Constant);
-        assert_eq!(offset.width(), u64::BITS);
-        assert_eq!(offset.immediate(), 256);
-        assert_eq!(lifted.expressions()[2].opcode(), ECodeExprOpcode::Extract);
+        assert_eq!(lifted.expressions().len(), 2);
+        let extract = &lifted.expressions()[1];
+        assert_eq!(extract.opcode(), ECodeExprOpcode::Extract);
+        assert_eq!(extract.immediate(), 256);
+        assert_eq!(extract.operands().len(), 1);
     }
 
     #[test]
@@ -1518,6 +1543,7 @@ mod test {
                 ),
             ],
             vec![IlBlockId::try_from_index(1).unwrap()],
+            vec![IlEdgeKinds::UNCONDITIONAL; 1],
         ));
         let source = builder.build(&CancellationToken::default()).unwrap();
         let mut transform = PCodeToECode::default();

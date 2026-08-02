@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::il::common::IlError;
+use crate::il::common::{IlEdgeKinds, IlError};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StructureError {
@@ -8,6 +8,14 @@ pub enum StructureError {
     BlockSourceCount { expected: usize, found: usize },
     #[error("block {block} has duplicate successor {successor}")]
     DuplicateSuccessor { block: u32, successor: u32 },
+    #[error("edge kind count mismatch: expected {expected}, found {found}")]
+    EdgeKindCount { expected: usize, found: usize },
+    #[error("block {block} edge {edge} has kinds {kinds:?} its terminator cannot produce")]
+    EdgeKindMismatch {
+        block: u32,
+        edge: u32,
+        kinds: IlEdgeKinds,
+    },
     #[error(transparent)]
     Il(#[from] IlError),
     #[error("block {block} operation range overlaps at operation {operation}")]

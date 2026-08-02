@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::il::common::verify::{StructureError, StructureVerifierError};
-use crate::il::common::{IlArtefact, IlError};
-use crate::il::ecode::{ECodeExpr, ECodeIr, ECodeStmt};
+use crate::il::common::{IlArtefact, IlBlock, IlBlockId, IlEdgeKinds, IlError};
+use crate::il::ecode::{ECodeExpr, ECodeIr, ECodeStmt, ECodeStmtOpcode};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum VerifyError {
@@ -36,6 +36,48 @@ impl ECodeIr {
 
         for statement in self.statements() {
             self.verify_statement(statement)?;
+        }
+
+        for (index, block) in self.graph().blocks().iter().enumerate() {
+            let block_id = IlBlockId::try_from_index(index)?;
+            self.verify_edge_kinds(block, block_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify_edge_kinds(&self, block: &IlBlock, block_id: IlBlockId) -> Result<(), VerifyError> {
+        let kinds = block.successors().slice(self.graph().successor_kinds());
+        if kinds.is_empty() {
+            return Ok(());
+        }
+
+        let terminator = block
+            .operations()
+            .end()
+            .checked_sub(1)
+            .and_then(|index| self.statements().get(index))
+            .map(ECodeStmt::opcode);
+        let permitted = match terminator {
+            Some(ECodeStmtOpcode::Branch) => IlEdgeKinds::UNCONDITIONAL,
+            Some(ECodeStmtOpcode::BranchIndirect) => IlEdgeKinds::COMPUTED,
+            Some(ECodeStmtOpcode::ConditionalBranch) => {
+                IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::TAKEN
+            }
+            Some(ECodeStmtOpcode::Return) => IlEdgeKinds::empty(),
+            _ => IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::UNCONDITIONAL,
+        };
+
+        let start = block.successors().start() as u32;
+        for (edge, kinds) in kinds.iter().enumerate() {
+            if !kinds.is_empty() && permitted.contains(*kinds) {
+                continue;
+            }
+            return Err(VerifyError::Structure(StructureError::EdgeKindMismatch {
+                block: block_id.value(),
+                edge: start.saturating_add(edge as u32),
+                kinds: *kinds,
+            }));
         }
 
         Ok(())

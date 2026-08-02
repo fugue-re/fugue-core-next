@@ -13,7 +13,7 @@ pub use analysis::IlAnalysis;
 pub use artefact::{IlArtefact, IlLevel, IlMetadata, IlSchemaVersion, ParseIlLevelError};
 pub use dominance::{IlDominance, IlDominanceFrontier};
 pub use error::IlError;
-pub use graph::{IlBlock, IlBlockPredecessors, IlBlockProperties, IlGraph};
+pub use graph::{IlBlock, IlBlockPredecessors, IlBlockProperties, IlEdgeKinds, IlGraph};
 pub(crate) use id::il_id;
 pub use id::{IlBlockId, IlExprId, IlOpId, IlValueId};
 pub use pool::IlIndexRange;
