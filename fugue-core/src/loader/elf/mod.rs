@@ -1439,10 +1439,13 @@ impl Loadable for Elf<'_> {
 mod test {
 
     use fallible_iterator::FallibleIterator;
-    use object::elf::{R_ARM_JUMP_SLOT, R_ARM_RELATIVE};
-    use object::{Object, RelocationFlags, RelocationTarget};
+    use object::elf::{
+        R_ARM_JUMP_SLOT, R_ARM_RELATIVE, R_MIPS_64, R_MIPS_REL32, R_PPC_JMP_SLOT, R_PPC_RELATIVE,
+        R_PPC64_RELATIVE, R_RISCV_CALL_PLT, R_RISCV_RELATIVE,
+    };
+    use object::{Object, ObjectSection, RelocationFlags, RelocationTarget};
 
-    use super::{ELF_DYNSYM_SELECTOR, Elf, ElfFileRepr};
+    use super::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfFileRepr};
     use crate::ir::{Address, RawAddress, SymbolIndex};
     use crate::loader::{ImageBankHandle, ImageSegmentContents, Loadable};
     use crate::types::BytesOrMapping;
@@ -1854,6 +1857,388 @@ mod test {
         }
 
         assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_riscv_relative_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        for (path, bits) in [
+            ("tests/libhello-riscv32.so", 32u32),
+            ("tests/libhello-riscv64.so", 64u32),
+        ] {
+            let mut attributes = AttributeMap::new();
+            let image_base = RawAddress::new(0x8000_0000u64);
+
+            attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+            let elf = Elf::new_with(BytesOrMapping::from_file(path)?, attributes)?;
+
+            assert_eq!(elf.architecture().language().processor(), "RISCV");
+            assert_eq!(elf.architecture().language().bits(), bits);
+
+            let (relocation_offset, relocation_value) = with_elf!(
+                elf.loaded_view(),
+                file | (|| {
+                    let mut relocs = file.dynamic_relocations()?;
+                    relocs.find_map(|(offset, reloc)| {
+                        let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                            return None;
+                        };
+
+                        (r_type == R_RISCV_RELATIVE).then_some((offset, reloc.addend()))
+                    })
+                })()
+            )
+            .expect("R_RISCV_RELATIVE relocation");
+
+            let relocation_address = Address::in_default_space(image_base)
+                .checked_add(relocation_offset)
+                .expect("RISC-V relocation address");
+            let expected_value = image_base.offset().wrapping_add_signed(relocation_value);
+
+            let mut relocated_value = None;
+            let segments = load_image_bytes(&elf)?;
+
+            for segm in &segments {
+                if !segm.contains_address(relocation_address) {
+                    continue;
+                }
+
+                let offset = segm
+                    .offset_of(relocation_address)
+                    .expect("RISC-V relocation offset");
+                relocated_value = if bits == 64 {
+                    segm.read_value::<u64>(offset)
+                } else {
+                    segm.read_value::<u32>(offset).map(u64::from)
+                };
+                break;
+            }
+
+            assert_eq!(relocated_value, Some(expected_value), "{path}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_riscv_call_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/hello-riscv64.o")?)?;
+
+        let (relocation_offset, symbol) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let section = file.sections().find(|s| s.name() == Ok(".text"))?;
+                section.relocations().find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    if r_type != R_RISCV_CALL_PLT {
+                        return None;
+                    }
+
+                    let RelocationTarget::Symbol(index) = reloc.target() else {
+                        return None;
+                    };
+
+                    elf.image_symbols()
+                        .get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
+                        .map(|(_, entry)| (offset, entry.address().offset().offset()))
+                        .filter(|(_, symbol)| *symbol != 0)
+                })
+            })()
+        )
+        .expect("R_RISCV_CALL_PLT relocation against a defined symbol");
+
+        let mut image_segments = elf.image_segments();
+        let mut text_address = None;
+        while let Some(segment) = image_segments.next()? {
+            if segment.name() == ".text" {
+                text_address = Some(segment.address().offset());
+                break;
+            }
+        }
+
+        let relocation_address = Address::in_default_space(text_address.expect(".text segment"))
+            .checked_add(relocation_offset)
+            .expect("RISC-V call address");
+
+        let mut pair = None;
+        let mut contents = elf.image_contents();
+
+        while let Some(segm) = contents.next()? {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm.offset_of(relocation_address).expect("call offset");
+            pair = segm
+                .read_value::<u32>(offset)
+                .zip(segm.read_value::<u32>(offset + 4));
+            break;
+        }
+
+        let (auipc, jalr) = pair.expect("AUIPC/JALR pair");
+
+        let displacement = (symbol as i64) - (relocation_address.offset() as i64);
+        let high = ((auipc & 0xffff_f000) as i32) as i64;
+        let low = ((jalr as i32) >> 20) as i64;
+
+        assert_eq!(high.wrapping_add(low), displacement);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_mips64_composite_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        let image_base = RawAddress::new(0x7000_0000u64);
+
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+        let elf = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-mips64.so")?,
+            attributes,
+        )?;
+
+        assert_eq!(elf.architecture().language().processor(), "MIPS");
+        assert_eq!(elf.architecture().language().bits(), 64);
+        assert!(elf.architecture().language().is_big_endian());
+
+        let relocation_offset = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    ((r_type & 0xff) == R_MIPS_REL32 && ((r_type >> 8) & 0xff) == R_MIPS_64)
+                        .then_some(offset)
+                })
+            })()
+        )
+        .expect("composite R_MIPS_REL32/R_MIPS_64 relocation");
+
+        let bump_address = elf
+            .image_symbols()
+            .get_first("bump")
+            .map(|(_, entry)| entry.address().offset().offset())
+            .expect("bump symbol");
+
+        let relocation_address = Address::in_default_space(image_base)
+            .checked_add(relocation_offset)
+            .expect("MIPS64 relocation address");
+
+        let mut relocated_value = None;
+        let segments = load_image_bytes(&elf)?;
+
+        for segm in &segments {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("MIPS64 relocation offset");
+            relocated_value = segm.read_value::<u64>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(bump_address));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_ppc_jump_slot_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/libhello-ppc32.so")?)?;
+
+        assert_eq!(elf.architecture().language().processor(), "PowerPC");
+        assert_eq!(elf.architecture().language().address_bits(), 32);
+        assert!(elf.architecture().language().is_big_endian());
+
+        let (relocation_offset, expected_value) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    if r_type != R_PPC_JMP_SLOT {
+                        return None;
+                    }
+
+                    let RelocationTarget::Symbol(index) = reloc.target() else {
+                        return None;
+                    };
+
+                    elf.image_symbols()
+                        .get_by_index(SymbolIndex::new(ELF_DYNSYM_SELECTOR, index.0))
+                        .map(|(_, entry)| (offset, entry.address().offset().offset()))
+                })
+            })()
+        )
+        .expect("R_PPC_JMP_SLOT relocation");
+
+        let relocation_address = elf
+            .base_address()
+            .checked_add(relocation_offset)
+            .expect("PowerPC jump slot address");
+
+        let mut relocated_value = None;
+        let segments = load_image_bytes(&elf)?;
+
+        for segm in &segments {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("PowerPC jump slot offset");
+            relocated_value = segm.read_value::<u32>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_ppc_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        let image_base = RawAddress::new(0x6000_0000u64);
+
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+        let elf = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc32.so")?,
+            attributes,
+        )?;
+
+        let (relocation_offset, relocation_value) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    (r_type == R_PPC_RELATIVE).then_some((offset, reloc.addend()))
+                })
+            })()
+        )
+        .expect("R_PPC_RELATIVE relocation");
+
+        let image_base = Address::in_default_space(image_base);
+
+        let relocation_address = image_base
+            .checked_add(relocation_offset)
+            .expect("PowerPC relocation address");
+        let expected_value = image_base.offset().wrapping_add_signed(relocation_value);
+
+        let mut relocated_value = None;
+        let segments = load_image_bytes(&elf)?;
+
+        for segm in &segments {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("PowerPC relocation offset");
+            relocated_value = segm.read_value::<u32>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_ppc64_rebased_dynamic_relocations() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attributes = AttributeMap::new();
+        let image_base = RawAddress::new(0x6000_0000u64);
+
+        attributes.set_attr(ATTRIBUTE_IMAGE_BASE, image_base);
+
+        let elf = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc64le.so")?,
+            attributes,
+        )?;
+
+        assert_eq!(elf.architecture().language().processor(), "PowerPC");
+        assert_eq!(elf.architecture().language().address_bits(), 64);
+        assert!(!elf.architecture().language().is_big_endian());
+
+        let (relocation_offset, relocation_value) = with_elf!(
+            elf.loaded_view(),
+            file | (|| {
+                let mut relocs = file.dynamic_relocations()?;
+                relocs.find_map(|(offset, reloc)| {
+                    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+                        return None;
+                    };
+
+                    (r_type == R_PPC64_RELATIVE).then_some((offset, reloc.addend()))
+                })
+            })()
+        )
+        .expect("R_PPC64_RELATIVE relocation");
+
+        let image_base = Address::in_default_space(image_base);
+
+        let relocation_address = image_base
+            .checked_add(relocation_offset)
+            .expect("PowerPC relocation address");
+        let expected_value = image_base.offset().wrapping_add_signed(relocation_value);
+
+        let mut relocated_value = None;
+        let segments = load_image_bytes(&elf)?;
+
+        for segm in &segments {
+            if !segm.contains_address(relocation_address) {
+                continue;
+            }
+
+            let offset = segm
+                .offset_of(relocation_address)
+                .expect("PowerPC relocation offset");
+            relocated_value = segm.read_value::<u64>(offset);
+            break;
+        }
+
+        assert_eq!(relocated_value, Some(expected_value));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_ppc_rel() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::new(BytesOrMapping::from_file("tests/hello-ppc32.o")?)?;
+
+        assert_eq!(elf.architecture().language().processor(), "PowerPC");
+
+        let mut contents = elf.image_contents();
+        let mut function_hints = 0usize;
+        while let Some(segment) = contents.next()? {
+            function_hints += segment.function_hints().len();
+        }
+
+        assert!(
+            function_hints > 0,
+            "R_PPC_REL24 call sites mark their targets as functions",
+        );
 
         Ok(())
     }

@@ -235,4 +235,166 @@ str r2,[r7,#0x0]
 
         Ok(())
     }
+
+    fn disassemble_snippet(language: &str, address: u64, bytes: &[u8]) -> anyhow::Result<String> {
+        let shellcode = Shellcode::new(language, address, bytes)?;
+
+        let mut lifter = shellcode.architecture().lifter();
+        let mut offset = 0usize;
+        let mut output = String::new();
+
+        while offset < bytes.len() {
+            let len = lifter
+                .disassemble(address + offset as u64, &bytes[offset..], &mut output)
+                .expect("valid");
+            offset += len;
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
+
+    #[test]
+    fn test_ppc_snippet() -> anyhow::Result<()> {
+        let output = disassemble_snippet(
+            "PowerPC:BE:32",
+            0x1000,
+            &[
+                0x94, 0x21, 0xff, 0xe0, 0x93, 0xe1, 0x00, 0x1c, 0x7c, 0x3f, 0x0b, 0x78, 0x90, 0x7f,
+                0x00, 0x18, 0x80, 0x9f, 0x00, 0x18, 0x7c, 0x64, 0x1a, 0x14, 0x4e, 0x80, 0x00, 0x20,
+            ],
+        )?;
+
+        assert_eq!(
+            output,
+            r#"stwu r1,-0x20(r1)
+stw r31,0x1c(r1)
+or r31,r1,r1
+stw r3,0x18(r31)
+lwz r4,0x18(r31)
+add r3,r4,r3
+blr
+"#
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_riscv_snippet() -> anyhow::Result<()> {
+        let output = disassemble_snippet(
+            "RISCV:LE:32",
+            0x12ba,
+            &[
+                0x41, 0x11, 0x06, 0xc6, 0x22, 0xc4, 0x00, 0x08, 0x23, 0x2a, 0xa4, 0xfe,
+            ],
+        )?;
+
+        assert_eq!(
+            output,
+            r#"c.addi sp,-0x10
+c.swsp ra,0xc(sp)
+c.swsp s0,0x8(sp)
+c.addi4spn s0,sp,0x10
+sw a0,-0xc(s0)
+"#
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_riscv64_snippet() -> anyhow::Result<()> {
+        let output = disassemble_snippet(
+            "RISCV:LE:64",
+            0x1442,
+            &[
+                0x01, 0x11, 0x06, 0xec, 0x22, 0xe8, 0x00, 0x10, 0x23, 0x26, 0xa4, 0xfe,
+            ],
+        )?;
+
+        assert_eq!(
+            output,
+            r#"c.addi sp,-0x20
+c.sdsp ra,0x18(sp)
+c.sdsp s0,0x10(sp)
+c.addi4spn s0,sp,0x20
+sw a0,-0x14(s0)
+"#
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_riscv_width_selects_distinct_language() -> anyhow::Result<()> {
+        let encoding = [0x06, 0xec];
+
+        assert_eq!(
+            disassemble_snippet("RISCV:LE:32", 0x1000, &encoding)?,
+            "c.fswsp ft1,0x18(sp)\n"
+        );
+        assert_eq!(
+            disassemble_snippet("RISCV:LE:64", 0x1000, &encoding)?,
+            "c.sdsp ra,0x18(sp)\n"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mips64_snippet() -> anyhow::Result<()> {
+        let bytes = [
+            0x67, 0xbd, 0xff, 0xe0, 0xff, 0xbf, 0x00, 0x18, 0xff, 0xbe, 0x00, 0x10, 0x03, 0xa0,
+            0xf0, 0x25, 0x00, 0x80, 0x10, 0x25, 0xaf, 0xc2, 0x00, 0x0c,
+        ];
+        let expected = r#"daddiu sp, sp, -0x20
+sd ra, 0x18(sp)
+sd s8, 0x10(sp)
+or s8, sp, zero
+or v0, a0, zero
+sw v0, 0xc(s8)
+"#;
+
+        assert_eq!(
+            disassemble_snippet("MIPS:BE:64", 0x10650, &bytes)?,
+            expected
+        );
+
+        let mut swapped = bytes;
+        for word in swapped.chunks_mut(4) {
+            word.reverse();
+        }
+
+        assert_eq!(
+            disassemble_snippet("MIPS:LE:64", 0x10650, &swapped)?,
+            expected
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ppc64le_snippet() -> anyhow::Result<()> {
+        let output = disassemble_snippet(
+            "PowerPC:LE:64",
+            0x10540,
+            &[
+                0xf4, 0xff, 0x61, 0x90, 0xf4, 0xff, 0xa1, 0x80, 0x14, 0x1a, 0x85, 0x7c, 0x00, 0x00,
+                0x63, 0x80, 0x20, 0x00, 0x80, 0x4e,
+            ],
+        )?;
+
+        assert_eq!(
+            output,
+            r#"stw r3,-0xc(r1)
+lwz r5,-0xc(r1)
+add r4,r5,r3
+lwz r3,0x0(r3)
+blr
+"#
+        );
+
+        Ok(())
+    }
 }

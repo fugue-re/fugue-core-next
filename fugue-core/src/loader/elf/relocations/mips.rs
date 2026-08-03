@@ -213,7 +213,7 @@ where
         }
     }
 
-    fn mips_implicit_addend<T: ByteCast + Default>(
+    pub(crate) fn mips_implicit_addend<T: ByteCast + Default>(
         &self,
         bytes: &ImageSegmentContents<'data>,
         offset: u64,
