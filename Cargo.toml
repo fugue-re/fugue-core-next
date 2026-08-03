@@ -13,8 +13,6 @@ members = [
   "fugue-lifter-codegen",
   "fugue-lifter-mips",
   "fugue-lifter-packager",
-  "fugue-lifter-ppc",
-  "fugue-lifter-riscv",
   "fugue-lifter-runtime",
   "fugue-lifter-x86",
   "fugue-python",

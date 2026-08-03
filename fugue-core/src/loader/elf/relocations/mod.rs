@@ -15,9 +15,6 @@ pub mod generic;
 pub mod aarch64;
 pub mod arm;
 pub mod mips;
-pub mod mips64;
-pub mod ppc;
-pub mod riscv;
 pub mod x86;
 pub mod x86_64;
 
@@ -172,18 +169,6 @@ where
             }
             Architecture::Mips => {
                 self.apply_mips_relocation(context.segment_mut(), offset, reloc, is_dynamic);
-            }
-            Architecture::Mips64 => {
-                self.apply_mips64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
-            }
-            Architecture::PowerPc => {
-                self.apply_ppc_relocation(context.segment_mut(), offset, reloc, is_dynamic);
-            }
-            Architecture::PowerPc64 => {
-                self.apply_ppc64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
-            }
-            Architecture::Riscv32 | Architecture::Riscv64 => {
-                self.apply_riscv_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
             Architecture::X86_64 => {
                 self.apply_x86_64_relocation(context.segment_mut(), offset, reloc, is_dynamic);

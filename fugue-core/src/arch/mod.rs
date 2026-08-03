@@ -16,12 +16,7 @@ use crate::storage::entities::{Entity, EntityId};
 pub mod aarch64;
 pub mod arm;
 pub mod mips;
-pub mod mips64;
-pub mod ppc;
-pub mod ppc64;
 pub mod registry;
-pub mod riscv;
-pub mod riscv64;
 pub mod x86;
 pub mod x86_64;
 

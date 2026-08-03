@@ -191,7 +191,6 @@ pub trait LanguageImpl {
     const PROCESSOR: &'static str;
     const LITTLE_ENDIAN: bool;
     const VARIANT: &'static str;
-    const BITS: u32;
 
     const ADDRESS_ALIGNMENT: usize;
     const ADDRESS_BITS: u32;
@@ -228,7 +227,6 @@ pub struct Language {
     pub(crate) processor: &'static str,
     pub(crate) little_endian: bool,
     pub(crate) variant: &'static str,
-    pub(crate) bits: u32,
 
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
@@ -326,7 +324,6 @@ impl Language {
             processor: L::PROCESSOR,
             little_endian: L::LITTLE_ENDIAN,
             variant: L::VARIANT,
-            bits: L::BITS,
 
             address_alignment: L::ADDRESS_ALIGNMENT,
             address_bits: L::ADDRESS_BITS,
@@ -380,10 +377,6 @@ impl Language {
 
     pub fn variant(&self) -> &'static str {
         self.variant
-    }
-
-    pub fn bits(&self) -> u32 {
-        self.bits
     }
 
     pub fn address_alignment(&self) -> usize {

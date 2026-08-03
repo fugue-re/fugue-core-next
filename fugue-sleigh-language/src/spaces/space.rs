@@ -412,7 +412,7 @@ impl AddressSpace {
         let address_size = input.read_signed_integer_with_id(&ATTRIB_SIZE)? as usize;
         let delay = input.read_signed_integer_with_id(&ATTRIB_DELAY)? as usize;
         let word_size = input
-            .try_read_signed_integer_with_id(&ATTRIB_WORDSIZE)?
+            .try_read_unsigned_integer_with_id(&ATTRIB_WORDSIZE)?
             .unwrap_or(1) as usize;
         let deadcode_delay = delay;
 

@@ -3,7 +3,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
-use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
+use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageError};
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
@@ -48,7 +48,6 @@ pub struct Language {
     pub(crate) processor: Box<str>,
     pub(crate) variant: Box<str>,
     pub(crate) little_endian: bool,
-    pub(crate) bits: u32,
 
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
@@ -137,7 +136,6 @@ impl Language {
             processor,
             variant,
             little_endian,
-            bits,
             address_alignment,
             address_bits,
             address_size,
@@ -205,7 +203,6 @@ impl Language {
             processor: processor.install(),
             little_endian,
             variant: variant.install(),
-            bits,
             address_alignment,
             address_bits,
             address_size,
@@ -229,55 +226,31 @@ impl Language {
         }))
     }
 
-    pub(crate) fn from_sleigh(sleigh: &SleighLanguage, definition: &LanguageDef) -> Self {
+    pub(crate) fn from_sleigh(
+        sleigh: &SleighLanguage,
+        defaults: impl IntoIterator<Item = (impl Into<Box<str>>, u32)>,
+    ) -> Self {
         let tables = Tables::new(sleigh);
-        let context_defaults = definition
-            .context_set()
-            .map(|(name, value)| (Box::<str>::from(name), value))
+        let context_defaults = defaults
+            .into_iter()
+            .map(|(name, value)| (name.into(), value))
             .collect();
-        let truncated_spaces = definition.truncated_spaces();
 
         let arch = sleigh.architecture();
-        let declared_bits = definition
-            .id()
-            .parse::<LanguageId>()
-            .map_or_else(|_| arch.bits(), |id| id.bits());
         let default_space = sleigh.spaces().default_space_ref();
         let constant_space_id = sleigh.spaces().constant_space_id().index() as u8;
         let default_space_id = default_space.index() as u8;
         let register_space_id = sleigh.spaces().register_space_id().index() as u8;
         let unique_space_id = sleigh.spaces().unique_space_id().index() as u8;
 
-        let truncated_default = truncated_spaces
-            .iter()
-            .find(|truncated| truncated.space() == default_space.name());
-
-        let (address_size, address_bits, address_upper_bound) = match truncated_default {
-            Some(truncated) => (
-                truncated.size() as usize,
-                truncated.address_bits(),
-                truncated.upper_bound().min(default_space.highest_offset()),
-            ),
-            None => (
-                default_space.address_size(),
-                (default_space.address_size() as u32) * 8,
-                default_space.highest_offset(),
-            ),
-        };
+        let address_size = default_space.address_size();
+        let address_bits = (address_size as u32) * 8;
+        let address_upper_bound = default_space.highest_offset();
 
         let spaces = sleigh
             .spaces()
             .iter()
-            .map(|spc| {
-                let mut space = AddressSpace::from_sleigh(spc, default_space_id);
-                if let Some(truncated) = truncated_spaces
-                    .iter()
-                    .find(|truncated| truncated.space() == spc.name())
-                {
-                    space.upper_bound = space.upper_bound.min(truncated.upper_bound());
-                }
-                space
-            })
+            .map(|spc| AddressSpace::from_sleigh(spc, default_space_id))
             .collect::<Box<[AddressSpace]>>();
 
         let space_names = sleigh
@@ -330,11 +303,10 @@ impl Language {
         context_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
         Self {
-            id: Box::<str>::from(definition.id()),
+            id: arch.to_string().into_boxed_str(),
             processor: Box::<str>::from(arch.processor()),
             variant: Box::<str>::from(arch.variant()),
             little_endian: arch.endian().is_little(),
-            bits: declared_bits,
             address_alignment: sleigh.alignment(),
             address_bits,
             address_size,
@@ -403,7 +375,10 @@ impl Language {
             source,
         })?;
 
-        Ok(Self::from_sleigh(&sleigh, definition.language()))
+        Ok(Self::from_sleigh(
+            &sleigh,
+            definition.language().context_set(),
+        ))
     }
 }
 

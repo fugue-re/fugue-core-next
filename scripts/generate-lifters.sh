@@ -37,29 +37,14 @@ run_silent() {
 }
 
 foreach_target() {
-    "$1" AARCH64:BE:64:v8A     ""         aarch64_be
-    "$1" AARCH64:LE:64:v8A     ""         aarch64_le
-    "$1" ARM:BE:32:v8          v8T        arm_be
-    "$1" ARM:LE:32:v8          v8T        arm_le
-    "$1" MIPS:BE:32:default    ""         mips_be
-    "$1" MIPS:LE:32:default    ""         mips_le
-    "$1" MIPS:BE:64:default    64-32addr  mips64_be
-    "$1" MIPS:LE:64:default    64-32addr  mips64_le
-    "$1" PowerPC:BE:32:default ""         ppc_be
-    "$1" PowerPC:LE:32:default ""         ppc_le
-    "$1" PowerPC:BE:64:default 64-32addr  ppc64_be
-    "$1" PowerPC:LE:64:default 64-32addr  ppc64_le
-    "$1" RISCV:LE:32:default   ""         riscv
-    "$1" RISCV:LE:64:default   ""         riscv64
-    "$1" x86:LE:32:default     ""         x86
-    "$1" x86:LE:64:default     compat32   x86_64
-}
-
-crate_for() {
-    case "$1" in
-        powerpc) printf 'ppc' ;;
-        *)       printf '%s' "$1" ;;
-    esac
+    "$1" AARCH64:BE:64:v8A   ""        aarch64_be
+    "$1" AARCH64:LE:64:v8A   ""        aarch64_le
+    "$1" ARM:BE:32:v8        v8T       arm_be
+    "$1" ARM:LE:32:v8        v8T       arm_le
+    "$1" MIPS:BE:32:default  ""        mips_be
+    "$1" MIPS:LE:32:default  ""        mips_le
+    "$1" x86:LE:32:default   ""        x86
+    "$1" x86:LE:64:default   compat32  x86_64
 }
 
 build_static() {
@@ -67,7 +52,7 @@ build_static() {
     VARIANTS="$2"
     STATIC_OUT="$3"
 
-    CRATE=$(crate_for "$(printf '%s' "$LANGUAGE" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')")
+    CRATE=$(printf '%s' "$LANGUAGE" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')
     SPECS="./fugue-lifter-${CRATE}/data/processors"
     OUTPUT="./fugue-lifter-${CRATE}/data/generated/${STATIC_OUT}.rs.gz"
 
@@ -90,7 +75,7 @@ build_dynamic() {
     VARIANTS="$2"
 
     ARCH_DIR=$(printf '%s' "$LANGUAGE" | cut -d: -f1)
-    CRATE=$(crate_for "$(printf '%s' "$ARCH_DIR" | tr '[:upper:]' '[:lower:]')")
+    CRATE=$(printf '%s' "$ARCH_DIR" | tr '[:upper:]' '[:lower:]')
     SPECS="./fugue-lifter-${CRATE}/data/processors"
     PREFIX=$(printf '%s' "$LANGUAGE" | cut -d: -f1-3)
     PRIMARY_SUFFIX=$(printf '%s' "$LANGUAGE" | cut -d: -f4)

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use fugue_arch::ArchitectureDef;
-use fugue_sleigh_language::{LanguageDB, TruncatedSpace};
+use fugue_sleigh_language::LanguageDB;
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
 use quote::ToTokens;
@@ -172,19 +172,13 @@ impl BuildOptions {
 pub struct LanguageVariant {
     name: String,
     context_defaults: Vec<(String, u32)>,
-    truncated_spaces: Vec<TruncatedSpace>,
 }
 
 impl LanguageVariant {
-    pub fn new(
-        name: impl Into<String>,
-        context_defaults: Vec<(String, u32)>,
-        truncated_spaces: Vec<TruncatedSpace>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, context_defaults: Vec<(String, u32)>) -> Self {
         Self {
             name: name.into(),
             context_defaults,
-            truncated_spaces,
         }
     }
 }
@@ -227,11 +221,7 @@ pub fn build_with(
         .collect::<Vec<(String, u32)>>();
 
     let primary_sla = primary_def.language().sla_file();
-    let primary_variant = LanguageVariant::new(
-        primary_arch.variant(),
-        primary_context_defaults,
-        primary_def.language().truncated_spaces().to_vec(),
-    );
+    let primary_variant = LanguageVariant::new(primary_arch.variant(), primary_context_defaults);
 
     let mut extra_variants = Vec::with_capacity(options.variants.len());
 
@@ -271,7 +261,6 @@ pub fn build_with(
         extra_variants.push(LanguageVariant::new(
             variant.clone(),
             extra_context_defaults,
-            extra_def.language().truncated_spaces().to_vec(),
         ));
     }
 

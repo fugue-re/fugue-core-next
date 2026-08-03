@@ -7,11 +7,9 @@ build = "build.rs"
 [features]
 mips-be = []
 mips-le = []
-mips64-be = []
-mips64-le = []
 bundled = ["fugue-lifter-packager"]
 compiled = ["fugue-lifter-codegen", "fugue-lifter-codegen/bundled-compiler"]
-default = ["mips-be", "mips-le", "mips64-be", "mips64-le", "bundled"]
+default = ["mips-be", "mips-le", "bundled"]
 
 [dependencies]
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }

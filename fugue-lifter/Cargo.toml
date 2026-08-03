@@ -13,17 +13,6 @@ aarch64 = ["aarch64-be", "aarch64-le"]
 mips-be = ["fugue-lifter-mips/mips-be"]
 mips-le = ["fugue-lifter-mips/mips-le"]
 mips = ["mips-be", "mips-le"]
-mips64-be = ["fugue-lifter-mips/mips64-be"]
-mips64-le = ["fugue-lifter-mips/mips64-le"]
-mips64 = ["mips64-be", "mips64-le"]
-ppc-be = ["fugue-lifter-ppc/ppc-be"]
-ppc-le = ["fugue-lifter-ppc/ppc-le"]
-ppc = ["ppc-be", "ppc-le"]
-ppc64-be = ["fugue-lifter-ppc/ppc64-be"]
-ppc64-le = ["fugue-lifter-ppc/ppc64-le"]
-ppc64 = ["ppc64-be", "ppc64-le"]
-riscv = ["fugue-lifter-riscv/riscv"]
-riscv64 = ["fugue-lifter-riscv/riscv64"]
 x86 = ["fugue-lifter-x86/x86"]
 x86-64 = ["fugue-lifter-x86/x86-64"]
 
@@ -31,42 +20,24 @@ bundled = [
   "fugue-lifter-arm?/bundled",
   "fugue-lifter-aarch64?/bundled",
   "fugue-lifter-mips?/bundled",
-  "fugue-lifter-ppc?/bundled",
-  "fugue-lifter-riscv?/bundled",
   "fugue-lifter-x86?/bundled"
 ]
 compiled = [
   "fugue-lifter-arm?/compiled",
   "fugue-lifter-aarch64?/compiled",
   "fugue-lifter-mips?/compiled",
-  "fugue-lifter-ppc?/compiled",
-  "fugue-lifter-riscv?/compiled",
   "fugue-lifter-x86?/compiled"
 ]
 
 serde = ["fugue-lifter-runtime/serde"]
 
-default = [
-  "arm",
-  "aarch64",
-  "bundled",
-  "mips",
-  "mips64",
-  "ppc",
-  "ppc64",
-  "riscv",
-  "riscv64",
-  "x86",
-  "x86-64"
-]
+default = ["arm", "aarch64", "bundled", "mips", "x86", "x86-64"]
 
 [dependencies]
 fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-lifter-arm =  { version = "0.3", path = "../fugue-lifter-arm", default-features = false, optional = true }
 fugue-lifter-aarch64 =  { version = "0.3", path = "../fugue-lifter-aarch64", default-features = false, optional = true }
 fugue-lifter-mips =  { version = "0.3", path = "../fugue-lifter-mips", default-features = false, optional = true }
-fugue-lifter-ppc =  { version = "0.3", path = "../fugue-lifter-ppc", default-features = false, optional = true }
-fugue-lifter-riscv =  { version = "0.3", path = "../fugue-lifter-riscv", default-features = false, optional = true }
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }
 fugue-lifter-x86 =  { version = "0.3", path = "../fugue-lifter-x86", default-features = false, optional = true }
 thiserror = "2"

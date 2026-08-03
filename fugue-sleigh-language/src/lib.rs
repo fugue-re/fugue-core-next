@@ -16,4 +16,4 @@ pub mod varnode;
 
 mod util;
 
-pub use language::{Language, LanguageDB, LanguageDef, LanguageError, TruncatedSpace};
+pub use language::{Language, LanguageDB, LanguageDef, LanguageError};

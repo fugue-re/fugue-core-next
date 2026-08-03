@@ -21,7 +21,7 @@ static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
 struct ArchData {
-    gprs: [Varnode; 31],
+    gprs: Vec<Varnode>,
 }
 
 impl ArchData {
@@ -33,9 +33,9 @@ impl ArchData {
             "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
             "x26", "x27", "x28", "x29", "x30",
         ]
-        .map(|name| {
-            reg(name).unwrap_or_else(|| panic!("AARCH64 language must define register `{name}`"))
-        });
+        .into_iter()
+        .filter_map(reg)
+        .collect();
 
         Self { gprs }
     }
