@@ -154,6 +154,46 @@ impl LifterBuilder {
             ("MIPS", false, None | Some(32), None | Some("default")) => {
                 Ok(crate::mips::le::LifterFactory::new_default())
             }
+            #[cfg(feature = "mips64-be")]
+            ("MIPS", true, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::mips64::be::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::mips64::be::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "mips64-le")]
+            ("MIPS", false, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::mips64::le::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::mips64::le::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "ppc-be")]
+            ("PowerPC", true, Some(32), None | Some("default")) => {
+                Ok(crate::ppc::be::LifterFactory::new_default())
+            }
+            #[cfg(feature = "ppc-le")]
+            ("PowerPC", false, Some(32), None | Some("default")) => {
+                Ok(crate::ppc::le::LifterFactory::new_default())
+            }
+            #[cfg(feature = "ppc64-be")]
+            ("PowerPC", true, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::ppc64::be::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::ppc64::be::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "ppc64-le")]
+            ("PowerPC", false, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::ppc64::le::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::ppc64::le::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "riscv")]
+            ("RISCV", false, Some(32), None | Some("default")) => {
+                Ok(crate::riscv::LifterFactory::new_default())
+            }
+            #[cfg(feature = "riscv64")]
+            ("RISCV", false, Some(64), None | Some("default")) => {
+                Ok(crate::riscv64::LifterFactory::new_default())
+            }
             _ => Err(LifterBuilderError::Unsupported),
         }
     }
@@ -213,6 +253,19 @@ mod test {
 
         let _ = "AARCH64:LE:64".parse::<LifterBuilder>()?.build()?;
         let _ = "AARCH64:LE:64:v8A".parse::<LifterBuilder>()?.build()?;
+
+        let _ = "MIPS:BE:64:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "MIPS:LE:64:64-32addr".parse::<LifterBuilder>()?.build()?;
+
+        let _ = "PowerPC:BE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:BE:64:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:64:64-32addr"
+            .parse::<LifterBuilder>()?
+            .build()?;
+
+        let _ = "RISCV:LE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "RISCV:LE:64:default".parse::<LifterBuilder>()?.build()?;
 
         Ok(())
     }

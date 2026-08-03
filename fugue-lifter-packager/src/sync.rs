@@ -103,6 +103,14 @@ const SYNC_TARGETS: &[SyncTarget] = &[
         destination: "fugue-lifter-mips/data/processors/MIPS",
     },
     SyncTarget {
+        source_processor: "PowerPC",
+        destination: "fugue-lifter-ppc/data/processors/PowerPC",
+    },
+    SyncTarget {
+        source_processor: "RISCV",
+        destination: "fugue-lifter-riscv/data/processors/RISCV",
+    },
+    SyncTarget {
         source_processor: "x86",
         destination: "fugue-lifter-x86/data/processors/x86",
     },
@@ -434,7 +442,18 @@ impl StagedTarget {
         let staged = LanguageDir::new(&staged_path);
         let destination_dir = LanguageDir::new(&destination);
 
-        for file in destination_dir.whitelist()? {
+        let whitelist = if destination.is_dir() {
+            let existing = destination_dir.whitelist()?;
+            if existing.is_empty() {
+                source.whitelist()?
+            } else {
+                existing
+            }
+        } else {
+            source.whitelist()?
+        };
+
+        for file in whitelist {
             staged.copy_file_from(&source, &file)?;
         }
         for file in staged.missing_sinc_includes()? {
@@ -567,6 +586,36 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
                 "source:extra.sinc",
             );
         }
+    }
+
+    #[test]
+    fn seeds_missing_destination_from_source_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace_root = root.path().join("workspace");
+        let source_root = root.path().join("ghidra");
+
+        create_workspace_tree(&workspace_root);
+        create_source_tree(&source_root);
+
+        let seeded = SYNC_TARGETS.last().unwrap();
+        fs::remove_dir_all(workspace_root.join(seeded.destination)).unwrap();
+
+        SyncJob {
+            workspace_root: &workspace_root,
+        }
+        .local(&source_root)
+        .unwrap();
+
+        let destination = workspace_root.join(seeded.destination);
+        let processor = seeded.source_processor;
+        assert_eq!(
+            fs::read_to_string(destination.join(format!("{processor}.slaspec"))).unwrap(),
+            format!("@include \"{processor}.sinc\"\n@include \"extra.sinc\"\n"),
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("extra.sinc")).unwrap(),
+            "source:extra.sinc",
+        );
     }
 
     #[test]
