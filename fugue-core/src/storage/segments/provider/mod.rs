@@ -294,7 +294,7 @@ impl SegmentRangeOverlap {
     }
 }
 
-pub trait SegmentStorageProvider {
+pub trait SegmentStorageProvider: Send + Sync {
     fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError>;
 
     fn read_bytes_exact(&self, offset: u64, bytes: &mut [u8]) -> Result<(), SegmentStorageError> {
