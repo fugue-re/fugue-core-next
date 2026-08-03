@@ -206,7 +206,7 @@ pub fn derive_segment_storage_provider(input: TokenStream) -> TokenStream {
 ///
 /// Applied to an `impl` block of an extension descriptor type, it passes each
 /// associated `const` and `fn` to the descriptor constructor and emits the
-/// `registry::submit!` registration automatically.
+/// `extension::submit!` registration automatically.
 ///
 /// Constants and functions are passed to `new` in declaration order.
 ///
@@ -276,7 +276,7 @@ fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
         const _: () = {
             #(#free_fns)*
 
-            ::fugue_core::registry::submit! {
+            ::fugue_core::extension::submit! {
                 #self_ty::new(#(#constructor_values),*)
             }
         };

@@ -3,16 +3,14 @@ use crate::il::common::{
     IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlParentSpan, IlSourceSpan,
 };
 use crate::il::ecode::ssa::ECodeSsaOpcode;
-use crate::il::ecode::{
-    ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode,
-};
+use crate::il::ecode::{ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
 use crate::il::pcode::RegisterId;
 use crate::ir::{Address, FunctionId};
 use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn empty_ecode_constructs_empty_ssa() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let source = ECodeBuilder::new(source_metadata, IlGraph::default())
         .build(&CancellationToken::default())
         .unwrap();
@@ -27,7 +25,7 @@ fn empty_ecode_constructs_empty_ssa() {
 
 #[test]
 fn register_read_after_write_uses_current_value() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let value = builder
         .push_expression(ECodeExpr::new(
@@ -100,7 +98,7 @@ fn register_read_after_write_uses_current_value() {
 
 #[test]
 fn call_preserves_only_declared_register_state() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     builder.set_call_preserved_registers(vec![RegisterId::new(7)]);
     let preserved = builder
@@ -206,7 +204,7 @@ fn call_preserves_only_declared_register_state() {
 
 #[test]
 fn insn_wide_expression_is_not_rebuilt_after_register_write() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let register = builder
         .push_expression(ECodeExpr::new(
@@ -300,7 +298,7 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
 
 #[test]
 fn register_read_without_write_becomes_undefined() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let read = builder
         .push_expression(ECodeExpr::new(
@@ -336,7 +334,7 @@ fn register_read_without_write_becomes_undefined() {
 
 #[test]
 fn load_preserves_fugue_address_space() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let offset = builder
         .push_expression(ECodeExpr::new(
@@ -395,7 +393,7 @@ fn load_preserves_fugue_address_space() {
 
 #[test]
 fn load_after_store_uses_store_memory_result() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let space = AddressSpaceId::new(3);
     let store_address = builder
@@ -487,7 +485,7 @@ fn load_after_store_uses_store_memory_result() {
 
 #[test]
 fn store_without_load_registers_memory_domain() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let space = AddressSpaceId::new(3);
     let address = builder
@@ -533,7 +531,7 @@ fn store_without_load_registers_memory_domain() {
 
 #[test]
 fn direct_branch_preserves_fugue_address() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
     let condition = builder
         .push_expression(ECodeExpr::new(
@@ -582,7 +580,7 @@ fn direct_branch_preserves_fugue_address() {
 
 #[test]
 fn deep_dominance_chain_constructs_iteratively() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let block_count = 128usize;
     let mut successors = Vec::new();
     let mut blocks = Vec::new();
@@ -652,7 +650,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
 #[test]
 fn merge_block_register_read_becomes_block_argument() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
         IlBlockId::try_from_index(2).unwrap(),
@@ -774,7 +772,7 @@ fn merge_block_register_read_becomes_block_argument() {
 
 #[test]
 fn merge_block_load_uses_memory_block_argument() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let join = IlBlockId::try_from_index(3).unwrap();
     let successors = vec![
         IlBlockId::try_from_index(1).unwrap(),
@@ -904,7 +902,7 @@ fn merge_block_load_uses_memory_block_argument() {
 
 #[test]
 fn loop_carried_register_uses_header_block_argument() {
-    let source_metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 11);
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
     let loop_header = IlBlockId::try_from_index(1).unwrap();
     let loop_body = IlBlockId::try_from_index(2).unwrap();
     let exit = IlBlockId::try_from_index(3).unwrap();

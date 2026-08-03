@@ -3,7 +3,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use crate::il::common::IlLevel;
+use crate::il::common::IlFormId;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, ProblemKind, ProblemScope, ReferenceKind,
     ReferenceTarget, Symbol,
@@ -242,11 +242,11 @@ pub enum ChangeRecord {
     },
     LiftedMaterialised {
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
     },
     LiftedRemoved {
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
     },
     ProblemRecorded {
         scope: ProblemScope,

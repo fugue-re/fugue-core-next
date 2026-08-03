@@ -25,7 +25,7 @@ fn project_remove_lifted_clears_derived_data_references() -> Result<(), Box<dyn 
 
     {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
+        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
         transaction.commit()?;
     }
 
@@ -44,7 +44,7 @@ fn project_remove_lifted_clears_derived_data_references() -> Result<(), Box<dyn 
 
     {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
+        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
         drop(transaction);
     }
 
@@ -322,7 +322,7 @@ fn project_ensure_pcode_preserves_flow_references() -> Result<(), Box<dyn std::e
     assert!(flow.is_call());
 
     let engine = AnalysisEngine::new(project)?;
-    engine.ensure_lifted(function, IlLevel::PCode)?;
+    engine.ensure_lifted(function, PCodeIr::FORM)?;
     let reader = engine.query_reader()?;
     let project = reader.project()?;
     let preserved = project
@@ -350,8 +350,8 @@ fn project_ensure_pcode_builds_from_recovered_instruction_bytes()
     };
 
     let engine = AnalysisEngine::new(project)?;
-    let materialised_pcode = engine.ensure_lifted(function, IlLevel::PCode)?;
-    let materialised_ecode = engine.ensure_lifted(function, IlLevel::ECode)?;
+    let materialised_pcode = engine.ensure_lifted(function, PCodeIr::FORM)?;
+    let materialised_ecode = engine.ensure_lifted(function, ECodeIr::FORM)?;
     let reader = engine.query_reader()?;
     let project = reader.project()?;
     let pcode = project
@@ -366,7 +366,7 @@ fn project_ensure_pcode_builds_from_recovered_instruction_bytes()
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::PCode,
+                form: PCodeIr::FORM,
             })
     );
     assert!(
@@ -374,7 +374,7 @@ fn project_ensure_pcode_builds_from_recovered_instruction_bytes()
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::ECode,
+                form: ECodeIr::FORM,
             })
     );
     assert!(!pcode.operations().is_empty());
@@ -406,7 +406,7 @@ fn project_ensure_pcode_records_zero_operation_source_gap() -> Result<(), Box<dy
     };
 
     let engine = AnalysisEngine::new(project)?;
-    engine.ensure_lifted(function, IlLevel::PCode)?;
+    engine.ensure_lifted(function, PCodeIr::FORM)?;
     let reader = engine.query_reader()?;
     let project = reader.project()?;
     let pcode = project
@@ -438,13 +438,13 @@ fn project_ensure_pcode_resolves_default_space_load() -> Result<(), Box<dyn std:
     };
 
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.ensure_lifted(function, IlLevel::PCode)?;
+    let changes = engine.ensure_lifted(function, PCodeIr::FORM)?;
     assert!(
         changes
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::PCode,
+                form: PCodeIr::FORM,
             })
     );
     let reader = engine.query_reader()?;

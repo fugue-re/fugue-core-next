@@ -1,12 +1,8 @@
-use std::fmt;
-use std::str::FromStr;
-
-use thiserror::Error;
-
 use crate::il::common::verify::StructureVerifierError;
-use crate::il::common::{IlAnalysis, IlError, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
+use crate::il::common::{IlAnalysis, IlFormId, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
 use crate::ir::FunctionId;
-use crate::storage::entities::MutableEntity;
+use crate::storage::entities::schema::EntityCodec;
+use crate::types::EstimateSize;
 use crate::types::common::Revision;
 
 #[derive(
@@ -27,7 +23,7 @@ use crate::types::common::Revision;
 pub struct IlSchemaVersion(u16);
 
 impl IlSchemaVersion {
-    pub(crate) const fn new(value: u16) -> Self {
+    pub const fn new(value: u16) -> Self {
         Self(value)
     }
 
@@ -36,96 +32,22 @@ impl IlSchemaVersion {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
-#[repr(u8)]
-pub enum IlLevel {
-    PCode = 0,
-    ECode = 1,
-    ECodeSsa = 2,
-}
-
-impl IlLevel {
-    pub const ALL: [Self; 3] = [Self::PCode, Self::ECode, Self::ECodeSsa];
-
-    pub const fn name(&self) -> &'static str {
-        match self {
-            Self::PCode => "pcode",
-            Self::ECode => "ecode",
-            Self::ECodeSsa => "ecode_ssa",
-        }
-    }
-
-    pub fn descendants_from(self) -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter().filter(move |level| *level >= self)
-    }
-}
-
-impl fmt::Display for IlLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("unknown IL level: {name}")]
-pub struct ParseIlLevelError {
-    name: String,
-}
-
-impl FromStr for IlLevel {
-    type Err = ParseIlLevelError;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        match name {
-            "pcode" => Ok(Self::PCode),
-            "ecode" => Ok(Self::ECode),
-            "ecode_ssa" => Ok(Self::ECodeSsa),
-            _ => Err(ParseIlLevelError {
-                name: String::from(name),
-            }),
-        }
-    }
-}
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct IlMetadata {
     function: FunctionId,
-    schema: IlSchemaVersion,
     input_revision: Revision,
 }
 
 impl IlMetadata {
-    pub(crate) fn new(
-        function: FunctionId,
-        schema: IlSchemaVersion,
-        input_revision: impl Into<Revision>,
-    ) -> Self {
+    pub fn new(function: FunctionId, input_revision: impl Into<Revision>) -> Self {
         Self {
             function,
-            schema,
             input_revision: input_revision.into(),
         }
     }
 
     pub const fn function(&self) -> FunctionId {
         self.function
-    }
-
-    pub const fn schema(&self) -> IlSchemaVersion {
-        self.schema
     }
 
     pub const fn input_revision(&self) -> Revision {
@@ -137,42 +59,11 @@ impl IlMetadata {
     }
 }
 
-pub trait IlArtefact: MutableEntity<Key = FunctionId> {
-    const LEVEL: IlLevel;
-    const SCHEMA: IlSchemaVersion;
+pub trait IlArtefact: EstimateSize + Send + Sync + Sized + 'static {
+    const FORM_IDENTIFIER: &'static str;
+    const FORM: IlFormId = IlFormId::from_static(Self::FORM_IDENTIFIER);
 
     fn metadata(&self) -> &IlMetadata;
-    fn metadata_mut(&mut self) -> &mut IlMetadata;
-    fn graph(&self) -> &IlGraph;
-
-    fn verify_structure<E>(
-        &self,
-        source_spans: &[IlSourceSpan],
-        parent_spans: Option<&[IlParentSpan]>,
-        node_count: usize,
-    ) -> Result<(), E>
-    where
-        E: StructureVerifierError,
-    {
-        if self.metadata().schema() != Self::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                Self::LEVEL,
-                Self::SCHEMA.value(),
-                self.metadata().schema().value(),
-            )
-            .into());
-        }
-
-        self.graph().verify().map_err(E::from_structure)?;
-        self.graph()
-            .verify_node_bounds(node_count)
-            .map_err(E::from_structure)?;
-        IlSourceSpan::verify(source_spans, node_count).map_err(E::from_structure)?;
-        if let Some(parent_spans) = parent_spans {
-            IlParentSpan::verify(parent_spans, node_count).map_err(E::from_structure)?;
-        }
-        Ok(())
-    }
 
     fn analyse<A: IlAnalysis<Self>>(&self) -> A {
         A::analyse(self)
@@ -188,16 +79,32 @@ pub trait IlArtefact: MutableEntity<Key = FunctionId> {
     fn verify_after_rewrite(&self) {}
 }
 
-#[cfg(test)]
-mod test {
-    use super::IlLevel;
+pub trait ControlFlowIl: IlArtefact {
+    fn graph(&self) -> &IlGraph;
 
-    #[test]
-    fn level_names_round_trip() {
-        for level in IlLevel::ALL {
-            assert_eq!(level.name().parse(), Ok(level));
+    fn verify_structure<E>(
+        &self,
+        source_spans: &[IlSourceSpan],
+        parent_spans: Option<&[IlParentSpan]>,
+        node_count: usize,
+    ) -> Result<(), E>
+    where
+        E: StructureVerifierError,
+    {
+        self.graph().verify().map_err(E::from_structure)?;
+        self.graph()
+            .verify_node_bounds(node_count)
+            .map_err(E::from_structure)?;
+        IlSourceSpan::verify(source_spans, node_count).map_err(E::from_structure)?;
+        if let Some(parent_spans) = parent_spans {
+            IlParentSpan::verify(parent_spans, node_count).map_err(E::from_structure)?;
         }
-
-        assert!("".parse::<IlLevel>().is_err());
+        Ok(())
     }
+}
+
+pub trait PersistableIl: IlArtefact + EntityCodec {
+    const SCHEMA: IlSchemaVersion;
+
+    fn metadata_mut(&mut self) -> &mut IlMetadata;
 }

@@ -61,13 +61,9 @@ impl ECodeSsaBuilder {
         block: IlBlockId,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        self.graph
-            .blocks()
-            .get(block.index())
-            .ok_or(IlError::range_out_of_bounds(
-                block.value(),
-                self.graph.blocks().len(),
-            ))?;
+        self.graph.blocks().get(block.index()).ok_or_else(|| {
+            IlError::range_out_of_bounds(block.value(), self.graph.blocks().len())
+        })?;
 
         let argument_index = u32::try_from(self.block_arguments.len())
             .map_err(|_| IlError::id_exhausted("SSA block argument"))?;

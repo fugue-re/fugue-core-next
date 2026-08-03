@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
 
-use crate::ir::{Address, CodeBlockTable, Function, FunctionRef, IndexHeader};
+use crate::ir::{Address, CodeBlockTable, Function, FunctionRef, IndexMetadata};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_CALL_GRAPH_EDGE_ID, ENTITY_KEY_CALL_GRAPH_FORWARD_ID, ENTITY_KEY_CALL_GRAPH_INVERSE_ID,
@@ -408,10 +408,10 @@ impl CallGraphIndex {
         let Some(persistent) = self.persistent() else {
             return self.rebuild(functions, blocks);
         };
-        let header = persistent
+        let metadata = persistent
             .storage
-            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::CallGraphIndex)?;
-        if header.is_some_and(|header| header.revision() == revision) {
+            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::CallGraphIndex)?;
+        if metadata.is_some_and(|metadata| metadata.revision() == revision) {
             return Ok(());
         }
 
@@ -425,9 +425,10 @@ impl CallGraphIndex {
         let Some(persistent) = self.persistent() else {
             return Ok(());
         };
-        persistent
-            .storage
-            .insert(&ProjectEntity::CallGraphIndex, &IndexHeader::new(revision))
+        persistent.storage.insert(
+            &ProjectEntity::CallGraphIndex,
+            &IndexMetadata::new(revision),
+        )
     }
 
     pub(crate) fn callees(

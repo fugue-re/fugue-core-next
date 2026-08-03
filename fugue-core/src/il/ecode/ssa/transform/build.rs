@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{ECodeSsaConstruction, ExpressionStep, SsaDomain};
-use crate::il::common::{IlError, IlExprId, IlIndexRange, IlLevel, IlValueId};
-use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
-use crate::il::ecode::{ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
+use crate::il::common::{IlArtefact, IlError, IlExprId, IlIndexRange, IlValueId};
+use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode};
+use crate::il::ecode::{ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
 use crate::il::pcode::{FlagId, RegisterId};
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -58,7 +58,7 @@ impl ECodeSsaConstruction<'_, '_> {
             ECodeStmtOpcode::Store => {
                 let address_space = statement
                     .address_space()
-                    .ok_or(IlError::missing_component(IlLevel::ECode, "address space"))?;
+                    .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
                 self.build_statement_operands(statement, current)?;
                 let memory = self.current_value(SsaDomain::Memory(address_space), 0, current)?;
 
@@ -82,7 +82,7 @@ impl ECodeSsaConstruction<'_, '_> {
                     .builder
                     .push_value_operands(self.statement_operands.iter().copied())?;
                 let opcode = ECodeSsaOpcode::from_statement(opcode)
-                    .ok_or(IlError::unsupported_opcode(IlLevel::ECodeSsa))?;
+                    .ok_or_else(|| IlError::unsupported_opcode(ECodeSsaIr::FORM))?;
                 let mut operation = ECodeSsaOp::new(opcode, IlIndexRange::EMPTY, operands, 0)
                     .with_immediate(statement.immediate());
 
@@ -119,7 +119,7 @@ impl ECodeSsaConstruction<'_, '_> {
     ) -> Result<IlValueId, IlError> {
         let value = statement
             .value()
-            .ok_or(IlError::missing_component(IlLevel::ECode, "value"))?;
+            .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "value"))?;
 
         self.build_expression(value, current)
     }
@@ -207,13 +207,13 @@ impl ECodeSsaConstruction<'_, '_> {
             self.expression_operands.clear();
             for operand in self.source.expression_operands_for(&expression) {
                 let operand = self.values[operand.index()]
-                    .ok_or(IlError::missing_component(IlLevel::ECodeSsa, "operand"))?;
+                    .ok_or_else(|| IlError::missing_component(ECodeSsaIr::FORM, "operand"))?;
                 self.expression_operands.push(operand);
             }
             if expression.opcode() == ECodeExprOpcode::Load {
                 let address_space = expression
                     .address_space()
-                    .ok_or(IlError::missing_component(IlLevel::ECode, "address space"))?;
+                    .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
                 let memory = self.current_value(SsaDomain::Memory(address_space), 0, current)?;
                 self.expression_operands.push(memory);
             }
@@ -222,7 +222,7 @@ impl ECodeSsaConstruction<'_, '_> {
                 .builder
                 .push_value_operands(self.expression_operands.iter().copied())?;
             let opcode = ECodeSsaOpcode::from_expression(expression.opcode())
-                .ok_or(IlError::unsupported_opcode(IlLevel::ECodeSsa))?;
+                .ok_or_else(|| IlError::unsupported_opcode(ECodeSsaIr::FORM))?;
             let value = self.push_value_operation(
                 opcode,
                 expression.width(),
@@ -234,10 +234,8 @@ impl ECodeSsaConstruction<'_, '_> {
             self.built_expressions.push(expression_id);
         }
 
-        self.values[id.index()].ok_or(IlError::missing_component(
-            IlLevel::ECodeSsa,
-            "expression value",
-        ))
+        self.values[id.index()]
+            .ok_or_else(|| IlError::missing_component(ECodeSsaIr::FORM, "expression value"))
     }
 
     fn current_value(

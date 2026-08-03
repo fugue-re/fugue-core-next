@@ -192,12 +192,16 @@ struct SqliteSchema {
 }
 
 impl SqliteSchema {
+    fn contains(&self, prefix: &EntityKeyPrefix) -> bool {
+        self.tables.contains(prefix)
+    }
+
     fn prepare_table(
         &self,
         conn: &rusqlite::Connection,
         prefix: &EntityKeyPrefix,
     ) -> Result<bool, rusqlite::Error> {
-        if self.tables.contains(prefix) {
+        if self.contains(prefix) {
             return Ok(false);
         }
         create_table(conn, prefix)?;
@@ -298,6 +302,10 @@ impl Default for SqliteEntityStorage<TRANSIENT> {
 
 impl<const P: StoragePersistence> SqliteEntityStorage<P> {
     fn ensure_table(&self, prefix: &EntityKeyPrefix) -> Result<(), EntityStorageError> {
+        if self.schema.contains(prefix) {
+            return Ok(());
+        }
+
         let conn = self.pool.get().map_err(EntityStorageError::backing)?;
         self.schema.ensure_table(&conn, prefix)?;
         Ok(())
@@ -1022,8 +1030,16 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
 #[cfg(test)]
 mod test {
     use std::ops::Bound;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{SqliteEntityStorage, create_table};
+    use r2d2::Pool;
+    use r2d2::event::{CheckoutEvent, HandleEvent};
+    use r2d2_sqlite::SqliteConnectionManager;
+
+    use super::{
+        SqliteConnectionCustomiser, SqliteEntityStorage, SqliteSchema, create_table, init_database,
+    };
     use crate::ir::{Address, Switch, SwitchModel, SwitchTable};
     use crate::storage::TRANSIENT;
     use crate::storage::entities::schema::EntityId;
@@ -1042,6 +1058,49 @@ mod test {
 
     impl Entity for TestEntity {
         const ID: EntityId = EntityId::new(126);
+    }
+
+    #[derive(Debug)]
+    struct CheckoutCounter(Arc<AtomicUsize>);
+
+    impl HandleEvent for CheckoutCounter {
+        fn handle_checkout(&self, _event: CheckoutEvent) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn sqlite_known_table_iterator_checks_out_once() -> Result<(), Box<dyn std::error::Error>> {
+        let checkouts = Arc::new(AtomicUsize::new(0));
+        let manager = SqliteConnectionManager::memory().with_flags(
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                | rusqlite::OpenFlags::SQLITE_OPEN_SHARED_CACHE,
+        );
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_customizer(Box::new(SqliteConnectionCustomiser))
+            .event_handler(Box::new(CheckoutCounter(checkouts.clone())))
+            .build(manager)?;
+        let conn = pool.get()?;
+        init_database(&conn)?;
+        drop(conn);
+
+        let sqlite = SqliteEntityStorage::<TRANSIENT> {
+            pool,
+            schema: Arc::new(SqliteSchema::default()),
+        };
+        let storage = EntityStorage::new(sqlite);
+        storage.insert(&Address::from(1u64), &TestEntity::new(1))?;
+        checkouts.store(0, Ordering::Relaxed);
+
+        let entities = storage
+            .iter::<Address, TestEntity>()?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(entities.len(), 1);
+        assert_eq!(checkouts.load(Ordering::Relaxed), 1);
+        Ok(())
     }
 
     #[test]

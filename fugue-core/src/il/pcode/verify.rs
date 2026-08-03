@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::il::common::verify::{StructureError, StructureVerifierError};
-use crate::il::common::{IlArtefact, IlError};
+use crate::il::common::{ControlFlowIl, IlArtefact, IlError};
 use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeOp};
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl PCodeIr {
         let output = operation.output();
 
         if operation.opcode().requires_output() && output.is_none() {
-            return Err(IlError::missing_component(Self::LEVEL, "output").into());
+            return Err(IlError::missing_component(Self::FORM, "output").into());
         }
 
         if operation.opcode().forbids_output() && output.is_some() {
@@ -72,28 +72,26 @@ impl PCodeIr {
         }
 
         if let Some(output) = output {
-            self.location(output).ok_or(IlError::range_out_of_bounds(
-                output.value(),
-                self.locations().len(),
-            ))?;
+            self.location(output).ok_or_else(|| {
+                IlError::range_out_of_bounds(output.value(), self.locations().len())
+            })?;
         }
 
         for operand in self.operation_operands_for(operation) {
-            self.location(*operand).ok_or(IlError::range_out_of_bounds(
-                operand.value(),
-                self.locations().len(),
-            ))?;
+            self.location(*operand).ok_or_else(|| {
+                IlError::range_out_of_bounds(operand.value(), self.locations().len())
+            })?;
         }
 
         if operation.opcode().requires_address_space() && operation.address_space().is_none() {
-            return Err(IlError::missing_component(Self::LEVEL, "address space").into());
+            return Err(IlError::missing_component(Self::FORM, "address space").into());
         }
         if !operation.opcode().requires_address_space() && operation.address_space().is_some() {
             return Err(VerifyError::ForbiddenEffectSpace);
         }
 
         if operation.opcode().requires_address() && operation.immediate() == 0 {
-            return Err(IlError::missing_component(Self::LEVEL, "address").into());
+            return Err(IlError::missing_component(Self::FORM, "address").into());
         }
 
         if operation.opcode().requires_address()
@@ -116,7 +114,7 @@ impl PCodeIr {
             && let Some(first) = operands.first().and_then(|operand| self.location(*operand))
             && output.size() != first.size()
         {
-            return Err(IlError::width_mismatch(Self::LEVEL).into());
+            return Err(IlError::width_mismatch(Self::FORM).into());
         }
 
         if operation.opcode().compares_operands()
@@ -124,7 +122,7 @@ impl PCodeIr {
             && self.location(*left).map(PCodeLocation::size)
                 != self.location(*right).map(PCodeLocation::size)
         {
-            return Err(IlError::width_mismatch(Self::LEVEL).into());
+            return Err(IlError::width_mismatch(Self::FORM).into());
         }
 
         Ok(())

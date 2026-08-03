@@ -8,16 +8,13 @@ use crate::arch::Arch;
 use crate::engine::AnalysisEngine;
 use crate::engine::change::ChangeRecord;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlIndexRange, IlLevel,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlIndexRange,
     IlMetadata, IlSourceSpan, IlValueId,
 };
-use crate::il::ecode::ssa::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses,
-};
-use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeStmtOpcode, PCodeToECode};
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses};
+use crate::il::ecode::{ECodeBuilder, ECodeStmtOpcode, PCodeToECode};
 use crate::il::pcode::{
-    LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation, PCodeLocationProperties,
-    PCodeOp, PCodeOpcode,
+    LifterSpaceHandle, PCodeBuilder, PCodeLocation, PCodeLocationProperties, PCodeOp, PCodeOpcode,
 };
 use crate::ir::{
     AddressRange, AddressRangeSet, AddressWithContext, IncompleteCodeBlock, IncompleteFunction,
@@ -43,8 +40,8 @@ fn pcode_reference_ir(
     opcode: PCodeOpcode,
 ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
     let language = resolve_language("x86:LE:64")?;
-    let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
-    let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+    let metadata = IlMetadata::new(function, 0);
+    let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
 
     builder.set_source_spans(vec![IlSourceSpan::new(
         IlIndexRange::new(0, 1)?,
@@ -87,8 +84,8 @@ fn pcode_copy_ir(
     source: Address,
 ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
     let language = resolve_language("x86:LE:64")?;
-    let header = IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0);
-    let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+    let metadata = IlMetadata::new(function, 0);
+    let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
 
     builder.set_source_spans(vec![IlSourceSpan::new(
         IlIndexRange::new(0, 1)?,
@@ -260,22 +257,14 @@ fn single_block_graph() -> IlGraph {
 
 fn pcode_for_test(function: FunctionId, graph: IlGraph) -> PCodeIr {
     let language = resolve_language("x86:LE:64").expect("test language should resolve");
-    PCodeBuilder::new(
-        language,
-        IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
-        graph,
-    )
-    .build(&CancellationToken::default())
-    .expect("test PCode IR should verify")
+    PCodeBuilder::new(language, IlMetadata::new(function, 0), graph)
+        .build(&CancellationToken::default())
+        .expect("test PCode IR should verify")
 }
 
 fn tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
     let language = resolve_language("x86:LE:64").expect("test language should resolve");
-    let mut builder = PCodeBuilder::new(
-        language,
-        IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
-        IlGraph::default(),
-    );
+    let mut builder = PCodeBuilder::new(language, IlMetadata::new(function, 0), IlGraph::default());
     builder.set_source_spans(tagged_source_spans(payload));
     builder
         .build(&CancellationToken::default())
@@ -283,18 +272,15 @@ fn tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
 }
 
 fn ecode_for_test(function: FunctionId, graph: IlGraph) -> ECodeIr {
-    ECodeBuilder::new(IlMetadata::new(function, ECODE_SCHEMA_VERSION, 0), graph)
+    ECodeBuilder::new(IlMetadata::new(function, 0), graph)
         .build(&CancellationToken::default())
         .expect("test LIR should verify")
 }
 
 fn ecode_ssa_for_test(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
-    ECodeSsaBuilder::new(
-        IlMetadata::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
-        graph,
-    )
-    .build(&CancellationToken::default())
-    .expect("test LIR SSA should verify")
+    ECodeSsaBuilder::new(IlMetadata::new(function, 0), graph)
+        .build(&CancellationToken::default())
+        .expect("test LIR SSA should verify")
 }
 
 fn first_mapping_placement(

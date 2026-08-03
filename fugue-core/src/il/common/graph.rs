@@ -29,6 +29,10 @@ bitflags::bitflags! {
 archived_bitflags!(IlEdgeKinds, ArchivedIlEdgeKinds, u8);
 
 impl IlEdgeKinds {
+    pub const SINGULAR: Self = Self::FALL_THROUGH
+        .union(Self::TAKEN)
+        .union(Self::UNCONDITIONAL);
+
     pub const fn from_flow(kind: FlowKind) -> Option<Self> {
         match kind {
             FlowKind::Branch | FlowKind::TailCallBranch => Some(Self::UNCONDITIONAL),

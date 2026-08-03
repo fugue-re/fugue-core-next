@@ -5,9 +5,8 @@ use crate::arch::Arch;
 use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlError, IlExprId, IlIndexRange, IlMetadata, IlValueId,
 };
-use crate::il::ecode::ssa::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOptimiser,
-};
+use crate::il::common::{IlConversion, IlGenerationContext, IlGenerationError};
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOptimiser};
 use crate::il::ecode::{ECodeIr, PCodeToECode};
 use crate::il::pcode::{FlagId, PCodeCanonicaliser, PCodeError, RegisterId};
 use crate::ir::IncompleteFunction;
@@ -17,8 +16,8 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::types::common::Revision;
 
 mod blocks;
+mod build;
 mod domains;
-mod lift;
 mod spans;
 
 #[derive(Debug)]
@@ -35,6 +34,18 @@ pub struct ECodeToSsa {
     statement_operands: Vec<IlValueId>,
 }
 
+impl IlConversion for ECodeSsaIr {
+    type Source = ECodeIr;
+
+    fn convert(
+        source: &Self::Source,
+        _context: &IlGenerationContext<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, IlGenerationError> {
+        Ok(ECodeToSsa::default().transform_optimised(source, cancellation)?)
+    }
+}
+
 impl ECodeToSsa {
     pub fn transform(
         &mut self,
@@ -45,7 +56,6 @@ impl ECodeToSsa {
 
         let metadata = IlMetadata::new(
             source.metadata().function(),
-            ECODE_SSA_SCHEMA_VERSION,
             source.metadata().input_revision(),
         );
         let mut builder = ECodeSsaBuilder::new(metadata, source.graph().clone());

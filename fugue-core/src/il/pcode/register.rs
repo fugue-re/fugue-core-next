@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock};
 
-use crate::il::common::{IlError, IlLevel};
+use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
+
+use crate::il::common::{IlArtefact, IlError};
 use crate::il::pcode::{PCodeIr, PCodeLocation};
 use crate::ir::Endian;
 use crate::lifter::Language;
@@ -84,12 +88,30 @@ pub(crate) struct RegisterBank {
     roots: Vec<RegisterRange>,
 }
 
+static LANGUAGE_RANGES: LazyLock<RwLock<FxHashMap<usize, Arc<[RegisterRange]>>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
 impl RegisterBank {
-    pub(crate) fn new(language: &'static Language, source: &PCodeIr) -> Result<Self, IlError> {
+    fn language_ranges(language: &'static Language) -> Result<Arc<[RegisterRange]>, IlError> {
+        let key = std::ptr::from_ref(language) as usize;
+        if let Some(ranges) = LANGUAGE_RANGES.read().get(&key) {
+            return Ok(ranges.clone());
+        }
+
         let mut ranges = Vec::new();
         for (_, register) in language.registers() {
             Self::push_range(&mut ranges, register.offset(), register.size())?;
         }
+        ranges.sort_unstable_by_key(|range| (range.start, range.end));
+        let ranges = Arc::<[RegisterRange]>::from(ranges);
+        LANGUAGE_RANGES.write().insert(key, ranges.clone());
+
+        Ok(ranges)
+    }
+
+    pub(crate) fn new(language: &'static Language, source: &PCodeIr) -> Result<Self, IlError> {
+        let language_ranges = Self::language_ranges(language)?;
+        let mut ranges = Vec::new();
         for location in source
             .locations()
             .iter()
@@ -99,14 +121,29 @@ impl RegisterBank {
         }
         ranges.sort_unstable_by_key(|range| (range.start, range.end));
 
-        let mut roots = Vec::<RegisterRange>::new();
-        for range in ranges {
+        let mut roots = Vec::<RegisterRange>::with_capacity(language_ranges.len());
+        let mut merge = |range: RegisterRange| {
             if let Some(root) = roots.last_mut()
                 && range.start < root.end
             {
                 root.end = root.end.max(range.end);
             } else {
                 roots.push(range);
+            }
+        };
+
+        let mut base = language_ranges.iter().copied().peekable();
+        let mut local = ranges.into_iter().peekable();
+        loop {
+            let next = match (base.peek(), local.peek()) {
+                (Some(left), Some(right)) if left.start <= right.start => base.next(),
+                (Some(_), Some(_)) => local.next(),
+                (Some(_), None) => base.next(),
+                (None, Some(_)) => local.next(),
+                (None, None) => break,
+            };
+            if let Some(range) = next {
+                merge(range);
             }
         }
 
@@ -121,13 +158,13 @@ impl RegisterBank {
         let start = location.offset();
         let end = start
             .checked_add(u64::from(location.size()))
-            .ok_or(IlError::integer_overflow("register slice"))?;
+            .ok_or_else(|| IlError::integer_overflow("register slice"))?;
         let index = self.roots.partition_point(|root| root.end <= start);
         let root = self
             .roots
             .get(index)
             .filter(|root| root.start <= start && end <= root.end)
-            .ok_or(IlError::missing_component(IlLevel::PCode, "register root"))?;
+            .ok_or_else(|| IlError::missing_component(PCodeIr::FORM, "register root"))?;
         let root_bytes = root.end - root.start;
         let offset_bytes = match endian {
             Endian::Little => start - root.start,
@@ -136,7 +173,7 @@ impl RegisterBank {
         let root_bits = root_bytes
             .checked_mul(8)
             .and_then(|bits| u32::try_from(bits).ok())
-            .ok_or(IlError::integer_overflow("register width"))?;
+            .ok_or_else(|| IlError::integer_overflow("register width"))?;
         let offset = u32::try_from(offset_bytes)
             .map_err(|_| IlError::integer_overflow("register slice offset"))?;
 
@@ -148,9 +185,24 @@ impl RegisterBank {
         })
     }
 
-    pub(crate) fn preserved_roots(
-        slices: impl IntoIterator<Item = RegisterSlice>,
-    ) -> Vec<RegisterId> {
+    pub(crate) fn call_preserved_registers(
+        &self,
+        language: &'static Language,
+        endian: Endian,
+        compiler: &str,
+    ) -> Result<Vec<RegisterId>, IlError> {
+        let slices = language
+            .call_preserved_registers(compiler)
+            .or_else(|| language.call_preserved_registers("default"))
+            .unwrap_or_default()
+            .iter()
+            .map(|register| self.slice(&PCodeLocation::from_varnode(language, register), endian))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self::preserved_roots(slices))
+    }
+
+    fn preserved_roots(slices: impl IntoIterator<Item = RegisterSlice>) -> Vec<RegisterId> {
         let mut roots: BTreeMap<RegisterId, (u32, Vec<(u32, u32)>)> = BTreeMap::new();
         for slice in slices {
             let start = slice.offset() * 8;
@@ -183,7 +235,7 @@ impl RegisterBank {
         let size = u64::try_from(size).map_err(|_| IlError::integer_overflow("register range"))?;
         let end = start
             .checked_add(size)
-            .ok_or(IlError::integer_overflow("register range"))?;
+            .ok_or_else(|| IlError::integer_overflow("register range"))?;
         ranges.push(RegisterRange { start, end });
         Ok(())
     }

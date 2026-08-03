@@ -4,11 +4,11 @@ use std::sync::Arc;
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::engine::change::ChangeRecord;
 use fugue_core::il::common::{
-    IlArtefact as CoreIlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
+    IlArtefact as CoreIlArtefact, IlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
-    IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlGraph as CoreIlGraph,
-    IlLevel as CoreIlLevel, IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
-    IlSourceSpan as CoreIlSourceSpan, IlValueId as CoreIlValueId,
+    IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlFormId as CoreIlFormId,
+    IlGraph as CoreIlGraph, IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
+    IlSourceSpan as CoreIlSourceSpan, IlValueId as CoreIlValueId, PersistableIl,
 };
 use fugue_core::il::ecode::ssa::{
     ECodeSsaBlockArg as CoreECodeSsaBlockArg, ECodeSsaIr as CoreECodeSsaIr,
@@ -40,10 +40,13 @@ pub(crate) struct Project {
 }
 
 impl Project {
-    fn parse_level(level: &str) -> PyResult<CoreIlLevel> {
-        level
-            .parse()
-            .map_err(|_| BindingError::invalid_level(level).into())
+    fn parse_form(form: &str) -> PyResult<CoreIlFormId> {
+        match form {
+            "pcode" => Ok(<CorePCodeIr as IlArtefact>::FORM),
+            "ecode" => Ok(<CoreECodeIr as IlArtefact>::FORM),
+            "ecode_ssa" => Ok(<CoreECodeSsaIr as IlArtefact>::FORM),
+            _ => CoreIlFormId::new(form).map_err(|_| BindingError::invalid_form(form).into()),
+        }
     }
 
     fn from_core(inner: CoreProject) -> PyResult<Self> {
@@ -122,22 +125,26 @@ impl Project {
             .map_err(project_error)
     }
 
-    fn has_lifted(&self, function: &Function, level: &str) -> PyResult<bool> {
-        let level = Self::parse_level(level)?;
+    fn has_lifted(&self, function: &Function, form: &str) -> PyResult<bool> {
+        let form = Self::parse_form(form)?;
         let project = self.reader.project().map_err(project_error)?;
-        match level {
-            CoreIlLevel::PCode => project.pcode(function.id).map(|ir| ir.is_some()),
-            CoreIlLevel::ECode => project.ecode(function.id).map(|ir| ir.is_some()),
-            CoreIlLevel::ECodeSsa => project.ecode_ssa(function.id).map(|ir| ir.is_some()),
+        if form == <CorePCodeIr as IlArtefact>::FORM {
+            project.pcode(function.id).map(|ir| ir.is_some())
+        } else if form == <CoreECodeIr as IlArtefact>::FORM {
+            project.ecode(function.id).map(|ir| ir.is_some())
+        } else if form == <CoreECodeSsaIr as IlArtefact>::FORM {
+            project.ecode_ssa(function.id).map(|ir| ir.is_some())
+        } else {
+            Ok(false)
         }
         .map_err(project_error)
     }
 
-    fn ensure_lifted(&mut self, function: &Function, level: &str) -> PyResult<bool> {
-        let level = Self::parse_level(level)?;
+    fn ensure_lifted(&mut self, function: &Function, form: &str) -> PyResult<bool> {
+        let form = Self::parse_form(form)?;
         let changes = self
             .engine
-            .ensure_lifted(function.id, level)
+            .ensure_lifted(function.id, form)
             .map_err(project_error)?;
         Ok(changes
             .records()
@@ -145,24 +152,25 @@ impl Project {
             .any(|record| matches!(record, ChangeRecord::LiftedMaterialised { .. })))
     }
 
-    fn lifted_display(&self, function: &Function, level: &str) -> PyResult<Option<String>> {
-        let level = Self::parse_level(level)?;
-        match level {
-            CoreIlLevel::PCode => self
-                .reader
+    fn lifted_display(&self, function: &Function, form: &str) -> PyResult<Option<String>> {
+        let form = Self::parse_form(form)?;
+        if form == <CorePCodeIr as IlArtefact>::FORM {
+            self.reader
                 .pcode(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
-                .map_err(project_error),
-            CoreIlLevel::ECode => self
-                .reader
+                .map_err(project_error)
+        } else if form == <CoreECodeIr as IlArtefact>::FORM {
+            self.reader
                 .ecode(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
-                .map_err(project_error),
-            CoreIlLevel::ECodeSsa => self
-                .reader
+                .map_err(project_error)
+        } else if form == <CoreECodeSsaIr as IlArtefact>::FORM {
+            self.reader
                 .ecode_ssa(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
-                .map_err(project_error),
+                .map_err(project_error)
+        } else {
+            Ok(None)
         }
     }
 
@@ -316,19 +324,14 @@ impl IlMetadata {
     }
 
     #[getter]
-    fn schema(&self) -> u16 {
-        self.inner.schema().value()
-    }
-
-    #[getter]
     fn input_revision(&self) -> u64 {
         self.inner.input_revision().value()
     }
 
     fn __repr__(&self) -> String {
         let function = self.function();
-        let schema = self.schema();
-        format!("IlMetadata(function={function:?}, schema={schema})")
+        let input_revision = self.input_revision();
+        format!("IlMetadata(function={function:?}, input_revision={input_revision})")
     }
 }
 
@@ -397,8 +400,13 @@ impl PCodeIr {
 #[pymethods]
 impl PCodeIr {
     #[getter]
-    fn level(&self) -> &'static str {
-        CoreIlLevel::PCode.name()
+    fn form(&self) -> &'static str {
+        <CorePCodeIr as IlArtefact>::FORM_IDENTIFIER
+    }
+
+    #[getter]
+    fn schema(&self) -> u16 {
+        <CorePCodeIr as PersistableIl>::SCHEMA.value()
     }
 
     fn metadata(&self) -> IlMetadata {
@@ -485,8 +493,13 @@ impl ECodeIr {
 #[pymethods]
 impl ECodeIr {
     #[getter]
-    fn level(&self) -> &'static str {
-        CoreIlLevel::ECode.name()
+    fn form(&self) -> &'static str {
+        <CoreECodeIr as IlArtefact>::FORM_IDENTIFIER
+    }
+
+    #[getter]
+    fn schema(&self) -> u16 {
+        <CoreECodeIr as PersistableIl>::SCHEMA.value()
     }
 
     fn metadata(&self) -> IlMetadata {
@@ -575,8 +588,13 @@ impl ECodeSsaIr {
 #[pymethods]
 impl ECodeSsaIr {
     #[getter]
-    fn level(&self) -> &'static str {
-        CoreIlLevel::ECodeSsa.name()
+    fn form(&self) -> &'static str {
+        <CoreECodeSsaIr as IlArtefact>::FORM_IDENTIFIER
+    }
+
+    #[getter]
+    fn schema(&self) -> u16 {
+        <CoreECodeSsaIr as PersistableIl>::SCHEMA.value()
     }
 
     fn metadata(&self) -> IlMetadata {

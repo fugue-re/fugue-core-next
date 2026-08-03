@@ -178,16 +178,14 @@ mod test {
     use crate::il::common::{
         IlArtefact, IlBlock, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
     };
-    use crate::il::ecode::ssa::{
-        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
-    };
+    use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode};
     use crate::ir::FunctionId;
 
     #[test]
     fn liveness_tracks_value_across_linear_edge() {
         let block0 = IlBlockId::try_from_index(0).unwrap();
         let block1 = IlBlockId::try_from_index(1).unwrap();
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let graph = IlGraph::new(
             vec![
                 IlBlock::new(
@@ -239,7 +237,7 @@ mod test {
     #[test]
     fn liveness_ignores_value_defined_before_same_block_use() {
         let block = IlBlockId::try_from_index(0).unwrap();
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let graph = IlGraph::new(
             vec![IlBlock::new(
                 IlIndexRange::new(0, 2).unwrap(),
@@ -282,7 +280,7 @@ mod test {
     #[test]
     fn liveness_treats_block_argument_as_entry_definition() {
         let block = IlBlockId::try_from_index(0).unwrap();
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let graph = IlGraph::new(
             vec![IlBlock::new(
                 IlIndexRange::new(0, 1).unwrap(),
@@ -316,7 +314,7 @@ mod test {
     fn liveness_tracks_value_used_only_as_edge_argument() {
         let block0 = IlBlockId::try_from_index(0).unwrap();
         let block1 = IlBlockId::try_from_index(1).unwrap();
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let graph = IlGraph::new(
             vec![
                 IlBlock::new(

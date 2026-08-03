@@ -9,8 +9,8 @@ use crate::il::common::{
 };
 use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaIrParts,
-    ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaMemoryDomain,
+    ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::FunctionId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -88,7 +88,7 @@ impl SsaFixture {
 
 #[test]
 fn ssa_verifier_rejects_invalid_value_definition() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let ir = SsaFixture::default()
         .with_values(
             vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
@@ -104,7 +104,7 @@ fn ssa_verifier_rejects_invalid_value_definition() {
 
 #[test]
 fn ssa_verifier_rejects_duplicate_memory_domains() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let space = AddressSpaceId::new(7);
     let ir = SsaFixture::default()
         .with_memory_domains(vec![
@@ -121,7 +121,7 @@ fn ssa_verifier_rejects_duplicate_memory_domains() {
 
 #[test]
 fn ssa_verifier_rejects_load_without_memory_domain() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let space = AddressSpaceId::new(7);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
     let (_value, results) = builder.push_result_value(8).unwrap();
@@ -143,7 +143,7 @@ fn ssa_verifier_rejects_load_without_memory_domain() {
 
 #[test]
 fn ssa_verifier_reports_invalid_store_result_count() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let space = AddressSpaceId::new(7);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
     builder.ensure_memory_domain(space);
@@ -202,7 +202,7 @@ fn ssa_verifier_reports_invalid_store_result_count() {
 
 #[test]
 fn ssa_verifier_rejects_wide_constant_beyond_pool() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
     let (_value, results) = builder.push_result_value(128).unwrap();
 
@@ -223,7 +223,7 @@ fn ssa_verifier_rejects_wide_constant_beyond_pool() {
 
 #[test]
 fn ssa_verifier_rejects_operand_width_mismatch() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (wide, wide_results) = builder.push_result_value(64).unwrap();
@@ -257,7 +257,7 @@ fn ssa_verifier_rejects_operand_width_mismatch() {
 
 #[test]
 fn ssa_verifier_accepts_wide_constant_within_pool() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (source, source_results) = builder.push_result_value(64).unwrap();
@@ -309,7 +309,7 @@ fn ssa_verifier_accepts_wide_constant_within_pool() {
 #[test]
 fn ssa_verifier_bounds_wide_constant_at_pool_edge() {
     let wide_constant = |pool_len: usize| {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         SsaFixture::default()
             .with_values(
                 vec![ECodeSsaValue::operation_result(
@@ -344,7 +344,7 @@ fn ssa_verifier_bounds_wide_constant_at_pool_edge() {
 
 #[test]
 fn ssa_verifier_rejects_non_dominating_linear_use() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let value = IlValueId::try_from_index(0).unwrap();
     let result = IlIndexRange::new(0, 1).unwrap();
     let operands = IlIndexRange::new(0, 1).unwrap();
@@ -374,7 +374,7 @@ fn ssa_verifier_rejects_non_dominating_linear_use() {
 
 #[test]
 fn ssa_verifier_rejects_non_dominating_block_use() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let left = IlBlockId::try_from_index(1).unwrap();
     let right = IlBlockId::try_from_index(2).unwrap();
     let value = IlValueId::try_from_index(0).unwrap();
@@ -436,7 +436,7 @@ fn ssa_verifier_rejects_non_dominating_block_use() {
 
 #[test]
 fn ssa_verifier_rejects_wrong_edge_argument_count() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let successor = IlBlockId::try_from_index(1).unwrap();
     let argument_value = IlValueId::try_from_index(0).unwrap();
     let graph = IlGraph::new(
@@ -471,7 +471,7 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
 
 #[test]
 fn ssa_verifier_rejects_non_dominating_edge_argument() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let left = IlBlockId::try_from_index(1).unwrap();
     let right = IlBlockId::try_from_index(2).unwrap();
     let value = IlValueId::try_from_index(0).unwrap();
@@ -528,7 +528,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
 
 #[test]
 fn ssa_verifier_rejects_duplicate_operation_placement() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(

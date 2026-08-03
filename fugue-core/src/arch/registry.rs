@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 use crate::arch::Arch;
+use crate::extension::{self, Registration};
 use crate::lifter::LanguageSource;
 use crate::lifter::{Language, LanguageError, LanguageId};
-use crate::registry::{self, Registration};
 
 #[derive(Debug, Error)]
 pub enum ArchError {
@@ -50,7 +50,7 @@ impl Registration for ArchProvider {
     }
 }
 
-registry::collect!(ArchProvider);
+extension::collect!(ArchProvider);
 
 pub struct LanguageProvider {
     name: &'static str,
@@ -77,10 +77,10 @@ impl Registration for LanguageProvider {
     }
 }
 
-registry::collect!(LanguageProvider);
+extension::collect!(LanguageProvider);
 
 pub fn provide_arch(language: &'static Language) -> Result<Arch, ArchError> {
-    let mut matches = registry::iter::<ArchProvider>()
+    let mut matches = extension::iter::<ArchProvider>()
         .filter(|provider| provider.supports(language))
         .collect::<Vec<_>>();
 
@@ -97,7 +97,7 @@ pub fn provide_language(
 ) -> Result<Option<&'static Language>, LanguageError> {
     let mut resolved = Vec::new();
 
-    for provider in registry::iter::<LanguageProvider>() {
+    for provider in extension::iter::<LanguageProvider>() {
         if let Some(language) = provider.provide(id, source)? {
             resolved.push(language);
         }

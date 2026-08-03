@@ -1,4 +1,6 @@
-use crate::il::common::{IlAnalysis, IlArtefact, IlBlock, IlBlockId, IlBlockPredecessors, IlCsr};
+use crate::il::common::{
+    ControlFlowIl, IlAnalysis, IlBlock, IlBlockId, IlBlockPredecessors, IlCsr,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominance {
@@ -125,7 +127,7 @@ impl IlDominance {
     }
 }
 
-impl<I: IlArtefact> IlAnalysis<I> for IlDominance {
+impl<I: ControlFlowIl> IlAnalysis<I> for IlDominance {
     fn analyse(ir: &I) -> Self {
         let Some(entry) = ir.graph().entry_block() else {
             return Self::default();
@@ -194,7 +196,7 @@ impl IlDominanceFrontier {
     }
 }
 
-impl<I: IlArtefact> IlAnalysis<I> for IlDominanceFrontier {
+impl<I: ControlFlowIl> IlAnalysis<I> for IlDominanceFrontier {
     fn analyse(ir: &I) -> Self {
         ir.analyse::<IlDominance>()
             .frontiers(ir.graph().blocks(), ir.graph().successors())

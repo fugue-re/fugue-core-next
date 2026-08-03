@@ -1,15 +1,18 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-use crate::il::common::{IlArtefact, IlError, IlLevel};
-use crate::il::ecode::ECodeIr;
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::pcode::PCodeIr;
+use crate::il::common::{IlError, IlFormId, PersistableIl};
 use crate::ir::FunctionId;
+use crate::storage::entities::schema::{
+    ENTITY_IL_OVERRIDE_ID, ENTITY_KEY_IL_OVERRIDE_ID, Entity, EntityId, EntityKey, EntityKeyId,
+};
 use crate::storage::entities::{EntityWrite, EntityWriteBatch};
 use crate::storage::{EntityStorageError, StorageContainer};
 use crate::types::common::Revision;
+
+const FUNCTION_KEY_SIZE: usize = 8;
 
 #[derive(Debug, Error)]
 pub(crate) enum IlStorageError {
@@ -19,25 +22,107 @@ pub(crate) enum IlStorageError {
     Storage(#[from] EntityStorageError),
 }
 
-pub(crate) trait IlPersist: IlArtefact + Sized {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct IlOverrideKey {
+    function: FunctionId,
+    form: IlFormId,
+}
+
+impl IlOverrideKey {
+    pub(crate) fn new(function: FunctionId, form: IlFormId) -> Self {
+        Self { function, form }
+    }
+
+    pub(crate) fn function(&self) -> FunctionId {
+        self.function
+    }
+
+    pub(crate) fn form(&self) -> &IlFormId {
+        &self.form
+    }
+}
+
+impl EntityKey for IlOverrideKey {
+    const ID: EntityKeyId = ENTITY_KEY_IL_OVERRIDE_ID;
+
+    fn decode(buf: &[u8]) -> Option<Self> {
+        let (function, form) = buf.split_at_checked(FUNCTION_KEY_SIZE)?;
+        Some(Self {
+            function: FunctionId::decode(function)?,
+            form: IlFormId::from_stored(str::from_utf8(form).ok()?),
+        })
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        EntityKey::encode(&self.function, output);
+        output.extend(self.form.as_str().bytes());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub(crate) struct IlOverride {
+    form: String,
+    schema: u16,
+    input_revision: u64,
+    bytes: Vec<u8>,
+}
+
+impl Entity for IlOverride {
+    const ID: EntityId = ENTITY_IL_OVERRIDE_ID;
+}
+
+type IlEncodeFn = fn(&(dyn Any + Send + Sync)) -> Result<IlOverride, EntityStorageError>;
+
+fn encode_erased<T: PersistableIl>(
+    artefact: &(dyn Any + Send + Sync),
+) -> Result<IlOverride, EntityStorageError> {
+    let artefact = artefact
+        .downcast_ref::<T>()
+        .ok_or_else(|| EntityStorageError::encode(IlError::mismatched_source(T::FORM)))?;
+
+    IlOverride::encode(artefact)
+}
+
+impl IlOverride {
+    fn encode<T: PersistableIl>(artefact: &T) -> Result<Self, EntityStorageError> {
+        Ok(Self {
+            form: String::from(T::FORM_IDENTIFIER),
+            schema: T::SCHEMA.value(),
+            input_revision: artefact.metadata().input_revision().value(),
+            bytes: rkyv::to_bytes::<rkyv::rancor::Error>(artefact)
+                .map_err(EntityStorageError::encode)?
+                .into_vec(),
+        })
+    }
+
+    pub(crate) fn input_revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    fn decode<T: PersistableIl>(&self) -> Result<T, IlStorageError> {
+        if self.form != T::FORM_IDENTIFIER {
+            return Err(IlError::dialect_unavailable(self.form.clone()).into());
+        }
+        if self.schema != T::SCHEMA.value() {
+            return Err(IlError::schema_mismatch(T::FORM, T::SCHEMA.value(), self.schema).into());
+        }
+
+        rkyv::from_bytes::<T, rkyv::rancor::Error>(&self.bytes)
+            .map_err(|error| EntityStorageError::decode(error).into())
+    }
+}
+
+pub(crate) trait IlPersist: PersistableIl {
     fn load(
         storage: &StorageContainer,
         function: FunctionId,
     ) -> Result<Option<Self>, IlStorageError> {
-        let Some(artefact) = storage.entity::<FunctionId, Self>(&function)? else {
+        let key = IlOverrideKey::new(function, Self::FORM);
+        let Some(stored) = storage.entity::<IlOverrideKey, IlOverride>(&key)? else {
             return Ok(None);
         };
 
-        if artefact.metadata().schema() != Self::SCHEMA {
-            return Err(IlError::schema_mismatch(
-                Self::LEVEL,
-                Self::SCHEMA.value(),
-                artefact.metadata().schema().value(),
-            )
-            .into());
-        }
-
-        Ok(Some(artefact))
+        stored.decode::<Self>().map(Some)
     }
 
     fn load_current(
@@ -45,70 +130,40 @@ pub(crate) trait IlPersist: IlArtefact + Sized {
         function: FunctionId,
         input_revision: Revision,
     ) -> Result<Option<Self>, IlStorageError> {
-        let Some(artefact) = Self::load(storage, function)? else {
+        let key = IlOverrideKey::new(function, Self::FORM);
+        let Some(stored) = storage.entity::<IlOverrideKey, IlOverride>(&key)? else {
             return Ok(None);
         };
 
-        if artefact.metadata().input_revision() != input_revision {
+        if stored.input_revision() != input_revision.value() {
             return Err(IlError::stale_artefact(
-                Self::LEVEL,
+                Self::FORM,
                 input_revision.value(),
-                artefact.metadata().input_revision().value(),
+                stored.input_revision(),
             )
             .into());
         }
 
-        Ok(Some(artefact))
+        stored.decode::<Self>().map(Some)
     }
 }
 
-impl<T: IlArtefact> IlPersist for T {}
+impl<T: PersistableIl> IlPersist for T {}
 
-pub(crate) trait StagedIl: IlPersist {
-    fn mutations(stage: &IlStage) -> &BTreeMap<FunctionId, IlMutation<Self>>;
-    fn mutations_mut(stage: &mut IlStage) -> &mut BTreeMap<FunctionId, IlMutation<Self>>;
+struct IlStagedArtefact {
+    artefact: Box<dyn Any + Send + Sync>,
+    encode: IlEncodeFn,
 }
 
-impl StagedIl for PCodeIr {
-    fn mutations(stage: &IlStage) -> &BTreeMap<FunctionId, IlMutation<Self>> {
-        &stage.pcode
-    }
-
-    fn mutations_mut(stage: &mut IlStage) -> &mut BTreeMap<FunctionId, IlMutation<Self>> {
-        &mut stage.pcode
-    }
-}
-
-impl StagedIl for ECodeIr {
-    fn mutations(stage: &IlStage) -> &BTreeMap<FunctionId, IlMutation<Self>> {
-        &stage.ecode
-    }
-
-    fn mutations_mut(stage: &mut IlStage) -> &mut BTreeMap<FunctionId, IlMutation<Self>> {
-        &mut stage.ecode
-    }
-}
-
-impl StagedIl for ECodeSsaIr {
-    fn mutations(stage: &IlStage) -> &BTreeMap<FunctionId, IlMutation<Self>> {
-        &stage.ecode_ssa
-    }
-
-    fn mutations_mut(stage: &mut IlStage) -> &mut BTreeMap<FunctionId, IlMutation<Self>> {
-        &mut stage.ecode_ssa
-    }
-}
-
-pub(crate) struct IlMutation<T> {
+struct IlMutation {
     base_present: bool,
-    value: Option<T>,
+    value: Option<IlStagedArtefact>,
 }
 
 #[derive(Default)]
 pub(crate) struct IlStage {
-    pcode: BTreeMap<FunctionId, IlMutation<PCodeIr>>,
-    ecode: BTreeMap<FunctionId, IlMutation<ECodeIr>>,
-    ecode_ssa: BTreeMap<FunctionId, IlMutation<ECodeSsaIr>>,
+    mutations: BTreeMap<IlOverrideKey, IlMutation>,
+    stored: Option<BTreeMap<FunctionId, Vec<IlFormId>>>,
 }
 
 impl IlStage {
@@ -118,20 +173,24 @@ impl IlStage {
         artefact: T,
     ) -> Result<(), EntityStorageError>
     where
-        T: StagedIl,
+        T: PersistableIl,
     {
-        let function = artefact.metadata().function();
-        if let Some(mutation) = T::mutations_mut(self).get_mut(&function) {
-            mutation.value = Some(artefact);
+        let key = IlOverrideKey::new(artefact.metadata().function(), T::FORM);
+        let staged = IlStagedArtefact {
+            artefact: Box::new(artefact),
+            encode: encode_erased::<T>,
+        };
+        if let Some(mutation) = self.mutations.get_mut(&key) {
+            mutation.value = Some(staged);
             return Ok(());
         }
 
-        let base_present = storage.contains_entity::<FunctionId, T>(&function)?;
-        T::mutations_mut(self).insert(
-            function,
+        let base_present = storage.contains_entity::<IlOverrideKey, IlOverride>(&key)?;
+        self.mutations.insert(
+            key,
             IlMutation {
                 base_present,
-                value: Some(artefact),
+                value: Some(staged),
             },
         );
         Ok(())
@@ -143,15 +202,22 @@ impl IlStage {
         function: FunctionId,
     ) -> Result<Option<T>, IlStorageError>
     where
-        T: StagedIl,
+        T: PersistableIl,
     {
-        if let Some(mutation) = T::mutations_mut(self).get_mut(&function) {
-            return Ok(mutation.value.take());
+        let key = IlOverrideKey::new(function, T::FORM);
+        if let Some(mutation) = self.mutations.get_mut(&key) {
+            return Ok(mutation.value.take().and_then(|staged| {
+                staged
+                    .artefact
+                    .downcast::<T>()
+                    .ok()
+                    .map(|artefact| *artefact)
+            }));
         }
 
         let previous = T::load(storage, function)?;
-        T::mutations_mut(self).insert(
-            function,
+        self.mutations.insert(
+            key,
             IlMutation {
                 base_present: previous.is_some(),
                 value: None,
@@ -160,163 +226,96 @@ impl IlStage {
         Ok(previous)
     }
 
-    pub(crate) fn prepare(&self) -> Result<EntityWriteBatch, EntityStorageError> {
-        let capacity = self
-            .pcode
-            .len()
-            .saturating_add(self.ecode.len())
-            .saturating_add(self.ecode_ssa.len());
-        let mut writes = EntityWriteBatch::with_capacity(capacity);
-        self.prepare_level::<PCodeIr>(&mut writes)?;
-        self.prepare_level::<ECodeIr>(&mut writes)?;
-        self.prepare_level::<ECodeSsaIr>(&mut writes)?;
-        Ok(writes)
+    pub(crate) fn remove_form(
+        &mut self,
+        storage: &StorageContainer,
+        function: FunctionId,
+        form: &IlFormId,
+    ) -> Result<bool, EntityStorageError> {
+        let key = IlOverrideKey::new(function, form.clone());
+        if let Some(mutation) = self.mutations.get_mut(&key) {
+            return Ok(mutation.value.take().is_some());
+        }
+
+        let base_present = storage.contains_entity::<IlOverrideKey, IlOverride>(&key)?;
+        self.mutations.insert(
+            key,
+            IlMutation {
+                base_present,
+                value: None,
+            },
+        );
+        Ok(base_present)
     }
 
-    fn prepare_level<T>(&self, writes: &mut EntityWriteBatch) -> Result<(), EntityStorageError>
-    where
-        T: StagedIl,
-    {
-        for (&function, mutation) in T::mutations(self) {
+    pub(crate) fn prepare(&self) -> Result<EntityWriteBatch, EntityStorageError> {
+        let mut writes = EntityWriteBatch::with_capacity(self.mutations.len());
+        for (key, mutation) in &self.mutations {
             if !mutation.base_present && mutation.value.is_none() {
                 continue;
             }
-            let value = mutation
-                .value
-                .as_ref()
-                .map(|artefact| {
-                    rkyv::to_bytes::<rkyv::rancor::Error>(artefact)
-                        .map_err(EntityStorageError::encode)
-                })
-                .transpose()?;
-            let key = T::ID.key_for(&function);
-            writes.push(match value {
-                Some(value) => EntityWrite::insert_archive(key, value),
+            let key = IlOverride::ID.key_for(key);
+            writes.push(match &mutation.value {
+                Some(staged) => EntityWrite::insert_archive(
+                    key,
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&(staged.encode)(
+                        staged.artefact.as_ref(),
+                    )?)
+                    .map_err(EntityStorageError::encode)?,
+                ),
                 None => EntityWrite::remove(key),
             });
         }
-        Ok(())
+        Ok(writes)
     }
 
-    pub(crate) fn for_each_change(&self, mut f: impl FnMut(FunctionId, IlLevel, bool)) {
-        self.for_each_level::<PCodeIr>(&mut f);
-        self.for_each_level::<ECodeIr>(&mut f);
-        self.for_each_level::<ECodeSsaIr>(&mut f);
+    pub(crate) fn remove_function(
+        &mut self,
+        storage: &StorageContainer,
+        function: FunctionId,
+    ) -> Result<usize, EntityStorageError> {
+        if self.stored.is_none() {
+            let mut stored: BTreeMap<FunctionId, Vec<IlFormId>> = BTreeMap::new();
+            for key in storage.entities().keys::<IlOverrideKey, IlOverride>()? {
+                let key = key?;
+                stored.entry(key.function()).or_default().push(key.form);
+            }
+            self.stored = Some(stored);
+        }
+
+        let forms = self
+            .stored
+            .as_ref()
+            .and_then(|stored| stored.get(&function))
+            .map_or(&[][..], Vec::as_slice);
+
+        let mut removed = 0usize;
+        for form in forms {
+            if self
+                .mutations
+                .insert(
+                    IlOverrideKey::new(function, form.clone()),
+                    IlMutation {
+                        base_present: true,
+                        value: None,
+                    },
+                )
+                .is_none()
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
-    fn for_each_level<T>(&self, f: &mut impl FnMut(FunctionId, IlLevel, bool))
-    where
-        T: StagedIl,
-    {
-        for (&function, mutation) in T::mutations(self) {
+    pub(crate) fn for_each_change(&self, mut f: impl FnMut(FunctionId, IlFormId, bool)) {
+        for (key, mutation) in &self.mutations {
             if mutation.base_present || mutation.value.is_some() {
-                f(function, T::LEVEL, mutation.value.is_some());
+                f(key.function(), key.form().clone(), mutation.value.is_some());
             }
         }
     }
 }
 
 #[cfg(test)]
-mod test {
-    use super::IlStage;
-    use crate::il::common::{IlGraph, IlMetadata};
-    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeIr};
-    use crate::ir::FunctionId;
-    use crate::storage::{EntityStorage, InMemoryEntityStorage, SegmentStorage, StorageContainer};
-    use crate::types::Revision;
-
-    fn pcode(function: FunctionId, revision: Revision) -> PCodeIr {
-        PCodeIr::new(
-            IlMetadata::new(function, PCODE_SCHEMA_VERSION, revision),
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-    }
-
-    fn storage() -> StorageContainer {
-        StorageContainer::from_parts(
-            EntityStorage::new(InMemoryEntityStorage::new()),
-            SegmentStorage::empty(),
-        )
-        .expect("transient storage should initialise")
-    }
-
-    #[test]
-    fn repeated_replacement_retains_only_the_final_artefact() {
-        let storage = storage();
-        let function = FunctionId::new(7);
-        let expected = pcode(function, Revision::from(2));
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(&expected).expect("artefact should encode");
-        let mut stage = IlStage::default();
-
-        stage
-            .replace(&storage, pcode(function, Revision::from(1)))
-            .expect("first replacement should stage");
-        stage
-            .replace(&storage, expected)
-            .expect("second replacement should coalesce");
-
-        let writes = stage.prepare().expect("stage should prepare");
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].value(), Some(encoded.as_slice()));
-
-        let mut changes = Vec::new();
-        stage.for_each_change(|function, level, present| {
-            changes.push((function, level, present));
-        });
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].0, function);
-        assert!(changes[0].2);
-    }
-
-    #[test]
-    fn removing_an_unpublished_replacement_elides_the_mutation() {
-        let storage = storage();
-        let function = FunctionId::new(7);
-        let mut stage = IlStage::default();
-
-        stage
-            .replace(&storage, pcode(function, Revision::from(1)))
-            .expect("replacement should stage");
-        assert!(
-            stage
-                .remove::<PCodeIr>(&storage, function)
-                .expect("replacement should be removable")
-                .is_some()
-        );
-
-        assert!(stage.prepare().expect("stage should prepare").is_empty());
-        stage.for_each_change(|_, _, _| panic!("elided mutation must not publish a change"));
-    }
-
-    #[test]
-    fn removing_a_missing_artefact_caches_its_absence() {
-        let storage = storage();
-        let function = FunctionId::new(7);
-        let mut stage = IlStage::default();
-
-        assert!(
-            stage
-                .remove::<PCodeIr>(&storage, function)
-                .expect("missing artefact lookup should succeed")
-                .is_none()
-        );
-        assert!(
-            stage
-                .pcode
-                .get(&function)
-                .is_some_and(|mutation| !mutation.base_present && mutation.value.is_none())
-        );
-        assert!(
-            stage
-                .remove::<PCodeIr>(&storage, function)
-                .expect("cached missing artefact lookup should succeed")
-                .is_none()
-        );
-    }
-}
+mod test;

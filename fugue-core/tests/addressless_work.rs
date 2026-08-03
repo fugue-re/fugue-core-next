@@ -6,10 +6,10 @@ use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
 };
+use fugue_core::extension;
 use fugue_core::ir::AddressRangeSet;
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::registry;
 use fugue_core::storage::TransientStorageProvider;
 use fugue_core::types::AttributeMap;
 
@@ -61,7 +61,7 @@ fn build_addressless_analyser(_project: &Project) -> Result<Box<dyn Analyser>, A
     Ok(Box::new(AddresslessAnalyser))
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("addressless-test", build_addressless_analyser)
 }
 

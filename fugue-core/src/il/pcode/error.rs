@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::analysis::control::Cancelled;
-use crate::il::common::IlError;
+use crate::il::common::{IlError, IlGenerationError};
 use crate::il::pcode::AddressAnnotationRole;
 use crate::ir::Address;
 use crate::lifter::LifterError;
@@ -146,5 +146,14 @@ impl PCodeError {
 impl From<Cancelled> for PCodeError {
     fn from(cancelled: Cancelled) -> Self {
         Self::Common(IlError::from(cancelled))
+    }
+}
+
+impl From<PCodeError> for IlGenerationError {
+    fn from(error: PCodeError) -> Self {
+        match error {
+            PCodeError::Common(error) => Self::Il(error),
+            error => Self::producer(error),
+        }
     }
 }

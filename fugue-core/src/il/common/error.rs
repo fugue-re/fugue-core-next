@@ -1,25 +1,29 @@
 use thiserror::Error;
 
 use crate::analysis::control::Cancelled;
-use crate::il::common::IlLevel;
+use crate::il::common::IlFormId;
 use crate::ir::FunctionId;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IlError {
     #[error("build cancelled")]
     Cancelled,
+    #[error("no dialect is registered for stored form `{form}`")]
+    DialectUnavailable { form: String },
     #[error("ID space exhausted for {kind}")]
     IdExhausted { kind: &'static str },
     #[error("integer overflow while constructing {what}")]
     IntegerOverflow { what: &'static str },
-    #[error("missing {level} IR for function {function:?}")]
+    #[error("a {form} artefact was expected as the conversion source")]
+    MismatchedSource { form: IlFormId },
+    #[error("missing {form} IR for function {function:?}")]
     MissingArtefact {
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
     },
-    #[error("{level} operation is missing {component}")]
+    #[error("{form} operation is missing {component}")]
     MissingComponent {
-        level: IlLevel,
+        form: IlFormId,
         component: &'static str,
     },
     #[error("IR cannot be materialised after semantic mutations in the same transaction")]
@@ -28,25 +32,29 @@ pub enum IlError {
     RangeOutOfBounds { end: u32, len: usize },
     #[error("range start {start} exceeds end {end}")]
     ReversedRange { start: u32, end: u32 },
-    #[error("{level} schema mismatch: expected {expected}, found {found}")]
+    #[error("{form} schema mismatch: expected {expected}, found {found}")]
     SchemaMismatch {
-        level: IlLevel,
+        form: IlFormId,
         expected: u16,
         found: u16,
     },
-    #[error("stale {level} IR: expected input revision {expected}, found {found}")]
+    #[error("stale {form} IR: expected input revision {expected}, found {found}")]
     StaleArtefact {
-        level: IlLevel,
+        form: IlFormId,
         expected: u64,
         found: u64,
     },
-    #[error("opcode cannot be lifted into {level}")]
-    UnsupportedOpcode { level: IlLevel },
-    #[error("{level} operation widths do not match")]
-    WidthMismatch { level: IlLevel },
+    #[error("opcode cannot be lifted into {form}")]
+    UnsupportedOpcode { form: IlFormId },
+    #[error("{form} operation widths do not match")]
+    WidthMismatch { form: IlFormId },
 }
 
 impl IlError {
+    pub fn dialect_unavailable(form: impl Into<String>) -> Self {
+        Self::DialectUnavailable { form: form.into() }
+    }
+
     pub const fn id_exhausted(kind: &'static str) -> Self {
         Self::IdExhausted { kind }
     }
@@ -55,12 +63,16 @@ impl IlError {
         Self::IntegerOverflow { what }
     }
 
-    pub const fn missing_artefact(function: FunctionId, level: IlLevel) -> Self {
-        Self::MissingArtefact { function, level }
+    pub fn mismatched_source(form: IlFormId) -> Self {
+        Self::MismatchedSource { form }
     }
 
-    pub const fn missing_component(level: IlLevel, component: &'static str) -> Self {
-        Self::MissingComponent { level, component }
+    pub fn missing_artefact(function: FunctionId, form: IlFormId) -> Self {
+        Self::MissingArtefact { function, form }
+    }
+
+    pub fn missing_component(form: IlFormId, component: &'static str) -> Self {
+        Self::MissingComponent { form, component }
     }
 
     pub const fn publish_after_semantic_mutation() -> Self {
@@ -75,28 +87,28 @@ impl IlError {
         Self::ReversedRange { start, end }
     }
 
-    pub const fn schema_mismatch(level: IlLevel, expected: u16, found: u16) -> Self {
+    pub fn schema_mismatch(form: IlFormId, expected: u16, found: u16) -> Self {
         Self::SchemaMismatch {
-            level,
+            form,
             expected,
             found,
         }
     }
 
-    pub const fn stale_artefact(level: IlLevel, expected: u64, found: u64) -> Self {
+    pub fn stale_artefact(form: IlFormId, expected: u64, found: u64) -> Self {
         Self::StaleArtefact {
-            level,
+            form,
             expected,
             found,
         }
     }
 
-    pub const fn unsupported_opcode(level: IlLevel) -> Self {
-        Self::UnsupportedOpcode { level }
+    pub fn unsupported_opcode(form: IlFormId) -> Self {
+        Self::UnsupportedOpcode { form }
     }
 
-    pub const fn width_mismatch(level: IlLevel) -> Self {
-        Self::WidthMismatch { level }
+    pub fn width_mismatch(form: IlFormId) -> Self {
+        Self::WidthMismatch { form }
     }
 }
 

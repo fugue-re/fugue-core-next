@@ -22,13 +22,13 @@ use crate::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisPhase, Priority, ProjectUpdate,
     ProjectView,
 };
+use crate::extension::{self, Registration, submit};
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionProperties,
     FunctionTable, IncompleteFunction, ProblemKind, RawAddress, RawAddressRangeSet,
 };
 use crate::lifter::InsnResolver;
 use crate::project::Project;
-use crate::registry::{self, Registration, submit};
 use crate::storage::{AddressSpaceId, SegmentStorage};
 use crate::types::{Confidence, EstimateSize};
 
@@ -122,7 +122,7 @@ impl Registration for FunctionRecoveryExtension {
     }
 }
 
-registry::collect!(FunctionRecoveryExtension);
+extension::collect!(FunctionRecoveryExtension);
 
 #[derive(Default)]
 pub struct FunctionDiscoveryContext {
@@ -1652,7 +1652,7 @@ impl FunctionRecovery {
         recovery.set_chunk_output_byte_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_OUTPUT_BYTES));
         recovery.set_chunk_candidate_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_CANDIDATES));
         recovery.set_chunk_function_limit(Some(DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS));
-        let mut extensions = registry::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
+        let mut extensions = extension::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
         extensions.sort_unstable_by_key(|extension| (extension.priority(), extension.name()));
 
         for extension in extensions {

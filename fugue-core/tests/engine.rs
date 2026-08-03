@@ -23,7 +23,12 @@ use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, EngineError,
     MappingMetadataUpdate, Priority, ProjectUpdate, ProjectView, Subscription,
 };
-use fugue_core::il::common::{IlError, IlLevel};
+use fugue_core::extension::{self, Registration};
+use fugue_core::il::common::IlArtefact;
+use fugue_core::il::common::IlError;
+use fugue_core::il::ecode::ECodeIr;
+use fugue_core::il::ecode::ssa::ECodeSsaIr;
+use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FlowKind,
     ProblemKind, ProblemScope, RawAddress, Reference, ReferenceOrigin, ReferenceProperties,
@@ -38,7 +43,6 @@ use fugue_core::loader::{
 };
 use fugue_core::project::{Project, ProjectError};
 use fugue_core::queries::{CallEdge, MappingRow, QueryError, QueryPage, SymbolRow};
-use fugue_core::registry::{self, Registration};
 use fugue_core::storage::{
     BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesAsIterator,
     EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter,
@@ -749,43 +753,43 @@ fn configure_test_recovery(
     Ok(())
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("error-test", build_error_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("mutating-error", build_mutating_error_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("panicking-test", build_panicking_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("completion-test", build_completion_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("completion-panic-test", build_completion_panic_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("derived-symbol", build_derived_symbol_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("storm-test", build_storm_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("cancelling-test", build_cancelling_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new("cancellation-follow-up", build_cancellation_follow_up_analyser)
 }
 
-registry::submit! {
+extension::submit! {
     FunctionRecoveryExtension::new("test-recovery", configure_test_recovery)
 }
 
@@ -1090,7 +1094,7 @@ fn test_byte_chunked_function_recovery_converges() -> Result<(), Box<dyn Error>>
     let mut chunked_project = Project::new_transient(&loader)?;
     let mut unchunked = FunctionRecovery::new();
     let mut chunked = FunctionRecovery::new();
-    let mut extensions = registry::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
+    let mut extensions = extension::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
     extensions.sort_unstable_by_key(|extension| (extension.priority(), extension.name()));
     for extension in extensions {
         extension.apply(&unchunked_project, &mut unchunked)?;
@@ -1831,13 +1835,13 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
-    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
 
-    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
         assert!(
             ensured
                 .records()
-                .contains(&ChangeRecord::LiftedMaterialised { function, level })
+                .contains(&ChangeRecord::LiftedMaterialised { function, form })
         );
     }
 
@@ -1848,7 +1852,7 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
         .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
     assert_eq!(ssa.metadata().function(), function);
 
-    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
     assert!(ensured.records().is_empty());
 
     Ok(())
@@ -1875,7 +1879,7 @@ fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
     cancellation.cancel();
 
     assert!(matches!(
-        engine.ensure_lifted(function, IlLevel::ECodeSsa),
+        engine.ensure_lifted(function, ECodeSsaIr::FORM),
         Err(EngineError::Project(ProjectError::Il(IlError::Cancelled)))
     ));
 
@@ -1888,12 +1892,12 @@ fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
     drop(snapshot);
 
     cancellation.clear();
-    let ensured = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
-    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
+    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
         assert!(
             ensured
                 .records()
-                .contains(&ChangeRecord::LiftedMaterialised { function, level })
+                .contains(&ChangeRecord::LiftedMaterialised { function, form })
         );
     }
     assert!(engine.query_reader()?.ecode_ssa(function)?.is_some());
@@ -1945,8 +1949,8 @@ fn engine_pcode_materialisation_is_idempotent() -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
-    engine.ensure_lifted(function, IlLevel::PCode)?;
-    let changes = engine.ensure_lifted(function, IlLevel::PCode)?;
+    engine.ensure_lifted(function, PCodeIr::FORM)?;
+    let changes = engine.ensure_lifted(function, PCodeIr::FORM)?;
     assert!(!changes.records().iter().any(|record| matches!(
         record,
         ChangeRecord::LiftedMaterialised { .. } | ChangeRecord::ReferencesChanged { .. }
@@ -2570,7 +2574,7 @@ fn test_drop_reopen_reads_explicitly_materialised_lifted() -> Result<(), Box<dyn
         .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
-    engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
     let pcode = reader
         .pcode(function)?
         .ok_or_else(|| io::Error::other("PCode IR missing after ensure_lifted"))?;

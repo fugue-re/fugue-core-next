@@ -1,15 +1,17 @@
+use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 
-use crate::il::common::{IlArtefact, IlLevel};
+use crate::il::common::{IlArtefact, IlFormId, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{Address, CodeBlockId, FunctionId, InsnList};
+use crate::project::{Project, ProjectError};
 use crate::types::EstimateSize;
 
 const CFG_CACHE_CAPACITY: usize = 1024;
@@ -26,26 +28,40 @@ impl Weighter<CodeBlockId, Option<Arc<InsnList>>> for InsnWeigher {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct CachedIl {
+    value: Arc<dyn Any + Send + Sync>,
+    size: usize,
+}
+
+impl CachedIl {
+    fn new<T: IlArtefact>(value: Arc<T>) -> Self {
+        let size = value.estimate_size();
+        Self { value, size }
+    }
+
+    fn downcast<T: IlArtefact>(&self) -> Option<Arc<T>> {
+        self.value.clone().downcast::<T>().ok()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LiftedWeigher;
 
-impl<T> Weighter<FunctionId, Option<Arc<T>>> for LiftedWeigher
-where
-    T: EstimateSize,
-{
-    fn weight(&self, _function: &FunctionId, ir: &Option<Arc<T>>) -> u64 {
-        let size = ir.as_ref().map_or(0, |ir| ir.estimate_size());
-        (size_of::<FunctionId>() + size_of::<Arc<T>>() + size) as u64
+impl Weighter<IlCacheKey, Option<CachedIl>> for LiftedWeigher {
+    fn weight(&self, key: &IlCacheKey, ir: &Option<CachedIl>) -> u64 {
+        let size = ir.as_ref().map_or(0, |ir| ir.size);
+        (size_of::<IlCacheKey>() + key.1.as_str().len() + size_of::<CachedIl>() + size) as u64
     }
 }
+
+type IlCacheKey = (FunctionId, IlFormId);
 
 pub(crate) struct QueryCache {
     flow_targets: Cache<Address, Option<Arc<FlowTargets>>>,
     insns: Cache<CodeBlockId, Option<Arc<InsnList>>, InsnWeigher>,
     insn_cache_bytes: usize,
-    pcode: Cache<FunctionId, Option<Arc<PCodeIr>>, LiftedWeigher>,
-    ecode: Cache<FunctionId, Option<Arc<ECodeIr>>, LiftedWeigher>,
-    ecode_ssa: Cache<FunctionId, Option<Arc<ECodeSsaIr>>, LiftedWeigher>,
+    lifted: Cache<IlCacheKey, Option<CachedIl>, LiftedWeigher>,
     lifted_entry_cache_bytes: usize,
 }
 
@@ -65,40 +81,49 @@ impl<T> CacheLookup<T> {
     }
 }
 
-pub(crate) trait QueryCachedIl: EstimateSize + IlArtefact {
-    fn cached(cache: &QueryCache, function: FunctionId) -> CacheLookup<Self>;
-    fn insert_cached(cache: &QueryCache, function: FunctionId, ir: Option<Arc<Self>>);
-}
-
-impl QueryCachedIl for PCodeIr {
-    fn cached(cache: &QueryCache, function: FunctionId) -> CacheLookup<Self> {
-        CacheLookup::from_cached(cache.pcode.get(&function))
-    }
-
-    fn insert_cached(cache: &QueryCache, function: FunctionId, ir: Option<Arc<Self>>) {
-        cache.insert_lifted(&cache.pcode, function, ir);
+pub trait QueryableIl: IlArtefact {
+    fn load_persisted(
+        _project: &Project,
+        _function: FunctionId,
+    ) -> Result<Option<Self>, ProjectError> {
+        Ok(None)
     }
 }
 
-impl QueryCachedIl for ECodeIr {
-    fn cached(cache: &QueryCache, function: FunctionId) -> CacheLookup<Self> {
-        CacheLookup::from_cached(cache.ecode.get(&function))
-    }
+pub(crate) trait QueryCachedIl: PersistableIl + QueryableIl {}
 
-    fn insert_cached(cache: &QueryCache, function: FunctionId, ir: Option<Arc<Self>>) {
-        cache.insert_lifted(&cache.ecode, function, ir);
+impl QueryableIl for PCodeIr {
+    fn load_persisted(
+        project: &Project,
+        function: FunctionId,
+    ) -> Result<Option<Self>, ProjectError> {
+        project.lifted::<Self>(function)
     }
 }
 
-impl QueryCachedIl for ECodeSsaIr {
-    fn cached(cache: &QueryCache, function: FunctionId) -> CacheLookup<Self> {
-        CacheLookup::from_cached(cache.ecode_ssa.get(&function))
-    }
-
-    fn insert_cached(cache: &QueryCache, function: FunctionId, ir: Option<Arc<Self>>) {
-        cache.insert_lifted(&cache.ecode_ssa, function, ir);
+impl QueryableIl for ECodeIr {
+    fn load_persisted(
+        project: &Project,
+        function: FunctionId,
+    ) -> Result<Option<Self>, ProjectError> {
+        project.lifted::<Self>(function)
     }
 }
+
+impl QueryableIl for ECodeSsaIr {
+    fn load_persisted(
+        project: &Project,
+        function: FunctionId,
+    ) -> Result<Option<Self>, ProjectError> {
+        project.lifted::<Self>(function)
+    }
+}
+
+impl QueryCachedIl for PCodeIr {}
+
+impl QueryCachedIl for ECodeIr {}
+
+impl QueryCachedIl for ECodeSsaIr {}
 
 impl QueryCache {
     pub(crate) fn new(insn_cache_bytes: usize, lifted_cache_bytes: usize) -> Self {
@@ -111,19 +136,9 @@ impl QueryCache {
                 InsnWeigher,
             ),
             insn_cache_bytes,
-            pcode: Cache::with_weighter(
+            lifted: Cache::with_weighter(
                 ESTIMATED_LIFTED_CACHE_ENTRIES,
-                lifted_entry_cache_bytes as u64,
-                LiftedWeigher,
-            ),
-            ecode: Cache::with_weighter(
-                ESTIMATED_LIFTED_CACHE_ENTRIES,
-                lifted_entry_cache_bytes as u64,
-                LiftedWeigher,
-            ),
-            ecode_ssa: Cache::with_weighter(
-                ESTIMATED_LIFTED_CACHE_ENTRIES,
-                lifted_entry_cache_bytes as u64,
+                lifted_cache_bytes as u64,
                 LiftedWeigher,
             ),
             lifted_entry_cache_bytes,
@@ -152,17 +167,22 @@ impl QueryCache {
         self.insns.clear();
     }
 
-    fn insert_lifted<T>(
-        &self,
-        cache: &Cache<FunctionId, Option<Arc<T>>, LiftedWeigher>,
-        function: FunctionId,
-        ir: Option<Arc<T>>,
-    ) where
-        T: EstimateSize,
-    {
-        let retained = LiftedWeigher.weight(&function, &ir) as usize;
+    pub(crate) fn lifted<T: IlArtefact>(&self, function: FunctionId) -> CacheLookup<T> {
+        match self.lifted.get(&(function, T::FORM)) {
+            None => CacheLookup::Miss,
+            Some(None) => CacheLookup::Absent,
+            Some(Some(cached)) => cached
+                .downcast::<T>()
+                .map_or(CacheLookup::Miss, CacheLookup::Hit),
+        }
+    }
+
+    pub(crate) fn insert_lifted<T: IlArtefact>(&self, function: FunctionId, ir: Option<Arc<T>>) {
+        let key = (function, T::FORM);
+        let entry = ir.map(CachedIl::new);
+        let retained = LiftedWeigher.weight(&key, &entry) as usize;
         if retained <= self.lifted_entry_cache_bytes {
-            cache.insert(function, ir);
+            self.lifted.insert(key, entry);
         }
     }
 
@@ -178,24 +198,12 @@ impl QueryCache {
         self.flow_targets.remove(&entry);
     }
 
-    pub(crate) fn remove_lifted(&self, function: FunctionId, level: IlLevel) {
-        match level {
-            IlLevel::PCode => {
-                self.pcode.remove(&function);
-            }
-            IlLevel::ECode => {
-                self.ecode.remove(&function);
-            }
-            IlLevel::ECodeSsa => {
-                self.ecode_ssa.remove(&function);
-            }
-        }
+    pub(crate) fn remove_lifted(&self, function: FunctionId, form: &IlFormId) {
+        self.lifted.remove(&(function, form.clone()));
     }
 
     pub(crate) fn clear_lifted(&self) {
-        self.pcode.clear();
-        self.ecode.clear();
-        self.ecode_ssa.clear();
+        self.lifted.clear();
     }
 
     pub(crate) fn clear(&self) {

@@ -298,12 +298,12 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata};
-    use crate::il::ecode::ssa::{ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder};
+    use crate::il::ecode::ssa::ECodeSsaBuilder;
     use crate::ir::FunctionId;
 
     #[test]
     fn ssa_body_display_is_deterministic() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
         let (value, results) = builder.push_result_value(64).unwrap();
 

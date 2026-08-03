@@ -32,11 +32,11 @@ fn replacing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Err
     assert!(project.ecode(function)?.is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::ECode,
+        form: ECodeIr::FORM,
     }));
 
     Ok(())
@@ -150,7 +150,7 @@ fn removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Erro
     assert!(project.functions().get_by_address(entry).is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(changes.records().iter().any(|record| {
         matches!(
@@ -192,7 +192,7 @@ fn byte_write_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
     assert!(project.functions().get_by_address(entry).is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(changes.records().iter().any(|record| {
         matches!(
@@ -275,11 +275,11 @@ fn byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error:
     assert!(project.pcode(function)?.is_none());
     assert!(project.ecode(function)?.is_none());
     assert!(project.ecode_ssa(function)?.is_none());
-    for level in [IlLevel::PCode, IlLevel::ECode, IlLevel::ECodeSsa] {
+    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
         assert!(
             changes
                 .records()
-                .contains(&ChangeRecord::LiftedRemoved { function, level })
+                .contains(&ChangeRecord::LiftedRemoved { function, form })
         );
     }
 
@@ -483,7 +483,7 @@ fn mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>
     assert!(project.functions().get_by_address(entry).is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(changes.records().iter().any(|record| {
         matches!(
@@ -571,11 +571,11 @@ fn mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::err
     assert!(project.functions().get_by_address(new_entry).is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function: old_function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function: new_function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
 
     Ok(())

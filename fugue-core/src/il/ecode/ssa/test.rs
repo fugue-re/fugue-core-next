@@ -1,9 +1,6 @@
 use std::mem::size_of;
 
-use super::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
-    ECodeSsaValue,
-};
+use super::{ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue};
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{IlGraph, IlIndexRange, IlMetadata};
 use crate::ir::FunctionId;
@@ -17,7 +14,7 @@ fn ssa_records_stay_compact() {
 
 #[test]
 fn exact_insert_extract_pair_recovers_only_the_inserted_value() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (base, base_results) = builder.push_result_value(64).unwrap();

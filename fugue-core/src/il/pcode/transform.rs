@@ -3,12 +3,13 @@ use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange, IlLevel,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
     IlMetadata, IlOpId, IlSourceSpan,
 };
+use crate::il::common::{IlGenerationContext, IlGenerationError, IlRootProducer};
 use crate::il::pcode::{
-    AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
-    PCodeBuilder, PCodeError, PCodeIr, PCodeOpcode,
+    AddressAnnotation, AddressAnnotationValue, PCodeAddressContext, PCodeBuilder, PCodeError,
+    PCodeIr, PCodeOpcode,
 };
 use crate::ir::{
     Address, CodeBlockId, CodeBlockTable, FlowTarget, FunctionId, FunctionTable,
@@ -51,6 +52,26 @@ impl PCodeCanonicaliser {
                 .find(|(to, _)| Some(*to) == target)
                 .map_or(IlEdgeKinds::UNCONDITIONAL, |(_, kinds)| *kinds)
         }));
+    }
+}
+
+impl IlRootProducer for PCodeIr {
+    fn produce(
+        function: FunctionId,
+        context: &IlGenerationContext<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, IlGenerationError> {
+        Ok(
+            PCodeCanonicaliser::default().build_function(PCodeFunctionInput::new(
+                context.language(),
+                context.functions(),
+                context.blocks(),
+                context.segments(),
+                function,
+                context.input_revision(),
+                cancellation,
+            ))?,
+        )
     }
 }
 
@@ -104,7 +125,7 @@ struct PCodeConstruction<'a> {
 impl PCodeCanonicaliser {
     pub fn build_function(&mut self, input: PCodeFunctionInput<'_>) -> Result<PCodeIr, PCodeError> {
         let Some(function_body) = input.functions.get_by_id(input.function) else {
-            return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
+            return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
         };
 
         self.code_block_ids.clear();
@@ -119,12 +140,12 @@ impl PCodeCanonicaliser {
 
         for &code_block_id in &self.code_block_ids {
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
-                return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
+                return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
             self.block_addresses.push(code_block.address());
         }
 
-        let metadata = IlMetadata::new(input.function, PCODE_SCHEMA_VERSION, input.input_revision);
+        let metadata = IlMetadata::new(input.function, input.input_revision);
         let mut construction = PCodeConstruction::new(input.language, metadata, input.segments);
         let mut successors = Vec::new();
         let mut successor_kinds = Vec::new();
@@ -134,7 +155,7 @@ impl PCodeCanonicaliser {
 
             let code_block_id = self.code_block_ids[index];
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
-                return Err(IlError::missing_artefact(input.function, IlLevel::PCode).into());
+                return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
 
             successors.clear();
@@ -168,7 +189,7 @@ impl PCodeCanonicaliser {
         input_revision: Revision,
         cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
-        let metadata = IlMetadata::new(FunctionId::INVALID, PCODE_SCHEMA_VERSION, input_revision);
+        let metadata = IlMetadata::new(FunctionId::INVALID, input_revision);
         let mut construction = PCodeConstruction::new(language, metadata, segments);
         let mut successors = Vec::new();
         let mut successor_kinds = Vec::new();
@@ -421,14 +442,13 @@ impl<'a> PCodeConstruction<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::pcode::PCODE_SCHEMA_VERSION;
     use crate::ir::FunctionId;
     use crate::lifter::resolve_language;
     use crate::storage::segments::space::AddressSpaceId;
 
     #[test]
     fn canonicaliser_builds_empty_stream() {
-        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 3);
+        let metadata = IlMetadata::new(FunctionId::default(), 3);
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let mut context = PCodeAddressContext::new(source, &[]);
         let language = resolve_language("x86:LE:64").expect("test language should resolve");

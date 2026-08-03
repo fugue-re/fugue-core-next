@@ -5,13 +5,13 @@ use object::{ReadRef, pe};
 use crate::analysis::AnalysisError;
 use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
+use crate::extension::{self, Registration};
 use crate::ir::{Endian, RawAddress};
 use crate::lifter::LanguageId;
 use crate::lifter::LanguageSource;
 use crate::loader::pe::PeFileRepr;
 use crate::loader::{ImageSegmentContents, LoaderError, Pe};
 use crate::platform::{CallingConvention, Platform};
-use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 
 pub struct ImageContext<'a> {
@@ -81,7 +81,7 @@ impl<'a> ImageContext<'a> {
     ) -> Result<Arch, LoaderError> {
         let mut matches = Vec::new();
 
-        for resolver in registry::iter::<ArchResolver>() {
+        for resolver in extension::iter::<ArchResolver>() {
             if let Some(arch) = self.resolve_architecture_using(resolver, source)? {
                 matches.push(arch);
             }
@@ -175,8 +175,8 @@ impl Registration for ArchResolver {
     }
 }
 
-registry::collect!(ArchResolver);
-registry::submit! {
+extension::collect!(ArchResolver);
+extension::submit! {
     ArchResolver::new("pe-builtins", ArchResolver::resolve_builtin)
 }
 
@@ -211,7 +211,7 @@ impl<'a> AnalysisContext<'a> {
         &self,
         recovery: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        for handler in registry::iter::<FunctionRecoveryHandler>() {
+        for handler in extension::iter::<FunctionRecoveryHandler>() {
             self.apply_function_recovery_extension(handler, recovery)?;
         }
 
@@ -255,7 +255,7 @@ impl Registration for FunctionRecoveryHandler {
     }
 }
 
-registry::collect!(FunctionRecoveryHandler);
+extension::collect!(FunctionRecoveryHandler);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
@@ -325,7 +325,7 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
     }
 
     pub fn apply_relocation(&mut self) -> Result<bool, LoaderError> {
-        for handler in registry::iter::<RelocationHandler>() {
+        for handler in extension::iter::<RelocationHandler>() {
             if self.apply_relocation_with(handler)? {
                 return Ok(true);
             }
@@ -368,4 +368,4 @@ impl Registration for RelocationHandler {
     }
 }
 
-registry::collect!(RelocationHandler);
+extension::collect!(RelocationHandler);

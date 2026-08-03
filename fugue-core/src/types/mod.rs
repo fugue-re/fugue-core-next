@@ -15,6 +15,6 @@ pub use common::{OwnedOrRef, Revision};
 pub use fugue_specs::Confidence;
 pub use memmap::{BytesOrMapping, SharedBytesOrMapping};
 
-pub(crate) trait EstimateSize {
+pub trait EstimateSize {
     fn estimate_size(&self) -> usize;
 }

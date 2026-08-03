@@ -27,8 +27,8 @@ pub(crate) enum BindingError {
     EmptyMapping,
     #[error("invalid instruction at {0}")]
     InvalidInstruction(CoreAddress),
-    #[error("invalid IR level `{0}`")]
-    InvalidIrLevel(String),
+    #[error("invalid IL form `{0}`")]
+    InvalidIlForm(String),
     #[error("no mapped bytes at {0}")]
     NoMappedBytes(CoreAddress),
 }
@@ -46,8 +46,8 @@ impl BindingError {
         Self::InvalidInstruction(address)
     }
 
-    pub(crate) fn invalid_level(level: impl Into<String>) -> Self {
-        Self::InvalidIrLevel(level.into())
+    pub(crate) fn invalid_form(form: impl Into<String>) -> Self {
+        Self::InvalidIlForm(form.into())
     }
 
     pub(crate) fn no_mapped_bytes(address: CoreAddress) -> Self {
@@ -62,7 +62,7 @@ impl From<BindingError> for PyErr {
             BindingError::NoMappedBytes(_) => StorageError::new_err(error.to_string()),
             BindingError::EmptyMapping
             | BindingError::AddressSpace(_)
-            | BindingError::InvalidIrLevel(_)
+            | BindingError::InvalidIlForm(_)
             | BindingError::AttributesNotDict
             | BindingError::AttributeKey
             | BindingError::AttributeValue(_) => PyValueError::new_err(error.to_string()),

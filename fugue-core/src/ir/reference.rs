@@ -9,7 +9,9 @@ use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::cfg::FlowKind;
-use crate::ir::{Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexHeader};
+use crate::ir::{
+    Address, AddressRange, AddressRangeSet, CodeBlockTable, FunctionRef, IndexMetadata,
+};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
@@ -837,10 +839,10 @@ impl ReferenceIndex {
         let Some(persistent) = self.persistent() else {
             return self.rebuild(functions, blocks);
         };
-        let header = persistent
+        let metadata = persistent
             .storage
-            .get::<ProjectEntity, IndexHeader>(&ProjectEntity::ReferenceIndex)?;
-        if header.is_some_and(|header| header.revision() == revision) {
+            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::ReferenceIndex)?;
+        if metadata.is_some_and(|metadata| metadata.revision() == revision) {
             return Ok(());
         }
 
@@ -854,9 +856,10 @@ impl ReferenceIndex {
         let Some(persistent) = self.persistent() else {
             return Ok(());
         };
-        persistent
-            .storage
-            .insert(&ProjectEntity::ReferenceIndex, &IndexHeader::new(revision))
+        persistent.storage.insert(
+            &ProjectEntity::ReferenceIndex,
+            &IndexMetadata::new(revision),
+        )
     }
 
     fn rebuild<'a>(
@@ -1025,8 +1028,7 @@ mod test {
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
     use crate::il::pcode::{
-        AddressAnnotation, AddressAnnotationValue, PCODE_SCHEMA_VERSION, PCodeAddressContext,
-        PCodeBuilder,
+        AddressAnnotation, AddressAnnotationValue, PCodeAddressContext, PCodeBuilder,
     };
     use crate::ir::{
         CodeBlockTable, FunctionId, FunctionTable, FunctionTableStage, IncompleteCodeBlock,
@@ -1394,7 +1396,7 @@ mod test {
             inputs: Inputs([Varnode::constant(data_address, 8), register_value]),
             output: Varnode::INVALID,
         };
-        let header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let annotations = [
             AddressAnnotation::new(
                 IlOpId::try_from_index(0).unwrap(),
@@ -1406,7 +1408,7 @@ mod test {
             ),
         ];
         let mut context = PCodeAddressContext::new(insn_address, &annotations);
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
         builder.push_lifted_operations(&[load_operation, store_operation], &mut context)?;
         builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 2).unwrap(),
@@ -1432,13 +1434,13 @@ mod test {
             Some(Address::new(data_space, data_address))
         );
 
-        let header = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let annotations = [AddressAnnotation::new(
             IlOpId::try_from_index(0).unwrap(),
             AddressAnnotationValue::ComputedSpace(data_space),
         )];
         let mut context = PCodeAddressContext::new(insn_address, &annotations);
-        let mut builder = PCodeBuilder::new(language, header, IlGraph::default());
+        let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
         let register_relative = RawPCodeOp {
             op: Op::Load(default_space),
             inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),

@@ -6,7 +6,7 @@ use crate::analysis::control::Cancelled;
 use crate::arch::Arch;
 use crate::engine::AnalysisCoverage;
 use crate::engine::change::{ChangeSource, Revision};
-use crate::il::common::{IlArtefact, IlError};
+use crate::il::common::{IlError, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::{PCodeError, PCodeIr};
@@ -546,7 +546,7 @@ impl Project {
 
     pub(crate) fn lifted<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
     where
-        T: IlArtefact,
+        T: PersistableIl,
     {
         T::load_current(&self.storage, function, self.revisions.semantic_revision())
             .map_err(ProjectError::from)

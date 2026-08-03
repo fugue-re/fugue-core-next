@@ -3,20 +3,16 @@ use std::mem::size_of;
 use fugue_bv::BitVec;
 
 use crate::il::common::{
-    IlArtefact, IlBlockId, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId, IlParentSpan,
-    IlSchemaVersion, IlSourceSpan, IlValueId,
+    ControlFlowIl, IlArtefact, IlBlockId, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlParentSpan,
+    IlSchemaVersion, IlSourceSpan, IlValueId, PersistableIl,
 };
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode,
     ECodeSsaValue, ECodeSsaValueKind,
 };
-use crate::ir::{Address, FunctionId};
-use crate::storage::entities::schema::ENTITY_IL_ECODE_SSA_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
-
-pub const ECODE_SSA_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ECodeSsaIr {
@@ -354,38 +350,31 @@ impl ECodeSsaRewriter<'_> {
     }
 }
 
-impl Entity for ECodeSsaIr {
-    const ID: EntityId = ENTITY_IL_ECODE_SSA_ID;
-}
-
-impl MutableEntity for ECodeSsaIr {
-    type Key = FunctionId;
-
-    fn entity_key(&self) -> FunctionId {
-        self.metadata.function()
-    }
-}
-
 impl IlArtefact for ECodeSsaIr {
-    const LEVEL: IlLevel = IlLevel::ECodeSsa;
-    const SCHEMA: IlSchemaVersion = ECODE_SSA_SCHEMA_VERSION;
+    const FORM_IDENTIFIER: &str = "fugue.ecode.ssa";
 
     fn metadata(&self) -> &IlMetadata {
         &self.metadata
-    }
-
-    fn metadata_mut(&mut self) -> &mut IlMetadata {
-        &mut self.metadata
-    }
-
-    fn graph(&self) -> &IlGraph {
-        &self.graph
     }
 
     #[cfg(debug_assertions)]
     fn verify_after_rewrite(&self) {
         self.verify()
             .expect("ECode SSA rewrite produced invalid IR");
+    }
+}
+
+impl ControlFlowIl for ECodeSsaIr {
+    fn graph(&self) -> &IlGraph {
+        &self.graph
+    }
+}
+
+impl PersistableIl for ECodeSsaIr {
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
+
+    fn metadata_mut(&mut self) -> &mut IlMetadata {
+        &mut self.metadata
     }
 }
 

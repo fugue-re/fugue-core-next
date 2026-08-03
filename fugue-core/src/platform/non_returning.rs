@@ -1,6 +1,6 @@
+use crate::extension::{self, Registration};
 use crate::ir::symbol::{Symbol, SymbolSet};
 use crate::platform::OperatingSystem;
-use crate::registry::{self, Registration};
 
 type NonReturningExternSetFn = fn() -> &'static SymbolSet;
 
@@ -42,10 +42,10 @@ impl Registration for NonReturningExternSet {
     }
 }
 
-registry::collect!(NonReturningExternSet);
+extension::collect!(NonReturningExternSet);
 
 pub fn is_non_returning_extern(os: OperatingSystem, symbol: Symbol) -> bool {
-    registry::iter::<NonReturningExternSet>()
+    extension::iter::<NonReturningExternSet>()
         .filter(|registration| registration.covers(os))
         .any(|registration| registration.externs().contains(&symbol))
 }

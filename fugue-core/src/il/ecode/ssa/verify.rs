@@ -1,7 +1,9 @@
 use thiserror::Error;
 
 use crate::il::common::verify::{StructureError, StructureVerifierError};
-use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlError, IlLevel, IlOpId, IlValueId};
+use crate::il::common::{
+    ControlFlowIl, IlArtefact, IlBlockId, IlDominance, IlError, IlOpId, IlValueId,
+};
 use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
 
 #[cfg(test)]
@@ -66,12 +68,9 @@ impl ECodeSsaIr {
                 IlError::range_out_of_bounds(argument.block().value(), self.graph().blocks().len()),
             )?;
 
-            self.values()
-                .get(argument.value().index())
-                .ok_or(IlError::range_out_of_bounds(
-                    argument.value().value(),
-                    self.values().len(),
-                ))?;
+            self.values().get(argument.value().index()).ok_or_else(|| {
+                IlError::range_out_of_bounds(argument.value().value(), self.values().len())
+            })?;
 
             let value = self.values()[argument.value().index()];
 
@@ -100,7 +99,7 @@ impl ECodeSsaIr {
                 }
 
                 if value.width() != operation.width() {
-                    return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
+                    return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
                 }
             }
 
@@ -121,29 +120,25 @@ impl ECodeSsaIr {
                 .operands()
                 .checked_slice(self.operation_operands())?
             {
-                let value =
-                    self.values()
-                        .get(operand.index())
-                        .ok_or(IlError::range_out_of_bounds(
-                            operand.value(),
-                            self.values().len(),
-                        ))?;
+                let value = self.values().get(operand.index()).ok_or_else(|| {
+                    IlError::range_out_of_bounds(operand.value(), self.values().len())
+                })?;
 
                 if uniform_operand_width && value.width() != operation.width() {
-                    return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
+                    return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
                 }
             }
 
             if operation.opcode().requires_memory_domain() {
                 let Some(address_space) = operation.address_space() else {
                     return Err(
-                        IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into(),
+                        IlError::missing_component(ECodeSsaIr::FORM, "memory domain").into(),
                     );
                 };
 
                 if self.memory_domain(address_space).is_none() {
                     return Err(
-                        IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into(),
+                        IlError::missing_component(ECodeSsaIr::FORM, "memory domain").into(),
                     );
                 }
 
@@ -203,16 +198,16 @@ impl ECodeSsaIr {
         operation: &ECodeSsaOp,
     ) -> Result<(), VerifyError> {
         if self.pointer_operand(operation).is_none() {
-            return Err(IlError::missing_component(IlLevel::ECodeSsa, "pointer").into());
+            return Err(IlError::missing_component(ECodeSsaIr::FORM, "pointer").into());
         }
 
         let Some(memory) = self.memory_operand(operation) else {
-            return Err(IlError::missing_component(IlLevel::ECodeSsa, "memory domain").into());
+            return Err(IlError::missing_component(ECodeSsaIr::FORM, "memory domain").into());
         };
         let memory = self.values()[memory.index()];
 
         if memory.width() != 0 {
-            return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
+            return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
         }
 
         if operation.opcode() == ECodeSsaOpcode::Store {
@@ -227,7 +222,7 @@ impl ECodeSsaIr {
             let result = self.values()[operation.results().start()];
 
             if result.width() != 0 {
-                return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
+                return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
             }
         }
 
@@ -250,10 +245,7 @@ impl ECodeSsaIr {
         for value in self.edge_argument_values() {
             self.values()
                 .get(value.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    value.value(),
-                    self.values().len(),
-                ))?;
+                .ok_or_else(|| IlError::range_out_of_bounds(value.value(), self.values().len()))?;
         }
 
         Ok(())
@@ -362,7 +354,7 @@ impl ECodeSsaIr {
                     let incoming = self.values()[value.index()];
 
                     if incoming.width() != argument.width() {
-                        return Err(IlError::width_mismatch(IlLevel::ECodeSsa).into());
+                        return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
                     }
 
                     if !self.value_dominates_edge(

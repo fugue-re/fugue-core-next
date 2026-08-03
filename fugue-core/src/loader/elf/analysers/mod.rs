@@ -4,11 +4,11 @@ use crate::analysis::function::recovery::{
 };
 use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
+use crate::extension::submit;
 use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryHandler};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
 use crate::platform::{CallingConvention, Format};
 use crate::project::Project;
-use crate::registry::submit;
 
 mod specs;
 

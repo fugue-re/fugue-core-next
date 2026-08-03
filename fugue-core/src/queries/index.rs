@@ -270,7 +270,8 @@ impl ChangeIndex {
 mod test {
     use super::*;
     use crate::engine::change::ChangeRecord;
-    use crate::il::common::IlLevel;
+    use crate::il::common::IlArtefact;
+    use crate::il::ecode::ECodeIr;
     use crate::ir::{FunctionId, RawAddress};
 
     #[test]
@@ -309,7 +310,7 @@ mod test {
             Revision::new(7),
             [ChangeRecord::LiftedMaterialised {
                 function: FunctionId::default(),
-                level: IlLevel::ECode,
+                form: ECodeIr::FORM,
             }],
         ));
         assert_eq!(

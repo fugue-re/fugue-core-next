@@ -128,13 +128,11 @@ mod test {
     use crate::il::common::{
         IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
     };
-    use crate::il::ecode::ssa::{
-        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
-    };
+    use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode};
     use crate::ir::FunctionId;
 
     fn builder() -> ECodeSsaBuilder {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         ECodeSsaBuilder::new(metadata, IlGraph::default())
     }
 

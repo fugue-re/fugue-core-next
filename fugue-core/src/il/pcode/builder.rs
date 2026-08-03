@@ -4,24 +4,20 @@ use rustc_hash::FxHashMap;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlError, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId, IlPool,
-    IlSchemaVersion, IlSourceSpan,
+    ControlFlowIl, IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlPool,
+    IlSchemaVersion, IlSourceSpan, PersistableIl,
 };
 use crate::il::pcode::{
     AddressAnnotationRole, AddressAnnotationValue, PCodeAddressContext, PCodeError, PCodeLocation,
     PCodeLocationId, PCodeOp, PCodeOpcode,
 };
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, Location, Reference, ReferenceOrigin,
+    Address, AddressRange, AddressRangeSet, Location, Reference, ReferenceOrigin,
     ReferenceProperties,
 };
 use crate::lifter::{Language, Op, RawPCodeOp, Varnode};
-use crate::storage::entities::schema::ENTITY_IL_PCODE_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
-
-pub const PCODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PCodeIr {
@@ -173,32 +169,25 @@ impl PCodeIr {
     }
 }
 
-impl Entity for PCodeIr {
-    const ID: EntityId = ENTITY_IL_PCODE_ID;
-}
-
-impl MutableEntity for PCodeIr {
-    type Key = FunctionId;
-
-    fn entity_key(&self) -> FunctionId {
-        self.metadata.function()
-    }
-}
-
 impl IlArtefact for PCodeIr {
-    const LEVEL: IlLevel = IlLevel::PCode;
-    const SCHEMA: IlSchemaVersion = PCODE_SCHEMA_VERSION;
+    const FORM_IDENTIFIER: &str = "fugue.pcode.cfg";
 
     fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
+}
+
+impl ControlFlowIl for PCodeIr {
+    fn graph(&self) -> &IlGraph {
+        &self.graph
+    }
+}
+
+impl PersistableIl for PCodeIr {
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
 
     fn metadata_mut(&mut self) -> &mut IlMetadata {
         &mut self.metadata
-    }
-
-    fn graph(&self) -> &IlGraph {
-        &self.graph
     }
 }
 
@@ -464,6 +453,7 @@ mod test {
         AddressAnnotation, AddressAnnotationValue, LifterSpaceHandle, PCodeAddressContext,
         PCodeLocationProperties,
     };
+    use crate::ir::FunctionId;
     use crate::lifter::{Op, Varnode};
     use crate::storage::segments::space::AddressSpaceId;
 
@@ -476,7 +466,7 @@ mod test {
     }
 
     fn metadata() -> IlMetadata {
-        IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0)
+        IlMetadata::new(FunctionId::default(), 0)
     }
 
     #[test]

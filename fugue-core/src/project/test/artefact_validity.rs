@@ -12,7 +12,7 @@ fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error
     }
 
     let ir = PCodeIr::new(
-        IlMetadata::new(function, PCODE_SCHEMA_VERSION, stale_revision),
+        IlMetadata::new(function, stale_revision),
         IlGraph::default(),
         Vec::new(),
         Vec::new(),
@@ -20,43 +20,14 @@ fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error
         Vec::new(),
         Vec::new(),
     );
-    project.storage.entities().insert(&function, &ir)?;
+    let mut stage = crate::il::storage::IlStage::default();
+    stage.replace(&project.storage, ir)?;
+    let writes = stage.prepare()?;
+    project.storage.entities().apply_batch(&writes)?;
 
     assert!(matches!(
         project.pcode(function),
-        Err(ProjectError::Il(IlError::StaleArtefact {
-            level: IlLevel::PCode,
-            ..
-        }))
-    ));
-
-    Ok(())
-}
-
-#[test]
-fn project_pcode_rejects_schema_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-    let project = Project::from_file_transient("tests/ls.elf")?;
-    let function = FunctionId::default();
-    let schema = IlSchemaVersion::new(PCODE_SCHEMA_VERSION.value() + 1);
-    let ir = PCodeIr::new(
-        IlMetadata::new(function, schema, project.semantic_revision()),
-        IlGraph::default(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-
-    project.storage.entities().insert(&function, &ir)?;
-
-    assert!(matches!(
-        project.pcode(function),
-        Err(ProjectError::Il(IlError::SchemaMismatch {
-            level: IlLevel::PCode,
-            expected,
-            found,
-        })) if expected == PCODE_SCHEMA_VERSION.value() && found == schema.value()
+        Err(ProjectError::Il(IlError::StaleArtefact { ref form, .. })) if *form == PCodeIr::FORM
     ));
 
     Ok(())

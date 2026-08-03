@@ -120,14 +120,12 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlArtefact, IlGraph, IlIndexRange, IlMetadata};
-    use crate::il::ecode::ssa::{
-        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode,
-    };
+    use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode};
     use crate::ir::FunctionId;
 
     #[test]
     fn uses_builds_from_ssa_body() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
         let (left, left_results) = builder.push_result_value(64).unwrap();
 

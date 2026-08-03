@@ -7,7 +7,7 @@ mod transform;
 mod verify;
 
 pub(crate) use builder::PCodeBuilder;
-pub use builder::{PCODE_SCHEMA_VERSION, PCodeIr};
+pub use builder::PCodeIr;
 pub use error::PCodeError;
 pub use format::{PCodeIrDisplay, PCodeSourceDisplay};
 pub use operation::{

@@ -12,14 +12,15 @@ use thiserror::Error;
 use self::change::{ChangeFilter, ChangeKinds, ChangeProvenance, ChangeSet, Revision};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
-use crate::il::common::IlLevel;
+use crate::extension::{self, Registration};
+use crate::il::common::IlFormId;
+use crate::il::registry::IlRegistry;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
     ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError};
 use crate::queries::{QueryEngine, QueryReader};
-use crate::registry::{self, Registration};
 use crate::storage::segments::mapping::{SegmentMappingBuilder, SegmentMappingId};
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -218,11 +219,12 @@ impl Display for Priority {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AnalysisEngineConfig {
     channel_capacity: usize,
     insn_cache_bytes: usize,
     lifted_cache_bytes: usize,
+    registry: Arc<IlRegistry>,
     worker_limit: usize,
 }
 
@@ -232,6 +234,7 @@ impl Default for AnalysisEngineConfig {
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             insn_cache_bytes: DEFAULT_INSN_CACHE_BYTES,
             lifted_cache_bytes: DEFAULT_LIFTED_CACHE_BYTES,
+            registry: IlRegistry::standard().clone(),
             worker_limit: 1,
         }
     }
@@ -287,6 +290,19 @@ impl AnalysisEngineConfig {
 
     pub fn with_worker_limit(mut self, limit: usize) -> Self {
         self.set_worker_limit(limit);
+        self
+    }
+
+    pub fn registry(&self) -> &IlRegistry {
+        &self.registry
+    }
+
+    pub fn set_registry(&mut self, registry: impl Into<Arc<IlRegistry>>) {
+        self.registry = registry.into();
+    }
+
+    pub fn with_registry(mut self, registry: impl Into<Arc<IlRegistry>>) -> Self {
+        self.set_registry(registry);
         self
     }
 }
@@ -452,7 +468,7 @@ impl Ord for AnalyserProvider {
     }
 }
 
-registry::collect!(AnalyserProvider);
+extension::collect!(AnalyserProvider);
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -732,7 +748,7 @@ impl AnalysisEngine {
     pub fn ensure_lifted(
         &self,
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
     ) -> Result<ChangeSet, EngineError> {
         self.poison_check()?;
 
@@ -740,7 +756,7 @@ impl AnalysisEngine {
         self.tx
             .send(Intake::EnsureLifted {
                 function,
-                level,
+                form,
                 reply: reply_tx,
             })
             .map_err(|_| EngineError::Stopped)?;

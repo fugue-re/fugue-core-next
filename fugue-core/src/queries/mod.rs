@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
 use crate::engine::{EngineError, Intake, on_analysis_thread};
-use crate::il::common::{IlError, IlLevel};
+use crate::il::common::{IlError, IlFormId};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
@@ -36,6 +36,7 @@ mod index;
 mod read;
 
 use cache::QueryCache;
+pub use cache::QueryableIl;
 pub(crate) use cache::{CacheLookup, QueryCachedIl};
 pub use cached::{Cached, Dependency};
 use index::ChangeIndex;
@@ -110,7 +111,7 @@ pub enum QueryError {
     #[error(transparent)]
     InsnExtent(#[from] InsnExtentError),
     #[error("analysis worker returned the wrong IL type for {0}")]
-    InvalidGeneratedIlType(IlLevel),
+    InvalidGeneratedIlType(IlFormId),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
@@ -493,33 +494,32 @@ impl QueryReader {
         Ok(Some(insns))
     }
 
-    pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
-        if let Some(cached) = self.cached_il::<PCodeIr>(function)? {
+    pub fn il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
+    where
+        T: QueryableIl,
+    {
+        if let Some(cached) = self.cached_il::<T>(function)? {
             return Ok(Some(cached));
         }
 
-        self.request_generated::<PCodeIr>(function)
+        self.request_generated::<T>(function)
+    }
+
+    pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
+        self.il::<PCodeIr>(function)
     }
 
     pub fn ecode(&self, function: FunctionId) -> Result<Option<Arc<ECodeIr>>, QueryError> {
-        if let Some(cached) = self.cached_il::<ECodeIr>(function)? {
-            return Ok(Some(cached));
-        }
-
-        self.request_generated::<ECodeIr>(function)
+        self.il::<ECodeIr>(function)
     }
 
     pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
-        if let Some(cached) = self.cached_il::<ECodeSsaIr>(function)? {
-            return Ok(Some(cached));
-        }
-
-        self.request_generated::<ECodeSsaIr>(function)
+        self.il::<ECodeSsaIr>(function)
     }
 
     fn cached_il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
     where
-        T: QueryCachedIl,
+        T: QueryableIl,
     {
         let _query_guard = self.enter_query()?;
 
@@ -530,7 +530,7 @@ impl QueryReader {
 
     fn request_generated<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
     where
-        T: QueryCachedIl + Send + Sync + 'static,
+        T: QueryableIl,
     {
         let Some(intake) = &self.intake else {
             return Ok(None);
@@ -544,7 +544,7 @@ impl QueryReader {
         intake
             .send(Intake::GenerateLifted {
                 function,
-                level: T::LEVEL,
+                form: T::FORM,
                 reply: reply_tx,
             })
             .map_err(|_| QueryError::Stopped)?;
@@ -552,7 +552,7 @@ impl QueryReader {
         match reply_rx.recv().map_err(|_| QueryError::Stopped)? {
             Ok(Some(generated)) => Arc::downcast::<T>(generated)
                 .map(Some)
-                .map_err(|_| QueryError::InvalidGeneratedIlType(T::LEVEL)),
+                .map_err(|_| QueryError::InvalidGeneratedIlType(T::FORM)),
             Ok(None) => Ok(None),
             Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
                 Ok(None)
@@ -806,25 +806,23 @@ impl QueryEngine {
         lookup: LiftedLookup,
     ) -> Result<Option<Arc<T>>, ProjectError>
     where
-        T: QueryCachedIl,
+        T: QueryableIl,
     {
         if lookup == LiftedLookup::Current {
-            match T::cached(cache, function) {
+            match cache.lifted::<T>(function) {
                 CacheLookup::Hit(cached) => return Ok(Some(cached)),
                 CacheLookup::Absent => return Ok(None),
                 CacheLookup::Miss => {}
             }
         }
 
-        let ir = match project.lifted::<T>(function) {
+        let ir = match T::load_persisted(project, function) {
             Ok(ir) => ir.map(Arc::new),
-            Err(ProjectError::Il(
-                IlError::SchemaMismatch { .. } | IlError::StaleArtefact { .. },
-            )) => None,
+            Err(ProjectError::Il(IlError::StaleArtefact { .. })) => None,
             Err(error) => return Err(error),
         };
         if lookup == LiftedLookup::Current {
-            T::insert_cached(cache, function, ir.clone());
+            cache.insert_lifted(function, ir.clone());
         }
         Ok(ir)
     }
@@ -836,16 +834,16 @@ impl QueryEngine {
         lookup: LiftedLookup,
     ) -> Result<Option<Arc<T>>, ProjectError>
     where
-        T: QueryCachedIl,
+        T: QueryableIl,
     {
         Self::resolve_lifted(&self.cache, project, function, lookup)
     }
 
     pub(crate) fn insert_lifted<T>(&self, function: FunctionId, ir: Arc<T>)
     where
-        T: QueryCachedIl,
+        T: QueryableIl,
     {
-        T::insert_cached(&self.cache, function, Some(ir));
+        self.cache.insert_lifted(function, Some(ir));
     }
 
     pub(crate) fn reader(&self) -> QueryReader {
@@ -872,9 +870,9 @@ impl QueryEngine {
                 | ChangeRecord::FunctionRemoved { entry, .. } => {
                     self.cache.remove_flow_targets(*entry);
                 }
-                ChangeRecord::LiftedMaterialised { function, level }
-                | ChangeRecord::LiftedRemoved { function, level } => {
-                    self.cache.remove_lifted(*function, *level);
+                ChangeRecord::LiftedMaterialised { function, form }
+                | ChangeRecord::LiftedRemoved { function, form } => {
+                    self.cache.remove_lifted(*function, form);
                 }
                 ChangeRecord::Resynchronise { .. } => self.cache.clear(),
                 _ => {}
@@ -913,16 +911,14 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::engine::change::FunctionChangeKind;
+    use crate::il::common::PersistableIl;
     use crate::il::common::{
         IlArtefact, IlBlockId, IlDominance, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan,
         IlValueId,
     };
-    use crate::il::ecode::ssa::{
-        ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses,
-    };
-    use crate::il::ecode::{ECODE_SCHEMA_VERSION, ECodeBuilder};
-    use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeBuilder};
-    use crate::il::storage::StagedIl;
+    use crate::il::ecode::ECodeBuilder;
+    use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses};
+    use crate::il::pcode::PCodeBuilder;
     use crate::ir::{
         AddressRange, IncompleteCodeBlock, IncompleteFunction, RawAddress, ReferenceKind,
         ReferenceOrigin,
@@ -1006,7 +1002,7 @@ mod test {
 
         fn materialise_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn Error>>
         where
-            T: Clone + StagedIl,
+            T: Clone + PersistableIl,
         {
             ir.metadata_mut()
                 .set_input_revision(self.project.read().semantic_revision());
@@ -1033,7 +1029,7 @@ mod test {
         fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
             let mut builder = PCodeBuilder::new(
                 self.project.read().language(),
-                IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, 0),
                 IlGraph::default(),
             );
 
@@ -1052,7 +1048,7 @@ mod test {
         fn pcode_for(&self, function: FunctionId) -> PCodeIr {
             PCodeBuilder::new(
                 self.project.read().language(),
-                IlMetadata::new(function, PCODE_SCHEMA_VERSION, 0),
+                IlMetadata::new(function, 0),
                 IlGraph::default(),
             )
             .build(&CancellationToken::default())
@@ -1060,21 +1056,15 @@ mod test {
         }
 
         fn ecode_for(function: FunctionId) -> ECodeIr {
-            ECodeBuilder::new(
-                IlMetadata::new(function, ECODE_SCHEMA_VERSION, 0),
-                IlGraph::default(),
-            )
-            .build(&CancellationToken::default())
-            .expect("empty ecode ir should build")
+            ECodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
+                .build(&CancellationToken::default())
+                .expect("empty ecode ir should build")
         }
 
         fn ecode_ssa_for(function: FunctionId) -> ECodeSsaIr {
-            ECodeSsaBuilder::new(
-                IlMetadata::new(function, ECODE_SSA_SCHEMA_VERSION, 0),
-                IlGraph::default(),
-            )
-            .build(&CancellationToken::default())
-            .expect("empty ecode ssa ir should build")
+            ECodeSsaBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
+                .build(&CancellationToken::default())
+                .expect("empty ecode ssa ir should build")
         }
 
         fn materialise_lifted_chain(

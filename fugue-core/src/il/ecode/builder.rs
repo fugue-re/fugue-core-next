@@ -2,17 +2,14 @@ use std::mem::size_of;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlError, IlExprId, IlGraph, IlIndexRange, IlLevel, IlMetadata, IlOpId,
-    IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan,
+    ControlFlowIl, IlArtefact, IlError, IlExprId, IlGraph, IlIndexRange, IlMetadata, IlOpId,
+    IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan, PersistableIl,
 };
-use crate::il::ecode::{ECodeExpr, ECodeStmt};
-use crate::il::pcode::RegisterId;
-use crate::ir::{Address, FunctionId};
-use crate::storage::entities::schema::ENTITY_IL_ECODE_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeSink, ECodeStmt, ECodeStmtOpcode};
+use crate::il::pcode::{FlagId, RegisterId};
+use crate::ir::Address;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
-
-pub const ECODE_SCHEMA_VERSION: IlSchemaVersion = IlSchemaVersion::new(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ECodeIr {
@@ -154,32 +151,25 @@ impl ECodeIr {
     }
 }
 
-impl Entity for ECodeIr {
-    const ID: EntityId = ENTITY_IL_ECODE_ID;
-}
-
-impl MutableEntity for ECodeIr {
-    type Key = FunctionId;
-
-    fn entity_key(&self) -> FunctionId {
-        self.metadata.function()
-    }
-}
-
 impl IlArtefact for ECodeIr {
-    const LEVEL: IlLevel = IlLevel::ECode;
-    const SCHEMA: IlSchemaVersion = ECODE_SCHEMA_VERSION;
+    const FORM_IDENTIFIER: &str = "fugue.ecode.cfg";
 
     fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
+}
+
+impl ControlFlowIl for ECodeIr {
+    fn graph(&self) -> &IlGraph {
+        &self.graph
+    }
+}
+
+impl PersistableIl for ECodeIr {
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(2);
 
     fn metadata_mut(&mut self) -> &mut IlMetadata {
         &mut self.metadata
-    }
-
-    fn graph(&self) -> &IlGraph {
-        &self.graph
     }
 }
 
@@ -264,10 +254,6 @@ impl ECodeBuilder {
         Ok(id)
     }
 
-    pub(crate) fn statement_count(&self) -> usize {
-        self.statements.len()
-    }
-
     pub(crate) fn set_graph(&mut self, graph: IlGraph) {
         self.graph = graph;
     }
@@ -310,6 +296,174 @@ impl ECodeBuilder {
 
         Ok(ir)
     }
+
+    fn push_nullary(
+        &mut self,
+        opcode: ECodeExprOpcode,
+        width: u32,
+        immediate: u64,
+    ) -> Result<IlExprId, IlError> {
+        self.push_expression(ECodeExpr::new(
+            opcode,
+            width,
+            IlIndexRange::EMPTY,
+            immediate,
+            None,
+        ))
+    }
+}
+
+impl ECodeSink for ECodeBuilder {
+    type Value = IlExprId;
+
+    fn constant(&mut self, width: u32, value: u64) -> Result<Self::Value, IlError> {
+        self.push_nullary(ECodeExprOpcode::Constant, width, value)
+    }
+
+    fn address(&mut self, width: u32, offset: u64) -> Result<Self::Value, IlError> {
+        self.push_nullary(ECodeExprOpcode::Address, width, offset)
+    }
+
+    fn undefined(&mut self, width: u32, discriminant: u64) -> Result<Self::Value, IlError> {
+        self.push_nullary(ECodeExprOpcode::Undefined, width, discriminant)
+    }
+
+    fn read_register(&mut self, register: RegisterId, width: u32) -> Result<Self::Value, IlError> {
+        self.push_nullary(ECodeExprOpcode::ReadRegister, width, register.value())
+    }
+
+    fn read_flag(&mut self, flag: FlagId, width: u32) -> Result<Self::Value, IlError> {
+        self.push_nullary(ECodeExprOpcode::ReadFlag, width, flag.value())
+    }
+
+    fn apply(
+        &mut self,
+        opcode: ECodeExprOpcode,
+        width: u32,
+        operands: &[Self::Value],
+        immediate: u64,
+        address_space: Option<AddressSpaceId>,
+    ) -> Result<Self::Value, IlError> {
+        let operands = self.push_expression_operands(operands.iter().copied())?;
+        self.push_expression(ECodeExpr::new(
+            opcode,
+            width,
+            operands,
+            immediate,
+            address_space,
+        ))
+    }
+
+    fn write_register(&mut self, register: RegisterId, value: Self::Value) -> Result<(), IlError> {
+        self.push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(value),
+                None,
+                None,
+            )
+            .with_immediate(register.value()),
+        )?;
+
+        Ok(())
+    }
+
+    fn write_flag(&mut self, flag: FlagId, value: Self::Value) -> Result<(), IlError> {
+        self.push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteFlag,
+                IlIndexRange::EMPTY,
+                Some(value),
+                None,
+                None,
+            )
+            .with_immediate(flag.value()),
+        )?;
+
+        Ok(())
+    }
+
+    fn store(
+        &mut self,
+        operands: &[Self::Value],
+        address_space: Option<AddressSpaceId>,
+    ) -> Result<(), IlError> {
+        let operands = self.push_statement_operands(operands.iter().copied())?;
+        self.push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Store,
+            operands,
+            None,
+            None,
+            address_space,
+        ))?;
+
+        Ok(())
+    }
+
+    fn direct_flow(
+        &mut self,
+        opcode: ECodeStmtOpcode,
+        target: Address,
+        operands: &[Self::Value],
+    ) -> Result<(), IlError> {
+        let operands = self.push_statement_operands(operands.iter().copied())?;
+        self.push_statement(ECodeStmt::new(opcode, operands, None, Some(target), None))?;
+
+        Ok(())
+    }
+
+    fn indirect_flow(
+        &mut self,
+        opcode: ECodeStmtOpcode,
+        operands: &[Self::Value],
+        address_space: Option<AddressSpaceId>,
+    ) -> Result<(), IlError> {
+        let operands = self.push_statement_operands(operands.iter().copied())?;
+        self.push_statement(ECodeStmt::new(opcode, operands, None, None, address_space))?;
+
+        Ok(())
+    }
+
+    fn intrinsic(
+        &mut self,
+        intrinsic: u64,
+        operands: &[Self::Value],
+        address_space: Option<AddressSpaceId>,
+    ) -> Result<(), IlError> {
+        let operands = self.push_statement_operands(operands.iter().copied())?;
+        self.push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::Intrinsic,
+                operands,
+                None,
+                None,
+                address_space,
+            )
+            .with_immediate(intrinsic),
+        )?;
+
+        Ok(())
+    }
+
+    fn trap(
+        &mut self,
+        intrinsic: u64,
+        address_space: Option<AddressSpaceId>,
+    ) -> Result<(), IlError> {
+        self.push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::Trap,
+                IlIndexRange::EMPTY,
+                None,
+                None,
+                address_space,
+            )
+            .with_immediate(intrinsic),
+        )?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -318,12 +472,13 @@ mod test {
     use crate::il::common::IlSourceSpan;
     use crate::il::ecode::verify::VerifyError;
     use crate::il::ecode::{ECodeExprOpcode, ECodeStmtOpcode};
-    use crate::ir::{Address, FunctionId};
+    use crate::ir::Address;
+    use crate::ir::FunctionId;
     use crate::storage::segments::space::AddressSpaceId;
 
     #[test]
     fn ecode_builder_finishes_verified_body() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let expression = builder
             .push_expression(ECodeExpr::new(
@@ -358,7 +513,7 @@ mod test {
 
     #[test]
     fn ecode_body_returns_statements_for_source() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let address = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let other = Address::new(AddressSpaceId::new(1), 0x2000u64);
         let ir = ECodeIr::new(ECodeIrParts {
@@ -388,7 +543,7 @@ mod test {
 
     #[test]
     fn ecode_verifier_rejects_store_without_space() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let offset = builder
             .push_expression(ECodeExpr::new(
@@ -430,7 +585,7 @@ mod test {
 
     #[test]
     fn ecode_verifier_rejects_load_without_space() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let offset = builder
             .push_expression(ECodeExpr::new(
@@ -457,7 +612,7 @@ mod test {
 
     #[test]
     fn ecode_verifier_rejects_non_preceding_expression_operand() {
-        let metadata = IlMetadata::new(FunctionId::default(), ECODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let ir = ECodeIr::new(ECodeIrParts {
             metadata,
             graph: IlGraph::default(),

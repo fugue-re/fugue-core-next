@@ -6,15 +6,13 @@ use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange,
     IlMetadata,
 };
-use crate::il::ecode::ssa::{
-    ECODE_SSA_SCHEMA_VERSION, ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind,
-};
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
 use crate::ir::{Address, FunctionId};
 use crate::storage::segments::space::AddressSpaceId;
 
 #[test]
 fn fold_constants_materialises_wide_result_in_pool() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (source, source_results) = builder.push_result_value(64).unwrap();
@@ -59,7 +57,7 @@ fn fold_constants_propagates_through_block_argument() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
     let block3 = IlBlockId::try_from_index(3).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -169,7 +167,7 @@ fn fold_constants_leaves_disagreeing_block_argument_unfolded() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
     let block3 = IlBlockId::try_from_index(3).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -277,7 +275,7 @@ fn fold_constants_leaves_disagreeing_block_argument_unfolded() {
 #[test]
 fn fold_constants_leaves_sourceless_block_argument_unfolded() {
     let block0 = IlBlockId::try_from_index(0).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![IlBlock::new(
             IlIndexRange::new(0, 2).unwrap(),
@@ -327,7 +325,7 @@ fn fold_constants_leaves_sourceless_block_argument_unfolded() {
 fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -402,7 +400,7 @@ fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
 
 #[test]
 fn compact_removes_dead_operations_and_remaps_indices() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (first, first_results) = builder.push_result_value(64).unwrap();
@@ -516,7 +514,7 @@ fn compact_preserves_sources_for_operation_empty_blocks() {
         vec![IlEdgeKinds::UNCONDITIONAL; 1],
     )
     .with_block_sources(vec![entry_source, exit_source]);
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
     let (_, dead_results) = builder.push_result_value(32).unwrap();
@@ -553,7 +551,7 @@ fn compact_preserves_sources_for_operation_empty_blocks() {
 fn compact_drops_dead_loop_phi_and_sources() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -647,7 +645,7 @@ fn compact_preserves_live_phi_and_remaps_edge_arguments() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
     let block3 = IlBlockId::try_from_index(3).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -760,7 +758,7 @@ fn compact_drops_one_of_two_phis_by_position() {
     let block1 = IlBlockId::try_from_index(1).unwrap();
     let block2 = IlBlockId::try_from_index(2).unwrap();
     let block3 = IlBlockId::try_from_index(3).unwrap();
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let graph = IlGraph::new(
         vec![
             IlBlock::new(
@@ -875,7 +873,7 @@ fn compact_drops_one_of_two_phis_by_position() {
 
 #[test]
 fn fold_then_compact_collapses_constant_expression() {
-    let metadata = IlMetadata::new(FunctionId::default(), ECODE_SSA_SCHEMA_VERSION, 0);
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
     let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
 
     let (first, first_results) = builder.push_result_value(64).unwrap();

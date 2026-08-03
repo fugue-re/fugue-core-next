@@ -16,10 +16,10 @@ use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
 };
 #[cfg(feature = "sqlite")]
+use fugue_core::extension;
+#[cfg(feature = "sqlite")]
 use fugue_core::ir::{AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
 use fugue_core::project::Project;
-#[cfg(feature = "sqlite")]
-use fugue_core::registry;
 use fugue_core::storage::TransientStorageProvider;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
@@ -123,12 +123,12 @@ fn build_old_coverage_analyser(_project: &Project) -> Result<Box<dyn Analyser>, 
 }
 
 #[cfg(feature = "sqlite")]
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new(NEW_ANALYSER_NAME, build_new_coverage_analyser)
 }
 
 #[cfg(feature = "sqlite")]
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new(OLD_ANALYSER_NAME, build_old_coverage_analyser)
 }
 

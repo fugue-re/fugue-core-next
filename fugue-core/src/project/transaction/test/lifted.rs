@@ -17,7 +17,7 @@ fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn st
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::PCode,
+                form: PCodeIr::FORM,
             })
     );
     assert_eq!(project.pcode(function)?.as_ref(), Some(&materialised));
@@ -32,13 +32,13 @@ fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn st
 
     let changes = {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, IlLevel::PCode)?);
+        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
         transaction.commit()?
     };
 
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::PCode,
+        form: PCodeIr::FORM,
     }));
     assert!(project.pcode(function)?.is_none());
 
@@ -122,7 +122,7 @@ fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Err
     assert!(project.pcode(function)?.is_some());
 
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.ensure_lifted(function, IlLevel::ECode)?;
+    let changes = engine.ensure_lifted(function, ECodeIr::FORM)?;
     let reader = engine.query_reader()?;
     assert!(reader.pcode(function)?.is_some());
     assert!(reader.ecode(function)?.is_some());
@@ -131,11 +131,11 @@ fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Err
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::ECode,
+                form: ECodeIr::FORM,
             })
     );
 
-    let changes = engine.ensure_lifted(function, IlLevel::ECode)?;
+    let changes = engine.ensure_lifted(function, ECodeIr::FORM)?;
 
     assert!(changes.records().is_empty());
 
@@ -162,7 +162,7 @@ fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Er
     }
 
     let engine = AnalysisEngine::new(project)?;
-    let changes = engine.ensure_lifted(function, IlLevel::ECodeSsa)?;
+    let changes = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
     let reader = engine.query_reader()?;
     assert!(reader.ecode(function)?.is_some());
     assert!(reader.ecode_ssa(function)?.is_some());
@@ -171,7 +171,7 @@ fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Er
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::ECode,
+                form: ECodeIr::FORM,
             })
     );
     assert!(
@@ -179,7 +179,7 @@ fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Er
             .records()
             .contains(&ChangeRecord::LiftedMaterialised {
                 function,
-                level: IlLevel::ECodeSsa,
+                form: ECodeSsaIr::FORM,
             })
     );
 
@@ -201,7 +201,7 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
 
     {
         let mut transaction = project.transaction("test");
-        assert_eq!(transaction.remove_lifted_from(function, IlLevel::ECode)?, 2);
+        assert_eq!(transaction.remove_lifted_from(function, &ECodeIr::FORM)?, 2);
         drop(transaction);
     }
 
@@ -210,7 +210,7 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
 
     let changes = {
         let mut transaction = project.transaction("test");
-        assert_eq!(transaction.remove_lifted_from(function, IlLevel::ECode)?, 2);
+        assert_eq!(transaction.remove_lifted_from(function, &ECodeIr::FORM)?, 2);
         transaction.commit()?
     };
 
@@ -219,11 +219,11 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
     assert!(project.ecode_ssa(function)?.is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::ECode,
+        form: ECodeIr::FORM,
     }));
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
-        level: IlLevel::ECodeSsa,
+        form: ECodeSsaIr::FORM,
     }));
 
     Ok(())

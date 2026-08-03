@@ -73,9 +73,9 @@ impl AnalysisPass<FunctionRecoveryState> for NonReturningThunk {
 mod test {
     use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryExtension};
     use crate::analysis::non_returning::NonReturningExterns;
+    use crate::extension;
     use crate::loader::{Loadable, LoadableAnalysers, Loader};
     use crate::project::Project;
-    use crate::registry;
 
     #[test]
     #[ignore = "requires binary test fixtures"]
@@ -89,7 +89,7 @@ mod test {
             let config = FunctionRecoveryConfig::default().with_non_returning_analysis(true);
             let mut recovery = loader.analysers().function_recovery_with(config)?;
 
-            for extension in registry::iter::<FunctionRecoveryExtension>() {
+            for extension in extension::iter::<FunctionRecoveryExtension>() {
                 extension.apply(&project, &mut recovery)?;
             }
 

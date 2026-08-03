@@ -216,9 +216,7 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
-    use crate::il::pcode::{
-        LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocationProperties,
-    };
+    use crate::il::pcode::{LifterSpaceHandle, PCodeBuilder, PCodeLocationProperties};
     use crate::ir::FunctionId;
     use crate::lifter::{Language, resolve_language};
     use crate::storage::segments::space::AddressSpaceId;
@@ -229,7 +227,7 @@ mod test {
 
     #[test]
     fn pcode_ir_display_is_deterministic() {
-        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
         let input = builder
             .push_location(PCodeLocation::new(
@@ -282,7 +280,7 @@ mod test {
     fn pcode_source_display_selects_source_instruction_operations() {
         let first = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let second = Address::new(AddressSpaceId::new(1), 0x1004u64);
-        let metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 0);
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
 
         builder.set_source_spans(vec![

@@ -1,4 +1,6 @@
-use crate::il::common::IlIndexRange;
+use crate::il::common::{IlArtefact, IlError, IlIndexRange};
+use crate::il::ecode::ECodeIr;
+use crate::il::pcode::PCodeOpcode;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -69,6 +71,72 @@ pub enum ECodeExprOpcode {
 }
 
 impl ECodeExprOpcode {
+    pub(crate) fn from_pcode(opcode: PCodeOpcode) -> Result<Self, IlError> {
+        match opcode {
+            PCodeOpcode::Copy => Ok(Self::Copy),
+            PCodeOpcode::Load => Ok(Self::Load),
+            PCodeOpcode::IntAdd => Ok(Self::Add),
+            PCodeOpcode::IntSub => Ok(Self::Sub),
+            PCodeOpcode::IntMul => Ok(Self::Mul),
+            PCodeOpcode::IntDiv => Ok(Self::UnsignedDiv),
+            PCodeOpcode::IntSignedDiv => Ok(Self::SignedDiv),
+            PCodeOpcode::IntRem => Ok(Self::UnsignedRem),
+            PCodeOpcode::IntSignedRem => Ok(Self::SignedRem),
+            PCodeOpcode::IntLeftShift => Ok(Self::LeftShift),
+            PCodeOpcode::IntRightShift => Ok(Self::LogicalRightShift),
+            PCodeOpcode::IntSignedRightShift => Ok(Self::ArithmeticRightShift),
+            PCodeOpcode::IntEq => Ok(Self::IntEqual),
+            PCodeOpcode::IntNotEq => Ok(Self::IntNotEqual),
+            PCodeOpcode::IntLess => Ok(Self::IntLess),
+            PCodeOpcode::IntSignedLess => Ok(Self::IntSignedLess),
+            PCodeOpcode::IntLessEq => Ok(Self::IntLessEqual),
+            PCodeOpcode::IntSignedLessEq => Ok(Self::IntSignedLessEqual),
+            PCodeOpcode::IntCarry => Ok(Self::Carry),
+            PCodeOpcode::IntSignedCarry => Ok(Self::SignedCarry),
+            PCodeOpcode::IntSignedBorrow => Ok(Self::SignedBorrow),
+            PCodeOpcode::IntAnd => Ok(Self::And),
+            PCodeOpcode::IntOr => Ok(Self::Or),
+            PCodeOpcode::IntXor => Ok(Self::Xor),
+            PCodeOpcode::IntNot => Ok(Self::Not),
+            PCodeOpcode::BoolAnd => Ok(Self::BoolAnd),
+            PCodeOpcode::BoolOr => Ok(Self::BoolOr),
+            PCodeOpcode::BoolXor => Ok(Self::BoolXor),
+            PCodeOpcode::BoolNot => Ok(Self::BoolNot),
+            PCodeOpcode::IntNeg => Ok(Self::Negate),
+            PCodeOpcode::CountOnes => Ok(Self::CountOnes),
+            PCodeOpcode::CountLeadingZeros => Ok(Self::CountLeadingZeros),
+            PCodeOpcode::ZeroExt => Ok(Self::ZeroExtend),
+            PCodeOpcode::SignExt => Ok(Self::SignExtend),
+            PCodeOpcode::Subpiece => Ok(Self::Extract),
+            PCodeOpcode::FloatAdd => Ok(Self::FloatAdd),
+            PCodeOpcode::FloatSub => Ok(Self::FloatSub),
+            PCodeOpcode::FloatMul => Ok(Self::FloatMul),
+            PCodeOpcode::FloatDiv => Ok(Self::FloatDiv),
+            PCodeOpcode::FloatNeg => Ok(Self::FloatNegate),
+            PCodeOpcode::FloatAbs => Ok(Self::FloatAbs),
+            PCodeOpcode::FloatSqrt => Ok(Self::FloatSqrt),
+            PCodeOpcode::FloatCeiling => Ok(Self::FloatCeiling),
+            PCodeOpcode::FloatFloor => Ok(Self::FloatFloor),
+            PCodeOpcode::FloatRound => Ok(Self::FloatRound),
+            PCodeOpcode::FloatIsNan => Ok(Self::FloatIsNan),
+            PCodeOpcode::FloatEq => Ok(Self::FloatEqual),
+            PCodeOpcode::FloatNotEq => Ok(Self::FloatNotEqual),
+            PCodeOpcode::FloatLess => Ok(Self::FloatLess),
+            PCodeOpcode::FloatLessEq => Ok(Self::FloatLessEqual),
+            PCodeOpcode::FloatToInt => Ok(Self::FloatToInt),
+            PCodeOpcode::FloatToFloat => Ok(Self::FloatToFloat),
+            PCodeOpcode::IntToFloat => Ok(Self::IntToFloat),
+            PCodeOpcode::UserOp => Ok(Self::IntrinsicResult),
+            PCodeOpcode::Store
+            | PCodeOpcode::Branch
+            | PCodeOpcode::CBranch
+            | PCodeOpcode::IBranch
+            | PCodeOpcode::Call
+            | PCodeOpcode::ICall
+            | PCodeOpcode::Return => Err(IlError::unsupported_opcode(ECodeIr::FORM)),
+        }
+    }
+
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Constant => "const",

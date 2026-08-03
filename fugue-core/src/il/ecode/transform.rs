@@ -5,18 +5,12 @@ use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{
     IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlExprId, IlGraph, IlIndexRange,
-    IlLevel, IlMetadata, IlParentSpan, IlSourceSpan,
+    IlMetadata, IlParentSpan, IlSourceSpan,
 };
-use crate::il::ecode::{
-    ECODE_SCHEMA_VERSION, ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt,
-    ECodeStmtOpcode,
-};
-use crate::il::pcode::{
-    FlagId, PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode, RegisterBank,
-    RegisterId, RegisterSlice,
-};
+use crate::il::common::{IlConversion, IlGenerationContext, IlGenerationError};
+use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeLiftScratch, ECodeLifter};
+use crate::il::pcode::{PCodeIr, PCodeOp, PCodeOpcode};
 use crate::ir::Address;
-use crate::lifter::Varnode;
 use crate::platform::Platform;
 
 #[derive(Debug, Default)]
@@ -57,9 +51,25 @@ impl BlockSuccessors {
 
 #[derive(Debug, Default)]
 pub struct PCodeToECode {
-    intrinsic_args: Vec<Varnode>,
-    operands: Vec<IlExprId>,
+    scratch: ECodeLiftScratch<IlExprId>,
     source_spans_by_address: FxHashMap<Address, SmallVec<[IlSourceSpan; 1]>>,
+}
+
+impl IlConversion for ECodeIr {
+    type Source = PCodeIr;
+
+    fn convert(
+        source: &Self::Source,
+        context: &IlGenerationContext<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, IlGenerationError> {
+        Ok(PCodeToECode::default().transform(
+            source,
+            context.arch(),
+            context.platform(),
+            cancellation,
+        )?)
+    }
 }
 
 impl PCodeToECode {
@@ -74,33 +84,17 @@ impl PCodeToECode {
 
         let metadata = IlMetadata::new(
             source.metadata().function(),
-            ECODE_SCHEMA_VERSION,
             source.metadata().input_revision(),
         );
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let mut construction = ECodeConstruction::new(
-            source,
-            arch,
-            &mut builder,
-            &mut self.intrinsic_args,
-            &mut self.operands,
-        )?;
+        let mut lifter = ECodeLifter::new(source, arch, &mut builder, &mut self.scratch)?;
 
-        let offsets = construction.lift(cancellation)?;
-        let compiler = platform.compiler_spec_id();
-        let preserved_slices = arch
-            .language()
-            .call_preserved_registers(compiler)
-            .or_else(|| arch.language().call_preserved_registers("default"))
-            .unwrap_or_default()
-            .iter()
-            .map(|register| {
-                let location = PCodeLocation::from_varnode(arch.language(), register);
-                construction.register_bank.slice(&location, arch.endian())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let call_preserved_registers = RegisterBank::preserved_roots(preserved_slices);
-        drop(construction);
+        let offsets = lifter.lift(cancellation)?;
+        let call_preserved_registers = lifter.register_bank().call_preserved_registers(
+            arch.language(),
+            arch.endian(),
+            platform.compiler_spec_id(),
+        )?;
 
         builder.set_call_preserved_registers(call_preserved_registers);
         builder.set_graph(self.remap_graph(source, &offsets)?);
@@ -202,13 +196,13 @@ impl PCodeToECode {
                         ) =>
                     {
                         let conditional = operation.opcode() == PCodeOpcode::CBranch;
-                        let permitted = if conditional {
-                            IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH
-                        } else {
-                            IlEdgeKinds::UNCONDITIONAL
+                        let permitted = match (conditional, next) {
+                            (false, _) => IlEdgeKinds::UNCONDITIONAL,
+                            (true, Some(_)) => IlEdgeKinds::TAKEN,
+                            (true, None) => IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH,
                         };
 
-                        if let Some(target) = self
+                        let taken_arm = self
                             .internal_target(
                                 source,
                                 source_block.operations(),
@@ -218,7 +212,16 @@ impl PCodeToECode {
                             .and_then(|target| {
                                 Self::refined_target(first_blocks[block_index], ranges, target)
                             })
-                        {
+                            .or_else(|| {
+                                Self::external_target(
+                                    source,
+                                    operation,
+                                    original_successors,
+                                    &first_blocks,
+                                )
+                            });
+
+                        if let Some(target) = taken_arm {
                             let taken = if conditional {
                                 IlEdgeKinds::TAKEN
                             } else {
@@ -306,6 +309,24 @@ impl PCodeToECode {
         })
     }
 
+    fn external_target(
+        source: &PCodeIr,
+        operation: &PCodeOp,
+        successors: &[IlBlockId],
+        first_blocks: &[IlBlockId],
+    ) -> Option<IlBlockId> {
+        let address = source.target(operation.immediate())?.address();
+        let sources = source.graph().block_sources();
+        let mut resolved = successors
+            .iter()
+            .filter(|successor| sources.get(successor.index()).copied() == Some(address));
+        let target = resolved.next()?;
+        resolved
+            .next()
+            .is_none()
+            .then(|| first_blocks[target.index()])
+    }
+
     fn refined_target(
         first: IlBlockId,
         ranges: &[IlIndexRange],
@@ -390,550 +411,18 @@ impl PCodeToECode {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum LocationRole {
-    Address,
-    Value,
-}
-
-struct ECodeConstruction<'a, 'b> {
-    arch: &'a Arch,
-    source: &'a PCodeIr,
-    builder: &'b mut ECodeBuilder,
-    register_bank: RegisterBank,
-    flags: FxHashMap<PCodeLocation, FlagId>,
-    values: FxHashMap<(PCodeLocationId, LocationRole), IlExprId>,
-    register_values: FxHashMap<RegisterId, IlExprId>,
-    register_reads: FxHashMap<PCodeLocationId, IlExprId>,
-    flag_values: FxHashMap<FlagId, IlExprId>,
-    intrinsic_args: &'b mut Vec<Varnode>,
-    operands: &'b mut Vec<IlExprId>,
-}
-
-impl<'a, 'b> ECodeConstruction<'a, 'b> {
-    fn new(
-        source: &'a PCodeIr,
-        arch: &'a Arch,
-        builder: &'b mut ECodeBuilder,
-        intrinsic_args: &'b mut Vec<Varnode>,
-        operands: &'b mut Vec<IlExprId>,
-    ) -> Result<Self, IlError> {
-        let language = arch.language();
-        let flags = arch
-            .flags()
-            .iter()
-            .map(|flag| {
-                let variable = flag.variable();
-                (
-                    PCodeLocation::from_varnode(language, &variable),
-                    FlagId::new(variable.offset()),
-                )
-            })
-            .collect();
-
-        Ok(Self {
-            arch,
-            source,
-            builder,
-            register_bank: RegisterBank::new(language, source)?,
-            flags,
-            values: FxHashMap::default(),
-            register_values: FxHashMap::default(),
-            register_reads: FxHashMap::default(),
-            flag_values: FxHashMap::default(),
-            intrinsic_args,
-            operands,
-        })
-    }
-
-    fn lift(&mut self, cancellation: &CancellationToken) -> Result<Vec<u32>, IlError> {
-        let mut offsets = Vec::with_capacity(self.source.operations().len() + 1);
-        let mut source_span = 0usize;
-
-        for (index, operation) in self.source.operations().iter().enumerate() {
-            cancellation.check()?;
-            while self
-                .source
-                .source_spans()
-                .get(source_span)
-                .is_some_and(|span| span.destination().start() == index)
-            {
-                self.values.clear();
-                self.register_values.clear();
-                self.register_reads.clear();
-                self.flag_values.clear();
-                source_span += 1;
-            }
-            offsets.push(self.builder.statement_count() as u32);
-            self.lift_operation(operation)?;
-        }
-
-        offsets.push(self.builder.statement_count() as u32);
-
-        Ok(offsets)
-    }
-
-    fn lift_operation(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
-        match operation.opcode() {
-            PCodeOpcode::Store => self.lift_store(operation),
-            PCodeOpcode::Branch => self.lift_direct_flow(operation, ECodeStmtOpcode::Branch),
-            PCodeOpcode::CBranch => {
-                self.lift_direct_flow(operation, ECodeStmtOpcode::ConditionalBranch)
-            }
-            PCodeOpcode::IBranch => {
-                self.lift_indirect_flow(operation, ECodeStmtOpcode::BranchIndirect)
-            }
-            PCodeOpcode::Call => self.lift_direct_flow(operation, ECodeStmtOpcode::Call),
-            PCodeOpcode::ICall => self.lift_indirect_flow(operation, ECodeStmtOpcode::CallIndirect),
-            PCodeOpcode::Return => self.lift_indirect_flow(operation, ECodeStmtOpcode::Return),
-            PCodeOpcode::UserOp if operation.output().is_none() => self.lift_intrinsic(operation),
-            opcode => self.lift_expression_operation(operation, opcode),
-        }
-    }
-
-    fn lift_intrinsic(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
-        let (opcode, operands) = if self.is_trap_intrinsic(operation) {
-            (ECodeStmtOpcode::Trap, IlIndexRange::EMPTY)
-        } else {
-            (
-                ECodeStmtOpcode::Intrinsic,
-                self.lift_statement_operands(operation, None)?,
-            )
-        };
-        self.builder.push_statement(
-            ECodeStmt::new(opcode, operands, None, None, operation.address_space())
-                .with_immediate(u64::from(operation.immediate())),
-        )?;
-
-        Ok(())
-    }
-
-    fn is_trap_intrinsic(&mut self, operation: &PCodeOp) -> bool {
-        self.intrinsic_args.clear();
-        for operand in self.source.operation_operands_for(operation) {
-            let location = self.location(*operand);
-            self.intrinsic_args.push(Varnode::new(
-                location.lifter_space().value(),
-                location.offset(),
-                location.size(),
-            ));
-        }
-        self.arch.is_trap_intrinsic(
-            u16::try_from(operation.immediate())
-                .expect("PCode user-op identifier originated as u16"),
-            self.intrinsic_args,
-        )
-    }
-
-    fn lift_expression_operation(
-        &mut self,
-        operation: &PCodeOp,
-        opcode: PCodeOpcode,
-    ) -> Result<(), IlError> {
-        let Some(output) = operation.output() else {
-            return Err(IlError::missing_component(IlLevel::PCode, "output"));
-        };
-        let output_width = self.location(output).bits();
-        let mut immediate = u64::from(operation.immediate());
-        if opcode == PCodeOpcode::Subpiece {
-            let source = self.source.operation_operands_for(operation)[0];
-            let offset = self.source.operation_operands_for(operation)[1];
-            let source = self.lift_location(source, LocationRole::Value)?;
-            let location = *self.location(offset);
-            if !location.is_constant() {
-                return Err(IlError::missing_component(
-                    IlLevel::PCode,
-                    "constant subpiece offset",
-                ));
-            }
-            immediate = location
-                .offset()
-                .checked_mul(8)
-                .ok_or(IlError::integer_overflow("subpiece offset"))?;
-            self.operands.clear();
-            self.operands.push(source);
-        } else {
-            let address_operand = (opcode == PCodeOpcode::Load).then_some(0);
-            self.lift_operand_values(operation, address_operand)?;
-        }
-        let operands = self
-            .builder
-            .push_expression_operands(self.operands.iter().copied())?;
-        let expression_opcode = self.expression_opcode(opcode)?;
-        let expression = ECodeExpr::new(
-            expression_opcode,
-            output_width,
-            operands,
-            immediate,
-            operation.address_space(),
-        );
-        let expression = self.builder.push_expression(expression)?;
-
-        self.assign_output(output, expression)?;
-
-        Ok(())
-    }
-
-    fn assign_output(
-        &mut self,
-        output: PCodeLocationId,
-        expression: IlExprId,
-    ) -> Result<(), IlError> {
-        let location = *self.location(output);
-        if let Some(flag) = self.flags.get(&location).copied() {
-            self.flag_values.insert(flag, expression);
-            self.builder.push_statement(
-                ECodeStmt::new(
-                    ECodeStmtOpcode::WriteFlag,
-                    IlIndexRange::EMPTY,
-                    Some(expression),
-                    None,
-                    None,
-                )
-                .with_immediate(flag.value()),
-            )?;
-        } else if location.is_register() {
-            self.assign_register(&location, expression)?;
-        } else {
-            self.values
-                .insert((output, LocationRole::Value), expression);
-        }
-
-        Ok(())
-    }
-
-    fn assign_register(
-        &mut self,
-        location: &PCodeLocation,
-        expression: IlExprId,
-    ) -> Result<(), IlError> {
-        let slice = self.register_bank.slice(location, self.arch.endian())?;
-        let value = if slice.is_root() {
-            expression
-        } else {
-            let root = self.register_value(slice)?;
-            let operands = self.builder.push_expression_operands([root, expression])?;
-            self.builder.push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Insert,
-                slice.root_bits(),
-                operands,
-                u64::from(slice.offset()) * 8,
-                None,
-            ))?
-        };
-
-        self.register_reads.clear();
-        let write_start = u128::from(location.offset());
-        let write_end = write_start + u128::from(location.size());
-        for (flag_location, flag) in &self.flags {
-            if flag_location.lifter_space() != location.lifter_space() {
-                continue;
-            }
-            let flag_start = u128::from(flag_location.offset());
-            let flag_end = flag_start + u128::from(flag_location.size());
-            if write_start < flag_end && flag_start < write_end {
-                self.flag_values.remove(flag);
-            }
-        }
-        self.register_values.insert(slice.root(), value);
-        self.builder.push_statement(
-            ECodeStmt::new(
-                ECodeStmtOpcode::WriteRegister,
-                IlIndexRange::EMPTY,
-                Some(value),
-                None,
-                None,
-            )
-            .with_immediate(slice.root().value()),
-        )?;
-
-        Ok(())
-    }
-
-    fn lift_store(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
-        let operands = self.lift_statement_operands(operation, Some(0))?;
-
-        self.builder.push_statement(ECodeStmt::new(
-            ECodeStmtOpcode::Store,
-            operands,
-            None,
-            None,
-            operation.address_space(),
-        ))?;
-
-        Ok(())
-    }
-
-    fn lift_direct_flow(
-        &mut self,
-        operation: &PCodeOp,
-        opcode: ECodeStmtOpcode,
-    ) -> Result<(), IlError> {
-        let operands = self.lift_direct_flow_operands(operation)?;
-        let target = self
-            .source
-            .target(operation.immediate())
-            .expect("direct flow target is within the target pool");
-
-        self.builder.push_statement(ECodeStmt::new(
-            opcode,
-            operands,
-            None,
-            Some(target.address()),
-            None,
-        ))?;
-
-        Ok(())
-    }
-
-    fn lift_indirect_flow(
-        &mut self,
-        operation: &PCodeOp,
-        opcode: ECodeStmtOpcode,
-    ) -> Result<(), IlError> {
-        let operands = self.lift_statement_operands(operation, Some(0))?;
-
-        self.builder.push_statement(ECodeStmt::new(
-            opcode,
-            operands,
-            None,
-            None,
-            operation.address_space(),
-        ))?;
-
-        Ok(())
-    }
-
-    fn lift_statement_operands(
-        &mut self,
-        operation: &PCodeOp,
-        address_operand: Option<usize>,
-    ) -> Result<IlIndexRange, IlError> {
-        self.lift_operand_values(operation, address_operand)?;
-
-        self.builder
-            .push_statement_operands(self.operands.iter().copied())
-    }
-
-    fn lift_direct_flow_operands(&mut self, operation: &PCodeOp) -> Result<IlIndexRange, IlError> {
-        self.operands.clear();
-        for operand_index in 1..self.source.operation_operands_for(operation).len() {
-            let operand = self.source.operation_operands_for(operation)[operand_index];
-            let operand = self.lift_location(operand, LocationRole::Value)?;
-            self.operands.push(operand);
-        }
-
-        self.builder
-            .push_statement_operands(self.operands.iter().copied())
-    }
-
-    fn lift_operand_values(
-        &mut self,
-        operation: &PCodeOp,
-        address_operand: Option<usize>,
-    ) -> Result<(), IlError> {
-        self.operands.clear();
-        for operand_index in 0..self.source.operation_operands_for(operation).len() {
-            let operand = self.source.operation_operands_for(operation)[operand_index];
-            let role = if address_operand == Some(operand_index) {
-                LocationRole::Address
-            } else {
-                LocationRole::Value
-            };
-            let operand = self.lift_location(operand, role)?;
-            self.operands.push(operand);
-        }
-
-        Ok(())
-    }
-
-    fn lift_location(
-        &mut self,
-        id: PCodeLocationId,
-        role: LocationRole,
-    ) -> Result<IlExprId, IlError> {
-        let location = *self.location(id);
-        let key = if location.is_constant() {
-            (id, role)
-        } else {
-            (id, LocationRole::Value)
-        };
-        if let Some(expression) = self.values.get(&key).copied() {
-            return Ok(expression);
-        }
-
-        let expression = if location.is_constant() {
-            ECodeExpr::new(
-                match role {
-                    LocationRole::Address => ECodeExprOpcode::Address,
-                    LocationRole::Value => ECodeExprOpcode::Constant,
-                },
-                location.bits(),
-                IlIndexRange::EMPTY,
-                location.offset(),
-                None,
-            )
-        } else if let Some(flag) = self.flags.get(&location).copied() {
-            if let Some(expression) = self.flag_values.get(&flag).copied() {
-                return Ok(expression);
-            }
-            let expression = self.builder.push_expression(ECodeExpr::new(
-                ECodeExprOpcode::ReadFlag,
-                location.bits(),
-                IlIndexRange::EMPTY,
-                flag.value(),
-                None,
-            ))?;
-            self.flag_values.insert(flag, expression);
-            return Ok(expression);
-        } else if location.is_register() {
-            return self.lift_register(id, &location);
-        } else {
-            ECodeExpr::new(
-                ECodeExprOpcode::Undefined,
-                location.bits(),
-                IlIndexRange::EMPTY,
-                u64::from(id.value()),
-                None,
-            )
-        };
-        let expression = self.builder.push_expression(expression)?;
-
-        self.values.insert(key, expression);
-
-        Ok(expression)
-    }
-
-    fn lift_register(
-        &mut self,
-        id: PCodeLocationId,
-        location: &PCodeLocation,
-    ) -> Result<IlExprId, IlError> {
-        if let Some(expression) = self.register_reads.get(&id).copied() {
-            return Ok(expression);
-        }
-
-        let slice = self.register_bank.slice(location, self.arch.endian())?;
-        let root = self.register_value(slice)?;
-        let expression = if slice.is_root() {
-            root
-        } else {
-            let operands = self.builder.push_expression_operands([root])?;
-            self.builder.push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Extract,
-                slice.bits(),
-                operands,
-                u64::from(slice.offset()) * 8,
-                None,
-            ))?
-        };
-        self.register_reads.insert(id, expression);
-
-        Ok(expression)
-    }
-
-    fn register_value(&mut self, slice: RegisterSlice) -> Result<IlExprId, IlError> {
-        if let Some(expression) = self.register_values.get(&slice.root()).copied() {
-            return Ok(expression);
-        }
-
-        let expression = self.builder.push_expression(ECodeExpr::new(
-            ECodeExprOpcode::ReadRegister,
-            slice.root_bits(),
-            IlIndexRange::EMPTY,
-            slice.root().value(),
-            None,
-        ))?;
-        self.register_values.insert(slice.root(), expression);
-
-        Ok(expression)
-    }
-
-    fn location(&self, id: PCodeLocationId) -> &PCodeLocation {
-        self.source
-            .location(id)
-            .expect("location id is within the location pool")
-    }
-
-    fn expression_opcode(&self, opcode: PCodeOpcode) -> Result<ECodeExprOpcode, IlError> {
-        match opcode {
-            PCodeOpcode::Copy => Ok(ECodeExprOpcode::Copy),
-            PCodeOpcode::Load => Ok(ECodeExprOpcode::Load),
-            PCodeOpcode::IntAdd => Ok(ECodeExprOpcode::Add),
-            PCodeOpcode::IntSub => Ok(ECodeExprOpcode::Sub),
-            PCodeOpcode::IntMul => Ok(ECodeExprOpcode::Mul),
-            PCodeOpcode::IntDiv => Ok(ECodeExprOpcode::UnsignedDiv),
-            PCodeOpcode::IntSignedDiv => Ok(ECodeExprOpcode::SignedDiv),
-            PCodeOpcode::IntRem => Ok(ECodeExprOpcode::UnsignedRem),
-            PCodeOpcode::IntSignedRem => Ok(ECodeExprOpcode::SignedRem),
-            PCodeOpcode::IntLeftShift => Ok(ECodeExprOpcode::LeftShift),
-            PCodeOpcode::IntRightShift => Ok(ECodeExprOpcode::LogicalRightShift),
-            PCodeOpcode::IntSignedRightShift => Ok(ECodeExprOpcode::ArithmeticRightShift),
-            PCodeOpcode::IntEq => Ok(ECodeExprOpcode::IntEqual),
-            PCodeOpcode::IntNotEq => Ok(ECodeExprOpcode::IntNotEqual),
-            PCodeOpcode::IntLess => Ok(ECodeExprOpcode::IntLess),
-            PCodeOpcode::IntSignedLess => Ok(ECodeExprOpcode::IntSignedLess),
-            PCodeOpcode::IntLessEq => Ok(ECodeExprOpcode::IntLessEqual),
-            PCodeOpcode::IntSignedLessEq => Ok(ECodeExprOpcode::IntSignedLessEqual),
-            PCodeOpcode::IntCarry => Ok(ECodeExprOpcode::Carry),
-            PCodeOpcode::IntSignedCarry => Ok(ECodeExprOpcode::SignedCarry),
-            PCodeOpcode::IntSignedBorrow => Ok(ECodeExprOpcode::SignedBorrow),
-            PCodeOpcode::IntAnd => Ok(ECodeExprOpcode::And),
-            PCodeOpcode::IntOr => Ok(ECodeExprOpcode::Or),
-            PCodeOpcode::IntXor => Ok(ECodeExprOpcode::Xor),
-            PCodeOpcode::IntNot => Ok(ECodeExprOpcode::Not),
-            PCodeOpcode::BoolAnd => Ok(ECodeExprOpcode::BoolAnd),
-            PCodeOpcode::BoolOr => Ok(ECodeExprOpcode::BoolOr),
-            PCodeOpcode::BoolXor => Ok(ECodeExprOpcode::BoolXor),
-            PCodeOpcode::BoolNot => Ok(ECodeExprOpcode::BoolNot),
-            PCodeOpcode::IntNeg => Ok(ECodeExprOpcode::Negate),
-            PCodeOpcode::CountOnes => Ok(ECodeExprOpcode::CountOnes),
-            PCodeOpcode::CountLeadingZeros => Ok(ECodeExprOpcode::CountLeadingZeros),
-            PCodeOpcode::ZeroExt => Ok(ECodeExprOpcode::ZeroExtend),
-            PCodeOpcode::SignExt => Ok(ECodeExprOpcode::SignExtend),
-            PCodeOpcode::Subpiece => Ok(ECodeExprOpcode::Extract),
-            PCodeOpcode::FloatAdd => Ok(ECodeExprOpcode::FloatAdd),
-            PCodeOpcode::FloatSub => Ok(ECodeExprOpcode::FloatSub),
-            PCodeOpcode::FloatMul => Ok(ECodeExprOpcode::FloatMul),
-            PCodeOpcode::FloatDiv => Ok(ECodeExprOpcode::FloatDiv),
-            PCodeOpcode::FloatNeg => Ok(ECodeExprOpcode::FloatNegate),
-            PCodeOpcode::FloatAbs => Ok(ECodeExprOpcode::FloatAbs),
-            PCodeOpcode::FloatSqrt => Ok(ECodeExprOpcode::FloatSqrt),
-            PCodeOpcode::FloatCeiling => Ok(ECodeExprOpcode::FloatCeiling),
-            PCodeOpcode::FloatFloor => Ok(ECodeExprOpcode::FloatFloor),
-            PCodeOpcode::FloatRound => Ok(ECodeExprOpcode::FloatRound),
-            PCodeOpcode::FloatIsNan => Ok(ECodeExprOpcode::FloatIsNan),
-            PCodeOpcode::FloatEq => Ok(ECodeExprOpcode::FloatEqual),
-            PCodeOpcode::FloatNotEq => Ok(ECodeExprOpcode::FloatNotEqual),
-            PCodeOpcode::FloatLess => Ok(ECodeExprOpcode::FloatLess),
-            PCodeOpcode::FloatLessEq => Ok(ECodeExprOpcode::FloatLessEqual),
-            PCodeOpcode::FloatToInt => Ok(ECodeExprOpcode::FloatToInt),
-            PCodeOpcode::FloatToFloat => Ok(ECodeExprOpcode::FloatToFloat),
-            PCodeOpcode::IntToFloat => Ok(ECodeExprOpcode::IntToFloat),
-            PCodeOpcode::UserOp => Ok(ECodeExprOpcode::IntrinsicResult),
-            PCodeOpcode::Store
-            | PCodeOpcode::Branch
-            | PCodeOpcode::CBranch
-            | PCodeOpcode::IBranch
-            | PCodeOpcode::Call
-            | PCodeOpcode::ICall
-            | PCodeOpcode::Return => Err(IlError::unsupported_opcode(IlLevel::ECode)),
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlGraph, IlIndexRange, IlSourceSpan,
-    };
+    use crate::il::common::IlError;
     use crate::il::ecode::ssa::ECodeToSsa;
+    use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeSink, ECodeStmt, ECodeStmtOpcode};
     use crate::il::pcode::{
-        LifterSpaceHandle, PCODE_SCHEMA_VERSION, PCodeBuilder, PCodeLocation,
-        PCodeLocationProperties, PCodeOp, PCodeOpcode,
+        FlagId, LifterSpaceHandle, PCodeBuilder, PCodeLocation, PCodeLocationProperties, PCodeOp,
+        PCodeOpcode, RegisterId,
     };
     use crate::ir::{Address, FunctionId};
+    use crate::lifter::Varnode;
     use crate::lifter::{Language, resolve_language};
     use crate::storage::segments::space::AddressSpaceId;
 
@@ -951,7 +440,7 @@ mod test {
 
     #[test]
     fn empty_pcode_lifts_to_empty_ecode() {
-        let pcode_metadata = IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11);
+        let pcode_metadata = IlMetadata::new(FunctionId::default(), 11);
         let source = PCodeBuilder::new(language(), pcode_metadata, IlGraph::default())
             .build(&CancellationToken::default())
             .unwrap();
@@ -1584,8 +1073,272 @@ mod test {
         );
     }
 
+    #[derive(Default)]
+    struct WidthProbe {
+        addresses: Vec<Address>,
+        widths: Vec<u32>,
+        effects: usize,
+    }
+
+    impl ECodeSink for WidthProbe {
+        type Value = u32;
+
+        fn begin_instruction(&mut self, address: Address) -> Result<(), IlError> {
+            self.addresses.push(address);
+            Ok(())
+        }
+
+        fn constant(&mut self, width: u32, _value: u64) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn address(&mut self, width: u32, _offset: u64) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn undefined(&mut self, width: u32, _discriminant: u64) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn read_register(
+            &mut self,
+            _register: RegisterId,
+            width: u32,
+        ) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn read_flag(&mut self, _flag: FlagId, width: u32) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn apply(
+            &mut self,
+            _opcode: ECodeExprOpcode,
+            width: u32,
+            _operands: &[Self::Value],
+            _immediate: u64,
+            _address_space: Option<AddressSpaceId>,
+        ) -> Result<Self::Value, IlError> {
+            self.widths.push(width);
+            Ok(width)
+        }
+
+        fn write_register(
+            &mut self,
+            _register: RegisterId,
+            _value: Self::Value,
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn write_flag(&mut self, _flag: FlagId, _value: Self::Value) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn store(
+            &mut self,
+            _operands: &[Self::Value],
+            _address_space: Option<AddressSpaceId>,
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn direct_flow(
+            &mut self,
+            _opcode: ECodeStmtOpcode,
+            _target: Address,
+            _operands: &[Self::Value],
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn indirect_flow(
+            &mut self,
+            _opcode: ECodeStmtOpcode,
+            _operands: &[Self::Value],
+            _address_space: Option<AddressSpaceId>,
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn intrinsic(
+            &mut self,
+            _intrinsic: u64,
+            _operands: &[Self::Value],
+            _address_space: Option<AddressSpaceId>,
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+
+        fn trap(
+            &mut self,
+            _intrinsic: u64,
+            _address_space: Option<AddressSpaceId>,
+        ) -> Result<(), IlError> {
+            self.effects += 1;
+            Ok(())
+        }
+    }
+
+    fn assert_pairing_matches(source: &PCodeIr) {
+        let cancellation = CancellationToken::default();
+        let arch = arch();
+        let solo = PCodeToECode::default()
+            .transform(source, &arch, &platform(), &cancellation)
+            .unwrap();
+
+        let builder = ECodeBuilder::new(
+            IlMetadata::new(
+                source.metadata().function(),
+                source.metadata().input_revision(),
+            ),
+            IlGraph::default(),
+        );
+        let mut paired = (builder, WidthProbe::default());
+        let mut scratch = ECodeLiftScratch::default();
+        let mut lifter = ECodeLifter::new(source, &arch, &mut paired, &mut scratch).unwrap();
+        lifter.lift(&cancellation).unwrap();
+        drop(lifter);
+
+        let (mut builder, probe) = paired;
+        builder.set_graph(solo.graph().clone());
+        builder.set_parent_spans(solo.parent_spans().to_vec());
+        builder.set_source_spans(solo.source_spans().to_vec());
+        builder.set_call_preserved_registers(solo.call_preserved_registers().to_vec());
+        let mirrored = builder.build(&cancellation).unwrap();
+
+        assert_eq!(mirrored, solo);
+        assert_eq!(probe.effects, solo.statements().len());
+        assert_eq!(
+            probe.addresses,
+            solo.source_spans()
+                .iter()
+                .map(IlSourceSpan::address)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            probe.widths,
+            solo.expressions()
+                .iter()
+                .map(ECodeExpr::width)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_paired_sink_observes_every_effect_without_changing_the_built_ir() {
+        let sources = [
+            copy_source(),
+            unique_copy_source(),
+            flag_source(),
+            store_source(),
+            branch_source(Address::new(AddressSpaceId::new(3), 0x2000u64)),
+            return_source(AddressSpaceId::new(9)),
+            trap_source(),
+            intrinsic_source(),
+        ];
+        let mut seen = Vec::new();
+        for source in &sources {
+            assert_pairing_matches(source);
+            let lifted = PCodeToECode::default()
+                .transform(source, &arch(), &platform(), &CancellationToken::default())
+                .unwrap();
+            seen.extend(lifted.statements().iter().map(ECodeStmt::opcode));
+        }
+
+        for opcode in [
+            ECodeStmtOpcode::Branch,
+            ECodeStmtOpcode::Intrinsic,
+            ECodeStmtOpcode::Return,
+            ECodeStmtOpcode::Store,
+            ECodeStmtOpcode::Trap,
+            ECodeStmtOpcode::WriteFlag,
+            ECodeStmtOpcode::WriteRegister,
+        ] {
+            assert!(seen.contains(&opcode), "{opcode:?} is not exercised");
+        }
+    }
+
     fn pcode_metadata() -> IlMetadata {
-        IlMetadata::new(FunctionId::default(), PCODE_SCHEMA_VERSION, 11)
+        IlMetadata::new(FunctionId::default(), 11)
+    }
+
+    fn flag_source() -> PCodeIr {
+        let language = language();
+        let cf = language.register_by_name("CF").expect("CF should exist");
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
+        let flag = builder
+            .push_location(PCodeLocation::from_varnode(language, &cf))
+            .unwrap();
+        let flag_constant = builder
+            .push_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::constant(1, cf.size),
+            ))
+            .unwrap();
+        let operands = builder.push_operands([flag_constant]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::Copy,
+            Some(flag),
+            operands,
+            0,
+            None,
+        ));
+
+        builder.build(&CancellationToken::default()).unwrap()
+    }
+
+    fn trap_source() -> PCodeIr {
+        let language = language();
+        let trap = language
+            .user_op_by_name("invalidInstructionException")
+            .expect("x86 trap intrinsic should exist");
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::UserOp,
+            None,
+            IlIndexRange::EMPTY,
+            u32::from(trap),
+            None,
+        ));
+
+        builder.build(&CancellationToken::default()).unwrap()
+    }
+
+    fn intrinsic_source() -> PCodeIr {
+        let language = language();
+        let swi = language
+            .user_op_by_name("swi")
+            .expect("x86 software-interrupt intrinsic should exist");
+        let mut builder = PCodeBuilder::new(language, pcode_metadata(), IlGraph::default());
+        let argument = builder
+            .push_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::constant(0x80, 8),
+            ))
+            .unwrap();
+        let operands = builder.push_operands([argument]).unwrap();
+        builder.push_operation(PCodeOp::new(
+            PCodeOpcode::UserOp,
+            None,
+            operands,
+            u32::from(swi),
+            None,
+        ));
+
+        builder.build(&CancellationToken::default()).unwrap()
     }
 
     fn copy_source() -> PCodeIr {

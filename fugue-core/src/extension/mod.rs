@@ -5,28 +5,30 @@ pub mod __private {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __fugue_core_registry_collect {
+macro_rules! __fugue_core_extension_collect {
     ($($tokens:tt)*) => {
-        $crate::registry::__private::inventory::collect!($($tokens)*);
+        $crate::extension::__private::inventory::collect!($($tokens)*);
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __fugue_core_registry_submit {
+macro_rules! __fugue_core_extension_submit {
     ($($tokens:tt)*) => {
-        $crate::registry::__private::inventory::submit!($($tokens)*);
+        $crate::extension::__private::inventory::submit!($($tokens)*);
     };
 }
 
-pub use crate::{__fugue_core_registry_collect as collect, __fugue_core_registry_submit as submit};
+pub use crate::{
+    __fugue_core_extension_collect as collect, __fugue_core_extension_submit as submit,
+};
 
 mod private {
-    pub trait RegistryCollect: Sized + 'static {
+    pub trait ExtensionCollect: Sized + 'static {
         fn iter() -> Box<dyn Iterator<Item = &'static Self>>;
     }
 
-    impl<T> RegistryCollect for T
+    impl<T> ExtensionCollect for T
     where
         T: inventory::Collect,
     {
@@ -36,7 +38,7 @@ mod private {
     }
 }
 
-pub trait Collect: private::RegistryCollect {}
+pub trait Collect: private::ExtensionCollect {}
 
 impl<T> Collect for T where T: inventory::Collect {}
 
@@ -48,5 +50,5 @@ pub fn iter<T>() -> impl Iterator<Item = &'static T>
 where
     T: Collect,
 {
-    <T as private::RegistryCollect>::iter()
+    <T as private::ExtensionCollect>::iter()
 }

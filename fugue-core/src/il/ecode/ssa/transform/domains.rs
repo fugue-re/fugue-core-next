@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ECodeSsaConstruction, SsaDomain, SsaDomains};
-use crate::il::common::{IlBlockId, IlDominance, IlError, IlLevel};
-use crate::il::ecode::{ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
+use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlError};
+use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::ecode::{ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
 use crate::il::pcode::{FlagId, RegisterId};
 
 impl ECodeSsaConstruction<'_, '_> {
@@ -39,9 +40,9 @@ impl ECodeSsaConstruction<'_, '_> {
                             .push(block_id);
                     }
                     ECodeStmtOpcode::Store => {
-                        let space = statement
-                            .address_space()
-                            .ok_or(IlError::missing_component(IlLevel::ECode, "address space"))?;
+                        let space = statement.address_space().ok_or_else(|| {
+                            IlError::missing_component(ECodeIr::FORM, "address space")
+                        })?;
                         let domain = SsaDomain::Memory(space);
 
                         Self::record_domain_width(&mut domains.widths, domain, 0)?;
@@ -69,9 +70,9 @@ impl ECodeSsaConstruction<'_, '_> {
                     domains.reads.insert(domain);
                 }
                 ECodeExprOpcode::Load => {
-                    let space = expression
-                        .address_space()
-                        .ok_or(IlError::missing_component(IlLevel::ECode, "address space"))?;
+                    let space = expression.address_space().ok_or_else(|| {
+                        IlError::missing_component(ECodeIr::FORM, "address space")
+                    })?;
 
                     Self::record_domain_width(&mut domains.widths, SsaDomain::Memory(space), 0)?;
                 }
@@ -90,7 +91,7 @@ impl ECodeSsaConstruction<'_, '_> {
     fn statement_value_width(&self, statement: &ECodeStmt) -> Result<u32, IlError> {
         let value = statement
             .value()
-            .ok_or(IlError::missing_component(IlLevel::ECode, "value"))?;
+            .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "value"))?;
         Ok(self.source.expressions()[value.index()].width())
     }
 
@@ -101,7 +102,7 @@ impl ECodeSsaConstruction<'_, '_> {
     ) -> Result<(), IlError> {
         if let Some(existing) = widths.get(&domain) {
             if *existing != width {
-                return Err(IlError::width_mismatch(IlLevel::ECodeSsa));
+                return Err(IlError::width_mismatch(ECodeSsaIr::FORM));
             }
         } else {
             widths.insert(domain, width);

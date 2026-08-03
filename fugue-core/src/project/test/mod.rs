@@ -1,8 +1,8 @@
 use super::{Project, ProjectError};
 #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
 use crate::attributes;
-use crate::il::common::{IlError, IlGraph, IlLevel, IlMetadata, IlSchemaVersion};
-use crate::il::pcode::{PCODE_SCHEMA_VERSION, PCodeIr};
+use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata};
+use crate::il::pcode::PCodeIr;
 use crate::ir::FunctionId;
 #[cfg(any(feature = "sqlite", feature = "rocksdb", feature = "mdbx"))]
 use crate::platform::Format;

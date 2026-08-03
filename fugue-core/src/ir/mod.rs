@@ -76,11 +76,11 @@ pub use symbol::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct IndexHeader {
+struct IndexMetadata {
     revision: Revision,
 }
 
-impl IndexHeader {
+impl IndexMetadata {
     fn new(revision: Revision) -> Self {
         Self { revision }
     }
@@ -90,7 +90,7 @@ impl IndexHeader {
     }
 }
 
-impl Entity for IndexHeader {
+impl Entity for IndexMetadata {
     const ID: EntityId = ENTITY_INDEX_HEADER_ID;
 }
 

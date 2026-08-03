@@ -26,14 +26,15 @@ use super::{
 use super::{EngineMetrics, ReadSet};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Cancelled, Progress};
-use crate::il::common::{IlArtefact, IlError, IlLevel};
+use crate::extension;
+use crate::il::common::{IlArtefact, IlError, IlFormId};
 use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa};
 use crate::il::ecode::{ECodeIr, PCodeToECode};
 use crate::il::pcode::{PCodeCanonicaliser, PCodeFunctionInput, PCodeIr};
+use crate::il::registry::IlRegistry;
 use crate::ir::{AddressRangeSet, FunctionId, ProblemKind, ProblemScope, Reference, ReferenceKind};
 use crate::project::{Project, ProjectError, ProjectTransaction};
 use crate::queries::{LiftedLookup, QueryCachedIl, QueryEngine};
-use crate::registry;
 use crate::storage::segments::mapping::SegmentMappingBuilder;
 
 pub(crate) enum Intake {
@@ -50,12 +51,12 @@ pub(crate) enum Intake {
     },
     EnsureLifted {
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
     GenerateLifted {
         function: FunctionId,
-        level: IlLevel,
+        form: IlFormId,
         reply: Sender<Result<Option<Arc<dyn Any + Send + Sync>>, EngineError>>,
     },
     Shutdown,
@@ -133,6 +134,9 @@ pub(super) struct Worker {
     recent_changes: RecentChanges,
     metrics: EngineMetrics,
     subscribers: Vec<Subscriber>,
+    canonicaliser: PCodeCanonicaliser,
+    pcode_to_ecode: PCodeToECode,
+    ecode_to_ssa: ECodeToSsa,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,9 +236,7 @@ impl PendingDiagnostics {
 
 #[derive(Default)]
 struct PreparedLiftedArtefacts {
-    pcode: Option<PCodeIr>,
-    ecode: Option<ECodeIr>,
-    ecode_ssa: Option<ECodeSsaIr>,
+    artefacts: Vec<(IlFormId, Box<dyn Any + Send + Sync>)>,
     pcode_references: Option<PreparedDerivedReferences>,
 }
 
@@ -243,45 +245,21 @@ struct PreparedDerivedReferences {
     references: Vec<Reference>,
 }
 
-trait GeneratedIl: QueryCachedIl + Send + Sync + 'static {
-    fn take(prepared: &mut PreparedLiftedArtefacts) -> Option<Self>;
-}
-
-impl GeneratedIl for PCodeIr {
-    fn take(prepared: &mut PreparedLiftedArtefacts) -> Option<Self> {
-        prepared.pcode.take()
-    }
-}
-
-impl GeneratedIl for ECodeIr {
-    fn take(prepared: &mut PreparedLiftedArtefacts) -> Option<Self> {
-        prepared.ecode.take()
-    }
-}
-
-impl GeneratedIl for ECodeSsaIr {
-    fn take(prepared: &mut PreparedLiftedArtefacts) -> Option<Self> {
-        prepared.ecode_ssa.take()
-    }
-}
-
 impl PreparedLiftedArtefacts {
+    fn push<T: IlArtefact>(&mut self, artefact: T) {
+        self.artefacts.push((T::FORM, Box::new(artefact)));
+    }
+
     fn admit(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
-        if let Some(pcode) = self.pcode {
-            transaction.materialise_lifted(pcode)?;
-            if let Some(references) = self.pcode_references {
-                transaction.replace_derived_references(
-                    references.coverage,
-                    ReferenceKind::Data,
-                    references.references,
-                )?;
-            }
+        for (form, artefact) in self.artefacts {
+            transaction.materialise_erased(&form, artefact)?;
         }
-        if let Some(ecode) = self.ecode {
-            transaction.materialise_lifted(ecode)?;
-        }
-        if let Some(ecode_ssa) = self.ecode_ssa {
-            transaction.materialise_lifted(ecode_ssa)?;
+        if let Some(references) = self.pcode_references {
+            transaction.replace_derived_references(
+                references.coverage,
+                ReferenceKind::Data,
+                references.references,
+            )?;
         }
         Ok(())
     }
@@ -300,19 +278,19 @@ impl PreparedLiftedArtefacts {
         Ok(())
     }
 
-    fn publish_one<T>(&mut self, queries: &QueryEngine) -> Option<Arc<T>>
-    where
-        T: GeneratedIl,
-    {
-        let ir = Arc::new(T::take(self)?);
-        queries.insert_lifted(ir.metadata().function(), ir.clone());
-        Some(ir)
+    fn get<T: IlArtefact>(&self) -> Option<&T> {
+        self.artefacts
+            .iter()
+            .find_map(|(_, artefact)| artefact.downcast_ref::<T>())
     }
 
-    fn publish(mut self, queries: &QueryEngine) {
-        self.publish_one::<PCodeIr>(queries);
-        self.publish_one::<ECodeIr>(queries);
-        self.publish_one::<ECodeSsaIr>(queries);
+    fn take<T: IlArtefact>(&mut self) -> Option<T> {
+        let index = self
+            .artefacts
+            .iter()
+            .position(|(_, artefact)| artefact.is::<T>())?;
+        let (_, artefact) = self.artefacts.remove(index);
+        artefact.downcast::<T>().ok().map(|artefact| *artefact)
     }
 }
 
@@ -328,7 +306,7 @@ impl Worker {
     ) -> Result<Self, EngineError> {
         let mut analysers = Vec::new();
         let project_read = project.read();
-        for provider in registry::iter::<AnalyserProvider>() {
+        for provider in extension::iter::<AnalyserProvider>() {
             let analyser = provider.build(&project_read)?;
             if analyser.can_analyse(&project_read) {
                 analysers.push(ScheduledAnalyser::new(analyser));
@@ -367,6 +345,9 @@ impl Worker {
             recent_changes: RecentChanges::new(revision),
             metrics,
             subscribers: Vec::new(),
+            canonicaliser: PCodeCanonicaliser::default(),
+            pcode_to_ecode: PCodeToECode::default(),
+            ecode_to_ssa: ECodeToSsa::default(),
         };
 
         worker.apply_coverage_reconfiguration(&coverage);
@@ -501,22 +482,22 @@ impl Worker {
 
                 Intake::EnsureLifted {
                     function,
-                    level,
+                    form,
                     reply,
                 } => {
                     let result = self
                         .drain_or_handle_cancelled()
-                        .and_then(|()| self.ensure_lifted(function, level));
+                        .and_then(|()| self.ensure_lifted(function, &form));
                     let _ = reply.send(result);
                 }
                 Intake::GenerateLifted {
                     function,
-                    level,
+                    form,
                     reply,
                 } => {
                     let result = self
                         .drain_or_handle_cancelled()
-                        .and_then(|()| self.generate_lifted(function, level));
+                        .and_then(|()| self.generate_lifted(function, &form));
                     let _ = reply.send(result);
                 }
                 Intake::Updates { updates, reply } => {
@@ -1241,11 +1222,11 @@ impl Worker {
     fn ensure_lifted(
         &mut self,
         function: FunctionId,
-        level: IlLevel,
+        form: &IlFormId,
     ) -> Result<ChangeSet, EngineError> {
         let cancellation = self.cancellation.child();
         let prepared =
-            self.prepare_lifted(function, level, LiftedLookup::Persisted, &cancellation)?;
+            self.prepare_lifted(function, form, LiftedLookup::Persisted, &cancellation)?;
         let result = self
             .with_transaction(ChangeSource::engine("ensure IR"), move |_, transaction| {
                 prepared.admit(transaction)
@@ -1260,12 +1241,16 @@ impl Worker {
     fn generate_lifted(
         &mut self,
         function: FunctionId,
-        level: IlLevel,
+        form: &IlFormId,
     ) -> Result<Option<Arc<dyn Any + Send + Sync>>, EngineError> {
-        match level {
-            IlLevel::PCode => self.generate::<PCodeIr>(function),
-            IlLevel::ECode => self.generate::<ECodeIr>(function),
-            IlLevel::ECodeSsa => self.generate::<ECodeSsaIr>(function),
+        if *form == PCodeIr::FORM {
+            self.generate::<PCodeIr>(function)
+        } else if *form == ECodeIr::FORM {
+            self.generate::<ECodeIr>(function)
+        } else if *form == ECodeSsaIr::FORM {
+            self.generate::<ECodeSsaIr>(function)
+        } else {
+            Ok(None)
         }
     }
 
@@ -1274,11 +1259,14 @@ impl Worker {
         function: FunctionId,
     ) -> Result<Option<Arc<dyn Any + Send + Sync>>, EngineError>
     where
-        T: GeneratedIl,
+        T: QueryCachedIl,
     {
-        let mut prepared = self.prepare_generated_lifted(function, T::LEVEL)?;
-        let generated = prepared.publish_one::<T>(&self.queries);
-        prepared.publish(&self.queries);
+        let mut prepared = self.prepare_generated_lifted(function, &T::FORM)?;
+        let generated = prepared.take::<T>().map(Arc::new);
+        if let Some(ir) = generated.as_ref() {
+            self.queries.insert_lifted(function, ir.clone());
+        }
+        self.publish_prepared(prepared);
         match generated {
             Some(ir) => Ok(Some(ir)),
             None => Ok(self
@@ -1287,14 +1275,27 @@ impl Worker {
         }
     }
 
+    fn publish_prepared(&self, mut prepared: PreparedLiftedArtefacts) {
+        self.publish_prepared_form::<PCodeIr>(&mut prepared);
+        self.publish_prepared_form::<ECodeIr>(&mut prepared);
+        self.publish_prepared_form::<ECodeSsaIr>(&mut prepared);
+    }
+
+    fn publish_prepared_form<T: QueryCachedIl>(&self, prepared: &mut PreparedLiftedArtefacts) {
+        if let Some(artefact) = prepared.take::<T>() {
+            let function = artefact.metadata().function();
+            self.queries.insert_lifted(function, Arc::new(artefact));
+        }
+    }
+
     fn prepare_generated_lifted(
         &mut self,
         function: FunctionId,
-        level: IlLevel,
+        form: &IlFormId,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         let cancellation = self.cancellation.child();
         let mut prepared =
-            self.prepare_lifted(function, level, LiftedLookup::Current, &cancellation)?;
+            self.prepare_lifted(function, form, LiftedLookup::Current, &cancellation)?;
         if prepared.pcode_references.is_none() {
             return Ok(prepared);
         }
@@ -1310,16 +1311,16 @@ impl Worker {
     }
 
     fn prepare_lifted(
-        &self,
+        &mut self,
         function: FunctionId,
-        level: IlLevel,
+        form: &IlFormId,
         lookup: LiftedLookup,
         cancellation: &CancellationToken,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         cancellation.check().map_err(ProjectError::from)?;
         if function.is_invalid() {
             return Err(
-                ProjectError::from(IlError::missing_artefact(function, IlLevel::PCode)).into(),
+                ProjectError::from(IlError::missing_artefact(function, PCodeIr::FORM)).into(),
             );
         }
 
@@ -1335,14 +1336,17 @@ impl Worker {
         let existing_ecode_ssa = self
             .queries
             .current_lifted::<ECodeSsaIr>(&project, function, lookup)?;
-        let build_ecode = level >= IlLevel::ECode && existing_ecode.is_none();
-        let build_pcode = (level == IlLevel::PCode || build_ecode) && existing_pcode.is_none();
-        let build_ecode_ssa = level == IlLevel::ECodeSsa && existing_ecode_ssa.is_none();
+        let path = IlRegistry::standard().canonical_path(form);
+        let on_path = |form: &IlFormId| path.contains(form);
+        let build_ecode = on_path(&ECodeIr::FORM) && existing_ecode.is_none();
+        let build_pcode = (on_path(&PCodeIr::FORM) && (*form == PCodeIr::FORM || build_ecode))
+            && existing_pcode.is_none();
+        let build_ecode_ssa = *form == ECodeSsaIr::FORM && existing_ecode_ssa.is_none();
         let mut prepared = PreparedLiftedArtefacts::default();
 
         if build_pcode {
-            let mut canonicaliser = PCodeCanonicaliser::default();
-            let pcode = canonicaliser
+            let pcode = self
+                .canonicaliser
                 .build_function(PCodeFunctionInput::new(
                     view.language(),
                     view.functions(),
@@ -1369,18 +1373,17 @@ impl Worker {
                 coverage,
                 references: pcode.data_references().collect(),
             });
-            prepared.pcode = Some(pcode);
+            prepared.push(pcode);
         }
 
         if build_ecode {
             let source = prepared
-                .pcode
-                .as_ref()
+                .get::<PCodeIr>()
                 .or(existing_pcode.as_deref())
-                .ok_or_else(|| IlError::missing_artefact(function, IlLevel::PCode))
+                .ok_or_else(|| IlError::missing_artefact(function, PCodeIr::FORM))
                 .map_err(ProjectError::from)?;
-            let mut transform = PCodeToECode::default();
-            let ecode = transform
+            let ecode = self
+                .pcode_to_ecode
                 .transform(source, view.arch(), view.platform(), cancellation)
                 .map_err(ProjectError::from)?;
             if cfg!(debug_assertions) {
@@ -1388,19 +1391,17 @@ impl Worker {
                     .verify()
                     .expect("transformed ecode fails verification");
             }
-            prepared.ecode = Some(ecode);
+            prepared.push(ecode);
         }
 
         if build_ecode_ssa {
             let source = prepared
-                .ecode
-                .as_ref()
+                .get::<ECodeIr>()
                 .or(existing_ecode.as_deref())
-                .ok_or_else(|| IlError::missing_artefact(function, IlLevel::ECode))
+                .ok_or_else(|| IlError::missing_artefact(function, ECodeIr::FORM))
                 .map_err(ProjectError::from)?;
-            let mut transform = ECodeToSsa::default();
-            prepared.ecode_ssa = Some(
-                transform
+            prepared.push(
+                self.ecode_to_ssa
                     .transform_optimised(source, cancellation)
                     .map_err(ProjectError::from)?,
             );
@@ -1411,7 +1412,7 @@ impl Worker {
 
     fn current_query_lifted<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, EngineError>
     where
-        T: IlArtefact + QueryCachedIl,
+        T: QueryCachedIl,
     {
         let project = self.project.read();
         self.queries

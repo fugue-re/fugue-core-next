@@ -7,10 +7,10 @@ use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
 };
+use fugue_core::extension;
 use fugue_core::ir::{Address, AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
-use fugue_core::registry;
 use fugue_core::storage::{SegmentMappingId, TransientStorageProvider};
 use fugue_core::types::AttributeMap;
 
@@ -63,7 +63,7 @@ fn build_rejecting_collapse_analyser(
     Ok(Box::new(RejectingCollapseAnalyser))
 }
 
-registry::submit! {
+extension::submit! {
     AnalyserProvider::new(
         "rejecting-collapse-test",
         build_rejecting_collapse_analyser,

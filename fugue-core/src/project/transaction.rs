@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::{iter, mem, thread};
 
@@ -13,11 +14,12 @@ use crate::engine::change::{
     ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind,
     MAX_DETAILED_CHANGE_RECORDS, Revision,
 };
-use crate::il::common::{IlError, IlLevel};
+use crate::il::common::{IlArtefact, IlError, IlFormId, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
-use crate::il::storage::{IlStage, StagedIl};
+use crate::il::registry::{IlFormRegistration, IlRegistry};
+use crate::il::storage::IlStage;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphStage, CodeBlockId, CodeBlockTable, Function,
     FunctionId, FunctionMaterialisation, FunctionProperties, FunctionRef, FunctionTable,
@@ -452,13 +454,42 @@ impl ProjectTransaction<'_> {
         self.materialise_lifted(ir)
     }
 
-    pub fn replace_pcode(&mut self, ir: PCodeIr) -> Result<(), ProjectError> {
+    pub fn replace_il<T: PersistableIl>(&mut self, ir: T) -> Result<(), ProjectError> {
         self.materialise_lifted(ir)
+    }
+
+    pub(crate) fn materialise_erased(
+        &mut self,
+        form: &IlFormId,
+        value: Box<dyn Any + Send + Sync>,
+    ) -> Result<(), ProjectError> {
+        if self.changes.semantic() {
+            return Err(IlError::publish_after_semantic_mutation().into());
+        }
+
+        let admit = IlRegistry::standard()
+            .form(form)
+            .and_then(IlFormRegistration::admit)
+            .ok_or_else(|| IlError::dialect_unavailable(form.as_str()))?;
+
+        Ok(admit(
+            &mut self.il_stage,
+            &self.project.storage,
+            value,
+            self.project.semantic_revision(),
+        )?)
+    }
+
+    pub fn remove_il<T: PersistableIl>(
+        &mut self,
+        function: FunctionId,
+    ) -> Result<bool, ProjectError> {
+        self.remove_lifted(function, &T::FORM)
     }
 
     pub(crate) fn materialise_lifted<T>(&mut self, mut ir: T) -> Result<(), ProjectError>
     where
-        T: StagedIl,
+        T: PersistableIl,
     {
         if self.changes.semantic() {
             return Err(IlError::publish_after_semantic_mutation().into());
@@ -639,58 +670,38 @@ impl ProjectTransaction<'_> {
     pub fn remove_lifted(
         &mut self,
         function: FunctionId,
-        level: IlLevel,
+        form: &IlFormId,
     ) -> Result<bool, ProjectError> {
-        let removed = match level {
-            IlLevel::PCode => {
-                let Some(previous) = self
-                    .il_stage
-                    .remove::<PCodeIr>(&self.project.storage, function)?
-                else {
-                    return Ok(false);
-                };
+        if *form == PCodeIr::FORM {
+            let Some(previous) = self
+                .il_stage
+                .remove::<PCodeIr>(&self.project.storage, function)?
+            else {
+                return Ok(false);
+            };
 
-                let mut coverage = AddressRangeSet::new();
-                for source in previous.source_spans() {
-                    coverage.insert_range(AddressRange::point(source.address()));
-                }
-                self.replace_derived_references(coverage, ReferenceKind::Data, [])?;
-                true
+            let mut coverage = AddressRangeSet::new();
+            for source in previous.source_spans() {
+                coverage.insert_range(AddressRange::point(source.address()));
             }
-            IlLevel::ECode => {
-                let Some(_) = self
-                    .il_stage
-                    .remove::<ECodeIr>(&self.project.storage, function)?
-                else {
-                    return Ok(false);
-                };
+            self.replace_derived_references(coverage, ReferenceKind::Data, [])?;
+            return Ok(true);
+        }
 
-                true
-            }
-            IlLevel::ECodeSsa => {
-                let Some(_) = self
-                    .il_stage
-                    .remove::<ECodeSsaIr>(&self.project.storage, function)?
-                else {
-                    return Ok(false);
-                };
-
-                true
-            }
-        };
-
-        Ok(removed)
+        Ok(self
+            .il_stage
+            .remove_form(&self.project.storage, function, form)?)
     }
 
     pub fn remove_lifted_from(
         &mut self,
         function: FunctionId,
-        first_invalid: IlLevel,
+        first_invalid: &IlFormId,
     ) -> Result<usize, ProjectError> {
         let mut removed = 0usize;
 
-        for level in first_invalid.descendants_from() {
-            if self.remove_lifted(function, level)? {
+        for form in IlRegistry::standard().descendants(first_invalid) {
+            if self.remove_lifted(function, form)? {
                 removed += 1;
             }
         }
@@ -701,7 +712,7 @@ impl ProjectTransaction<'_> {
     pub fn remove_lifted_in_range(
         &mut self,
         range: &AddressRange,
-        first_invalid: IlLevel,
+        first_invalid: &IlFormId,
     ) -> Result<usize, ProjectError> {
         let functions = self
             .project
@@ -952,7 +963,7 @@ impl ProjectTransaction<'_> {
             !replaces_existing,
         );
         if replaces_existing {
-            self.remove_lifted_from(id, IlLevel::PCode)?;
+            self.remove_lifted_from(id, &PCodeIr::FORM)?;
         }
 
         let references = mutation.take_references();
@@ -1131,7 +1142,10 @@ impl ProjectTransaction<'_> {
 
         self.remove_switches_of_function(id)?;
 
-        self.remove_lifted_from(id, IlLevel::PCode)?;
+        self.remove_lifted_from(id, &PCodeIr::FORM)?;
+        self.il_stage
+            .remove_function(&self.project.storage, id)
+            .map_err(ProjectError::from)?;
 
         self.changes.push(ChangeRecord::FunctionRemoved {
             entry,
@@ -1856,7 +1870,7 @@ impl ProjectTransaction<'_> {
                     .functions
                     .staged_by_id(&self.function_stage, id)?
                     .expect("staged function origin requires a function");
-                self.remove_lifted_from(id, IlLevel::PCode)?;
+                self.remove_lifted_from(id, &PCodeIr::FORM)?;
                 self.add_problem(function.entry(), ProblemKind::HinderedByAssertedFact)?;
             } else if self.stage_function_removal(id)?.is_some() {
                 invalidated += 1;
@@ -1912,11 +1926,11 @@ impl ProjectTransaction<'_> {
         let _entered = span.enter();
         let changes = &mut self.changes;
         self.il_stage
-            .for_each_change(|function, level, materialised| {
+            .for_each_change(|function, form, materialised| {
                 changes.push(if materialised {
-                    ChangeRecord::LiftedMaterialised { function, level }
+                    ChangeRecord::LiftedMaterialised { function, form }
                 } else {
-                    ChangeRecord::LiftedRemoved { function, level }
+                    ChangeRecord::LiftedRemoved { function, form }
                 });
             });
         self.invalidate_semantic_problems();

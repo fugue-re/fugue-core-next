@@ -83,6 +83,7 @@ pub const ENTITY_KEY_CODE_BLOCK_SIZE_BUCKETS_ID: EntityKeyId = EntityKeyId::new(
 pub const ENTITY_KEY_SYMBOL_NAME_ID: EntityKeyId = EntityKeyId::new(18);
 pub const ENTITY_KEY_SYMBOL_ADDRESS_ID: EntityKeyId = EntityKeyId::new(19);
 pub const ENTITY_KEY_SYMBOL_LOADER_ID: EntityKeyId = EntityKeyId::new(20);
+pub const ENTITY_KEY_IL_OVERRIDE_ID: EntityKeyId = EntityKeyId::new(21);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -97,9 +98,7 @@ pub const ENTITY_CALL_GRAPH_EDGE_ID: EntityId = EntityId::new(9);
 pub const ENTITY_INDEX_HEADER_ID: EntityId = EntityId::new(11);
 pub const ENTITY_PROJECT_REVISION_ID: EntityId = EntityId::new(12);
 pub const ENTITY_REFERENCE_RECORD_ID: EntityId = EntityId::new(13);
-pub const ENTITY_IL_PCODE_ID: EntityId = EntityId::new(15);
-pub const ENTITY_IL_ECODE_ID: EntityId = EntityId::new(16);
-pub const ENTITY_IL_ECODE_SSA_ID: EntityId = EntityId::new(17);
+pub const ENTITY_IL_OVERRIDE_ID: EntityId = EntityId::new(15);
 pub const ENTITY_SWITCH_ID: EntityId = EntityId::new(18);
 pub const ENTITY_SWITCH_TABLE_ID: EntityId = EntityId::new(19);
 pub const ENTITY_PLATFORM_ID: EntityId = EntityId::new(20);
@@ -345,7 +344,7 @@ impl EntityKey for Id<Problem> {
     }
 }
 
-pub trait Entity:
+pub trait EntityCodec:
     rkyv::Archive<
         Archived: rkyv::Deserialize<
             Self,
@@ -361,6 +360,27 @@ pub trait Entity:
         >,
     > + Clone
 {
+}
+
+impl<T> EntityCodec for T where
+    T: rkyv::Archive<
+            Archived: rkyv::Deserialize<
+                Self,
+                rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+            > + for<'a> rkyv::bytecheck::CheckBytes<
+                rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
+            >,
+        > + for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        > + Clone
+{
+}
+
+pub trait Entity: EntityCodec {
     const ID: EntityId;
 }
 
