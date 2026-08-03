@@ -4,11 +4,13 @@ Fugue lifters for MIPS.
 
 ## Build options
 
-By default, both architectures are built and pre-transpiled lifters are used
-for faster compile times. To generate lifters from source, use the following:
+By default, all four targets (32/64-bit, big/little endian) are built and
+pre-transpiled lifters are used for faster compile times. The 64-bit targets
+additionally bundle the `64-32addr` variant, which truncates the `ram` space to
+32-bit addresses. To generate lifters from source, use the following:
 
 ```sh
-cargo build --features=compiled,mips-be,mips-le --no-default-features
+cargo build --features=compiled,mips-be,mips-le,mips64-be,mips64-le --no-default-features
 ```
 
 ## Development
@@ -29,20 +31,30 @@ release before regenerating lifters, run:
 To regenerate only this crate's bundled outputs manually, use:
 
 ```sh
-cargo run --bin lifter-packager \
-    ./fugue-lifter-mips/data/processors \
-    MIPS:BE:32:default \
-    ./fugue-lifter-mips/data/generated/mips_be.rs.gz
+cargo run --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:BE:32:default \
+    --output ./fugue-lifter-mips/data/generated/mips_be.rs.gz
 
-cargo run --bin lifter-packager \
-    ./fugue-lifter-mips/data/processors \
-    MIPS:LE:32:default \
-    ./fugue-lifter-mips/data/generated/mips_le.rs.gz
+cargo run --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:LE:32:default \
+    --output ./fugue-lifter-mips/data/generated/mips_le.rs.gz
+
+cargo run --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:BE:64:default --variant 64-32addr \
+    --output ./fugue-lifter-mips/data/generated/mips64_be.rs.gz
+
+cargo run --bin lifter-packager -- build-static \
+    --language-db ./fugue-lifter-mips/data/processors \
+    --language MIPS:LE:64:default --variant 64-32addr \
+    --output ./fugue-lifter-mips/data/generated/mips64_le.rs.gz
 ```
 
-Both endians compile from the same `.sinc` sources, so regenerate **both**
+All targets compile from the same `.sinc` sources, so regenerate **all four**
 bundles whenever the source tree (or `data/patches/`) changes — otherwise the
-outdated half will collide with the fresh half at compile time.
+outdated bundles will collide with the fresh ones at compile time.
 
 ## Patches
 

@@ -140,7 +140,10 @@ impl ArchResolver {
                 .entry()
                 .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
             elf::EM_386 => None,
-            elf::EM_MIPS if !context.is_64() => None,
+            elf::EM_MIPS => None,
+            elf::EM_PPC if !context.is_64() => None,
+            elf::EM_PPC64 => (!context.is_64()).then_some("64-32addr"),
+            elf::EM_RISCV => None,
             elf::EM_X86_64 => None,
             _ => return Ok(None),
         };
@@ -149,7 +152,12 @@ impl ArchResolver {
             elf::EM_AARCH64 => LanguageId::new_with("AARCH64", is_be, 64, variant),
             elf::EM_ARM => LanguageId::new_with("ARM", is_be, 32, variant),
             elf::EM_386 => LanguageId::new_with("x86", false, 32, variant),
+            elf::EM_MIPS if context.is_64() => LanguageId::new_with("MIPS", is_be, 64, variant),
             elf::EM_MIPS => LanguageId::new_with("MIPS", is_be, 32, variant),
+            elf::EM_PPC => LanguageId::new_with("PowerPC", is_be, 32, variant),
+            elf::EM_PPC64 => LanguageId::new_with("PowerPC", is_be, 64, variant),
+            elf::EM_RISCV if context.is_64() => LanguageId::new_with("RISCV", false, 64, variant),
+            elf::EM_RISCV => LanguageId::new_with("RISCV", false, 32, variant),
             elf::EM_X86_64 => LanguageId::new_with("x86", false, 64, variant),
             _ => return Ok(None),
         };

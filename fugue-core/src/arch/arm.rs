@@ -25,7 +25,7 @@ static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
 struct ArchData {
-    gprs: Vec<Varnode>,
+    gprs: [Varnode; 16],
     t_mode: ContextBitRange,
 }
 
@@ -37,9 +37,9 @@ impl ArchData {
             "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
             "lr", "pc",
         ]
-        .into_iter()
-        .filter_map(reg)
-        .collect();
+        .map(|name| {
+            reg(name).unwrap_or_else(|| panic!("ARM language must define register `{name}`"))
+        });
 
         let t_mode = language
             .context_variable_by_name("TMode")

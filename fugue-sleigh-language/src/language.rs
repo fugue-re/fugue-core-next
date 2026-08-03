@@ -503,6 +503,34 @@ impl Language {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncatedSpace {
+    space: String,
+    size: u64,
+}
+
+impl TruncatedSpace {
+    pub fn space(&self) -> &str {
+        &self.space
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn address_bits(&self) -> u32 {
+        (self.size.min(8) * 8) as u32
+    }
+
+    pub fn upper_bound(&self) -> u64 {
+        if self.size >= 8 {
+            u64::MAX
+        } else {
+            (1u64 << (self.size * 8)) - 1
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageDef {
     id: String,
     architecture: ArchitectureDef,
@@ -510,6 +538,7 @@ pub struct LanguageDef {
     sla_file: PathBuf,
     processor_spec: ProcessorSpec,
     compiler_specs: Map<String, CompilerSpec>,
+    truncated_spaces: Vec<TruncatedSpace>,
 }
 
 impl LanguageDef {
@@ -535,6 +564,10 @@ impl LanguageDef {
 
     pub fn compiler_specs(&self) -> &Map<String, CompilerSpec> {
         &self.compiler_specs
+    }
+
+    pub fn truncated_spaces(&self) -> &[TruncatedSpace] {
+        &self.truncated_spaces
     }
 
     pub fn from_xml<P: AsRef<Path>>(root: P, input: xml::Node) -> Result<Self, DeserialiseError> {
@@ -636,6 +669,17 @@ impl LanguageDef {
         let slafile_path = input.attribute_string("slafile")?;
         path.push(slafile_path);
 
+        let truncated_spaces = input
+            .children()
+            .filter(|e| e.is_element() && e.tag_name().name() == "truncate_space")
+            .map(|truncate| {
+                Ok(TruncatedSpace {
+                    space: truncate.attribute_string("space")?,
+                    size: truncate.attribute_int("size")?,
+                })
+            })
+            .collect::<Result<Vec<_>, DeserialiseError>>()?;
+
         Ok(Self {
             id: input.attribute_string("id")?,
             architecture,
@@ -643,6 +687,7 @@ impl LanguageDef {
             sla_file: path,
             processor_spec,
             compiler_specs,
+            truncated_spaces,
         })
     }
 
@@ -702,10 +747,15 @@ impl LanguageDB {
         &'a self,
         definition: S,
     ) -> Result<Option<LanguageDefBuilder<'a>>, ArchDefParseError> {
-        let def = definition.as_ref().parse::<ArchitectureDef>()?;
+        let definition = definition.as_ref();
+        let def = definition.parse::<ArchitectureDef>()?;
+        if let Some(language) = self.db.get(&def) {
+            return Ok(Some(LanguageDefBuilder { language }));
+        }
         Ok(self
             .db
-            .get(&def)
+            .values()
+            .find(|language| language.id == definition)
             .map(|language| LanguageDefBuilder { language }))
     }
 
@@ -914,7 +964,38 @@ mod test {
     use tempfile::TempDir;
     use tracing_subscriber::prelude::*;
 
-    use super::{Language, Map};
+    use super::{Language, LanguageDB, Map};
+
+    #[test]
+    fn ldefs_truncate_space_and_id_lookup() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let db = LanguageDB::from_directory_with(
+            workspace.join("fugue-lifter-ppc/data/processors"),
+            true,
+        )?;
+
+        let builder = db
+            .lookup_str("PowerPC:BE:64:64-32addr")?
+            .expect("resolved by ldefs id");
+        let truncated = builder.language().truncated_spaces();
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].space(), "ram");
+        assert_eq!(truncated[0].size(), 4);
+        assert_eq!(truncated[0].address_bits(), 32);
+        assert_eq!(truncated[0].upper_bound(), 0xffff_ffff);
+
+        assert!(db
+            .lookup_str("PowerPC:BE:64:default")?
+            .expect("resolved by attributes")
+            .language()
+            .truncated_spaces()
+            .is_empty());
+
+        Ok(())
+    }
 
     #[test]
     fn test_packed_sla() -> Result<(), Box<dyn std::error::Error>> {
