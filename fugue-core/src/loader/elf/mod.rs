@@ -1449,6 +1449,8 @@ mod test {
     use crate::ir::{Address, RawAddress, SymbolIndex};
     use crate::loader::{ImageBankHandle, ImageSegmentContents, Loadable};
     use crate::types::BytesOrMapping;
+    use rustc_hash::FxHashMap;
+
     use crate::types::attributes::{
         ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap,
     };
@@ -1885,6 +1887,32 @@ mod test {
         attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, "nonexistent");
 
         assert!(Elf::new_with(BytesOrMapping::from_file(path)?, attributes).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_language_variant_override_scoped() -> Result<(), Box<dyn std::error::Error>> {
+        let scoped = FxHashMap::from_iter([
+            (String::from("PowerPC:LE:64"), String::from("A2ALT")),
+            (String::from("ARM:LE:32"), String::from("v8T")),
+        ]);
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, &scoped);
+
+        let matched = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc64le.so")?,
+            attributes.clone(),
+        )?;
+        assert_eq!(matched.architecture().language().variant(), "A2ALT");
+
+        let unmatched = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc32.so")?,
+            attributes,
+        )?;
+        assert_eq!(unmatched.architecture().language().variant(), "default");
+        assert_eq!(unmatched.architecture().language().bits(), 32);
 
         Ok(())
     }
