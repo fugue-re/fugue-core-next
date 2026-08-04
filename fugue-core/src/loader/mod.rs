@@ -3,6 +3,7 @@ use std::path::Path;
 
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
@@ -10,7 +11,7 @@ use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::Address;
 use crate::ir::symbol::SymbolTable;
-use crate::lifter::LanguageError;
+use crate::lifter::{Language, LanguageError};
 use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
@@ -97,6 +98,26 @@ impl LoaderError {
         M: Debug + Display + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::msg(m))
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum LanguageVariantOverride {
+    Any(String),
+    ByLanguage(FxHashMap<String, String>),
+}
+
+impl LanguageVariantOverride {
+    pub fn variant_for(&self, language: &Language) -> Option<&str> {
+        match self {
+            Self::Any(variant) => Some(variant),
+            Self::ByLanguage(variants) => {
+                let endian = if language.is_big_endian() { "BE" } else { "LE" };
+                let key = format!("{}:{endian}:{}", language.processor(), language.bits());
+                variants.get(&key).map(String::as_str)
+            }
+        }
     }
 }
 

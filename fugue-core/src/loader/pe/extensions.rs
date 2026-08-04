@@ -9,7 +9,7 @@ use crate::ir::{Endian, RawAddress};
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{ImageSegmentContents, LoaderError, Pe};
+use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError, Pe};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_LANGUAGE_VARIANT;
@@ -97,19 +97,24 @@ impl<'a> ImageContext<'a> {
             }
         };
 
-        let Some(variant) = self
+        let Some(overrides) = self
             .attributes
-            .get_attr::<String>(ATTRIBUTE_LANGUAGE_VARIANT)
+            .get_attr::<LanguageVariantOverride>(ATTRIBUTE_LANGUAGE_VARIANT)
         else {
             return Ok(arch);
         };
 
         let language = arch.language();
+
+        let Some(variant) = overrides.variant_for(language) else {
+            return Ok(arch);
+        };
+
         let id = LanguageId::new_with(
             language.processor(),
             language.is_big_endian(),
             language.bits(),
-            Some(variant.as_str()),
+            Some(variant),
         );
 
         Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
