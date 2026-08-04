@@ -16,7 +16,7 @@ use crate::storage::{
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
+    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_INPUT_PATH, ATTRIBUTE_PROJECT_PATH,
 };
 
 pub struct Project {
@@ -377,8 +377,8 @@ impl Project {
         let path = path.as_ref();
         let mut attributes = attributes.into();
 
-        if !attributes.contains(ATTRIBUTE_FILE_PATH) {
-            attributes.set_attr(ATTRIBUTE_FILE_PATH, path);
+        if !attributes.contains(ATTRIBUTE_INPUT_PATH) {
+            attributes.set_attr(ATTRIBUTE_INPUT_PATH, path);
         }
 
         if !attributes.contains(ATTRIBUTE_PROJECT_PATH) {
