@@ -8,7 +8,12 @@ pub use fugue_lifter_mips::mips;
 pub use fugue_lifter_mips::mips64;
 #[cfg(any(feature = "ppc-be", feature = "ppc-le"))]
 pub use fugue_lifter_ppc::ppc;
-#[cfg(any(feature = "ppc64-be", feature = "ppc64-le"))]
+#[cfg(any(
+    feature = "ppc64-a2alt-be",
+    feature = "ppc64-a2alt-le",
+    feature = "ppc64-be",
+    feature = "ppc64-le"
+))]
 pub use fugue_lifter_ppc::ppc64;
 #[cfg(feature = "riscv")]
 pub use fugue_lifter_riscv::riscv;

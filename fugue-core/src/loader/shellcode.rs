@@ -375,6 +375,24 @@ sw v0, 0xc(s8)
     }
 
     #[test]
+    fn test_ppc64_a2alt_decodes_isa_3_0() -> anyhow::Result<()> {
+        let darn = [0x7c, 0x61, 0x05, 0xe6];
+
+        assert_eq!(
+            disassemble_snippet("PowerPC:BE:64:A2ALT", 0x1000, &darn)?,
+            "darn r3,0x1\n"
+        );
+
+        let base = Shellcode::new("PowerPC:BE:64:default", 0x1000u64, &darn[..])?;
+        let mut lifter = base.architecture().lifter();
+        let mut output = String::new();
+
+        assert_eq!(lifter.disassemble(0x1000, &darn[..], &mut output), None);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_ppc64le_snippet() -> anyhow::Result<()> {
         let output = disassemble_snippet(
             "PowerPC:LE:64",

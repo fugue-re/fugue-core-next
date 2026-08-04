@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fugue_sleigh_language::construct::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
 use fugue_sleigh_language::pattern::PatternExpression;
@@ -883,15 +883,19 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
         let mut userops = Vec::new();
         let mut userop_to_names = Vec::new();
+        let mut userop_idents = BTreeSet::new();
 
         for (i, op) in self.language.user_ops().iter().enumerate() {
             let id = i as u16;
             let name = op.as_str();
 
-            let upper_snake_name = Ident::new(
-                &heck::AsShoutySnakeCase(name).to_string(),
-                Span::call_site(),
-            );
+            let mut ident = heck::AsShoutySnakeCase(name).to_string();
+            if !userop_idents.insert(ident.clone()) {
+                ident = format!("{ident}_{id}");
+                userop_idents.insert(ident.clone());
+            }
+
+            let upper_snake_name = Ident::new(&ident, Span::call_site());
 
             userops.push(quote! {
                 pub const #upper_snake_name: u16 = #id;
@@ -1192,6 +1196,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         #(#defaults_lit),*
                     ];
 
+                    #[allow(non_camel_case_types)]
                     struct #marker_struct;
                     impl fugue_lifter_runtime::language::LanguageImpl for #marker_struct {
                         const ID: &'static str = #language_id_lit;

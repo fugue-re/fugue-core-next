@@ -370,7 +370,7 @@ impl<'a> LanguageDir<'a> {
         let mut missing = Vec::new();
 
         for file in self.whitelist()? {
-            if !file.ends_with(".slaspec") {
+            if !file.ends_with(".slaspec") && !file.ends_with(".sinc") {
                 continue;
             }
             let path = self.path.join(file);
@@ -456,8 +456,15 @@ impl StagedTarget {
         for file in whitelist {
             staged.copy_file_from(&source, &file)?;
         }
-        for file in staged.missing_sinc_includes()? {
-            staged.copy_file_from(&source, &file)?;
+
+        loop {
+            let missing = staged.missing_sinc_includes()?;
+            if missing.is_empty() {
+                break;
+            }
+            for file in missing {
+                staged.copy_file_from(&source, &file)?;
+            }
         }
 
         Ok(Self {
@@ -686,7 +693,7 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
     }
 
     #[test]
-    fn finds_missing_sinc_includes_in_whitelisted_slaspecs() {
+    fn finds_missing_sinc_includes_through_nested_sincs() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path();
 
@@ -696,14 +703,14 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
         )
         .unwrap();
         fs::write(
-            directory.join("skip.sinc"),
+            directory.join("present.sinc"),
             "@include \"nested-missing.sinc\"",
         )
         .unwrap();
-        fs::write(directory.join("present.sinc"), "").unwrap();
 
-        let missing = LanguageDir::new(directory).missing_sinc_includes().unwrap();
+        let mut missing = LanguageDir::new(directory).missing_sinc_includes().unwrap();
+        missing.sort();
 
-        assert_eq!(missing, vec!["missing.sinc"]);
+        assert_eq!(missing, vec!["missing.sinc", "nested-missing.sinc"]);
     }
 }

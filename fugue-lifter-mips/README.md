@@ -52,18 +52,18 @@ cargo run --bin lifter-packager -- build-static \
     --output ./fugue-lifter-mips/data/generated/mips64_le.rs.gz
 ```
 
-All targets compile from the same `.sinc` sources, so regenerate **all four**
-bundles whenever the source tree (or `data/patches/`) changes — otherwise the
+All targets compile from the same `.sinc` sources, so regenerate all four
+bundles whenever the source tree (or `data/patches/`) changes--otherwise the
 outdated bundles will collide with the fresh ones at compile time.
 
 ## Patches
 
 `data/processors/` is vendored from upstream Ghidra and re-pulled by
 `generate-lifters.sh --sync`, so direct edits there are clobbered on the next
-sync. Local fixes (e.g. SLEIGH-level defects upstream hasn't fixed yet) live as
+sync. Local fixes (e.g., SLEIGH-level defects upstream hasn't fixed yet) live as
 unified-diff overlays in `data/patches/`. The packager auto-detects the
 sibling `patches/` directory next to `data/processors/` and applies every
-`*.patch` / `*.diff` file in filename-sorted order to a scratch copy under
+`*.patch`/`*.diff` file in filename-sorted order to a scratch copy under
 `OUT_DIR` before invoking the SLEIGH compiler.
 
 When authoring or regenerating a patch:

@@ -9,9 +9,19 @@ ppc-be = []
 ppc-le = []
 ppc64-be = []
 ppc64-le = []
+ppc64-a2alt-be = []
+ppc64-a2alt-le = []
 bundled = ["fugue-lifter-packager"]
 compiled = ["fugue-lifter-codegen", "fugue-lifter-codegen/bundled-compiler"]
-default = ["ppc-be", "ppc-le", "ppc64-be", "ppc64-le", "bundled"]
+default = [
+  "bundled",
+  "ppc-be",
+  "ppc-le",
+  "ppc64-a2alt-be",
+  "ppc64-a2alt-le",
+  "ppc64-be",
+  "ppc64-le",
+]
 
 [dependencies]
 fugue-lifter-runtime = { version = "0.3", path = "../fugue-lifter-runtime" }

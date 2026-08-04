@@ -182,3 +182,34 @@ pub fn resolve_language_with(
     let id = s.as_ref().parse::<LanguageId>()?;
     resolve_language_id_with(&id, loader)
 }
+
+#[cfg(test)]
+mod test {
+    use std::path::PathBuf;
+
+    use fugue_bytes::Endian;
+
+    use super::LanguageLoader;
+    use crate::lifter::LanguageId;
+
+    #[test]
+    fn loader_resolves_variants_whose_ldefs_attributes_differ()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let specs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("fugue-lifter-ppc/data/processors");
+        let loader = LanguageLoader::new(specs)?;
+        let db = loader.database();
+
+        for variant in ["default", "64-32addr", "A2ALT", "A2ALT-32addr"] {
+            let id = LanguageId::new_with("PowerPC", true, 64, Some(variant));
+            assert!(
+                db.lookup("PowerPC", Endian::Big, 64, variant).is_some(),
+                "{id} must resolve against the language database",
+            );
+        }
+
+        Ok(())
+    }
+}
