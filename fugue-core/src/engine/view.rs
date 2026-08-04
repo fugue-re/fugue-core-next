@@ -1,20 +1,27 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::iter;
 use std::sync::Arc;
 
+use rangemap::RangeInclusiveMap;
 use smallvec::SmallVec;
 
+use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::engine::change::{ChangeKinds, ChangeSet};
+use crate::engine::scheduler::IlAnalysisInputs;
+use crate::il::common::{IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlSubject};
+use crate::il::registry::{IlGenerationSession, IlRegistry};
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CodeBlockId, CodeBlockRef, CodeBlockTable, FunctionRef,
-    FunctionTable, ProblemKind, ProblemRef, ProblemTable, ReferenceIndex, SwitchRef, SwitchTable,
-    SymbolTable,
+    Address, AddressRange, AddressRangeSet, CodeBlockId, CodeBlockRef, CodeBlockTable, FunctionId,
+    FunctionRef, FunctionTable, IncompleteFunction, ProblemKind, ProblemRef, ProblemTable,
+    ReferenceIndex, SwitchRef, SwitchTable, SymbolTable,
 };
 use crate::lifter::Language;
 use crate::platform::Platform;
-use crate::project::Project;
-use crate::storage::segments::{SegmentStorage, SegmentStorageError};
+use crate::project::{Project, ProjectError};
+use crate::storage::segments::{AddressSpaceId, SegmentStorage, SegmentStorageError};
+use crate::types::common::Revision;
 
 const MAX_READ_RANGES: usize = 1024;
 
@@ -132,7 +139,7 @@ impl ReadSet {
 
 struct AnalyserDependencies {
     addressless: Option<Arc<ReadSet>>,
-    regional: BTreeMap<AddressRange, Arc<ReadSet>>,
+    regional: BTreeMap<AddressSpaceId, RangeInclusiveMap<u64, Arc<ReadSet>>>,
 }
 
 impl AnalyserDependencies {
@@ -185,32 +192,16 @@ impl DependencyIndex {
             return;
         }
 
-        let affected = entries
-            .regional
-            .keys()
-            .filter(|range| regions.intersects_range(range))
-            .copied()
-            .collect::<SmallVec<[_; 8]>>();
+        let reads = (!reads.is_empty()).then(|| Arc::new(reads));
+        for region in regions.ranges() {
+            let regional = entries.regional.entry(region.space()).or_default();
+            let replacement = region.start().offset()..=region.end().offset();
 
-        for range in affected {
-            let reads = entries
-                .regional
-                .remove(&range)
-                .expect("selected dependency range must exist");
-            let mut previous = AddressRangeSet::new();
-            previous.insert_range(range);
-            for surviving in previous.difference(regions).ranges() {
-                entries.regional.insert(surviving, reads.clone());
+            if let Some(reads) = reads.as_ref() {
+                regional.insert(replacement, reads.clone());
+            } else {
+                regional.remove(replacement);
             }
-        }
-
-        if reads.is_empty() {
-            return;
-        }
-
-        let reads = Arc::new(reads);
-        for range in regions.ranges() {
-            entries.regional.insert(range, reads.clone());
         }
     }
 
@@ -233,9 +224,15 @@ impl DependencyIndex {
         };
         let addressless = entries.addressless.as_deref().is_some_and(&affected);
         let mut regions = AddressRangeSet::new();
-        for (range, reads) in &entries.regional {
-            if affected(reads) {
-                regions.insert_range(*range);
+        for (&space, regional) in &entries.regional {
+            for (range, reads) in regional.iter() {
+                if affected(reads) {
+                    regions.insert_range(AddressRange::new(
+                        space,
+                        (*range.start()).into(),
+                        (*range.end()).into(),
+                    ));
+                }
             }
         }
 
@@ -248,21 +245,45 @@ impl DependencyIndex {
 
 pub struct ProjectView<'a> {
     project: &'a Project,
+    registry: &'a IlRegistry,
+    il_inputs: Option<&'a IlAnalysisInputs>,
     reads: RefCell<ReadSet>,
     collapsed: Cell<bool>,
 }
 
 impl<'a> ProjectView<'a> {
     pub fn new(project: &'a Project) -> Self {
+        Self::with_registry(project, IlRegistry::standard())
+    }
+
+    pub(crate) fn with_registry(project: &'a Project, registry: &'a IlRegistry) -> Self {
         Self {
             project,
+            registry,
+            il_inputs: None,
             reads: RefCell::new(ReadSet::new()),
             collapsed: Cell::new(false),
         }
     }
 
+    pub(crate) fn with_il_inputs(
+        project: &'a Project,
+        registry: &'a IlRegistry,
+        il_inputs: &'a IlAnalysisInputs,
+    ) -> Self {
+        let mut view = Self::with_registry(project, registry);
+        view.il_inputs = Some(il_inputs);
+        view
+    }
+
     pub(crate) fn fork(&self) -> Self {
-        Self::new(self.project)
+        Self {
+            project: self.project,
+            registry: self.registry,
+            il_inputs: self.il_inputs,
+            reads: RefCell::new(ReadSet::new()),
+            collapsed: Cell::new(false),
+        }
     }
 
     pub(crate) fn merge_reads(&self, reads: &ReadSet) {
@@ -334,6 +355,21 @@ impl<'a> ProjectView<'a> {
     pub fn function_entries(&self) -> impl Iterator<Item = Address> + '_ {
         self.record_unbounded(ChangeKinds::FUNCTIONS);
         self.project.functions().addresses()
+    }
+
+    pub(crate) fn function_ids_overlapping(&self, regions: &AddressRangeSet) -> Vec<FunctionId> {
+        let mut functions = Vec::new();
+        for range in regions.ranges() {
+            self.record(ChangeKinds::FUNCTIONS, range);
+            functions.extend(
+                self.project
+                    .functions()
+                    .overlaps(self.project.blocks(), &range),
+            );
+        }
+        functions.sort_unstable();
+        functions.dedup();
+        functions
     }
 
     pub fn block(&self, id: CodeBlockId) -> Option<CodeBlockRef<'_>> {
@@ -435,6 +471,91 @@ impl<'a> ProjectView<'a> {
         self.project.references()
     }
 
+    pub fn speculative_il<T: IlArtefact>(
+        &self,
+        function: &IncompleteFunction,
+        input_revision: Revision,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<T>, IlGenerationError> {
+        let mut generation = IlGenerationSession::new(self.registry);
+        self.generate_il(
+            IlSubject::Speculative {
+                function,
+                input_revision,
+            },
+            input_revision,
+            &mut generation,
+            cancellation,
+        )
+    }
+
+    pub fn il<T: IlArtefact>(&self, function: FunctionId) -> Result<Option<Arc<T>>, ProjectError> {
+        self.record_unbounded(ChangeKinds::LIFTED);
+        self.registry
+            .registered_form::<T>()
+            .map_err(ProjectError::from)?;
+
+        if let Some(inputs) = self.il_inputs
+            && let Some(artefact) = inputs.get::<T>(function)?
+        {
+            return Ok(Some(artefact));
+        }
+
+        let artefact = match self
+            .project
+            .lifted_erased(self.registry, function, &T::FORM)
+        {
+            Ok(artefact) => artefact,
+            Err(ProjectError::Il(IlError::StaleArtefact { .. })) => None,
+            Err(error) => return Err(error),
+        };
+        let Some(artefact) = artefact else {
+            return Ok(None);
+        };
+        artefact
+            .downcast::<T>()
+            .map(Arc::from)
+            .map(Some)
+            .map_err(|_| IlError::mismatched_artefact(T::FORM).into())
+    }
+
+    fn generate_il<T: IlArtefact>(
+        &self,
+        subject: IlSubject<'_>,
+        input_revision: Revision,
+        generation: &mut IlGenerationSession,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<T>, IlGenerationError> {
+        let context = IlGenerationContext::new(
+            subject,
+            self.arch(),
+            self.platform(),
+            self.functions(),
+            self.blocks(),
+            self.segments(),
+            input_revision,
+        );
+
+        let generated = generation.generate(
+            self.registry,
+            &T::FORM,
+            iter::empty(),
+            &context,
+            cancellation,
+        )?;
+        let Some(artefact) = generated.into_requested() else {
+            return Ok(None);
+        };
+        let artefact = artefact
+            .downcast::<T>()
+            .map_err(|_| IlError::mismatched_artefact(T::FORM))?;
+        Ok(Some(*artefact))
+    }
+
+    pub(crate) fn il_analysis_function(&self) -> Option<FunctionId> {
+        self.il_inputs.map(IlAnalysisInputs::function)
+    }
+
     pub fn segments(&self) -> &SegmentStorage {
         self.record_unbounded(ChangeKinds::SEGMENTS | ChangeKinds::SPACE_CREATED);
         self.project.segments()
@@ -446,7 +567,7 @@ mod test {
     use super::*;
     use crate::engine::change::ChangeRecord;
     use crate::ir::Address;
-    use crate::storage::segments::{AddressSpaceId, DEFAULT_SPACE_ID};
+    use crate::storage::segments::DEFAULT_SPACE_ID;
 
     fn range(start: u64, end: u64) -> AddressRange {
         AddressRange::new(DEFAULT_SPACE_ID, start.into(), end.into())
@@ -608,6 +729,56 @@ mod test {
         assert!(!stale_new.regions().contains(Address::from(0x1200u64)));
         assert!(stale_new.regions().contains(Address::from(0x1500u64)));
         assert!(!stale_new.regions().contains(Address::from(0x1800u64)));
+    }
+
+    #[test]
+    fn replacing_a_production_preserves_other_address_spaces() {
+        let mut index = DependencyIndex::with_analysers(1);
+        let other_space = AddressSpaceId::from(7u8);
+        let mut produced = regions(0x1000, 0x1fff);
+        produced.insert_range(AddressRange::new(
+            other_space,
+            0x1000u64.into(),
+            0x1fffu64.into(),
+        ));
+        let mut old_reads = ReadSet::new();
+        old_reads.record_unbounded(ChangeKinds::SYMBOLS);
+        index.record(0, &produced, old_reads);
+
+        let mut new_reads = ReadSet::new();
+        new_reads.record_unbounded(ChangeKinds::SWITCHES);
+        index.record(0, &regions(0x1000, 0x1fff), new_reads);
+
+        let stale_old = index.invalidated(0, ChangeKinds::SYMBOLS, None);
+        assert!(!stale_old.regions().contains(Address::from(0x1800u64)));
+        assert!(
+            stale_old
+                .regions()
+                .contains(Address::new(other_space, 0x1800u64))
+        );
+
+        let stale_new = index.invalidated(0, ChangeKinds::SWITCHES, None);
+        assert!(stale_new.regions().contains(Address::from(0x1800u64)));
+        assert!(
+            !stale_new
+                .regions()
+                .contains(Address::new(other_space, 0x1800u64))
+        );
+    }
+
+    #[test]
+    fn an_empty_replacement_removes_only_superseded_dependencies() {
+        let mut index = DependencyIndex::with_analysers(1);
+        let mut reads = ReadSet::new();
+        reads.record_unbounded(ChangeKinds::SYMBOLS);
+        index.record(0, &regions(0x1000, 0x1fff), reads);
+
+        index.record(0, &regions(0x1400, 0x17ff), ReadSet::new());
+
+        let invalidated = index.invalidated(0, ChangeKinds::SYMBOLS, None);
+        assert!(invalidated.regions().contains(Address::from(0x1200u64)));
+        assert!(!invalidated.regions().contains(Address::from(0x1500u64)));
+        assert!(invalidated.regions().contains(Address::from(0x1800u64)));
     }
 
     #[test]

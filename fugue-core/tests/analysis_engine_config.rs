@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
+use std::thread;
 
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::ir::{Address, CodeBlockId, FlowTarget, FunctionId, FunctionProperties, Insn};
 use fugue_core::lifter::ContextSet;
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
+use fugue_core::queries::QueryError;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RecoveredBlock {
@@ -37,7 +39,7 @@ fn recover(
     let engine = AnalysisEngine::with_config(project, config)?;
     engine.analyse()?;
 
-    let reader = engine.query_reader()?;
+    let mut reader = engine.query_reader()?;
     let project = reader.project()?;
     let functions = project
         .functions()
@@ -116,7 +118,7 @@ fn zero_cache_budgets_disable_retention_without_disabling_queries() -> Result<()
     let engine = AnalysisEngine::with_config(project, config)?;
     engine.analyse()?;
 
-    let reader = engine.query_reader()?;
+    let mut reader = engine.query_reader()?;
     let function = reader
         .function_id_at(entry)?
         .ok_or("fixture entry function missing")?;
@@ -138,6 +140,48 @@ fn zero_cache_budgets_disable_retention_without_disabling_queries() -> Result<()
     let second_pcode = reader.pcode(function)?.ok_or("PCode missing")?;
     assert_eq!(first_pcode, second_pcode);
     assert!(!Arc::ptr_eq(&first_pcode, &second_pcode));
+
+    Ok(())
+}
+
+#[test]
+fn cloned_readers_decode_independently_in_parallel() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let config = AnalysisEngineConfig::default().with_insn_cache_bytes(0);
+    let engine = AnalysisEngine::with_config(project, config)?;
+    engine.analyse()?;
+
+    let reader = engine.query_reader()?;
+    let blocks = reader
+        .project()?
+        .blocks()
+        .iter()
+        .take(256)
+        .map(|block| block.id())
+        .collect::<Vec<_>>();
+
+    let decoded = thread::scope(|scope| {
+        let tasks = (0..4)
+            .map(|_| {
+                let blocks = &blocks;
+                let mut reader = reader.clone();
+                scope.spawn(move || {
+                    blocks
+                        .iter()
+                        .map(|&block| Ok(reader.insns(block)?.map_or(0, |insns| insns.len())))
+                        .collect::<Result<Vec<_>, QueryError>>()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        tasks
+            .into_iter()
+            .map(|task| task.join().expect("query task must complete"))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+
+    assert!(decoded.windows(2).all(|pair| pair[0] == pair[1]));
 
     Ok(())
 }

@@ -1,19 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::control::CancellationToken;
-use crate::arch::Arch;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlError, IlExprId, IlIndexRange, IlMetadata, IlValueId,
+    IlArtefact, IlBlock, IlBlockId, IlConverter, IlError, IlExprId, IlGenerationContext,
+    IlGenerationError, IlIndexRange, IlMetadata, IlValueId,
 };
-use crate::il::common::{IlConversion, IlGenerationContext, IlGenerationError};
+use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOptimiser};
-use crate::il::ecode::{ECodeIr, PCodeToECode};
-use crate::il::pcode::{FlagId, PCodeCanonicaliser, PCodeError, RegisterId};
-use crate::ir::IncompleteFunction;
-use crate::platform::Platform;
-use crate::storage::SegmentStorage;
+use crate::il::pcode::{FlagId, RegisterId};
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::common::Revision;
 
 mod blocks;
 mod build;
@@ -30,19 +25,20 @@ enum ExpressionStep {
 pub struct ECodeToSsa {
     expression_operands: Vec<IlValueId>,
     expression_steps: Vec<ExpressionStep>,
-    pcode_to_ecode: PCodeToECode,
     statement_operands: Vec<IlValueId>,
 }
 
-impl IlConversion for ECodeSsaIr {
-    type Source = ECodeIr;
+impl IlConverter for ECodeToSsa {
+    type Input = ECodeIr;
+    type Output = ECodeSsaIr;
 
     fn convert(
-        source: &Self::Source,
+        &mut self,
+        source: &Self::Input,
         _context: &IlGenerationContext<'_>,
         cancellation: &CancellationToken,
-    ) -> Result<Self, IlGenerationError> {
-        Ok(ECodeToSsa::default().transform_optimised(source, cancellation)?)
+    ) -> Result<Self::Output, IlGenerationError> {
+        Ok(self.transform_optimised(source, cancellation)?)
     }
 }
 
@@ -86,29 +82,6 @@ impl ECodeToSsa {
         }
 
         Ok(ir)
-    }
-
-    pub(crate) fn build_incomplete_function(
-        &mut self,
-        arch: &Arch,
-        platform: &Platform,
-        function: &IncompleteFunction,
-        segments: &SegmentStorage,
-        input_revision: Revision,
-        cancellation: &CancellationToken,
-    ) -> Result<ECodeSsaIr, PCodeError> {
-        let mut canonicaliser = PCodeCanonicaliser::default();
-        let lifted = canonicaliser.build_incomplete_function(
-            arch.language(),
-            function,
-            segments,
-            input_revision,
-            cancellation,
-        )?;
-        let ecode = self
-            .pcode_to_ecode
-            .transform(&lifted, arch, platform, cancellation)?;
-        Ok(self.transform_optimised(&ecode, cancellation)?)
     }
 }
 

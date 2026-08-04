@@ -1144,7 +1144,7 @@ fn load_persistent_project(project_path: &Path) -> Result<(Project, Address), Bo
         attributes![ATTRIBUTE_PROJECT_PATH => project_path],
     )?;
     let entry = project
-        .entry()
+        .entry_point()
         .ok_or_else(|| std::io::Error::other("fixture entry missing"))?;
     Ok((project, entry))
 }

@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -6,10 +8,11 @@ use crate::analysis::control::Cancelled;
 use crate::arch::Arch;
 use crate::engine::AnalysisCoverage;
 use crate::engine::change::{ChangeSource, Revision};
-use crate::il::common::{IlError, PersistableIl};
+use crate::il::common::{IlError, IlFormId, IlGenerationError, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::{PCodeError, PCodeIr};
+use crate::il::registry::{IlFormRegistration, IlRegistry};
 use crate::il::storage::{IlPersist, IlStorageError};
 use crate::ir::block::{ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES};
 use crate::ir::function::{ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES};
@@ -114,6 +117,8 @@ pub enum ProjectError {
     #[error(transparent)]
     Function(#[from] FunctionTableError),
     #[error(transparent)]
+    Generation(IlGenerationError),
+    #[error(transparent)]
     Il(#[from] IlError),
     #[error(transparent)]
     IncompleteFunction(#[from] IncompleteFunctionError),
@@ -144,6 +149,15 @@ impl From<IlStorageError> for ProjectError {
         match error {
             IlStorageError::Il(error) => Self::Il(error),
             IlStorageError::Storage(error) => Self::EntityStorage(error),
+        }
+    }
+}
+
+impl From<IlGenerationError> for ProjectError {
+    fn from(error: IlGenerationError) -> Self {
+        match error {
+            IlGenerationError::Il(error) => Self::Il(error),
+            error => Self::Generation(error),
         }
     }
 }
@@ -552,6 +566,20 @@ impl Project {
             .map_err(ProjectError::from)
     }
 
+    pub(crate) fn lifted_erased(
+        &self,
+        registry: &IlRegistry,
+        function: FunctionId,
+        form: &IlFormId,
+    ) -> Result<Option<Box<dyn Any + Send + Sync>>, ProjectError> {
+        let Some(load) = registry.form(form).and_then(IlFormRegistration::load) else {
+            return Ok(None);
+        };
+
+        load(&self.storage, function, self.revisions.semantic_revision())
+            .map_err(ProjectError::from)
+    }
+
     pub(crate) fn semantic_revision(&self) -> Revision {
         self.revisions.semantic_revision()
     }
@@ -561,7 +589,15 @@ impl Project {
     }
 
     pub fn transaction(&mut self, source: impl Into<ChangeSource>) -> ProjectTransaction<'_> {
-        ProjectTransaction::new(self, source.into())
+        ProjectTransaction::new(self, source.into(), IlRegistry::standard().clone())
+    }
+
+    pub(crate) fn transaction_with_registry(
+        &mut self,
+        source: impl Into<ChangeSource>,
+        registry: Arc<IlRegistry>,
+    ) -> ProjectTransaction<'_> {
+        ProjectTransaction::new(self, source.into(), registry)
     }
 
     pub fn symbols(&self) -> &SymbolTable {

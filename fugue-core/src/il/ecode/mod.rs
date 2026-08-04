@@ -7,6 +7,7 @@ mod lift;
 mod operation;
 mod sink;
 mod transform;
+#[cfg(debug_assertions)]
 mod verify;
 
 pub(crate) use builder::ECodeBuilder;

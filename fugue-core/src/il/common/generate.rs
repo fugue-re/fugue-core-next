@@ -5,13 +5,14 @@ use thiserror::Error as ThisError;
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{IlArtefact, IlError};
-use crate::ir::{CodeBlockTable, FunctionId, FunctionTable};
+use crate::ir::{CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction};
 use crate::lifter::Language;
 use crate::platform::Platform;
 use crate::storage::SegmentStorage;
 use crate::types::common::Revision;
 
 pub struct IlGenerationContext<'a> {
+    subject: IlSubject<'a>,
     arch: &'a Arch,
     platform: &'a Platform,
     functions: &'a FunctionTable,
@@ -22,6 +23,7 @@ pub struct IlGenerationContext<'a> {
 
 impl<'a> IlGenerationContext<'a> {
     pub fn new(
+        subject: IlSubject<'a>,
         arch: &'a Arch,
         platform: &'a Platform,
         functions: &'a FunctionTable,
@@ -30,6 +32,7 @@ impl<'a> IlGenerationContext<'a> {
         input_revision: Revision,
     ) -> Self {
         Self {
+            subject,
             arch,
             platform,
             functions,
@@ -66,6 +69,18 @@ impl<'a> IlGenerationContext<'a> {
     pub fn input_revision(&self) -> Revision {
         self.input_revision
     }
+
+    pub fn subject(&self) -> IlSubject<'a> {
+        self.subject
+    }
+
+    pub fn function(&self) -> FunctionId {
+        self.subject.function()
+    }
+
+    pub fn is_speculative(&self) -> bool {
+        self.subject.is_speculative()
+    }
 }
 
 #[derive(Debug, ThisError)]
@@ -82,20 +97,46 @@ impl IlGenerationError {
     }
 }
 
-pub trait IlRootProducer: IlArtefact {
-    fn produce(
-        function: FunctionId,
-        context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
-    ) -> Result<Self, IlGenerationError>;
+#[derive(Debug, Clone, Copy)]
+pub enum IlSubject<'a> {
+    Admitted(FunctionId),
+    Speculative {
+        function: &'a IncompleteFunction,
+        input_revision: Revision,
+    },
 }
 
-pub trait IlConversion: IlArtefact {
-    type Source: IlArtefact;
+impl IlSubject<'_> {
+    pub fn function(&self) -> FunctionId {
+        match self {
+            Self::Admitted(function) => *function,
+            Self::Speculative { .. } => FunctionId::INVALID,
+        }
+    }
 
-    fn convert(
-        source: &Self::Source,
+    pub fn is_speculative(&self) -> bool {
+        matches!(self, Self::Speculative { .. })
+    }
+}
+
+pub trait IlProducer: Default + Send + 'static {
+    type Output: IlArtefact;
+
+    fn produce(
+        &mut self,
         context: &IlGenerationContext<'_>,
         cancellation: &CancellationToken,
-    ) -> Result<Self, IlGenerationError>;
+    ) -> Result<Self::Output, IlGenerationError>;
+}
+
+pub trait IlConverter: Default + Send + 'static {
+    type Input: IlArtefact;
+    type Output: IlArtefact;
+
+    fn convert(
+        &mut self,
+        source: &Self::Input,
+        context: &IlGenerationContext<'_>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self::Output, IlGenerationError>;
 }

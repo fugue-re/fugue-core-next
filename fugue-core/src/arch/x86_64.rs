@@ -7,11 +7,10 @@ use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, Flag};
 use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnError, InsnProperties, RawAddress};
-use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
-    LiftingContext, Varnode,
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader,
+    LanguageSource, Lifter, LiftingContext, Varnode,
 };
 
 fn classify_bytes(bytes: &[u8]) -> BytesProperties {

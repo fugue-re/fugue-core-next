@@ -4,10 +4,10 @@ use smallvec::SmallVec;
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlExprId, IlGraph, IlIndexRange,
-    IlMetadata, IlParentSpan, IlSourceSpan,
+    IlBlock, IlBlockId, IlBlockProperties, IlConverter, IlEdgeKinds, IlError, IlExprId,
+    IlGenerationContext, IlGenerationError, IlGraph, IlIndexRange, IlMetadata, IlParentSpan,
+    IlSourceSpan,
 };
-use crate::il::common::{IlConversion, IlGenerationContext, IlGenerationError};
 use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeLiftScratch, ECodeLifter};
 use crate::il::pcode::{PCodeIr, PCodeOp, PCodeOpcode};
 use crate::ir::Address;
@@ -55,20 +55,26 @@ pub struct PCodeToECode {
     source_spans_by_address: FxHashMap<Address, SmallVec<[IlSourceSpan; 1]>>,
 }
 
-impl IlConversion for ECodeIr {
-    type Source = PCodeIr;
+impl IlConverter for PCodeToECode {
+    type Input = PCodeIr;
+    type Output = ECodeIr;
 
     fn convert(
-        source: &Self::Source,
+        &mut self,
+        source: &Self::Input,
         context: &IlGenerationContext<'_>,
         cancellation: &CancellationToken,
-    ) -> Result<Self, IlGenerationError> {
-        Ok(PCodeToECode::default().transform(
-            source,
-            context.arch(),
-            context.platform(),
-            cancellation,
-        )?)
+    ) -> Result<Self::Output, IlGenerationError> {
+        let ecode = self.transform(source, context.arch(), context.platform(), cancellation)?;
+
+        #[cfg(debug_assertions)]
+        if !context.is_speculative() {
+            ecode
+                .verify()
+                .expect("transformed ecode fails verification");
+        }
+
+        Ok(ecode)
     }
 }
 
@@ -422,8 +428,7 @@ mod test {
         PCodeOpcode, RegisterId,
     };
     use crate::ir::{Address, FunctionId};
-    use crate::lifter::Varnode;
-    use crate::lifter::{Language, resolve_language};
+    use crate::lifter::{Language, Varnode, resolve_language};
     use crate::storage::segments::space::AddressSpaceId;
 
     fn language() -> &'static Language {

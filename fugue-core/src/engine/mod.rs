@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, OnceLock};
@@ -13,14 +12,14 @@ use self::change::{ChangeFilter, ChangeKinds, ChangeProvenance, ChangeSet, Revis
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::extension::{self, Registration};
-use crate::il::common::IlFormId;
+use crate::il::common::{IlArtefact, IlFormId};
 use crate::il::registry::IlRegistry;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
     ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{Project, ProjectError};
-use crate::queries::{QueryEngine, QueryReader};
+use crate::queries::{QueryEngine, QueryReader, QueryReaderFactory};
 use crate::storage::segments::mapping::{SegmentMappingBuilder, SegmentMappingId};
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -33,6 +32,7 @@ pub(crate) mod metrics;
 pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 
 mod scheduler;
+pub use scheduler::IlAnalyserAdapter;
 
 mod subscription;
 pub(crate) use subscription::Subscriber;
@@ -43,10 +43,11 @@ pub use view::{ProjectView, ReadSet};
 
 mod update;
 pub use update::{
-    BytePatch, FunctionPatch, FunctionPropertiesUpdate, FunctionRemoval, MappingCreationResult,
-    MappingMetadataUpdate, MappingPlacement, MappingPlacementMode, MappingPriorityUpdate,
-    MappingRemap, MappingRemoval, MappingResize, ProblemPatch, ProjectUpdate, ReferenceRemoval,
-    SpaceCreationResult, SwitchPatch, SymbolPatch, SymbolRemoval,
+    BytePatch, DerivedReferenceReplacement, FunctionPatch, FunctionPropertiesUpdate,
+    FunctionRemoval, MappingCreationResult, MappingMetadataUpdate, MappingPlacement,
+    MappingPlacementMode, MappingPriorityUpdate, MappingRemap, MappingRemoval, MappingResize,
+    ProblemPatch, ProjectUpdate, ReferenceRemoval, SpaceCreationResult, SwitchPatch, SymbolPatch,
+    SymbolRemoval,
 };
 
 mod worker;
@@ -62,14 +63,6 @@ const MAX_COMPLETION_ROUNDS: usize = 256;
 const RETRACTED_BY_BYTE_CHANGE: &[AnalysisPhase] =
     &[AnalysisPhase::Decode, AnalysisPhase::Partition];
 const WORK_BATCH_ITEMS: usize = 1024;
-
-thread_local! {
-    static ON_ANALYSIS_THREAD: Cell<bool> = const { Cell::new(false) };
-}
-
-pub(crate) fn on_analysis_thread() -> bool {
-    ON_ANALYSIS_THREAD.with(Cell::get)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkCause {
@@ -305,6 +298,10 @@ impl AnalysisEngineConfig {
         self.set_registry(registry);
         self
     }
+
+    pub(super) fn registry_handle(&self) -> Arc<IlRegistry> {
+        self.registry.clone()
+    }
 }
 
 #[derive(Clone)]
@@ -429,16 +426,33 @@ type AnalyserBuildFn = fn(&Project) -> Result<Box<dyn Analyser>, AnalysisError>;
 
 pub struct AnalyserProvider {
     build: AnalyserBuildFn,
+    il_input: Option<IlFormId>,
     name: &'static str,
 }
 
 impl AnalyserProvider {
     pub const fn new(name: &'static str, build: AnalyserBuildFn) -> Self {
-        Self { build, name }
+        Self {
+            build,
+            il_input: None,
+            name,
+        }
     }
 
     pub fn build(&self, project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
         (self.build)(project)
+    }
+
+    pub const fn for_il<T: IlArtefact>(name: &'static str, build: AnalyserBuildFn) -> Self {
+        Self {
+            build,
+            il_input: Some(T::FORM),
+            name,
+        }
+    }
+
+    pub(crate) fn il_input(&self) -> Option<IlFormId> {
+        self.il_input.clone()
     }
 }
 
@@ -491,7 +505,7 @@ pub struct AnalysisEngine {
     handle: Option<JoinHandle<()>>,
     metrics: EngineMetrics,
     poison: Arc<OnceLock<String>>,
-    query_reader: QueryReader,
+    query_readers: QueryReaderFactory,
     tx: Sender<Intake>,
     worker_done: Receiver<()>,
 }
@@ -512,12 +526,14 @@ impl AnalysisEngine {
         let poison = Arc::new(OnceLock::new());
         let progress = Progress::default();
         let project = Arc::new(RwLock::new(project));
+        let registry = config.registry_handle();
         let queries = QueryEngine::new(
             project.clone(),
+            registry.clone(),
             config.insn_cache_bytes(),
             config.lifted_cache_bytes(),
         );
-        let query_reader = queries.reader().with_intake(tx.clone());
+        let query_readers = queries.reader_factory(tx.clone());
         let worker_cancellation = cancellation.clone();
         let worker_poison = poison.clone();
         let worker_state_poison = poison.clone();
@@ -527,7 +543,6 @@ impl AnalysisEngine {
         let handle = Builder::new()
             .name("fugue-analysis".to_owned())
             .spawn(move || {
-                ON_ANALYSIS_THREAD.with(|flag| flag.set(true));
                 let worker = Worker::new(
                     config,
                     project,
@@ -552,7 +567,7 @@ impl AnalysisEngine {
             handle: Some(handle),
             metrics,
             poison,
-            query_reader,
+            query_readers,
             tx,
             worker_done,
         })
@@ -781,7 +796,7 @@ impl AnalysisEngine {
 
     pub fn query_reader(&self) -> Result<QueryReader, EngineError> {
         self.poison_check()?;
-        Ok(self.query_reader.clone())
+        Ok(self.query_readers.reader())
     }
 
     pub fn cancel(&self) -> Result<(), EngineError> {
@@ -821,7 +836,7 @@ impl AnalysisEngine {
         }
         if !matches!(self.worker_done.try_recv(), Err(TryRecvError::Empty))
             || self.tx.is_disconnected()
-            || !self.query_reader.is_active()
+            || !self.query_readers.is_active()
             || self.handle.as_ref().is_some_and(JoinHandle::is_finished)
         {
             return Err(EngineError::Stopped);

@@ -472,8 +472,7 @@ mod test {
     use crate::il::common::IlSourceSpan;
     use crate::il::ecode::verify::VerifyError;
     use crate::il::ecode::{ECodeExprOpcode, ECodeStmtOpcode};
-    use crate::ir::Address;
-    use crate::ir::FunctionId;
+    use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
 
     #[test]

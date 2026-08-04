@@ -24,8 +24,7 @@ use fugue_core::engine::{
     MappingMetadataUpdate, Priority, ProjectUpdate, ProjectView, Subscription,
 };
 use fugue_core::extension::{self, Registration};
-use fugue_core::il::common::IlArtefact;
-use fugue_core::il::common::IlError;
+use fugue_core::il::common::{IlArtefact, IlError};
 use fugue_core::il::ecode::ECodeIr;
 use fugue_core::il::ecode::ssa::ECodeSsaIr;
 use fugue_core::il::pcode::PCodeIr;
@@ -53,7 +52,6 @@ use fugue_core::storage::{
     SegmentMappingProvenance, SegmentStorage, StorageContainer, StoragePersistence,
     StorageProvider, StorageProviderError, TransientStorageProvider,
 };
-
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
     DefaultPersistentSegmentStorage, PersistentStorageProvider, SqliteEntityStorage,
@@ -1752,12 +1750,12 @@ fn test_engine_applies_update_batch_in_one_revision() -> Result<(), Box<dyn Erro
         + 0x10_0000u64;
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
+    let revision = engine.query_reader()?.revision()?;
 
     let changes = engine.apply_updates(vec![
         ProjectUpdate::add_function(one_block_function(entry, 1)),
         ProjectUpdate::add_function(one_block_function(entry + 0x10u64, 1)),
     ])?;
-    engine.analyse()?;
 
     assert_eq!(
         changes
@@ -1767,7 +1765,8 @@ fn test_engine_applies_update_batch_in_one_revision() -> Result<(), Box<dyn Erro
             .count(),
         2
     );
-    assert_eq!(engine.query_reader()?.revision()?, changes.revision());
+    assert_eq!(changes.revision().value(), revision.value() + 1);
+    engine.analyse()?;
 
     Ok(())
 }
@@ -1835,15 +1834,38 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
+    let ensured = engine.ensure_lifted(function, PCodeIr::FORM)?;
+    assert!(
+        ensured
+            .records()
+            .contains(&ChangeRecord::LiftedMaterialised {
+                function,
+                form: PCodeIr::FORM,
+            })
+    );
+    assert!(!ensured.records().iter().any(|record| matches!(
+        record,
+        ChangeRecord::LiftedMaterialised { form, .. }
+            if form == &ECodeIr::FORM || form == &ECodeSsaIr::FORM
+    )));
+
     let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
 
-    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
+    for form in [ECodeIr::FORM, ECodeSsaIr::FORM] {
         assert!(
             ensured
                 .records()
                 .contains(&ChangeRecord::LiftedMaterialised { function, form })
         );
     }
+    assert!(
+        !ensured
+            .records()
+            .contains(&ChangeRecord::LiftedMaterialised {
+                function,
+                form: PCodeIr::FORM,
+            })
+    );
 
     let reader = engine.query_reader()?;
     assert!(reader.ecode(function)?.is_some());
@@ -2627,7 +2649,7 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
 
-    let reader = engine.query_reader()?;
+    let mut reader = engine.query_reader()?;
     let function = reader
         .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after analysis"))?;
@@ -2665,7 +2687,7 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     assert!(reopened.ecode_ssa(function)?.is_none());
 
     let engine = AnalysisEngine::new(reopened)?;
-    let reader = engine.query_reader()?;
+    let mut reader = engine.query_reader()?;
     assert_eq!(reader.insns(block)?.as_deref(), Some(insns.as_ref()));
     assert_eq!(reader.pcode(function)?.as_deref(), Some(pcode.as_ref()));
     assert_eq!(

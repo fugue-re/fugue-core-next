@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -10,11 +10,12 @@ use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
 use thiserror::Error;
 
 use crate::engine::change::{ChangeKinds, ChangeRecord, ChangeSet, Revision};
-use crate::engine::{EngineError, Intake, on_analysis_thread};
+use crate::engine::{EngineError, Intake};
 use crate::il::common::{IlError, IlFormId};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
+use crate::il::registry::IlRegistry;
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{
     Address, AddressRangeSet, CodeBlockId, FunctionId, InsnList, Problem, ProblemKey, ProblemKind,
@@ -35,43 +36,25 @@ mod cached;
 mod index;
 mod read;
 
+pub(crate) use cache::CacheLookup;
 use cache::QueryCache;
 pub use cache::QueryableIl;
-pub(crate) use cache::{CacheLookup, QueryCachedIl};
 pub use cached::{Cached, Dependency};
 use index::ChangeIndex;
 
 const MAX_QUERY_PAGE_LIMIT: usize = 4096;
 
-thread_local! {
-    static INSN_QUERY_CONTEXT: RefCell<Option<InsnQueryContext>> = const { RefCell::new(None) };
-}
-
-struct InsnQueryContext {
-    project: *const Project,
+struct InsnScratch {
     mapping_cache: SegmentMappingCache,
     resolver: InsnResolver,
 }
 
-impl InsnQueryContext {
+impl InsnScratch {
     fn new(project: &Project) -> Self {
         Self {
-            project,
             mapping_cache: SegmentMappingCache::new(),
             resolver: InsnResolver::new(project.arch()),
         }
-    }
-
-    fn for_project<'a>(slot: &'a mut Option<Self>, project: &Project) -> &'a mut Self {
-        let identity = project as *const Project;
-        if slot
-            .as_ref()
-            .is_none_or(|context| context.project != identity)
-        {
-            *slot = Some(Self::new(project));
-        }
-        slot.as_mut()
-            .expect("instruction query context must be initialised")
     }
 }
 
@@ -110,16 +93,12 @@ pub enum QueryError {
     Engine(Box<EngineError>),
     #[error(transparent)]
     InsnExtent(#[from] InsnExtentError),
-    #[error("analysis worker returned the wrong IL type for {0}")]
-    InvalidGeneratedIlType(IlFormId),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
     Stopped,
     #[error("cached computation observed undeclared change kinds: {0:?}")]
     UndeclaredDependency(ChangeKinds),
-    #[error("cannot wait on the analysis worker from the analysis worker")]
-    WouldDeadlock,
 }
 
 impl From<EngineError> for QueryError {
@@ -391,7 +370,6 @@ impl Ord for MappingRow {
     }
 }
 
-#[derive(Clone)]
 pub struct QueryReader {
     active: Arc<AtomicBool>,
     gate: Arc<RwLock<()>>,
@@ -399,6 +377,23 @@ pub struct QueryReader {
     cache: Arc<QueryCache>,
     changes: Arc<RwLock<ChangeIndex>>,
     intake: Option<Sender<Intake>>,
+    insn_scratch: Option<InsnScratch>,
+    registry: Arc<IlRegistry>,
+}
+
+impl Clone for QueryReader {
+    fn clone(&self) -> Self {
+        Self {
+            active: self.active.clone(),
+            gate: self.gate.clone(),
+            project: self.project.clone(),
+            cache: self.cache.clone(),
+            changes: self.changes.clone(),
+            intake: self.intake.clone(),
+            insn_scratch: None,
+            registry: self.registry.clone(),
+        }
+    }
 }
 
 impl QueryReader {
@@ -408,6 +403,7 @@ impl QueryReader {
         project: Arc<RwLock<Project>>,
         cache: Arc<QueryCache>,
         changes: Arc<RwLock<ChangeIndex>>,
+        registry: Arc<IlRegistry>,
     ) -> Self {
         Self {
             active,
@@ -416,16 +412,14 @@ impl QueryReader {
             cache,
             changes,
             intake: None,
+            insn_scratch: None,
+            registry,
         }
     }
 
     pub(crate) fn with_intake(mut self, intake: Sender<Intake>) -> Self {
         self.intake = Some(intake);
         self
-    }
-
-    pub(crate) fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
     }
 
     pub fn revision(&self) -> Result<Revision, QueryError> {
@@ -471,7 +465,7 @@ impl QueryReader {
         Ok(targets)
     }
 
-    pub fn insns(&self, block: CodeBlockId) -> Result<Option<Arc<InsnList>>, QueryError> {
+    pub fn insns(&mut self, block: CodeBlockId) -> Result<Option<Arc<InsnList>>, QueryError> {
         let _query_guard = self.enter_query()?;
         match self.cache.insns(block) {
             CacheLookup::Hit(cached) => return Ok(Some(cached)),
@@ -481,10 +475,10 @@ impl QueryReader {
 
         let project = self.project.read();
         let read = ProjectRead::new(&project);
-        let insns = INSN_QUERY_CONTEXT.with_borrow_mut(|slot| {
-            let context = InsnQueryContext::for_project(slot, &project);
-            read.insns(block, &mut context.mapping_cache, &mut context.resolver)
-        })?;
+        let scratch = self
+            .insn_scratch
+            .get_or_insert_with(|| InsnScratch::new(&project));
+        let insns = read.insns(block, &mut scratch.mapping_cache, &mut scratch.resolver)?;
         let Some(insns) = insns else {
             self.cache.insert_missing_insns(block);
             return Ok(None);
@@ -498,6 +492,9 @@ impl QueryReader {
     where
         T: QueryableIl,
     {
+        self.registry
+            .registered_form::<T>()
+            .map_err(ProjectError::from)?;
         if let Some(cached) = self.cached_il::<T>(function)? {
             return Ok(Some(cached));
         }
@@ -536,10 +533,6 @@ impl QueryReader {
             return Ok(None);
         };
 
-        if on_analysis_thread() {
-            return Err(QueryError::WouldDeadlock);
-        }
-
         let (reply_tx, reply_rx) = flume::bounded(1);
         intake
             .send(Intake::GenerateLifted {
@@ -552,7 +545,7 @@ impl QueryReader {
         match reply_rx.recv().map_err(|_| QueryError::Stopped)? {
             Ok(Some(generated)) => Arc::downcast::<T>(generated)
                 .map(Some)
-                .map_err(|_| QueryError::InvalidGeneratedIlType(T::FORM)),
+                .map_err(|_| ProjectError::from(IlError::mismatched_artefact(T::FORM)).into()),
             Ok(None) => Ok(None),
             Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
                 Ok(None)
@@ -762,6 +755,34 @@ impl QueryReader {
     }
 }
 
+pub(crate) struct QueryReaderFactory {
+    active: Arc<AtomicBool>,
+    gate: Arc<RwLock<()>>,
+    project: Arc<RwLock<Project>>,
+    cache: Arc<QueryCache>,
+    changes: Arc<RwLock<ChangeIndex>>,
+    intake: Sender<Intake>,
+    registry: Arc<IlRegistry>,
+}
+
+impl QueryReaderFactory {
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn reader(&self) -> QueryReader {
+        QueryReader::new(
+            self.active.clone(),
+            self.gate.clone(),
+            self.project.clone(),
+            self.cache.clone(),
+            self.changes.clone(),
+            self.registry.clone(),
+        )
+        .with_intake(self.intake.clone())
+    }
+}
+
 pub struct ProjectHandle {
     project: ArcRwLockReadGuard<RawRwLock, Project>,
     _gate: ArcRwLockReadGuard<RawRwLock, ()>,
@@ -781,11 +802,13 @@ pub(crate) struct QueryEngine {
     project: Arc<RwLock<Project>>,
     cache: Arc<QueryCache>,
     changes: Arc<RwLock<ChangeIndex>>,
+    registry: Arc<IlRegistry>,
 }
 
 impl QueryEngine {
     pub(crate) fn new(
         project: Arc<RwLock<Project>>,
+        registry: Arc<IlRegistry>,
         insn_cache_bytes: usize,
         lifted_cache_bytes: usize,
     ) -> Self {
@@ -796,6 +819,7 @@ impl QueryEngine {
             project,
             cache: Arc::new(QueryCache::new(insn_cache_bytes, lifted_cache_bytes)),
             changes: Arc::new(RwLock::new(ChangeIndex::new(revision))),
+            registry,
         }
     }
 
@@ -809,7 +833,7 @@ impl QueryEngine {
         T: QueryableIl,
     {
         if lookup == LiftedLookup::Current {
-            match cache.lifted::<T>(function) {
+            match cache.lifted::<T>(function)? {
                 CacheLookup::Hit(cached) => return Ok(Some(cached)),
                 CacheLookup::Absent => return Ok(None),
                 CacheLookup::Miss => {}
@@ -827,33 +851,67 @@ impl QueryEngine {
         Ok(ir)
     }
 
-    pub(crate) fn current_lifted<T>(
+    pub(crate) fn current_lifted_erased(
         &self,
         project: &Project,
         function: FunctionId,
+        form: &IlFormId,
         lookup: LiftedLookup,
-    ) -> Result<Option<Arc<T>>, ProjectError>
-    where
-        T: QueryableIl,
-    {
-        Self::resolve_lifted(&self.cache, project, function, lookup)
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, ProjectError> {
+        if lookup == LiftedLookup::Current {
+            match self.cache.lifted_erased(function, form) {
+                CacheLookup::Hit(cached) => return Ok(Some(cached)),
+                CacheLookup::Absent => return Ok(None),
+                CacheLookup::Miss => {}
+            }
+        }
+
+        let ir = match project.lifted_erased(&self.registry, function, form) {
+            Ok(ir) => ir.map(Arc::<dyn Any + Send + Sync>::from),
+            Err(ProjectError::Il(IlError::StaleArtefact { .. })) => None,
+            Err(error) => return Err(error),
+        };
+        if lookup == LiftedLookup::Current {
+            let registration = self
+                .registry
+                .form(form)
+                .ok_or_else(|| IlError::unregistered_form(form.clone()))?;
+            let size = match ir.as_ref() {
+                Some(ir) => (registration.size())(ir.as_ref())?,
+                None => 0,
+            };
+            self.cache
+                .insert_lifted_erased(function, form, ir.clone(), size);
+        }
+        Ok(ir)
     }
 
-    pub(crate) fn insert_lifted<T>(&self, function: FunctionId, ir: Arc<T>)
-    where
-        T: QueryableIl,
-    {
-        self.cache.insert_lifted(function, Some(ir));
+    pub(crate) fn insert_lifted_erased(
+        &self,
+        function: FunctionId,
+        form: &IlFormId,
+        ir: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), ProjectError> {
+        let registration = self
+            .registry
+            .form(form)
+            .ok_or_else(|| IlError::unregistered_form(form.clone()))?;
+        let size = (registration.size())(ir.as_ref())?;
+        self.cache
+            .insert_lifted_erased(function, form, Some(ir), size);
+        Ok(())
     }
 
-    pub(crate) fn reader(&self) -> QueryReader {
-        QueryReader::new(
-            self.active.clone(),
-            self.gate.clone(),
-            self.project.clone(),
-            self.cache.clone(),
-            self.changes.clone(),
-        )
+    pub(crate) fn reader_factory(&self, intake: Sender<Intake>) -> QueryReaderFactory {
+        QueryReaderFactory {
+            active: self.active.clone(),
+            gate: self.gate.clone(),
+            project: self.project.clone(),
+            cache: self.cache.clone(),
+            changes: self.changes.clone(),
+            intake,
+            registry: self.registry.clone(),
+        }
     }
 
     pub(crate) fn write_guard(&self) -> QueryWriteGuard {
@@ -911,10 +969,9 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::engine::change::FunctionChangeKind;
-    use crate::il::common::PersistableIl;
     use crate::il::common::{
         IlArtefact, IlBlockId, IlDominance, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan,
-        IlValueId,
+        IlValueId, PersistableIl,
     };
     use crate::il::ecode::ECodeBuilder;
     use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses};
@@ -950,12 +1007,24 @@ mod test {
         fn new() -> Result<Self, Box<dyn Error>> {
             let loader = Loader::from_file("tests/ls.elf")?;
             let project = Arc::new(RwLock::new(Project::new_transient(&loader)?));
-            let queries = QueryEngine::new(project.clone(), 32 * 1024 * 1024, 64 * 1024 * 1024);
+            let queries = QueryEngine::new(
+                project.clone(),
+                IlRegistry::standard().clone(),
+                32 * 1024 * 1024,
+                64 * 1024 * 1024,
+            );
             Ok(Self { project, queries })
         }
 
         fn reader(&self) -> QueryReader {
-            self.queries.reader()
+            QueryReader::new(
+                self.queries.active.clone(),
+                self.queries.gate.clone(),
+                self.queries.project.clone(),
+                self.queries.cache.clone(),
+                self.queries.changes.clone(),
+                self.queries.registry.clone(),
+            )
         }
 
         fn next_revision(&self) -> Revision {
@@ -1100,6 +1169,17 @@ mod test {
             .expect("pcode should be visible to query reader");
 
         assert_eq!(read.source_spans(), ir.source_spans());
+        Ok(())
+    }
+
+    #[test]
+    fn test_reader_without_intake_declines_generation() -> Result<(), Box<dyn Error>> {
+        let mut fixture = Fixture::new()?;
+        let entry = Address::from(0x1_0000_0000u64);
+        let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
+
+        assert!(fixture.reader().pcode(function)?.is_none());
+
         Ok(())
     }
 

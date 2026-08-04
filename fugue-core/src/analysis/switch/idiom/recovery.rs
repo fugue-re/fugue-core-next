@@ -6,8 +6,7 @@ use crate::ir::{
     Address, AddressTable, IncompleteCodeBlockId, IncompleteFunction, SwitchCase, SwitchCaseLabel,
     SwitchModel, SwitchProperties,
 };
-use crate::lifter::InsnResolver;
-use crate::lifter::{LiftingContext, RawPCodeOp};
+use crate::lifter::{InsnResolver, LiftingContext, RawPCodeOp};
 
 pub(crate) struct SwitchIdiomRecovery {
     cases: Vec<SwitchCase>,

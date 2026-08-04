@@ -1,9 +1,11 @@
+mod analysis;
 mod builder;
 mod error;
 mod format;
 mod operation;
 mod register;
 mod transform;
+#[cfg(debug_assertions)]
 mod verify;
 
 pub(crate) use builder::PCodeBuilder;

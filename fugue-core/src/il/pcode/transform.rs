@@ -3,10 +3,10 @@ use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
-    IlMetadata, IlOpId, IlSourceSpan,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGenerationContext,
+    IlGenerationError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlProducer, IlSourceSpan,
+    IlSubject,
 };
-use crate::il::common::{IlGenerationContext, IlGenerationError, IlRootProducer};
 use crate::il::pcode::{
     AddressAnnotation, AddressAnnotationValue, PCodeAddressContext, PCodeBuilder, PCodeError,
     PCodeIr, PCodeOpcode,
@@ -55,14 +55,16 @@ impl PCodeCanonicaliser {
     }
 }
 
-impl IlRootProducer for PCodeIr {
+impl IlProducer for PCodeCanonicaliser {
+    type Output = PCodeIr;
+
     fn produce(
-        function: FunctionId,
+        &mut self,
         context: &IlGenerationContext<'_>,
         cancellation: &CancellationToken,
-    ) -> Result<Self, IlGenerationError> {
-        Ok(
-            PCodeCanonicaliser::default().build_function(PCodeFunctionInput::new(
+    ) -> Result<Self::Output, IlGenerationError> {
+        let pcode = match context.subject() {
+            IlSubject::Admitted(function) => self.build_function(PCodeFunctionInput::new(
                 context.language(),
                 context.functions(),
                 context.blocks(),
@@ -71,7 +73,27 @@ impl IlRootProducer for PCodeIr {
                 context.input_revision(),
                 cancellation,
             ))?,
-        )
+            IlSubject::Speculative {
+                function,
+                input_revision,
+            } => self.build_incomplete_function(
+                context.language(),
+                function,
+                context.segments(),
+                input_revision,
+                cancellation,
+            )?,
+        };
+
+        #[cfg(debug_assertions)]
+        if !context.is_speculative()
+            && let Err(error) = pcode.verify()
+        {
+            let function = context.function();
+            panic!("canonicalised pcode for {function:?} fails verification: {error}");
+        }
+
+        Ok(pcode)
     }
 }
 

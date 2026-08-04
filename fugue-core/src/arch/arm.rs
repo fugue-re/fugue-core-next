@@ -15,11 +15,10 @@ use crate::ir::{
     Symbol,
 };
 use crate::lazy_symbol;
-use crate::lifter::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
-    LanguageLoader, Lifter, LiftingContext, Varnode,
+    LanguageLoader, LanguageSource, Lifter, LiftingContext, Varnode,
 };
 
 static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");

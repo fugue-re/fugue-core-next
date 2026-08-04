@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap as Map;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 use std::{array, mem};
 
 use itertools::Itertools;
@@ -390,7 +389,7 @@ pub struct ContextDatabase {
     variables: Map<String, ContextBitRange>,
     database: PartMap<u64, FreeArray>,
     #[rkyv(with = rkyv::with::Skip)]
-    database_cache: Rc<RefCell<ContextCache>>,
+    database_cache: RefCell<ContextCache>,
     trackbase: PartMap<u64, TrackedSet>,
     address_limit: u64,
 }
@@ -401,7 +400,7 @@ impl ContextDatabase {
             size: 0,
             variables: Map::new(),
             database: PartMap::new(Default::default()),
-            database_cache: Rc::new(RefCell::new(ContextCache::new(address_alignment))),
+            database_cache: RefCell::new(ContextCache::new(address_alignment)),
             trackbase: PartMap::new(Default::default()),
             address_limit,
         }

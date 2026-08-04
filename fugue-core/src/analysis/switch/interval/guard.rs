@@ -7,8 +7,7 @@ use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
-use crate::lifter::ContextSet;
-use crate::lifter::InsnResolver;
+use crate::lifter::{ContextSet, InsnResolver};
 
 pub(super) struct SwitchGuard {
     interval: StridedInterval,

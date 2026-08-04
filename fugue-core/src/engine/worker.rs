@@ -11,30 +11,26 @@ use super::change::{
     ChangeKinds, ChangeProvenance, ChangeRecord, ChangeSet, ChangeSource,
     MAX_DETAILED_CHANGE_RECORDS, Revision,
 };
-use super::coverage;
 use super::scheduler::{
-    AnalysisWorkQueue, Degradation, DegradationReport, ScheduledAnalyser, WORK_SLICE_BYTES,
-    WorkBatch,
+    AnalysisWorkQueue, Degradation, DegradationReport, IlAnalysisInputs, ScheduledAnalyser,
+    WORK_SLICE_BYTES, WorkBatch,
 };
 use super::subscription::Subscriber;
 use super::update::{MappingCreationResult, ProjectUpdate, SpaceCreationResult};
 use super::view::DependencyIndex;
 use super::{
     AnalyserProvider, AnalysisContext, AnalysisEngineConfig, AnalysisPhase, EngineError,
-    MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, WORK_BATCH_ITEMS, WorkCause,
+    EngineMetrics, MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, ReadSet,
+    WORK_BATCH_ITEMS, WorkCause, coverage,
 };
-use super::{EngineMetrics, ReadSet};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Cancelled, Progress};
 use crate::extension;
-use crate::il::common::{IlArtefact, IlError, IlFormId};
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeToSsa};
-use crate::il::ecode::{ECodeIr, PCodeToECode};
-use crate::il::pcode::{PCodeCanonicaliser, PCodeFunctionInput, PCodeIr};
-use crate::il::registry::IlRegistry;
-use crate::ir::{AddressRangeSet, FunctionId, ProblemKind, ProblemScope, Reference, ReferenceKind};
+use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
+use crate::il::registry::{GeneratedArtefact, IlGenerationSession, IlRegistry};
+use crate::ir::{AddressRangeSet, FunctionId, ProblemKind, ProblemScope};
 use crate::project::{Project, ProjectError, ProjectTransaction};
-use crate::queries::{LiftedLookup, QueryCachedIl, QueryEngine};
+use crate::queries::{LiftedLookup, QueryEngine};
 use crate::storage::segments::mapping::SegmentMappingBuilder;
 
 pub(crate) enum Intake {
@@ -129,14 +125,14 @@ pub(super) struct Worker {
     progress: Progress,
     project: Arc<RwLock<Project>>,
     queries: QueryEngine,
+    generation: IlGenerationSession,
+    il_inputs: Option<IlAnalysisInputs>,
+    registry: Arc<IlRegistry>,
     queue: AnalysisWorkQueue,
     dependencies: DependencyIndex,
     recent_changes: RecentChanges,
     metrics: EngineMetrics,
     subscribers: Vec<Subscriber>,
-    canonicaliser: PCodeCanonicaliser,
-    pcode_to_ecode: PCodeToECode,
-    ecode_to_ssa: ECodeToSsa,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,61 +232,20 @@ impl PendingDiagnostics {
 
 #[derive(Default)]
 struct PreparedLiftedArtefacts {
-    artefacts: Vec<(IlFormId, Box<dyn Any + Send + Sync>)>,
-    pcode_references: Option<PreparedDerivedReferences>,
-}
-
-struct PreparedDerivedReferences {
-    coverage: AddressRangeSet,
-    references: Vec<Reference>,
+    artefacts: Vec<GeneratedArtefact>,
 }
 
 impl PreparedLiftedArtefacts {
-    fn push<T: IlArtefact>(&mut self, artefact: T) {
-        self.artefacts.push((T::FORM, Box::new(artefact)));
+    fn new(artefacts: Vec<GeneratedArtefact>) -> Self {
+        Self { artefacts }
     }
 
     fn admit(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
-        for (form, artefact) in self.artefacts {
-            transaction.materialise_erased(&form, artefact)?;
-        }
-        if let Some(references) = self.pcode_references {
-            transaction.replace_derived_references(
-                references.coverage,
-                ReferenceKind::Data,
-                references.references,
-            )?;
+        for artefact in self.artefacts {
+            let form = artefact.form().clone();
+            transaction.materialise_erased(&form, artefact.into_value())?;
         }
         Ok(())
-    }
-
-    fn admit_references(
-        &mut self,
-        transaction: &mut ProjectTransaction<'_>,
-    ) -> Result<(), ProjectError> {
-        if let Some(references) = self.pcode_references.take() {
-            transaction.replace_derived_references(
-                references.coverage,
-                ReferenceKind::Data,
-                references.references,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn get<T: IlArtefact>(&self) -> Option<&T> {
-        self.artefacts
-            .iter()
-            .find_map(|(_, artefact)| artefact.downcast_ref::<T>())
-    }
-
-    fn take<T: IlArtefact>(&mut self) -> Option<T> {
-        let index = self
-            .artefacts
-            .iter()
-            .position(|(_, artefact)| artefact.is::<T>())?;
-        let (_, artefact) = self.artefacts.remove(index);
-        artefact.downcast::<T>().ok().map(|artefact| *artefact)
     }
 }
 
@@ -304,12 +259,13 @@ impl Worker {
         progress: Progress,
         metrics: EngineMetrics,
     ) -> Result<Self, EngineError> {
+        let registry = config.registry_handle();
         let mut analysers = Vec::new();
         let project_read = project.read();
         for provider in extension::iter::<AnalyserProvider>() {
             let analyser = provider.build(&project_read)?;
             if analyser.can_analyse(&project_read) {
-                analysers.push(ScheduledAnalyser::new(analyser));
+                analysers.push(ScheduledAnalyser::new(analyser, provider.il_input()));
             }
         }
         drop(project_read);
@@ -326,11 +282,13 @@ impl Worker {
             .configure(
                 analysers
                     .iter()
+                    .filter(|state| state.il_input().is_none())
                     .map(|state| (state.analyser().name(), state.phase())),
             )
             .into_reconfiguration();
 
         let revision = project.read().revision();
+        let generation = IlGenerationSession::new(&registry);
         let mut worker = Self {
             analysers,
             config,
@@ -339,15 +297,15 @@ impl Worker {
             poison,
             progress,
             queries,
+            generation,
+            il_inputs: None,
+            registry,
             project,
             queue: AnalysisWorkQueue::with_analysers(analyser_count),
             dependencies: DependencyIndex::with_analysers(analyser_count),
             recent_changes: RecentChanges::new(revision),
             metrics,
             subscribers: Vec::new(),
-            canonicaliser: PCodeCanonicaliser::default(),
-            pcode_to_ecode: PCodeToECode::default(),
-            ecode_to_ssa: ECodeToSsa::default(),
         };
 
         worker.apply_coverage_reconfiguration(&coverage);
@@ -726,6 +684,47 @@ impl Worker {
         self.route_direct(kind, regions, revision, &provenance);
     }
 
+    fn schedule_il_analysers(&mut self, function: FunctionId) {
+        let inputs = self
+            .il_inputs
+            .as_ref()
+            .expect("generated IL scheduling requires prepared inputs");
+        let analysers = self
+            .analysers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, analyser)| {
+                analyser
+                    .il_input()
+                    .is_some_and(|form| inputs.contains(form))
+                    .then_some(index)
+            })
+            .collect::<SmallVec<[_; 4]>>();
+        if analysers.is_empty() {
+            return;
+        }
+
+        let mut regions = AddressRangeSet::new();
+        let project = self.project.read();
+        let function_body = project
+            .functions()
+            .get_by_id(function)
+            .expect("generated IL must belong to a current function");
+        project
+            .blocks()
+            .coverage_into(function_body.blocks().map(|(_, block)| block), &mut regions);
+        if regions.is_empty() {
+            regions.insert(function_body.entry());
+        }
+        let revision = project.revision();
+        drop(project);
+
+        let provenance = ChangeProvenance::of(ChangeSource::engine("generated IL"));
+        for index in analysers {
+            self.schedule_analyser(index, &regions, ChangeKinds::empty(), revision, &provenance);
+        }
+    }
+
     fn schedule_uncovered_hints(&mut self) {
         let mut regions = AddressRangeSet::new();
         let project = self.project.read();
@@ -802,6 +801,9 @@ impl Worker {
 
     fn mark_covered(&mut self, index: usize, phase: AnalysisPhase, regions: &AddressRangeSet) {
         let state = &mut self.analysers[index];
+        if state.il_input().is_some() {
+            return;
+        }
         for range in regions.ranges() {
             state.claim(range);
         }
@@ -909,7 +911,7 @@ impl Worker {
         let query_write = self.queries.write_guard();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
-        let mut transaction = project.transaction(source);
+        let mut transaction = project.transaction_with_registry(source, self.registry.clone());
         transaction.set_worker_limit(self.config.worker_limit());
 
         let deferred_problems = self
@@ -1046,7 +1048,10 @@ impl Worker {
         let production = {
             let project = self.project.read();
             let base = project.revision();
-            let view = ProjectView::new(&project);
+            let view = match self.il_inputs.as_ref() {
+                Some(inputs) => ProjectView::with_il_inputs(&project, &self.registry, inputs),
+                None => ProjectView::with_registry(&project, &self.registry),
+            };
             let mut updates = Vec::new();
             let analysis =
                 self.analysers[index]
@@ -1153,7 +1158,10 @@ impl Worker {
             let production = {
                 let project = self.project.read();
                 let base = project.revision();
-                let view = ProjectView::new(&project);
+                let view = match self.il_inputs.as_ref() {
+                    Some(inputs) => ProjectView::with_il_inputs(&project, &self.registry, inputs),
+                    None => ProjectView::with_registry(&project, &self.registry),
+                };
                 let mut updates = Vec::new();
                 let analysis =
                     self.analysers[index]
@@ -1243,48 +1251,40 @@ impl Worker {
         function: FunctionId,
         form: &IlFormId,
     ) -> Result<Option<Arc<dyn Any + Send + Sync>>, EngineError> {
-        if *form == PCodeIr::FORM {
-            self.generate::<PCodeIr>(function)
-        } else if *form == ECodeIr::FORM {
-            self.generate::<ECodeIr>(function)
-        } else if *form == ECodeSsaIr::FORM {
-            self.generate::<ECodeSsaIr>(function)
-        } else {
-            Ok(None)
+        let prepared = self.prepare_generated_lifted(function, form)?;
+        if prepared.artefacts.is_empty() {
+            let project = self.project.read();
+            return self
+                .queries
+                .current_lifted_erased(&project, function, form, LiftedLookup::Current)
+                .map_err(EngineError::from);
         }
-    }
 
-    fn generate<T>(
-        &mut self,
-        function: FunctionId,
-    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, EngineError>
-    where
-        T: QueryCachedIl,
-    {
-        let mut prepared = self.prepare_generated_lifted(function, &T::FORM)?;
-        let generated = prepared.take::<T>().map(Arc::new);
-        if let Some(ir) = generated.as_ref() {
-            self.queries.insert_lifted(function, ir.clone());
+        let inputs = IlAnalysisInputs::new(function, prepared.artefacts);
+        let generated = inputs.requested(form);
+        self.il_inputs = Some(inputs);
+        self.schedule_il_analysers(function);
+        let admission = self.drain();
+        let inputs = self
+            .il_inputs
+            .take()
+            .expect("generated IL analysis owns its prepared inputs");
+        admission?;
+
+        for artefact in inputs.into_artefacts() {
+            let form = artefact.form().clone();
+            self.queries
+                .insert_lifted_erased(function, &form, artefact.into_artefact())?;
         }
-        self.publish_prepared(prepared);
+
         match generated {
-            Some(ir) => Ok(Some(ir)),
-            None => Ok(self
-                .current_query_lifted::<T>(function)?
-                .map(|ir| ir as Arc<dyn Any + Send + Sync>)),
-        }
-    }
-
-    fn publish_prepared(&self, mut prepared: PreparedLiftedArtefacts) {
-        self.publish_prepared_form::<PCodeIr>(&mut prepared);
-        self.publish_prepared_form::<ECodeIr>(&mut prepared);
-        self.publish_prepared_form::<ECodeSsaIr>(&mut prepared);
-    }
-
-    fn publish_prepared_form<T: QueryCachedIl>(&self, prepared: &mut PreparedLiftedArtefacts) {
-        if let Some(artefact) = prepared.take::<T>() {
-            let function = artefact.metadata().function();
-            self.queries.insert_lifted(function, Arc::new(artefact));
+            Some(generated) => Ok(Some(generated)),
+            None => {
+                let project = self.project.read();
+                self.queries
+                    .current_lifted_erased(&project, function, form, LiftedLookup::Current)
+                    .map_err(EngineError::from)
+            }
         }
     }
 
@@ -1294,20 +1294,7 @@ impl Worker {
         form: &IlFormId,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         let cancellation = self.cancellation.child();
-        let mut prepared =
-            self.prepare_lifted(function, form, LiftedLookup::Current, &cancellation)?;
-        if prepared.pcode_references.is_none() {
-            return Ok(prepared);
-        }
-
-        let result = self.with_transaction(
-            ChangeSource::engine("generated PCode references"),
-            |_, transaction| prepared.admit_references(transaction),
-        )?;
-        match result {
-            TransactionResult::Committed { .. } => Ok(prepared),
-            TransactionResult::Rejected(error) => Err(error.into()),
-        }
+        self.prepare_lifted(function, form, LiftedLookup::Current, &cancellation)
     }
 
     fn prepare_lifted(
@@ -1318,106 +1305,38 @@ impl Worker {
         cancellation: &CancellationToken,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         cancellation.check().map_err(ProjectError::from)?;
+        let registry = self.registry.clone();
+        let path = registry.canonical_path(form);
         if function.is_invalid() {
-            return Err(
-                ProjectError::from(IlError::missing_artefact(function, PCodeIr::FORM)).into(),
-            );
+            let root = path.first().unwrap_or(form).clone();
+            return Err(ProjectError::from(IlError::missing_artefact(function, root)).into());
         }
 
         let project = self.project.read();
-        let view = ProjectView::new(&project);
-        let revision = project.semantic_revision();
-        let existing_pcode = self
-            .queries
-            .current_lifted::<PCodeIr>(&project, function, lookup)?;
-        let existing_ecode = self
-            .queries
-            .current_lifted::<ECodeIr>(&project, function, lookup)?;
-        let existing_ecode_ssa = self
-            .queries
-            .current_lifted::<ECodeSsaIr>(&project, function, lookup)?;
-        let path = IlRegistry::standard().canonical_path(form);
-        let on_path = |form: &IlFormId| path.contains(form);
-        let build_ecode = on_path(&ECodeIr::FORM) && existing_ecode.is_none();
-        let build_pcode = (on_path(&PCodeIr::FORM) && (*form == PCodeIr::FORM || build_ecode))
-            && existing_pcode.is_none();
-        let build_ecode_ssa = *form == ECodeSsaIr::FORM && existing_ecode_ssa.is_none();
-        let mut prepared = PreparedLiftedArtefacts::default();
+        let view = ProjectView::with_registry(&project, &registry);
+        let context = IlGenerationContext::new(
+            IlSubject::Admitted(function),
+            view.arch(),
+            view.platform(),
+            view.functions(),
+            view.blocks(),
+            view.segments(),
+            project.semantic_revision(),
+        );
 
-        if build_pcode {
-            let pcode = self
-                .canonicaliser
-                .build_function(PCodeFunctionInput::new(
-                    view.language(),
-                    view.functions(),
-                    view.blocks(),
-                    view.segments(),
-                    function,
-                    revision,
-                    cancellation,
-                ))
-                .map_err(ProjectError::from)?;
-            if cfg!(debug_assertions)
-                && let Err(error) = pcode.verify()
-            {
-                panic!("canonicalised pcode for {function:?} fails verification: {error}");
-            }
+        let existing = path
+            .iter()
+            .map(|step| {
+                self.queries
+                    .current_lifted_erased(&project, function, step, lookup)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let generated = self
+            .generation
+            .generate(&registry, form, existing, &context, cancellation)
+            .map_err(ProjectError::from)?;
 
-            let mut coverage = AddressRangeSet::new();
-            pcode.reference_coverage_into(&mut coverage);
-            if let Some(function) = view.functions().get_by_id(function) {
-                view.blocks()
-                    .coverage_into(function.blocks().map(|(_, block)| block), &mut coverage);
-            }
-            prepared.pcode_references = Some(PreparedDerivedReferences {
-                coverage,
-                references: pcode.data_references().collect(),
-            });
-            prepared.push(pcode);
-        }
-
-        if build_ecode {
-            let source = prepared
-                .get::<PCodeIr>()
-                .or(existing_pcode.as_deref())
-                .ok_or_else(|| IlError::missing_artefact(function, PCodeIr::FORM))
-                .map_err(ProjectError::from)?;
-            let ecode = self
-                .pcode_to_ecode
-                .transform(source, view.arch(), view.platform(), cancellation)
-                .map_err(ProjectError::from)?;
-            if cfg!(debug_assertions) {
-                ecode
-                    .verify()
-                    .expect("transformed ecode fails verification");
-            }
-            prepared.push(ecode);
-        }
-
-        if build_ecode_ssa {
-            let source = prepared
-                .get::<ECodeIr>()
-                .or(existing_ecode.as_deref())
-                .ok_or_else(|| IlError::missing_artefact(function, ECodeIr::FORM))
-                .map_err(ProjectError::from)?;
-            prepared.push(
-                self.ecode_to_ssa
-                    .transform_optimised(source, cancellation)
-                    .map_err(ProjectError::from)?,
-            );
-        }
-
-        Ok(prepared)
-    }
-
-    fn current_query_lifted<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, EngineError>
-    where
-        T: QueryCachedIl,
-    {
-        let project = self.project.read();
-        self.queries
-            .current_lifted(&project, function, LiftedLookup::Current)
-            .map_err(EngineError::from)
+        Ok(PreparedLiftedArtefacts::new(generated.into_artefacts()))
     }
 
     fn create_mapping(

@@ -11,8 +11,7 @@ use crate::ir::{
     Address, AddressTable, AddressWithContext, SwitchCase, SwitchCaseLabel, SwitchModel,
     SwitchProperties,
 };
-use crate::lifter::ContextSet;
-use crate::lifter::InsnResolver;
+use crate::lifter::{ContextSet, InsnResolver};
 
 mod evaluator;
 mod guard;

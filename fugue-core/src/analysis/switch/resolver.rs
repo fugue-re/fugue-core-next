@@ -3,8 +3,7 @@ use fugue_bytes::Endian;
 
 use crate::arch::Arch;
 use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchProperties};
-use crate::lifter::InsnResolver;
-use crate::lifter::{ContextSet, LiftingContext};
+use crate::lifter::{ContextSet, InsnResolver, LiftingContext};
 use crate::storage::segments::provider::SegmentView;
 use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentStorage};
 

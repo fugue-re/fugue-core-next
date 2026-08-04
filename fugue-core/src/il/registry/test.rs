@@ -2,7 +2,9 @@ use std::mem::size_of;
 
 use super::*;
 use crate::analysis::control::CancellationToken;
-use crate::il::common::IlMetadata;
+use crate::il::common::{IlGenerationContext, IlGenerationError, IlMetadata};
+use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::pcode::PCodeIr;
 use crate::types::EstimateSize;
 
 macro_rules! external_form {
@@ -31,7 +33,27 @@ macro_rules! external_form {
 external_form!(AcmeTaint, "acme.taint.values");
 external_form!(AcmeSummary, "acme.taint.summary");
 external_form!(AcmeReport, "acme.taint.report");
+external_form!(AcmeDerived, "acme.taint.derived");
 external_form!(ImpostorPCode, "fugue.pcode.cfg");
+
+#[derive(Default)]
+struct AcmeDerivedConverter;
+
+impl IlConverter for AcmeDerivedConverter {
+    type Input = ECodeSsaIr;
+    type Output = AcmeDerived;
+
+    fn convert(
+        &mut self,
+        source: &Self::Input,
+        _context: &IlGenerationContext<'_>,
+        _cancellation: &CancellationToken,
+    ) -> Result<Self::Output, IlGenerationError> {
+        Ok(AcmeDerived {
+            metadata: *source.metadata(),
+        })
+    }
+}
 
 fn acme() -> DialectId {
     DialectId::from_static("acme.taint")
@@ -314,41 +336,9 @@ fn aggregated_errors_render_every_problem() {
 
 #[test]
 fn a_registered_conversion_dispatches_without_a_core_match_arm() {
-    struct AcmeDerived {
-        metadata: IlMetadata,
-    }
-
-    impl EstimateSize for AcmeDerived {
-        fn estimate_size(&self) -> usize {
-            size_of::<Self>()
-        }
-    }
-
-    impl IlArtefact for AcmeDerived {
-        const FORM_IDENTIFIER: &str = "acme.taint.derived";
-
-        fn metadata(&self) -> &IlMetadata {
-            &self.metadata
-        }
-    }
-
-    impl IlConversion for AcmeDerived {
-        type Source = ECodeSsaIr;
-
-        fn convert(
-            source: &Self::Source,
-            _context: &IlGenerationContext<'_>,
-            _cancellation: &CancellationToken,
-        ) -> Result<Self, IlGenerationError> {
-            Ok(Self {
-                metadata: *source.metadata(),
-            })
-        }
-    }
-
     let registry = IlRegistryBuilder::built_in()
         .with_dialect(acme())
-        .with_converted_form::<AcmeDerived>()
+        .with_converted_form::<AcmeDerivedConverter>()
         .build()
         .expect("a typed conversion registers");
 
@@ -357,7 +347,10 @@ fn a_registered_conversion_dispatches_without_a_core_match_arm() {
         .expect("the conversion is registered");
 
     assert_eq!(registration.source(), Some(&ECodeSsaIr::FORM));
-    assert!(matches!(registration.recipe(), Some(IlRecipe::Convert(_))));
+    assert!(matches!(
+        registration.recipe(),
+        Some(IlRecipe::Converter(_))
+    ));
     assert_eq!(
         registry
             .canonical_path(&AcmeDerived::FORM)
@@ -375,6 +368,6 @@ fn a_registered_conversion_dispatches_without_a_core_match_arm() {
         registry
             .form(&PCodeIr::FORM)
             .and_then(IlFormRegistration::recipe),
-        Some(IlRecipe::Root(_))
+        Some(IlRecipe::Producer(_))
     ));
 }

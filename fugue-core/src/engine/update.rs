@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::engine::change::ChangeSet;
 use crate::ir::{
-    Address, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind, Reference,
-    ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
+    Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
+    Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{ProjectError, ProjectTransaction};
 use crate::storage::segments::mapping::{
@@ -240,6 +240,40 @@ impl SymbolRemoval {
 pub struct ReferenceRemoval {
     from: Address,
     target: ReferenceTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedReferenceReplacement {
+    coverage: AddressRangeSet,
+    kind: ReferenceKind,
+    references: Vec<Reference>,
+}
+
+impl DerivedReferenceReplacement {
+    pub fn new(coverage: AddressRangeSet, kind: ReferenceKind, references: Vec<Reference>) -> Self {
+        Self {
+            coverage,
+            kind,
+            references,
+        }
+    }
+
+    pub fn coverage(&self) -> &AddressRangeSet {
+        &self.coverage
+    }
+
+    pub fn kind(&self) -> ReferenceKind {
+        self.kind
+    }
+
+    pub fn references(&self) -> &[Reference] {
+        &self.references
+    }
+
+    fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
+        transaction.replace_derived_references(self.coverage, self.kind, self.references)?;
+        Ok(())
+    }
 }
 
 impl ReferenceRemoval {
@@ -492,6 +526,7 @@ pub enum ProjectUpdate {
     RemoveReference(ReferenceRemoval),
     RemoveSwitch(Address),
     RemoveSymbol(SymbolRemoval),
+    ReplaceDerivedReferences(DerivedReferenceReplacement),
     ResizeMapping(MappingResize),
     SetFunctionProperties(FunctionPropertiesUpdate),
     UpdateMappingMetadata(MappingMetadataUpdate),
@@ -561,6 +596,14 @@ impl ProjectUpdate {
 
     pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
         Self::RemoveReference(ReferenceRemoval::new(from, target))
+    }
+
+    pub fn replace_derived_references(
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        references: Vec<Reference>,
+    ) -> Self {
+        Self::ReplaceDerivedReferences(DerivedReferenceReplacement::new(coverage, kind, references))
     }
 
     pub fn add_switch(switch: Switch) -> Self {
@@ -662,6 +705,7 @@ impl ProjectUpdate {
                 transaction.remove_symbol_by_index(removal.index())?;
                 Ok(())
             }
+            Self::ReplaceDerivedReferences(replacement) => replacement.apply(transaction),
             Self::ResizeMapping(resize) => {
                 transaction.resize_mapping(resize.mapping(), resize.size())
             }

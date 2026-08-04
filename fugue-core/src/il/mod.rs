@@ -44,11 +44,11 @@
 //! ```
 //!
 //! `reader.il::<CallSummary>(function)` now type-checks and participates in the shared
-//! byte-bounded cache. Registering a [`IlRootProducer`](common::IlRootProducer) with
+//! byte-bounded cache. Registering an [`IlProducer`](common::IlProducer) with
 //! [`IlFormRegistration::root`](registry::IlFormRegistration::root), or an
-//! [`IlConversion`](common::IlConversion) with
+//! [`IlConverter`](common::IlConverter) with
 //! [`IlFormRegistration::derived`](registry::IlFormRegistration::derived), additionally lets
-//! the engine generate it — `derived` takes its source form from `T::Source`, so a recipe
+//! the engine generate it — `derived` takes its source form from `T::Input`, so a recipe
 //! cannot disagree with the type it converts.
 //!
 //! # Capabilities

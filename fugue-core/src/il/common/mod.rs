@@ -11,12 +11,12 @@ mod rewrite;
 mod span;
 pub(crate) mod verify;
 
-pub use analysis::IlAnalysis;
+pub use analysis::{IlAnalyser, IlAnalysis};
 pub use artefact::{ControlFlowIl, IlArtefact, IlMetadata, IlSchemaVersion, PersistableIl};
 pub use dominance::{IlDominance, IlDominanceFrontier};
 pub use error::IlError;
 pub use form::{DialectId, IlFormId, IlFormIdError};
-pub use generate::{IlConversion, IlGenerationContext, IlGenerationError, IlRootProducer};
+pub use generate::{IlConverter, IlGenerationContext, IlGenerationError, IlProducer, IlSubject};
 pub use graph::{IlBlock, IlBlockPredecessors, IlBlockProperties, IlEdgeKinds, IlGraph};
 pub(crate) use id::il_id;
 pub use id::{IlBlockId, IlExprId, IlOpId, IlValueId};

@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::{iter, mem, thread};
 
 use rayon::prelude::*;
@@ -372,6 +373,7 @@ impl StagedChanges {
 
 pub struct ProjectTransaction<'p> {
     project: &'p mut Project,
+    registry: Arc<IlRegistry>,
     changes: StagedChanges,
     reads: ReadSet,
     reads_collapsed: bool,
@@ -411,11 +413,16 @@ impl Drop for ProjectTransaction<'_> {
 }
 
 impl ProjectTransaction<'_> {
-    pub(super) fn new(project: &mut Project, source: ChangeSource) -> ProjectTransaction<'_> {
+    pub(super) fn new(
+        project: &mut Project,
+        source: ChangeSource,
+        registry: Arc<IlRegistry>,
+    ) -> ProjectTransaction<'_> {
         let span = tracing::debug_span!("project_transaction", reason = source.label());
 
         ProjectTransaction {
             project,
+            registry,
             changes: StagedChanges::default(),
             reads: ReadSet::new(),
             reads_collapsed: false,
@@ -467,7 +474,8 @@ impl ProjectTransaction<'_> {
             return Err(IlError::publish_after_semantic_mutation().into());
         }
 
-        let admit = IlRegistry::standard()
+        let admit = self
+            .registry
             .form(form)
             .and_then(IlFormRegistration::admit)
             .ok_or_else(|| IlError::dialect_unavailable(form.as_str()))?;
@@ -484,7 +492,10 @@ impl ProjectTransaction<'_> {
         &mut self,
         function: FunctionId,
     ) -> Result<bool, ProjectError> {
-        self.remove_lifted(function, &T::FORM)
+        Ok(self
+            .il_stage
+            .remove::<T>(&self.project.storage, function)?
+            .is_some())
     }
 
     pub(crate) fn materialise_lifted<T>(&mut self, mut ir: T) -> Result<(), ProjectError>
@@ -672,22 +683,6 @@ impl ProjectTransaction<'_> {
         function: FunctionId,
         form: &IlFormId,
     ) -> Result<bool, ProjectError> {
-        if *form == PCodeIr::FORM {
-            let Some(previous) = self
-                .il_stage
-                .remove::<PCodeIr>(&self.project.storage, function)?
-            else {
-                return Ok(false);
-            };
-
-            let mut coverage = AddressRangeSet::new();
-            for source in previous.source_spans() {
-                coverage.insert_range(AddressRange::point(source.address()));
-            }
-            self.replace_derived_references(coverage, ReferenceKind::Data, [])?;
-            return Ok(true);
-        }
-
         Ok(self
             .il_stage
             .remove_form(&self.project.storage, function, form)?)
@@ -700,7 +695,8 @@ impl ProjectTransaction<'_> {
     ) -> Result<usize, ProjectError> {
         let mut removed = 0usize;
 
-        for form in IlRegistry::standard().descendants(first_invalid) {
+        let registry = self.registry.clone();
+        for form in registry.descendants(first_invalid) {
             if self.remove_lifted(function, form)? {
                 removed += 1;
             }

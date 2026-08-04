@@ -2,10 +2,10 @@ use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use quick_cache::Weighter;
-use quick_cache::sync::Cache;
+use quick_cache::sync::{Cache, DefaultLifecycle};
+use quick_cache::{DefaultHashBuilder, OptionsBuilder, Weighter};
 
-use crate::il::common::{IlArtefact, IlFormId, PersistableIl};
+use crate::il::common::{IlArtefact, IlError, IlFormId};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
@@ -40,8 +40,11 @@ impl CachedIl {
         Self { value, size }
     }
 
-    fn downcast<T: IlArtefact>(&self) -> Option<Arc<T>> {
-        self.value.clone().downcast::<T>().ok()
+    fn downcast<T: IlArtefact>(&self) -> Result<Arc<T>, IlError> {
+        self.value
+            .clone()
+            .downcast::<T>()
+            .map_err(|_| IlError::mismatched_artefact(T::FORM))
     }
 }
 
@@ -62,16 +65,16 @@ pub(crate) struct QueryCache {
     insns: Cache<CodeBlockId, Option<Arc<InsnList>>, InsnWeigher>,
     insn_cache_bytes: usize,
     lifted: Cache<IlCacheKey, Option<CachedIl>, LiftedWeigher>,
-    lifted_entry_cache_bytes: usize,
+    lifted_cache_bytes: usize,
 }
 
-pub(crate) enum CacheLookup<T> {
+pub(crate) enum CacheLookup<T: ?Sized> {
     Absent,
     Hit(Arc<T>),
     Miss,
 }
 
-impl<T> CacheLookup<T> {
+impl<T: ?Sized> CacheLookup<T> {
     fn from_cached(cached: Option<Option<Arc<T>>>) -> Self {
         match cached {
             None => Self::Miss,
@@ -89,8 +92,6 @@ pub trait QueryableIl: IlArtefact {
         Ok(None)
     }
 }
-
-pub(crate) trait QueryCachedIl: PersistableIl + QueryableIl {}
 
 impl QueryableIl for PCodeIr {
     fn load_persisted(
@@ -119,15 +120,16 @@ impl QueryableIl for ECodeSsaIr {
     }
 }
 
-impl QueryCachedIl for PCodeIr {}
-
-impl QueryCachedIl for ECodeIr {}
-
-impl QueryCachedIl for ECodeSsaIr {}
-
 impl QueryCache {
     pub(crate) fn new(insn_cache_bytes: usize, lifted_cache_bytes: usize) -> Self {
-        let lifted_entry_cache_bytes = lifted_cache_bytes / 3;
+        let lifted_options = OptionsBuilder::new()
+            .shards(1)
+            .estimated_items_capacity(ESTIMATED_LIFTED_CACHE_ENTRIES)
+            .weight_capacity(lifted_cache_bytes as u64)
+            .hot_allocation(1.0)
+            .build()
+            .expect("valid lifted cache configuration");
+
         Self {
             flow_targets: Cache::new(CFG_CACHE_CAPACITY),
             insns: Cache::with_weighter(
@@ -136,12 +138,13 @@ impl QueryCache {
                 InsnWeigher,
             ),
             insn_cache_bytes,
-            lifted: Cache::with_weighter(
-                ESTIMATED_LIFTED_CACHE_ENTRIES,
-                lifted_cache_bytes as u64,
+            lifted: Cache::with_options(
+                lifted_options,
                 LiftedWeigher,
+                DefaultHashBuilder::default(),
+                DefaultLifecycle::default(),
             ),
-            lifted_entry_cache_bytes,
+            lifted_cache_bytes,
         }
     }
 
@@ -167,13 +170,41 @@ impl QueryCache {
         self.insns.clear();
     }
 
-    pub(crate) fn lifted<T: IlArtefact>(&self, function: FunctionId) -> CacheLookup<T> {
-        match self.lifted.get(&(function, T::FORM)) {
+    pub(crate) fn lifted<T: IlArtefact>(
+        &self,
+        function: FunctionId,
+    ) -> Result<CacheLookup<T>, IlError> {
+        Ok(match self.lifted.get(&(function, T::FORM)) {
             None => CacheLookup::Miss,
             Some(None) => CacheLookup::Absent,
-            Some(Some(cached)) => cached
-                .downcast::<T>()
-                .map_or(CacheLookup::Miss, CacheLookup::Hit),
+            Some(Some(cached)) => CacheLookup::Hit(cached.downcast::<T>()?),
+        })
+    }
+
+    pub(crate) fn lifted_erased(
+        &self,
+        function: FunctionId,
+        form: &IlFormId,
+    ) -> CacheLookup<dyn Any + Send + Sync> {
+        match self.lifted.get(&(function, form.clone())) {
+            None => CacheLookup::Miss,
+            Some(None) => CacheLookup::Absent,
+            Some(Some(cached)) => CacheLookup::Hit(cached.value),
+        }
+    }
+
+    pub(crate) fn insert_lifted_erased(
+        &self,
+        function: FunctionId,
+        form: &IlFormId,
+        ir: Option<Arc<dyn Any + Send + Sync>>,
+        size: usize,
+    ) {
+        let key = (function, form.clone());
+        let entry = ir.map(|value| CachedIl { value, size });
+        let retained = LiftedWeigher.weight(&key, &entry) as usize;
+        if retained <= self.lifted_cache_bytes {
+            self.lifted.insert(key, entry);
         }
     }
 
@@ -181,7 +212,7 @@ impl QueryCache {
         let key = (function, T::FORM);
         let entry = ir.map(CachedIl::new);
         let retained = LiftedWeigher.weight(&key, &entry) as usize;
-        if retained <= self.lifted_entry_cache_bytes {
+        if retained <= self.lifted_cache_bytes {
             self.lifted.insert(key, entry);
         }
     }
@@ -212,3 +243,6 @@ impl QueryCache {
         self.clear_lifted();
     }
 }
+
+#[cfg(test)]
+mod test;

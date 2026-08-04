@@ -34,7 +34,7 @@ struct FunctionShape {
 }
 
 fn function_shape(
-    reader: &QueryReader,
+    reader: &mut QueryReader,
     entry: Address,
 ) -> Result<Option<FunctionShape>, Box<dyn Error>> {
     let project = reader.project()?;
@@ -149,13 +149,15 @@ fn assert_byte_change_converges(
         )
     }));
     incremental.analyse()?;
-    let incremental_shape = function_shape(&incremental.query_reader()?, entry)?;
+    let mut incremental_reader = incremental.query_reader()?;
+    let incremental_shape = function_shape(&mut incremental_reader, entry)?;
 
     let (project, clean_entry) = project_with_mutable_function(final_bytes)?;
     assert_eq!(clean_entry, entry);
     let clean = AnalysisEngine::new(project)?;
     clean.analyse()?;
-    let clean_shape = function_shape(&clean.query_reader()?, entry)?;
+    let mut clean_reader = clean.query_reader()?;
+    let clean_shape = function_shape(&mut clean_reader, entry)?;
 
     assert!(clean_shape.is_some());
     assert_eq!(incremental_shape, clean_shape);

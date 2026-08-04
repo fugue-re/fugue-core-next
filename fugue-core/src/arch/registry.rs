@@ -2,8 +2,7 @@ use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::extension::{self, Registration};
-use crate::lifter::LanguageSource;
-use crate::lifter::{Language, LanguageError, LanguageId};
+use crate::lifter::{Language, LanguageError, LanguageId, LanguageSource};
 
 #[derive(Debug, Error)]
 pub enum ArchError {

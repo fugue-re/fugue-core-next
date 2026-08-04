@@ -3,6 +3,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
+use fugue_core::ir::ReferenceKind;
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
 use sha2::{Digest, Sha256};
@@ -37,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut lifted = 0usize;
         let mut statements = 0usize;
         let mut expressions = 0usize;
-        for function in functions {
+        for function in functions.iter().copied() {
             let Some(ecode) = reader.ecode(function)? else {
                 continue;
             };
@@ -48,8 +49,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             digest.update(bytes.as_slice());
         }
 
+        let mut data_references = 0usize;
+        let mut seen = std::collections::BTreeSet::new();
+        for function in functions.iter().copied() {
+            let Some(ecode) = reader.ecode(function)? else {
+                continue;
+            };
+            for span in ecode.source_spans() {
+                if !seen.insert(span.address()) {
+                    continue;
+                }
+                for reference in reader.outgoing_references(span.address()) {
+                    if reference?.kind() == ReferenceKind::Data {
+                        data_references += 1;
+                    }
+                }
+            }
+        }
+
         println!(
-            "{}: lifted={lifted} statements={statements} expressions={expressions} digest={:x}",
+            "{}: lifted={lifted} statements={statements} expressions={expressions} \
+             data_refs={data_references} digest={:x}",
             input.display(),
             digest.finalize()
         );

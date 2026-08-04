@@ -7,19 +7,24 @@ use std::sync::{Arc, LazyLock};
 use rustc_hash::FxHashMap;
 use thiserror::Error as ThisError;
 
-use crate::analysis::control::CancellationToken;
 use crate::extension::{self, Registration};
 use crate::il::common::{
-    DialectId, IlArtefact, IlConversion, IlError, IlFormId, IlGenerationContext, IlGenerationError,
-    IlRootProducer, IlSchemaVersion, PersistableIl,
+    DialectId, IlArtefact, IlConverter, IlError, IlFormId, IlProducer, IlSchemaVersion,
+    PersistableIl,
 };
-use crate::il::ecode::ECodeIr;
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::pcode::PCodeIr;
-use crate::il::storage::{IlStage, IlStorageError};
+use crate::il::ecode::PCodeToECode;
+use crate::il::ecode::ssa::ECodeToSsa;
+use crate::il::pcode::PCodeCanonicaliser;
+use crate::il::storage::{IlPersist, IlStage, IlStorageError};
 use crate::ir::FunctionId;
 use crate::storage::StorageContainer;
+use crate::types::EstimateSize;
 use crate::types::common::Revision;
+
+mod runtime;
+
+pub(crate) use runtime::{GeneratedArtefact, IlGenerationSession};
+use runtime::IlRecipe;
 
 const PCODE_DIALECT: DialectId = DialectId::from_static("fugue.pcode");
 const ECODE_DIALECT: DialectId = DialectId::from_static("fugue.ecode");
@@ -101,19 +106,28 @@ impl Registration for IlDialectRegistration {
 
 extension::collect!(IlDialectRegistration);
 
-type IlProduced = Box<dyn Any + Send + Sync>;
+pub(super) type IlProduced = Box<dyn Any + Send + Sync>;
 
-type IlProduceFn = fn(
-    FunctionId,
-    &IlGenerationContext<'_>,
-    &CancellationToken,
-) -> Result<IlProduced, IlGenerationError>;
+pub(crate) type IlSizeFn = fn(&(dyn Any + Send + Sync)) -> Result<usize, IlError>;
 
-type IlConvertFn = fn(
-    &(dyn Any + Send + Sync),
-    &IlGenerationContext<'_>,
-    &CancellationToken,
-) -> Result<IlProduced, IlGenerationError>;
+fn size_erased<T: IlArtefact>(artefact: &(dyn Any + Send + Sync)) -> Result<usize, IlError> {
+    artefact
+        .downcast_ref::<T>()
+        .map(EstimateSize::estimate_size)
+        .ok_or_else(|| IlError::mismatched_artefact(T::FORM))
+}
+
+pub(crate) type IlLoadFn =
+    fn(&StorageContainer, FunctionId, Revision) -> Result<Option<IlProduced>, IlStorageError>;
+
+fn load_erased<T: PersistableIl>(
+    storage: &StorageContainer,
+    function: FunctionId,
+    input_revision: Revision,
+) -> Result<Option<IlProduced>, IlStorageError> {
+    Ok(T::load_current(storage, function, input_revision)?
+        .map(|artefact| Box::new(artefact) as IlProduced))
+}
 
 pub(crate) type IlAdmitFn =
     fn(&mut IlStage, &StorageContainer, IlProduced, Revision) -> Result<(), IlStorageError>;
@@ -132,32 +146,6 @@ fn admit_erased<T: PersistableIl>(
     Ok(stage.replace(storage, artefact)?)
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum IlRecipe {
-    Convert(IlConvertFn),
-    Root(IlProduceFn),
-}
-
-fn produce_erased<T: IlRootProducer>(
-    function: FunctionId,
-    context: &IlGenerationContext<'_>,
-    cancellation: &CancellationToken,
-) -> Result<IlProduced, IlGenerationError> {
-    Ok(Box::new(T::produce(function, context, cancellation)?))
-}
-
-fn convert_erased<T: IlConversion>(
-    source: &(dyn Any + Send + Sync),
-    context: &IlGenerationContext<'_>,
-    cancellation: &CancellationToken,
-) -> Result<IlProduced, IlGenerationError> {
-    let source = source
-        .downcast_ref::<T::Source>()
-        .ok_or_else(|| IlGenerationError::Il(IlError::mismatched_source(T::Source::FORM)))?;
-
-    Ok(Box::new(T::convert(source, context, cancellation)?))
-}
-
 #[derive(Debug)]
 pub struct IlFormRegistration {
     identifier: &'static str,
@@ -167,42 +155,56 @@ pub struct IlFormRegistration {
     source: Option<IlFormId>,
     recipe: Option<IlRecipe>,
     admit: Option<IlAdmitFn>,
+    load: Option<IlLoadFn>,
+    size: IlSizeFn,
 }
 
 impl IlFormRegistration {
     pub const fn of<T: IlArtefact>() -> Self {
-        Self::new::<T>(None, None, None)
+        Self::new::<T>(None, None)
     }
 
-    pub const fn root<T: IlRootProducer>() -> Self {
-        Self::new::<T>(None, None, Some(IlRecipe::Root(produce_erased::<T>)))
+    pub const fn root<T: IlProducer>() -> Self {
+        Self::new::<T::Output>(None, Some(IlRecipe::producer::<T>()))
     }
 
-    pub const fn derived<T: IlConversion>() -> Self {
-        Self::new::<T>(
-            None,
-            Some(T::Source::FORM),
-            Some(IlRecipe::Convert(convert_erased::<T>)),
-        )
+    pub const fn derived<T: IlConverter>() -> Self {
+        Self::new::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::converter::<T>()))
     }
 
-    const fn new<T: IlArtefact>(
-        schema: Option<IlSchemaVersion>,
-        source: Option<IlFormId>,
-        recipe: Option<IlRecipe>,
-    ) -> Self {
+    pub const fn persistable<T: PersistableIl>() -> Self {
+        Self::new_persistable::<T>(None, None)
+    }
+
+    pub const fn persistable_root<T: IlProducer>() -> Self
+    where
+        T::Output: PersistableIl,
+    {
+        Self::new_persistable::<T::Output>(None, Some(IlRecipe::producer::<T>()))
+    }
+
+    pub const fn persistable_derived<T: IlConverter>() -> Self
+    where
+        T::Output: PersistableIl,
+    {
+        Self::new_persistable::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::converter::<T>()))
+    }
+
+    const fn new<T: IlArtefact>(source: Option<IlFormId>, recipe: Option<IlRecipe>) -> Self {
         Self {
             identifier: T::FORM_IDENTIFIER,
             form: T::FORM,
             type_id: TypeId::of::<T>(),
-            schema,
+            schema: None,
             source,
             recipe,
             admit: None,
+            load: None,
+            size: size_erased::<T>,
         }
     }
 
-    const fn persistable<T: PersistableIl>(
+    const fn new_persistable<T: PersistableIl>(
         source: Option<IlFormId>,
         recipe: Option<IlRecipe>,
     ) -> Self {
@@ -214,6 +216,8 @@ impl IlFormRegistration {
             source,
             recipe,
             admit: Some(admit_erased::<T>),
+            load: Some(load_erased::<T>),
+            size: size_erased::<T>,
         }
     }
 
@@ -221,7 +225,15 @@ impl IlFormRegistration {
         self.admit
     }
 
-    pub fn recipe(&self) -> Option<IlRecipe> {
+    pub(crate) fn load(&self) -> Option<IlLoadFn> {
+        self.load
+    }
+
+    pub(crate) fn size(&self) -> IlSizeFn {
+        self.size
+    }
+
+    fn recipe(&self) -> Option<IlRecipe> {
         self.recipe
     }
 
@@ -272,18 +284,9 @@ impl IlRegistryBuilder {
         };
         builder.insert_dialect(PCODE_DIALECT);
         builder.insert_dialect(ECODE_DIALECT);
-        builder.insert_form(IlFormRegistration::persistable::<PCodeIr>(
-            None,
-            Some(IlRecipe::Root(produce_erased::<PCodeIr>)),
-        ));
-        builder.insert_form(IlFormRegistration::persistable::<ECodeIr>(
-            Some(PCodeIr::FORM),
-            Some(IlRecipe::Convert(convert_erased::<ECodeIr>)),
-        ));
-        builder.insert_form(IlFormRegistration::persistable::<ECodeSsaIr>(
-            Some(ECodeIr::FORM),
-            Some(IlRecipe::Convert(convert_erased::<ECodeSsaIr>)),
-        ));
+        builder.insert_form(IlFormRegistration::persistable_root::<PCodeCanonicaliser>());
+        builder.insert_form(IlFormRegistration::persistable_derived::<PCodeToECode>());
+        builder.insert_form(IlFormRegistration::persistable_derived::<ECodeToSsa>());
         builder
     }
 
@@ -314,6 +317,8 @@ impl IlRegistryBuilder {
                 source: registration.source.clone(),
                 recipe: registration.recipe,
                 admit: registration.admit,
+                load: registration.load,
+                size: registration.size,
             });
         }
         builder
@@ -333,12 +338,16 @@ impl IlRegistryBuilder {
         self.register(IlFormRegistration::of::<T>())
     }
 
-    pub fn with_converted_form<T: IlConversion>(self) -> Self {
+    pub fn with_produced_form<T: IlProducer>(self) -> Self {
+        self.register(IlFormRegistration::root::<T>())
+    }
+
+    pub fn with_converted_form<T: IlConverter>(self) -> Self {
         self.register(IlFormRegistration::derived::<T>())
     }
 
     pub fn with_derived_form<T: IlArtefact>(self, source: IlFormId) -> Self {
-        self.register(IlFormRegistration::new::<T>(None, Some(source), None))
+        self.register(IlFormRegistration::new::<T>(Some(source), None))
     }
 
     pub fn build(self) -> Result<IlRegistry, IlRegistryErrors> {
@@ -559,6 +568,16 @@ impl IlRegistry {
     pub fn form_of<T: IlArtefact>(&self) -> Option<&IlFormRegistration> {
         let form = self.forms_by_type.get(&TypeId::of::<T>())?;
         self.forms.get(form)
+    }
+
+    pub(crate) fn registered_form<T: IlArtefact>(&self) -> Result<&IlFormRegistration, IlError> {
+        let registration = self
+            .form(&T::FORM)
+            .ok_or_else(|| IlError::unregistered_form(T::FORM))?;
+        if registration.type_id != TypeId::of::<T>() {
+            return Err(IlError::mismatched_artefact(T::FORM));
+        }
+        Ok(registration)
     }
 
     pub fn contains(&self, form: &IlFormId) -> bool {

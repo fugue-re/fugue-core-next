@@ -11,8 +11,7 @@ use crate::ir::{
     Reference, ReferenceTarget,
 };
 use crate::lifter::InsnResolver;
-use crate::project::Project;
-use crate::project::ProjectError;
+use crate::project::{Project, ProjectError};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{SegmentMappingCache, SegmentStorageError};
 

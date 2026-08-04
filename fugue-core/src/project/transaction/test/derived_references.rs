@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn project_remove_lifted_clears_derived_data_references() -> Result<(), Box<dyn std::error::Error>>
-{
+fn project_remove_lifted_preserves_derived_data_references()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient("tests/ls.elf")?;
     let function = FunctionId::default();
     let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
@@ -29,12 +29,11 @@ fn project_remove_lifted_clears_derived_data_references() -> Result<(), Box<dyn 
         transaction.commit()?;
     }
 
-    assert!(
-        project
-            .references
-            .get(source, ReferenceTarget::from(target))?
-            .is_none()
-    );
+    let retained = project
+        .references
+        .get(source, ReferenceTarget::from(target))?
+        .expect("removing cached IL should preserve independently produced facts");
+    assert!(retained.is_read());
 
     {
         let mut transaction = project.transaction("test");

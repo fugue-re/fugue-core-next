@@ -14,6 +14,8 @@ pub enum IlError {
     IdExhausted { kind: &'static str },
     #[error("integer overflow while constructing {what}")]
     IntegerOverflow { what: &'static str },
+    #[error("a {form} artefact was produced with the wrong Rust type")]
+    MismatchedArtefact { form: IlFormId },
     #[error("a {form} artefact was expected as the conversion source")]
     MismatchedSource { form: IlFormId },
     #[error("missing {form} IR for function {function:?}")]
@@ -26,6 +28,8 @@ pub enum IlError {
         form: IlFormId,
         component: &'static str,
     },
+    #[error("no generation recipe is registered for {form}")]
+    MissingRecipe { form: IlFormId },
     #[error("IR cannot be materialised after semantic mutations in the same transaction")]
     PublishAfterSemanticMutation,
     #[error("range end {end} exceeds pool length {len}")]
@@ -44,6 +48,8 @@ pub enum IlError {
         expected: u64,
         found: u64,
     },
+    #[error("IL form `{form}` is not registered")]
+    UnregisteredForm { form: IlFormId },
     #[error("opcode cannot be lifted into {form}")]
     UnsupportedOpcode { form: IlFormId },
     #[error("{form} operation widths do not match")]
@@ -63,6 +69,10 @@ impl IlError {
         Self::IntegerOverflow { what }
     }
 
+    pub fn mismatched_artefact(form: IlFormId) -> Self {
+        Self::MismatchedArtefact { form }
+    }
+
     pub fn mismatched_source(form: IlFormId) -> Self {
         Self::MismatchedSource { form }
     }
@@ -73,6 +83,10 @@ impl IlError {
 
     pub fn missing_component(form: IlFormId, component: &'static str) -> Self {
         Self::MissingComponent { form, component }
+    }
+
+    pub fn missing_recipe(form: IlFormId) -> Self {
+        Self::MissingRecipe { form }
     }
 
     pub const fn publish_after_semantic_mutation() -> Self {
@@ -101,6 +115,10 @@ impl IlError {
             expected,
             found,
         }
+    }
+
+    pub fn unregistered_form(form: IlFormId) -> Self {
+        Self::UnregisteredForm { form }
     }
 
     pub fn unsupported_opcode(form: IlFormId) -> Self {
