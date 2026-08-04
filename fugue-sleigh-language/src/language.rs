@@ -738,25 +738,15 @@ impl LanguageDB {
         endian: Endian,
         bits: u32,
     ) -> Option<LanguageDefBuilder<'a>> {
-        self.db
-            .get(&ArchitectureDef::new(processor, endian, bits, "default"))
-            .map(|language| LanguageDefBuilder { language })
+        self.lookup(processor, endian, bits, "default")
     }
 
     pub fn lookup_str<'a, S: AsRef<str>>(
         &'a self,
         definition: S,
     ) -> Result<Option<LanguageDefBuilder<'a>>, ArchDefParseError> {
-        let definition = definition.as_ref();
-        let def = definition.parse::<ArchitectureDef>()?;
-        if let Some(language) = self.db.get(&def) {
-            return Ok(Some(LanguageDefBuilder { language }));
-        }
-        Ok(self
-            .db
-            .values()
-            .find(|language| language.id == definition)
-            .map(|language| LanguageDefBuilder { language }))
+        let def = definition.as_ref().parse::<ArchitectureDef>()?;
+        Ok(self.lookup_def(&def))
     }
 
     pub fn lookup<'a, P: Into<String>, V: Into<String>>(
@@ -766,8 +756,18 @@ impl LanguageDB {
         bits: u32,
         variant: V,
     ) -> Option<LanguageDefBuilder<'a>> {
+        self.lookup_def(&ArchitectureDef::new(processor, endian, bits, variant))
+    }
+
+    fn lookup_def<'a>(&'a self, def: &ArchitectureDef) -> Option<LanguageDefBuilder<'a>> {
+        if let Some(language) = self.db.get(def) {
+            return Some(LanguageDefBuilder { language });
+        }
+
+        let id = def.to_string();
         self.db
-            .get(&ArchitectureDef::new(processor, endian, bits, variant))
+            .values()
+            .find(|language| language.id == id)
             .map(|language| LanguageDefBuilder { language })
     }
 

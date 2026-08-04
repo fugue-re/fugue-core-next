@@ -13,6 +13,7 @@ static-lifters = [
   "fugue-lifter/mips64",
   "fugue-lifter/ppc",
   "fugue-lifter/ppc64",
+  "fugue-lifter/ppc64-a2alt",
   "fugue-lifter/riscv",
   "fugue-lifter/riscv64",
   "fugue-lifter/x86",

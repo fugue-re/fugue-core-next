@@ -63,6 +63,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_lifter("PowerPC:BE:64:default", &["64-32addr"], "ppc64_be.rs")?;
     #[cfg(feature = "ppc64-le")]
     build_lifter("PowerPC:LE:64:default", &["64-32addr"], "ppc64_le.rs")?;
+    #[cfg(feature = "ppc64-a2alt-be")]
+    build_lifter(
+        "PowerPC:BE:64:A2ALT",
+        &["A2ALT-32addr"],
+        "ppc64_a2alt_be.rs",
+    )?;
+    #[cfg(feature = "ppc64-a2alt-le")]
+    build_lifter(
+        "PowerPC:LE:64:A2ALT",
+        &["A2ALT-32addr"],
+        "ppc64_a2alt_le.rs",
+    )?;
 
     Ok(())
 }

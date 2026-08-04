@@ -49,6 +49,8 @@ foreach_target() {
     "$1" PowerPC:LE:32:default ""         ppc_le
     "$1" PowerPC:BE:64:default 64-32addr  ppc64_be
     "$1" PowerPC:LE:64:default 64-32addr  ppc64_le
+    "$1" PowerPC:BE:64:A2ALT   A2ALT-32addr ppc64_a2alt_be
+    "$1" PowerPC:LE:64:A2ALT   A2ALT-32addr ppc64_a2alt_le
     "$1" RISCV:LE:32:default   ""         riscv
     "$1" RISCV:LE:64:default   ""         riscv64
     "$1" x86:LE:32:default     ""         x86

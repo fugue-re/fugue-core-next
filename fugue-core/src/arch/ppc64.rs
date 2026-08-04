@@ -95,6 +95,20 @@ impl Ppc64 {
                     le::variants::V64_32ADDR
                 });
             }
+            Some("A2ALT") => {
+                return Ok(if is_be {
+                    a2alt_be::variants::A2ALT
+                } else {
+                    a2alt_le::variants::A2ALT
+                });
+            }
+            Some("A2ALT-32addr") => {
+                return Ok(if is_be {
+                    a2alt_be::variants::A2ALT_32ADDR
+                } else {
+                    a2alt_le::variants::A2ALT_32ADDR
+                });
+            }
             _ => {}
         }
         let loader = LanguageLoader::from_env()?;
@@ -121,6 +135,20 @@ impl Ppc64 {
                     be::variants::V64_32ADDR
                 } else {
                     le::variants::V64_32ADDR
+                });
+            }
+            Some("A2ALT") => {
+                return Ok(if is_be {
+                    a2alt_be::variants::A2ALT
+                } else {
+                    a2alt_le::variants::A2ALT
+                });
+            }
+            Some("A2ALT-32addr") => {
+                return Ok(if is_be {
+                    a2alt_be::variants::A2ALT_32ADDR
+                } else {
+                    a2alt_le::variants::A2ALT_32ADDR
                 });
             }
             _ => {}

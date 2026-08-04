@@ -174,16 +174,30 @@ impl LifterBuilder {
             ("PowerPC", false, Some(32), None | Some("default")) => {
                 Ok(crate::ppc::le::LifterFactory::new_default())
             }
-            #[cfg(feature = "ppc64-be")]
             ("PowerPC", true, Some(64), variant) => match variant {
+                #[cfg(feature = "ppc64-be")]
                 None | Some("default") => Ok(crate::ppc64::be::LifterFactory::new_default()),
+                #[cfg(feature = "ppc64-be")]
                 Some("64-32addr") => Ok(crate::ppc64::be::LifterFactory::new_64_32addr()),
+                #[cfg(feature = "ppc64-a2alt-be")]
+                Some("A2ALT") => Ok(crate::ppc64::a2alt_be::LifterFactory::new_a2alt()),
+                #[cfg(feature = "ppc64-a2alt-be")]
+                Some("A2ALT-32addr") => {
+                    Ok(crate::ppc64::a2alt_be::LifterFactory::new_a2alt_32addr())
+                }
                 _ => Err(LifterBuilderError::Unsupported),
             },
-            #[cfg(feature = "ppc64-le")]
             ("PowerPC", false, Some(64), variant) => match variant {
+                #[cfg(feature = "ppc64-le")]
                 None | Some("default") => Ok(crate::ppc64::le::LifterFactory::new_default()),
+                #[cfg(feature = "ppc64-le")]
                 Some("64-32addr") => Ok(crate::ppc64::le::LifterFactory::new_64_32addr()),
+                #[cfg(feature = "ppc64-a2alt-le")]
+                Some("A2ALT") => Ok(crate::ppc64::a2alt_le::LifterFactory::new_a2alt()),
+                #[cfg(feature = "ppc64-a2alt-le")]
+                Some("A2ALT-32addr") => {
+                    Ok(crate::ppc64::a2alt_le::LifterFactory::new_a2alt_32addr())
+                }
                 _ => Err(LifterBuilderError::Unsupported),
             },
             #[cfg(feature = "riscv")]
@@ -261,6 +275,10 @@ mod test {
         let _ = "PowerPC:LE:32:default".parse::<LifterBuilder>()?.build()?;
         let _ = "PowerPC:BE:64:default".parse::<LifterBuilder>()?.build()?;
         let _ = "PowerPC:LE:64:64-32addr"
+            .parse::<LifterBuilder>()?
+            .build()?;
+        let _ = "PowerPC:BE:64:A2ALT".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:64:A2ALT-32addr"
             .parse::<LifterBuilder>()?
             .build()?;
 
