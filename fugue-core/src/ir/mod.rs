@@ -21,7 +21,7 @@ pub use block::{
     CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockRef, CodeBlockTable, IncompleteCodeBlock,
     IncompleteCodeBlockId,
 };
-pub(crate) use block::{CodeBlockMaterialisation, PreparedCodeBlockMutation};
+pub(crate) use block::{CodeBlockIdsByStart, CodeBlockMaterialisation, PreparedCodeBlockMutation};
 
 pub(crate) mod call_graph;
 pub(crate) use call_graph::CallGraphStage;

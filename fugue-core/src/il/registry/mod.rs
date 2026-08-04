@@ -23,8 +23,8 @@ use crate::types::common::Revision;
 
 mod runtime;
 
-pub(crate) use runtime::{GeneratedArtefact, IlGenerationSession};
 use runtime::IlRecipe;
+pub(crate) use runtime::{GeneratedArtefact, IlGenerationSession};
 
 const PCODE_DIALECT: DialectId = DialectId::from_static("fugue.pcode");
 const ECODE_DIALECT: DialectId = DialectId::from_static("fugue.ecode");

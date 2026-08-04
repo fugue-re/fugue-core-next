@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use super::{FunctionTableError, PreparedFunctionEntry};
+use super::{CodeBlockOwners, FunctionTableError, PreparedFunctionEntry};
 use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
 use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, RawAddress};
 use crate::storage::entities::schema::{
@@ -164,8 +164,8 @@ impl FunctionTable {
         entries: &[PreparedFunctionEntry],
         reservations: &[FunctionId],
         cancelled: &BTreeSet<FunctionId>,
-        owners: &FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
-        original_owners: &FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+        owners: &FxHashMap<CodeBlockId, CodeBlockOwners>,
+        original_owners: &FxHashMap<CodeBlockId, CodeBlockOwners>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         let mut added = 0usize;
@@ -193,26 +193,25 @@ impl FunctionTable {
         }
 
         for (&block, final_owners) in owners {
-            let previous = original_owners
-                .get(&block)
-                .map_or(&[] as &[FunctionId], SmallVec::as_slice);
+            let previous = original_owners.get(&block);
             for owner in previous
-                .iter()
-                .filter(|owner| !final_owners.contains(owner))
+                .into_iter()
+                .flat_map(CodeBlockOwners::iter)
+                .filter(|owner| !final_owners.contains(*owner))
             {
                 writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
                     block,
-                    function: *owner,
+                    function: owner,
                 });
             }
             for owner in final_owners
                 .iter()
-                .filter(|owner| !previous.contains(owner))
+                .filter(|owner| previous.is_none_or(|previous| !previous.contains(*owner)))
             {
                 writes.insert_entity(
                     &FunctionOwnerKey {
                         block,
-                        function: *owner,
+                        function: owner,
                     },
                     &FunctionOwnerRecord,
                 )?;
@@ -283,7 +282,7 @@ impl FunctionTable {
             rkyv::to_bytes::<rkyv::rancor::Error>(&function).map_err(EntityStorageError::encode)?;
         let encoded_size = encoded.len();
         let mut writes = EntityWriteBatch::new();
-        writes.push(EntityWrite::insert_archive(
+        writes.push(EntityWrite::insert_archived(
             Function::ID.key_for(&id),
             encoded,
         ));
@@ -452,8 +451,10 @@ impl FunctionTable {
             })
     }
 
-    pub(super) fn block_owners(&self, block: CodeBlockId) -> SmallVec<[FunctionId; 2]> {
-        self.storage
+    pub(super) fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
+        let mut owners = CodeBlockOwners::new();
+        for owner in self
+            .storage
             .iter_range::<FunctionOwnerKey, FunctionOwnerRecord>(Bound::Included(
                 &FunctionOwnerKey::first(block),
             ))
@@ -462,7 +463,10 @@ impl FunctionTable {
                 let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
                 (key.block == block).then_some(key.function)
             })
-            .collect()
+        {
+            owners.insert(owner);
+        }
+        owners
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {

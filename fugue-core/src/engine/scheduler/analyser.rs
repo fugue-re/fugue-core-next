@@ -77,7 +77,10 @@ impl IlAnalysisInputs {
         self.function
     }
 
-    pub(crate) fn get<T: IlArtefact>(&self, function: FunctionId) -> Result<Option<Arc<T>>, IlError> {
+    pub(crate) fn get<T: IlArtefact>(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<Arc<T>>, IlError> {
         if function != self.function {
             return Ok(None);
         }
@@ -95,10 +98,7 @@ impl IlAnalysisInputs {
             .map_err(|_| IlError::mismatched_artefact(T::FORM))
     }
 
-    pub(crate) fn requested(
-        &self,
-        form: &IlFormId,
-    ) -> Option<Arc<dyn Any + Send + Sync>> {
+    pub(crate) fn requested(&self, form: &IlFormId) -> Option<Arc<dyn Any + Send + Sync>> {
         self.artefacts
             .iter()
             .find(|artefact| artefact.form() == form)

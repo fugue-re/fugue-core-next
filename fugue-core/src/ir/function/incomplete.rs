@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::collections::hash_map::Entry;
 use std::mem::{self, size_of};
 use std::num::NonZeroUsize;
-use std::vec::IntoIter;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -93,45 +92,13 @@ pub(crate) struct FunctionMaterialisation {
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
-enum BlockInsnSource {
-    Ordered(IntoIter<Insn>),
-    Shared {
-        insns: Vec<Option<Insn>>,
-        remaining_uses: Vec<usize>,
-    },
-}
-
-impl BlockInsnSource {
-    fn take(&mut self, ids: &[InsnId]) -> InsnList {
-        match self {
-            Self::Ordered(insns) => insns.by_ref().take(ids.len()).collect(),
-            Self::Shared {
-                insns,
-                remaining_uses,
-            } => ids
-                .iter()
-                .map(|id| {
-                    let remaining = &mut remaining_uses[id.index()];
-                    *remaining -= 1;
-                    if *remaining == 0 {
-                        insns[id.index()]
-                            .take()
-                            .expect("validated instruction must remain available")
-                    } else {
-                        insns[id.index()]
-                            .as_ref()
-                            .expect("validated instruction must remain available")
-                            .clone()
-                    }
-                })
-                .collect(),
-        }
-    }
-}
-
 impl FunctionMaterialisation {
     pub(crate) fn block_addresses(&self) -> impl Iterator<Item = Address> + '_ {
         self.blocks.iter().map(CodeBlockMaterialisation::address)
+    }
+
+    pub(crate) fn block_count(&self) -> usize {
+        self.blocks.len()
     }
 
     pub(crate) fn entry(&self) -> Address {
@@ -262,7 +229,9 @@ impl<'a> VacantInsnEntry<'a> {
             self.generation,
         );
         self.insns.push(insn);
-        self.insn_index.insert(self.address, id);
+        if !self.insn_index.is_empty() {
+            self.insn_index.insert(self.address, id);
+        }
         id
     }
 }
@@ -533,19 +502,37 @@ impl IncompleteFunction {
     }
 
     pub fn contains_insn(&self, address: Address) -> bool {
-        self.insn_index.contains(address)
-            || (self.insn_index.is_empty()
-                && self.insns.iter().any(|insn| insn.address() == address))
+        if !self.insn_index.is_empty() {
+            return self.insn_index.contains(address);
+        }
+        if self.insns_unsorted {
+            return self.insns.iter().any(|insn| insn.address() == address);
+        }
+        self.insns
+            .binary_search_by_key(&address, Insn::address)
+            .is_ok()
     }
 
     pub(crate) fn first_insn_id_at(&mut self, address: Address) -> Option<InsnId> {
+        if self.insn_index.is_empty() && !self.insns_unsorted {
+            let index = self.insns.partition_point(|insn| insn.address() < address);
+            return self
+                .insns
+                .get(index)
+                .filter(|insn| insn.address() == address)
+                .map(|_| {
+                    InsnId::with_generation(
+                        index.try_into().expect("too many instructions"),
+                        self.insn_generation,
+                    )
+                });
+        }
         self.ensure_insn_index();
         self.insn_index.first(address)
     }
 
     pub fn insn_entry(&mut self, address: Address) -> InsnEntry<'_> {
-        let append = !self.insn_index.is_empty()
-            && !self.insns_unsorted
+        let append = !self.insns_unsorted
             && self
                 .insns
                 .last()
@@ -619,15 +606,20 @@ impl IncompleteFunction {
     }
 
     pub fn insns_at(&self, address: Address) -> Box<dyn Iterator<Item = &Insn> + '_> {
-        if self.insn_index.is_empty() && !self.insns.is_empty() {
-            Box::new(
+        if !self.insn_index.is_empty() {
+            return Box::new(self.insn_index.ids(address).filter_map(|id| self.insn(id)));
+        }
+        if self.insns_unsorted {
+            return Box::new(
                 self.insns
                     .iter()
                     .filter(move |insn| insn.address() == address),
-            )
-        } else {
-            Box::new(self.insn_index.ids(address).filter_map(|id| self.insn(id)))
+            );
         }
+
+        let start = self.insns.partition_point(|insn| insn.address() < address);
+        let end = self.insns.partition_point(|insn| insn.address() <= address);
+        Box::new(self.insns[start..end].iter())
     }
 
     pub fn has_insns(&self) -> bool {
@@ -765,10 +757,8 @@ impl IncompleteFunction {
     }
 
     pub(crate) fn prepare_materialisation(
-        mut self,
+        self,
     ) -> Result<FunctionMaterialisation, IncompleteFunctionError> {
-        let mut expected_index = 0usize;
-        let mut ordered = true;
         for block in &self.blocks {
             if block.is_empty() {
                 return Err(IncompleteFunctionError::invalid_block_size(block.address()));
@@ -777,26 +767,8 @@ impl IncompleteFunction {
                 if self.insn(insn).is_none() {
                     return Err(IncompleteFunctionError::invalid_insn_id(insn));
                 }
-                ordered &= insn.index() == expected_index;
-                expected_index += 1;
             }
         }
-        ordered &= expected_index == self.insns.len();
-
-        let mut insns = if ordered {
-            BlockInsnSource::Ordered(mem::take(&mut self.insns).into_iter())
-        } else {
-            let mut remaining_uses = vec![0usize; self.insns.len()];
-            for block in &self.blocks {
-                for &insn in block.insns() {
-                    remaining_uses[insn.index()] += 1;
-                }
-            }
-            BlockInsnSource::Shared {
-                insns: mem::take(&mut self.insns).into_iter().map(Some).collect(),
-                remaining_uses,
-            }
-        };
         let mut blocks = Vec::with_capacity(self.blocks.len());
         let mut call_targets = BTreeSet::new();
         let mut coverage = AddressRangeSet::new();
@@ -805,7 +777,10 @@ impl IncompleteFunction {
         for block in &self.blocks {
             let size = NonZeroUsize::new(block.size())
                 .ok_or_else(|| IncompleteFunctionError::invalid_block_size(block.address()))?;
-            let block_insns = insns.take(block.insns());
+            let block_insns = block.insns().iter().map(|&id| {
+                self.insn(id)
+                    .expect("validated instruction must remain available")
+            });
             let materialisation = CodeBlockMaterialisation::new(
                 block.address(),
                 size,
@@ -907,5 +882,63 @@ impl IncompleteFunction {
         }
         let index = id.index();
         (index < self.blocks.len()).then_some(index)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ir::{InsnError, InsnProperties};
+
+    fn fall_through(address: Address) -> Result<Insn, InsnError> {
+        Insn::from_disassembly(address, 1, InsnProperties::FALL_THROUGH)
+    }
+
+    #[test]
+    fn sorted_insns_do_not_materialise_an_index() -> Result<(), InsnError> {
+        let first = Address::from(0x1000u64);
+        let second = first + 1u64;
+        let mut function = IncompleteFunction::new(first);
+
+        let InsnEntry::Vacant(entry) = function.insn_entry(first) else {
+            panic!("new function must not contain an instruction");
+        };
+        let first_id = entry.insert(fall_through(first)?);
+        let InsnEntry::Vacant(entry) = function.insn_entry(second) else {
+            panic!("new function must not contain the next instruction");
+        };
+        entry.insert(fall_through(second)?);
+
+        assert!(function.insn_index.is_empty());
+        assert!(function.contains_insn(first));
+        assert_eq!(function.first_insn_id_at(first), Some(first_id));
+        assert_eq!(function.insns_at(second).count(), 1);
+        assert!(function.insn_index.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn out_of_order_insns_materialise_an_index() -> Result<(), InsnError> {
+        let first = Address::from(0x1000u64);
+        let second = first + 1u64;
+        let mut function = IncompleteFunction::new(first);
+
+        let InsnEntry::Vacant(entry) = function.insn_entry(second) else {
+            panic!("new function must not contain an instruction");
+        };
+        entry.insert(fall_through(second)?);
+        let InsnEntry::Vacant(entry) = function.insn_entry(first) else {
+            panic!("new function must not contain the preceding instruction");
+        };
+        entry.insert(fall_through(first)?);
+
+        assert!(!function.insn_index.is_empty());
+        assert!(function.insns_unsorted);
+        assert!(function.contains_insn(first));
+        assert!(function.contains_insn(second));
+        function.sort_insns_by_address();
+        assert_eq!(function.insns()[0].address(), first);
+        assert_eq!(function.insns()[1].address(), second);
+        Ok(())
     }
 }

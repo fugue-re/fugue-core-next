@@ -9,10 +9,10 @@ use crate::types::{AttributeMap, BytesOrSlice};
 pub mod options;
 
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
+    EntityStorageReadTransaction, EntityStorageWriteTransaction, EntityWrite,
 };
 
 pub const ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS: &str = "storage.entities.rocksdb.options";
@@ -171,12 +171,17 @@ impl EntityStorageProvider for RocksDbEntityStorage {
         Ok(RocksDbEntityBytesAsIterator::boxed(self, prefix, f))
     }
 
-    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        RocksDbEntityTransaction::new_reader(self)
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+        Ok(Box::new(RocksDbEntityReader {
+            txn: self.database.transaction(),
+        }))
     }
 
-    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-        RocksDbEntityTransaction::new_writer(self)
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
+        Ok(Box::new(RocksDbEntityWriter {
+            batch: rocksdb::WriteBatchWithTransaction::default(),
+            database: &self.database,
+        }))
     }
 }
 
@@ -392,27 +397,11 @@ impl<'a, T> Iterator for RocksDbEntityBytesAsIterator<'a, T> {
     }
 }
 
-struct RocksDbEntityTransaction<'a> {
+struct RocksDbEntityReader<'a> {
     txn: rocksdb::Transaction<'a, rocksdb::OptimisticTransactionDB>,
 }
 
-impl<'a> RocksDbEntityTransaction<'a> {
-    fn new_reader(
-        storage: &'a RocksDbEntityStorage,
-    ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
-        let txn = storage.database.transaction();
-        Ok(Box::new(Self { txn }))
-    }
-
-    fn new_writer(
-        storage: &'a RocksDbEntityStorage,
-    ) -> Result<EntityBytesTransactionalWriter<'a>, EntityStorageError> {
-        let txn = storage.database.transaction();
-        Ok(Box::new(Self { txn }))
-    }
-}
-
-impl<'a> EntityStorageTransactionalReader<'a> for RocksDbEntityTransaction<'a> {
+impl EntityStorageReadTransaction for RocksDbEntityReader<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         self.txn
             .get(key)
@@ -428,19 +417,35 @@ impl<'a> EntityStorageTransactionalReader<'a> for RocksDbEntityTransaction<'a> {
     }
 }
 
-impl<'a> EntityStorageTransactionalWriter<'a> for RocksDbEntityTransaction<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        self.txn
-            .put(key, value)
-            .map_err(EntityStorageError::backing)
+struct RocksDbEntityWriter<'a> {
+    batch: rocksdb::WriteBatchWithTransaction<true>,
+    database: &'a rocksdb::OptimisticTransactionDB,
+}
+
+impl EntityStorageWriteTransaction for RocksDbEntityWriter<'_> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        self.batch.put(key, value);
+        Ok(())
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
-        self.txn.delete(key).map_err(EntityStorageError::backing)
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
+        self.batch.delete(key);
+        Ok(())
+    }
+
+    fn write_batch(&mut self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+        for write in writes {
+            match write.value() {
+                Some(value) => self.batch.put(write.key(), value),
+                None => self.batch.delete(write.key()),
+            }
+        }
+        Ok(())
     }
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        self.txn.commit().map_err(EntityStorageError::backing)
+        let Self { batch, database } = *self;
+        database.write(batch).map_err(EntityStorageError::backing)
     }
 }
 
@@ -454,7 +459,7 @@ mod test {
     use super::RocksDbEntityStorage;
     use crate::ir::Address;
     use crate::storage::entities::schema::EntityId;
-    use crate::storage::entities::{Entity, EntityStorage};
+    use crate::storage::entities::{Entity, EntityStorage, EntityWrite};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     struct TestEntity {
@@ -478,6 +483,33 @@ mod test {
 
     impl Entity for OtherTestEntity {
         const ID: EntityId = EntityId::new(126);
+    }
+
+    #[test]
+    fn rocksdb_applies_batch_in_order() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+        let first = Address::from(1u64);
+        let second = Address::from(2u64);
+        let first_value = rkyv::to_bytes::<rkyv::rancor::Error>(&TestEntity::new(1))?;
+        let second_value = rkyv::to_bytes::<rkyv::rancor::Error>(&TestEntity::new(2))?;
+        let replacement = rkyv::to_bytes::<rkyv::rancor::Error>(&TestEntity::new(3))?;
+        let writes = [
+            EntityWrite::insert_archived(TestEntity::ID.key_for(&first), first_value),
+            EntityWrite::insert_archived(TestEntity::ID.key_for(&second), second_value),
+            EntityWrite::insert_archived(TestEntity::ID.key_for(&first), replacement),
+            EntityWrite::remove(TestEntity::ID.key_for(&second)),
+        ];
+
+        storage.apply_batch(&writes)?;
+        assert_eq!(storage.get(&first)?, Some(TestEntity::new(3)));
+        assert_eq!(storage.get::<_, TestEntity>(&second)?, None);
+        Ok(())
     }
 
     #[test]

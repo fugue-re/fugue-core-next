@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_with::{FromInto, serde_as};
 
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesMapper, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter,
+    EntityStorageReadTransaction, EntityStorageWriteTransaction,
 };
 use crate::loader::Loadable;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
@@ -230,15 +230,11 @@ impl EntityStorageProvider for MdbxEntityStorage {
         MdbxEntityBytesAsIterator::boxed(self, prefix, f)
     }
 
-    fn transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction<'_>, EntityStorageError> {
         MdbxEntityReader::boxed(self)
     }
 
-    fn transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction<'_>, EntityStorageError> {
         MdbxEntityWriter::boxed(self)
     }
 }
@@ -478,13 +474,13 @@ struct MdbxEntityReader<'a> {
 impl<'a> MdbxEntityReader<'a> {
     fn boxed(
         storage: &'a MdbxEntityStorage,
-    ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
+    ) -> Result<EntityBytesReadTransaction<'a>, EntityStorageError> {
         let txn = storage.database.begin_ro_txn()?;
         Ok(Box::new(Self { txn }))
     }
 }
 
-impl<'a> EntityStorageTransactionalReader<'a> for MdbxEntityReader<'a> {
+impl EntityStorageReadTransaction for MdbxEntityReader<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let tbl = self.txn.open_table(None)?;
         let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
@@ -505,35 +501,21 @@ struct MdbxEntityWriter<'a> {
 impl<'a> MdbxEntityWriter<'a> {
     fn boxed(
         storage: &'a MdbxEntityStorage,
-    ) -> Result<EntityBytesTransactionalWriter<'a>, EntityStorageError> {
+    ) -> Result<EntityBytesWriteTransaction<'a>, EntityStorageError> {
         let txn = storage.database.begin_rw_txn()?;
         Ok(Box::new(Self { txn }))
     }
 }
 
-impl<'a> EntityStorageTransactionalReader<'a> for MdbxEntityWriter<'a> {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        let tbl = self.txn.open_table(None)?;
-        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
-        Ok(val.map(BytesOrSlice::from))
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        let tbl = self.txn.open_table(None)?;
-        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
-        Ok(val.is_some())
-    }
-}
-
-impl<'a> EntityStorageTransactionalWriter<'a> for MdbxEntityWriter<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+impl EntityStorageWriteTransaction for MdbxEntityWriter<'_> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         let tbl = self.txn.open_table(None)?;
         self.txn
             .put(&tbl, key, value.as_ref(), mdbx::WriteFlags::default())?;
         Ok(())
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
         let tbl = self.txn.open_table(None)?;
         self.txn.del(&tbl, key, None)?;
         Ok(())

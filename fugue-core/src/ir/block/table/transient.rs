@@ -220,17 +220,16 @@ impl CodeBlockTable {
     }
 
     pub(super) fn ids_at_starts(&self, starts: &[Address]) -> CodeBlockIdsByStart {
-        starts
-            .iter()
-            .map(|&address| {
-                (
-                    address,
-                    self.get_by_address(address)
-                        .map(CodeBlock::id)
-                        .collect::<CodeBlockIds>(),
-                )
-            })
-            .collect()
+        let mut locations = CodeBlockIdsByStart::with_capacity(starts.len());
+        for &address in starts {
+            locations.push(
+                address,
+                self.get_by_address(address)
+                    .map(CodeBlock::id)
+                    .collect::<CodeBlockIds>(),
+            );
+        }
+        locations
     }
 
     pub fn contains(&self, addr: Address) -> bool {

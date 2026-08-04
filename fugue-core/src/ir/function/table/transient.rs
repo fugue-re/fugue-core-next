@@ -4,7 +4,7 @@ use std::ops::RangeBounds;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use super::{FunctionIndex, FunctionTableError};
+use super::{CodeBlockOwners, FunctionIndex, FunctionTableError};
 use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, RawAddress};
 use crate::storage::EntityStorageError;
 use crate::storage::segments::space::AddressSpaceId;
@@ -71,10 +71,7 @@ impl FunctionTable {
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_owners(
-        &mut self,
-        owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
-    ) {
+    pub(super) fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, CodeBlockOwners>) {
         self.index.publish_owners(owners);
     }
 
@@ -223,7 +220,7 @@ impl FunctionTable {
             .map(|(address, _)| *address)
     }
 
-    pub(super) fn block_owners(&self, block: CodeBlockId) -> &[FunctionId] {
+    pub(super) fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
         self.index.owners(block)
     }
 

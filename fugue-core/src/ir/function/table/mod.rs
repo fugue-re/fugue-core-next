@@ -10,9 +10,10 @@ use smallvec::SmallVec;
 
 use crate::ir::function::FunctionMaterialisation;
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockMaterialisation,
-    CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator,
-    IncompleteFunctionError, PreparedCodeBlockMutation, RawAddress, Reference, ReferenceOrigin,
+    Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockIdsByStart,
+    CodeBlockMaterialisation, CodeBlockTable, Function, FunctionId, FunctionProperties, Id,
+    IdAllocator, IdSet, IncompleteFunctionError, PreparedCodeBlockMutation, RawAddress, Reference,
+    ReferenceOrigin,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
@@ -36,6 +37,7 @@ use transient::FunctionTable as TransientFunctionTable;
 
 pub type FunctionRef<'a> = EntityRef<'a, Function>;
 pub type FunctionMut<'a> = EntityMut<'a, Function>;
+type CodeBlockOwners = IdSet<Function>;
 
 const FUNCTION_TABLE_VERSION: u32 = 1;
 
@@ -51,7 +53,7 @@ impl Entity for FunctionTableHeader {
 struct FunctionIndex {
     allocator: IdAllocator<Function>,
     addresses: BTreeMap<Address, Id<Function>>,
-    owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
 }
 
 impl FunctionIndex {
@@ -73,10 +75,7 @@ impl FunctionIndex {
         blocks: impl IntoIterator<Item = CodeBlockId>,
     ) {
         for block in blocks {
-            let owners = self.owners.entry(block).or_default();
-            if let Err(index) = owners.binary_search(&function) {
-                owners.insert(index, function);
-            }
+            self.owners.entry(block).or_default().insert(function);
         }
     }
 
@@ -91,9 +90,7 @@ impl FunctionIndex {
     ) {
         for block in blocks {
             let remove = self.owners.get_mut(&block).is_some_and(|owners| {
-                if let Ok(index) = owners.binary_search(&function) {
-                    owners.remove(index);
-                }
+                owners.remove(function);
                 owners.is_empty()
             });
 
@@ -103,11 +100,11 @@ impl FunctionIndex {
         }
     }
 
-    fn owners(&self, block: CodeBlockId) -> &[FunctionId] {
-        self.owners.get(&block).map_or(&[], SmallVec::as_slice)
+    fn owners(&self, block: CodeBlockId) -> CodeBlockOwners {
+        self.owners.get(&block).cloned().unwrap_or_default()
     }
 
-    fn publish_owners(&mut self, mut staged: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>) {
+    fn publish_owners(&mut self, mut staged: FxHashMap<CodeBlockId, CodeBlockOwners>) {
         if self.owners.is_empty() {
             staged.retain(|_, owners| !owners.is_empty());
             self.owners = staged;
@@ -271,11 +268,11 @@ pub(crate) struct FunctionTableStage {
     function_reservations: Vec<FunctionId>,
     cancelled_functions: BTreeSet<FunctionId>,
     block_mutations: StagedEntities<CodeBlock, StagedBlock>,
-    block_locations: FxHashMap<Address, SmallVec<[CodeBlockId; 2]>>,
+    block_locations: CodeBlockIdsByStart,
     block_reservations: Vec<CodeBlockId>,
     cancelled_blocks: BTreeSet<CodeBlockId>,
-    owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
-    original_owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
+    original_owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
 }
 
 struct StagedFunction {
@@ -296,7 +293,7 @@ pub(crate) struct PreparedFunctionTables {
     cancelled_functions: BTreeSet<FunctionId>,
     function_reservations: Vec<FunctionId>,
     functions: Vec<PreparedFunctionEntry>,
-    owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>,
+    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
 }
 
 pub(crate) struct PreparedFunctionMutation {
@@ -362,6 +359,13 @@ struct PreparedFunctionEntry {
 }
 
 impl FunctionTableStage {
+    fn reserve_blocks(&mut self, additional: usize) {
+        self.block_locations.reserve(additional);
+        self.block_mutations.reserve(additional);
+        self.block_reservations.reserve(additional);
+        self.owners.reserve(additional);
+    }
+
     pub(crate) fn reserve_functions(&mut self, additional: usize) {
         self.function_mutations.reserve(additional);
         self.function_addresses.reserve(additional);
@@ -374,6 +378,7 @@ impl FunctionTableStage {
         blocks: &CodeBlockTable,
         mut function: FunctionMaterialisation,
     ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        self.reserve_blocks(function.block_count());
         self.load_existing_block_locations(blocks, &function)?;
         let entry = function.entry();
         let previous = self.function_by_address(functions, entry)?;
@@ -477,7 +482,7 @@ impl FunctionTableStage {
                 self.with_block(blocks, block, |block| {
                     block.coverage_into(&mut mutation.previous_coverage);
                 })?;
-                Self::remove_owner(self.owners_mut(functions, block), id);
+                self.owners_mut(functions, block).remove(id);
             }
             if previous.entry() != entry {
                 self.function_addresses.insert(previous.entry(), None);
@@ -486,7 +491,7 @@ impl FunctionTableStage {
 
         for (_, block) in function.blocks() {
             mutation.affected_blocks.push(block);
-            Self::insert_owner(self.owners_mut(functions, block), id);
+            self.owners_mut(functions, block).insert(id);
             if self
                 .block_mutations
                 .get(&block)
@@ -607,8 +612,8 @@ impl FunctionTableStage {
         blocks: &CodeBlockTable,
         materialisation: CodeBlockMaterialisation,
     ) -> Result<CodeBlockId, IncompleteFunctionError> {
-        if let Some(locations) = self.block_locations.get(&materialisation.address()) {
-            for &id in locations {
+        if self.block_locations.contains(materialisation.address()) {
+            for id in self.block_locations.ids(materialisation.address()) {
                 let matches = match self.block_mutations.get(&id) {
                     Some(StagedBlock {
                         block: Some(block), ..
@@ -667,7 +672,7 @@ impl FunctionTableStage {
                 is_new: true,
             },
         );
-        self.block_locations.entry(address).or_default().push(id);
+        self.block_locations.insert(address, id);
         Ok(id)
     }
 
@@ -682,14 +687,14 @@ impl FunctionTableStage {
 
         let mut starts = function
             .block_addresses()
-            .filter(|address| !self.block_locations.contains_key(address))
+            .filter(|address| !self.block_locations.contains(*address))
             .collect::<Vec<_>>();
         starts.sort_unstable();
         starts.dedup();
         let locations = blocks
             .try_ids_at_starts(&starts)
             .map_err(IncompleteFunctionError::block_creation)?;
-        self.block_locations.extend(locations);
+        self.block_locations.append(locations);
         Ok(())
     }
 
@@ -703,7 +708,7 @@ impl FunctionTableStage {
         let previous = self.function_by_id(functions, id)?;
         if let Some(previous) = &previous {
             for (_, block) in previous.blocks() {
-                Self::remove_owner(self.owners_mut(functions, block), id);
+                self.owners_mut(functions, block).remove(id);
             }
             if function
                 .as_ref()
@@ -714,7 +719,7 @@ impl FunctionTableStage {
         }
         if let Some(function) = &function {
             for (_, block) in function.blocks() {
-                Self::insert_owner(self.owners_mut(functions, block), id);
+                self.owners_mut(functions, block).insert(id);
             }
             self.function_addresses
                 .insert(function.entry(), Some(function.id()));
@@ -783,13 +788,7 @@ impl FunctionTableStage {
     }
 
     fn remove_block_location(&mut self, address: Address, id: CodeBlockId) {
-        let remove = self.block_locations.get_mut(&address).is_some_and(|ids| {
-            ids.retain(|candidate| *candidate != id);
-            ids.is_empty()
-        });
-        if remove {
-            self.block_locations.remove(&address);
-        }
+        self.block_locations.remove(address, id);
     }
 
     fn coverage(
@@ -870,7 +869,7 @@ impl FunctionTableStage {
                 .get(&block.id())
                 .cloned()
                 .unwrap_or_else(|| functions.block_owners(block.id()));
-            for owner in owners {
+            for owner in owners.iter() {
                 let Some(function) = self.function_by_id(functions, owner)? else {
                     continue;
                 };
@@ -976,30 +975,18 @@ impl FunctionTableStage {
         &'a mut self,
         functions: &FunctionTable,
         block: CodeBlockId,
-    ) -> &'a mut SmallVec<[FunctionId; 2]> {
+    ) -> &'a mut CodeBlockOwners {
         let is_new = self.new_block(block);
         let original_owners = &mut self.original_owners;
         self.owners.entry(block).or_insert_with(|| {
             if is_new {
-                SmallVec::new()
+                CodeBlockOwners::new()
             } else {
-                let owners = functions.block_owners(block);
-                original_owners.insert(block, owners.clone());
-                owners
+                let current = functions.block_owners(block);
+                original_owners.insert(block, current.clone());
+                current
             }
         })
-    }
-
-    fn insert_owner(owners: &mut SmallVec<[FunctionId; 2]>, function: FunctionId) {
-        if let Err(index) = owners.binary_search(&function) {
-            owners.insert(index, function);
-        }
-    }
-
-    fn remove_owner(owners: &mut SmallVec<[FunctionId; 2]>, function: FunctionId) {
-        if let Ok(index) = owners.binary_search(&function) {
-            owners.remove(index);
-        }
     }
 
     fn new_function(&self, id: FunctionId) -> bool {
@@ -1080,7 +1067,7 @@ impl FunctionTableStage {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(block)
                         .map_err(EntityStorageError::encode)?;
                     let encoded_size = encoded.len();
-                    writes.push(EntityWrite::insert_archive(
+                    writes.push(EntityWrite::insert_archived(
                         CodeBlock::ID.key_for(&id),
                         encoded,
                     ));
@@ -1129,7 +1116,7 @@ impl FunctionTableStage {
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(function)
                         .map_err(EntityStorageError::encode)?;
                     let encoded_size = encoded.len();
-                    writes.push(EntityWrite::insert_archive(
+                    writes.push(EntityWrite::insert_archived(
                         Function::ID.key_for(&id),
                         encoded,
                     ));
@@ -1446,7 +1433,7 @@ impl FunctionTable {
         }
     }
 
-    fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, SmallVec<[FunctionId; 2]>>) {
+    fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, CodeBlockOwners>) {
         match self {
             Self::Persistent(_) => {}
             Self::Transient(table) => table.publish_owners(owners),
@@ -1647,7 +1634,7 @@ impl FunctionTable {
     ) -> impl Iterator<Item = Id<Function>> + 'a {
         let mut functions = SmallVec::<[FunctionId; 8]>::new();
         for block in blocks.overlaps_range(range) {
-            for function in self.block_owners(block.id()) {
+            for function in self.block_owners(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
                 }
@@ -1660,7 +1647,10 @@ impl FunctionTable {
         &self,
         block: CodeBlockId,
     ) -> impl ExactSizeIterator<Item = FunctionId> + '_ {
-        self.block_owners(block).into_iter()
+        self.block_owners(block)
+            .iter()
+            .collect::<SmallVec<[FunctionId; 2]>>()
+            .into_iter()
     }
 
     pub(crate) fn functions_containing(
@@ -1671,7 +1661,7 @@ impl FunctionTable {
         let mut functions = SmallVec::new();
 
         for block in blocks.overlaps(address) {
-            for function in self.block_owners(block.id()) {
+            for function in self.block_owners(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
                 }
@@ -1681,10 +1671,10 @@ impl FunctionTable {
         functions
     }
 
-    fn block_owners(&self, block: CodeBlockId) -> SmallVec<[FunctionId; 2]> {
+    fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
         match self {
             Self::Persistent(table) => table.block_owners(block),
-            Self::Transient(table) => table.block_owners(block).into(),
+            Self::Transient(table) => table.block_owners(block),
         }
     }
 

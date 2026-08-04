@@ -281,7 +281,7 @@ impl SymbolTable {
                 let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
                     .map_err(EntityStorageError::encode)?;
                 let encoded_size = encoded.len();
-                writes.push(EntityWrite::insert_archive(
+                writes.push(EntityWrite::insert_archived(
                     SymbolEntry::ID.key_for(&id),
                     encoded,
                 ));
@@ -438,7 +438,7 @@ impl SymbolTable {
             rkyv::to_bytes::<rkyv::rancor::Error>(&entry).map_err(EntityStorageError::encode)?;
         let encoded_size = encoded.len();
         let mut writes = EntityWriteBatch::new();
-        writes.push(EntityWrite::insert_archive(
+        writes.push(EntityWrite::insert_archived(
             SymbolEntry::ID.key_for(&id),
             encoded,
         ));

@@ -10,6 +10,8 @@ use crate::ir::{Address, CodeBlock, Function, Id, Problem, RawAddress, Switch};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
+const INLINE_ENTITY_KEY_SIZE: usize = 16;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct EntityKeyId(u8);
@@ -39,15 +41,11 @@ impl EntityId {
         Self(index as u8)
     }
 
-    pub fn key_for<K: EntityKey>(self, key: &K) -> Bytes {
+    pub fn key_for<K: EntityKey>(self, key: &K) -> EntityKeyBytes {
         let mut bytes = SmallVec::<[u8; INLINE_ENTITY_KEY_SIZE]>::new();
         bytes.extend(EntityKeyPrefix::new(K::ID, self).0);
         key.encode(&mut bytes);
-        if bytes.spilled() {
-            Bytes::from(bytes.into_vec())
-        } else {
-            Bytes::copy_from_slice(&bytes)
-        }
+        EntityKeyBytes(bytes)
     }
 }
 
@@ -136,15 +134,11 @@ impl EntityKeyPrefix {
             .flatten()
     }
 
-    pub fn join(self, key: &[u8]) -> Bytes {
+    pub fn join(self, key: &[u8]) -> EntityKeyBytes {
         let mut bytes = SmallVec::<[u8; INLINE_ENTITY_KEY_SIZE]>::new();
         bytes.extend(self.0);
         bytes.extend(key.iter().copied());
-        if bytes.spilled() {
-            Bytes::from(bytes.into_vec())
-        } else {
-            Bytes::copy_from_slice(&bytes)
-        }
+        EntityKeyBytes(bytes)
     }
 
     pub fn split(bytes: &[u8]) -> Option<(Self, &[u8])> {
@@ -183,7 +177,38 @@ impl TryFrom<&[u8]> for EntityKeyPrefix {
     }
 }
 
-const INLINE_ENTITY_KEY_SIZE: usize = 32;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntityKeyBytes(SmallVec<[u8; INLINE_ENTITY_KEY_SIZE]>);
+
+impl From<EntityKeyBytes> for Bytes {
+    fn from(key: EntityKeyBytes) -> Self {
+        if key.0.spilled() {
+            Self::from(key.0.into_vec())
+        } else {
+            Self::copy_from_slice(&key.0)
+        }
+    }
+}
+
+impl From<Bytes> for EntityKeyBytes {
+    fn from(bytes: Bytes) -> Self {
+        Self(SmallVec::from_slice(&bytes))
+    }
+}
+
+impl AsRef<[u8]> for EntityKeyBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for EntityKeyBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
 
 pub trait EntityKey: Clone + PartialEq + Eq + Hash {
     const ID: EntityKeyId;

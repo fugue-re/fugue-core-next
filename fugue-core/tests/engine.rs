@@ -44,13 +44,12 @@ use fugue_core::project::{Project, ProjectError};
 use fugue_core::queries::{CallEdge, MappingRow, QueryError, QueryPage, SymbolRow};
 use fugue_core::storage::{
     BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesAsIterator,
-    EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter,
+    EntityBytesIterator, EntityBytesReadTransaction, EntityBytesWriteTransaction,
     EntityKeyBytesIterator, EntityStorage, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageTransactionalReader,
-    EntityStorageTransactionalWriter, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
-    ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind,
-    SegmentMappingProvenance, SegmentStorage, StorageContainer, StoragePersistence,
-    StorageProvider, StorageProviderError, TransientStorageProvider,
+    EntityStorageProviderFromLoadable, EntityStorageWriteTransaction, InMemoryEntityStorage,
+    InMemorySegmentStorage, PERSISTENT, ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags,
+    SegmentMappingKind, SegmentMappingProvenance, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
@@ -80,8 +79,11 @@ static FAIL_ENTITY_COMMITS: AtomicBool = AtomicBool::new(false);
 static FAILING_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static FAILING_ANALYSER_TEST_LOCK: Mutex<()> = Mutex::new(());
 static FAIL_ENTITY_REMOVES: AtomicBool = AtomicBool::new(false);
-static PROJECT_REVISION_KEY: LazyLock<Bytes> =
-    LazyLock::new(|| ENTITY_PROJECT_REVISION_ID.key_for(&ProjectEntity::Revision));
+static PROJECT_REVISION_KEY: LazyLock<Bytes> = LazyLock::new(|| {
+    ENTITY_PROJECT_REVISION_ID
+        .key_for(&ProjectEntity::Revision)
+        .into()
+});
 static PROJECT_REVISION_INSERTS: AtomicUsize = AtomicUsize::new(0);
 static STAGED_FAILURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 static STORM_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -110,22 +112,12 @@ struct FailingEntityWriter<'a> {
     inner: BufferedEntityWriter<'a, FailingEntityStorage>,
 }
 
-impl<'a> EntityStorageTransactionalReader<'a> for FailingEntityWriter<'a> {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        self.inner.get(key)
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        self.inner.contains(key)
-    }
-}
-
-impl<'a> EntityStorageTransactionalWriter<'a> for FailingEntityWriter<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+impl EntityStorageWriteTransaction for FailingEntityWriter<'_> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         self.inner.insert(key, value)
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
         self.inner.remove(key)
     }
 
@@ -216,11 +208,13 @@ impl EntityStorageProvider for FailingEntityStorage {
         self.inner.iter_prefix_as(prefix, f)
     }
 
-    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        Ok(Box::new(BufferedEntityWriter::new(self)))
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+        Err(EntityStorageError::unsupported_with(
+            "failing storage does not support read transactions",
+        ))
     }
 
-    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
         Ok(Box::new(FailingEntityWriter {
             inner: BufferedEntityWriter::new(self),
         }))

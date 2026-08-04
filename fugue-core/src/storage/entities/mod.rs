@@ -1,13 +1,11 @@
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io;
-use std::mem::{ManuallyDrop, align_of};
+use std::mem::align_of;
 use std::ops::{Bound, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::vec::IntoIter;
 
-use bitflags::bitflags;
 use bytes::Bytes;
 use rkyv::Archived;
 use rkyv::api::root_position;
@@ -40,8 +38,8 @@ pub use rocksdb::{ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS, RocksDbEntityStorage
 
 pub(crate) mod schema;
 pub use schema::{
-    ENTITY_PROJECT_REVISION_ID, Entity, EntityId, EntityKey, EntityKeyId, EntityKeyPrefix,
-    ProjectEntity,
+    ENTITY_PROJECT_REVISION_ID, Entity, EntityId, EntityKey, EntityKeyBytes, EntityKeyId,
+    EntityKeyPrefix, ProjectEntity,
 };
 
 #[cfg(feature = "sqlite")]
@@ -168,7 +166,7 @@ pub type EntityKeyIterator<'a, K> = Box<dyn Iterator<Item = Result<K, EntityStor
 
 #[derive(Debug)]
 pub struct EntityWrite {
-    key: Bytes,
+    key: EntityKeyBytes,
     value: Option<EntityWriteValue>,
 }
 
@@ -188,22 +186,25 @@ impl EntityWriteValue {
 }
 
 impl EntityWrite {
-    pub fn insert(key: Bytes, value: Bytes) -> Self {
+    pub fn insert(key: impl Into<EntityKeyBytes>, value: Bytes) -> Self {
         Self {
-            key,
+            key: key.into(),
             value: Some(EntityWriteValue::Shared(value)),
         }
     }
 
-    pub(crate) fn insert_archive(key: Bytes, value: AlignedVec) -> Self {
+    pub(crate) fn insert_archived(key: impl Into<EntityKeyBytes>, value: AlignedVec) -> Self {
         Self {
-            key,
+            key: key.into(),
             value: Some(EntityWriteValue::Archive(value)),
         }
     }
 
-    pub fn remove(key: Bytes) -> Self {
-        Self { key, value: None }
+    pub fn remove(key: impl Into<EntityKeyBytes>) -> Self {
+        Self {
+            key: key.into(),
+            value: None,
+        }
     }
 
     pub fn key(&self) -> &[u8] {
@@ -246,7 +247,7 @@ impl EntityWriteBatch {
     {
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
-        self.push(EntityWrite::insert_archive(E::ID.key_for(key), encoded));
+        self.push(EntityWrite::insert_archived(E::ID.key_for(key), encoded));
         Ok(())
     }
 
@@ -302,19 +303,19 @@ impl Deref for EntityWriteBatch {
     }
 }
 
-pub trait EntityStorageTransactionalReader<'a> {
+pub trait EntityStorageReadTransaction {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
 }
 
-pub type EntityBytesTransactionalReader<'a> = Box<dyn EntityStorageTransactionalReader<'a> + 'a>;
+pub type EntityBytesReadTransaction<'a> = Box<dyn EntityStorageReadTransaction + 'a>;
 
-pub struct EntityTransactionalReader<'a> {
-    inner: EntityBytesTransactionalReader<'a>,
+pub struct EntityReadTransaction<'a> {
+    inner: EntityBytesReadTransaction<'a>,
 }
 
-impl<'a> EntityTransactionalReader<'a> {
-    pub fn new(inner: EntityBytesTransactionalReader<'a>) -> Self {
+impl<'a> EntityReadTransaction<'a> {
+    pub fn new(inner: EntityBytesReadTransaction<'a>) -> Self {
         Self { inner }
     }
 
@@ -345,11 +346,11 @@ impl<'a> EntityTransactionalReader<'a> {
     }
 }
 
-pub trait EntityStorageTransactionalWriter<'a>: EntityStorageTransactionalReader<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError>;
+pub trait EntityStorageWriteTransaction {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError>;
 
-    fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+    fn write_batch(&mut self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
         for write in writes {
             match write.value() {
                 Some(value) => self.insert(write.key(), BytesOrSlice::from(value))?,
@@ -362,58 +363,23 @@ pub trait EntityStorageTransactionalWriter<'a>: EntityStorageTransactionalReader
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError>;
 }
 
-pub type EntityBytesTransactionalWriter<'a> = Box<dyn EntityStorageTransactionalWriter<'a> + 'a>;
+pub type EntityBytesWriteTransaction<'a> = Box<dyn EntityStorageWriteTransaction + 'a>;
 
-pub struct EntityTransactionalWriter<'a> {
-    inner: ManuallyDrop<EntityBytesTransactionalWriter<'a>>,
-    flags: EntityTransactionalWriterFlags,
+pub struct EntityWriteTransaction<'a> {
+    inner: Option<EntityBytesWriteTransaction<'a>>,
+    auto_commit: bool,
 }
 
-bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct EntityTransactionalWriterFlags: u8 {
-        const NONE        = 0b0000_0000;
-        const AUTO_COMMIT = 0b0000_0001;
-        const DROPPED     = 0b0000_0010;
-    }
-}
-
-impl<'a> EntityTransactionalWriter<'a> {
-    pub fn new(inner: EntityBytesTransactionalWriter<'a>) -> Self {
+impl<'a> EntityWriteTransaction<'a> {
+    pub fn new(inner: EntityBytesWriteTransaction<'a>) -> Self {
         Self {
-            inner: ManuallyDrop::new(inner),
-            flags: EntityTransactionalWriterFlags::NONE,
+            inner: Some(inner),
+            auto_commit: false,
         }
     }
 
-    pub fn get<K: EntityKey, E: Entity>(&self, key: &K) -> Result<Option<E>, EntityStorageError> {
-        let key = E::ID.key_for(key);
-        self.inner
-            .get(&key)?
-            .map(|bytes| decode_entity(bytes.as_slice()))
-            .transpose()
-    }
-
-    pub fn get_as<K, E, F, T>(&self, key: &K, mut f: F) -> Result<Option<T>, EntityStorageError>
-    where
-        K: EntityKey,
-        E: Entity,
-        F: FnMut(&[u8]) -> Result<T, EntityStorageError>,
-    {
-        let key = E::ID.key_for(key);
-        self.inner
-            .get(&key)?
-            .map(|bytes| f(bytes.as_slice()))
-            .transpose()
-    }
-
-    pub fn contains<K: EntityKey, E: Entity>(&self, key: &K) -> Result<bool, EntityStorageError> {
-        let key = E::ID.key_for(key);
-        self.inner.contains(&key)
-    }
-
     pub fn insert<K: EntityKey, E: Entity>(
-        &self,
+        &mut self,
         key: &K,
         entity: &E,
     ) -> Result<(), EntityStorageError> {
@@ -421,44 +387,44 @@ impl<'a> EntityTransactionalWriter<'a> {
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
         self.inner
+            .as_mut()
+            .expect("write transaction available")
             .insert(&key, BytesOrSlice::from(encoded.as_ref()))
     }
 
-    pub fn remove<K: EntityKey, E: Entity>(&self, key: &K) -> Result<(), EntityStorageError> {
+    pub fn remove<K: EntityKey, E: Entity>(&mut self, key: &K) -> Result<(), EntityStorageError> {
         let key = E::ID.key_for(key);
-        self.inner.remove(&key)
+        self.inner
+            .as_mut()
+            .expect("write transaction available")
+            .remove(&key)
     }
 
     pub fn enable_auto_commit(&mut self) {
-        self.flags |= EntityTransactionalWriterFlags::AUTO_COMMIT;
+        self.auto_commit = true;
     }
 
     pub fn disable_auto_commit(&mut self) {
-        self.flags
-            .remove(EntityTransactionalWriterFlags::AUTO_COMMIT);
+        self.auto_commit = false;
     }
 
     pub fn commit(mut self) -> Result<(), EntityStorageError> {
-        self.flags.insert(EntityTransactionalWriterFlags::DROPPED);
-        unsafe { ManuallyDrop::take(&mut self.inner) }.commit()
+        self.inner
+            .take()
+            .expect("write transaction available")
+            .commit()
     }
 }
 
-impl<'a> Drop for EntityTransactionalWriter<'a> {
+impl Drop for EntityWriteTransaction<'_> {
     fn drop(&mut self) {
-        if self.flags.contains(EntityTransactionalWriterFlags::DROPPED) {
-            // if the writer was already dropped, we do not need to drop/commit
+        let Some(inner) = self.inner.take() else {
             return;
-        }
-
-        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
-
-        if self
-            .flags
-            .contains(EntityTransactionalWriterFlags::AUTO_COMMIT)
-            && let Err(e) = inner.commit()
+        };
+        if self.auto_commit
+            && let Err(error) = inner.commit()
         {
-            tracing::error!("failed to commit transaction: {e}");
+            tracing::error!("failed to commit transaction: {error}");
         }
     }
 }
@@ -517,8 +483,8 @@ pub trait EntityStorageProvider: Send + Sync {
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a;
 
-    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
-    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError>;
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError>;
 
     fn persistence(&self) -> StoragePersistence {
         PERSISTENT
@@ -535,7 +501,7 @@ where
     S: EntityStorageProvider + ?Sized,
 {
     storage: &'a S,
-    writes: RefCell<Vec<BufferedEntityWrite>>,
+    writes: Vec<BufferedEntityWrite>,
 }
 
 impl<'a, S> BufferedEntityWriter<'a, S>
@@ -545,51 +511,37 @@ where
     pub fn new(storage: &'a S) -> Self {
         Self {
             storage,
-            writes: RefCell::new(Vec::new()),
+            writes: Vec::new(),
         }
     }
 }
 
-impl<'a, S> EntityStorageTransactionalReader<'a> for BufferedEntityWriter<'a, S>
+impl<S> EntityStorageWriteTransaction for BufferedEntityWriter<'_, S>
 where
     S: EntityStorageProvider + ?Sized,
 {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        self.storage.get(key)
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        self.storage.contains(key)
-    }
-}
-
-impl<'a, S> EntityStorageTransactionalWriter<'a> for BufferedEntityWriter<'a, S>
-where
-    S: EntityStorageProvider + ?Sized,
-{
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         if key.len() < schema::ENTITY_PREFIX_SIZE {
             return Err(EntityStorageError::InvalidKeyFormat);
         }
-        self.writes.borrow_mut().push(BufferedEntityWrite::Insert(
+        self.writes.push(BufferedEntityWrite::Insert(
             Bytes::copy_from_slice(key),
             value.into_bytes(),
         ));
         Ok(())
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
         if key.len() < schema::ENTITY_PREFIX_SIZE {
             return Err(EntityStorageError::InvalidKeyFormat);
         }
         self.writes
-            .borrow_mut()
             .push(BufferedEntityWrite::Remove(Bytes::copy_from_slice(key)));
         Ok(())
     }
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        for write in self.writes.into_inner() {
+        for write in self.writes {
             match write {
                 BufferedEntityWrite::Insert(key, value) => {
                     self.storage
@@ -634,13 +586,9 @@ pub trait ErasedEntityStorageProvider: Send + Sync {
         mapper: OutMapper2<'a>,
     ) -> Result<EntityBytesAsIterator<'a, Out>, EntityStorageError>;
 
-    fn erased_transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader, EntityStorageError>;
+    fn erased_read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError>;
 
-    fn erased_transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter, EntityStorageError>;
+    fn erased_write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError>;
 
     fn erased_persistence(&self) -> StoragePersistence;
 }
@@ -707,12 +655,12 @@ impl EntityStorageProvider for dyn ErasedEntityStorageProvider {
         Ok(Box::new(iter))
     }
 
-    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        self.erased_transactional_reader()
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+        self.erased_read_transaction()
     }
 
-    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-        self.erased_transactional_writer()
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
+        self.erased_write_transaction()
     }
 
     fn persistence(&self) -> StoragePersistence {
@@ -780,16 +728,12 @@ where
         Ok(Box::new(iter))
     }
 
-    fn erased_transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        self.transactional_reader()
+    fn erased_read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+        self.read_transaction()
     }
 
-    fn erased_transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
-        self.transactional_writer()
+    fn erased_write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
+        self.write_transaction()
     }
 
     fn erased_persistence(&self) -> StoragePersistence {
@@ -954,18 +898,14 @@ impl EntityStorage {
         })
     }
 
-    pub fn transactional_reader(
-        &self,
-    ) -> Result<EntityTransactionalReader<'_>, EntityStorageError> {
-        let reader = self.backing.transactional_reader()?;
-        Ok(EntityTransactionalReader::new(reader))
+    pub fn read_transaction(&self) -> Result<EntityReadTransaction<'_>, EntityStorageError> {
+        let reader = self.backing.read_transaction()?;
+        Ok(EntityReadTransaction::new(reader))
     }
 
-    pub fn transactional_writer(
-        &self,
-    ) -> Result<EntityTransactionalWriter<'_>, EntityStorageError> {
-        let writer = self.backing.transactional_writer()?;
-        Ok(EntityTransactionalWriter::new(writer))
+    pub fn write_transaction(&self) -> Result<EntityWriteTransaction<'_>, EntityStorageError> {
+        let writer = self.backing.write_transaction()?;
+        Ok(EntityWriteTransaction::new(writer))
     }
 
     pub(crate) fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
@@ -973,7 +913,12 @@ impl EntityStorage {
             return Ok(());
         }
 
-        let writer = self.backing.transactional_writer().map_err(|error| {
+        let result = (|| {
+            let mut writer = self.backing.write_transaction()?;
+            writer.write_batch(writes)?;
+            writer.commit()
+        })();
+        result.map_err(|error| {
             if matches!(error, EntityStorageError::Unsupported(_)) {
                 EntityStorageError::unsupported_with(
                     "entity storage does not support atomic batch admission",
@@ -981,9 +926,7 @@ impl EntityStorage {
             } else {
                 error
             }
-        })?;
-        writer.apply_batch(writes)?;
-        writer.commit()
+        })
     }
 
     pub fn persistence(&self) -> StoragePersistence {
@@ -1029,29 +972,15 @@ mod test {
         const ID: EntityId = EntityId::new(1);
     }
 
-    struct TestTransactionalStorage;
+    struct TestReadTransaction;
 
-    impl<'a> EntityStorageTransactionalReader<'a> for TestTransactionalStorage {
+    impl EntityStorageReadTransaction for TestReadTransaction {
         fn get(&self, _key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
             Ok(Some(BytesOrSlice::from(Vec::new())))
         }
 
         fn contains(&self, _key: &[u8]) -> Result<bool, EntityStorageError> {
             Ok(true)
-        }
-    }
-
-    impl<'a> EntityStorageTransactionalWriter<'a> for TestTransactionalStorage {
-        fn insert(&self, _key: &[u8], _value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-            Ok(())
-        }
-
-        fn remove(&self, _key: &[u8]) -> Result<(), EntityStorageError> {
-            Ok(())
-        }
-
-        fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-            Ok(())
         }
     }
 
@@ -1102,22 +1031,14 @@ mod test {
     }
 
     #[test]
-    fn transactional_get_as_preserves_closure_error_kind() {
+    fn read_transaction_get_as_preserves_closure_error_kind() {
         let address = Address::from(42u64);
-        let reader = EntityTransactionalReader::new(Box::new(TestTransactionalStorage));
+        let reader = EntityReadTransaction::new(Box::new(TestReadTransaction));
         let error = reader
             .get_as::<_, TestEntity, _, ()>(&address, |_| {
                 Err(EntityStorageError::backing_with("reader sentinel"))
             })
             .expect_err("reader closure error must be returned");
-        assert!(matches!(error, EntityStorageError::Backing(_)));
-
-        let writer = EntityTransactionalWriter::new(Box::new(TestTransactionalStorage));
-        let error = writer
-            .get_as::<_, TestEntity, _, ()>(&address, |_| {
-                Err(EntityStorageError::backing_with("writer sentinel"))
-            })
-            .expect_err("writer closure error must be returned");
         assert!(matches!(error, EntityStorageError::Backing(_)));
     }
 
@@ -1147,7 +1068,7 @@ mod test {
         };
         let encoded = rkyv::to_bytes::<RkyvError>(&entity).map_err(EntityStorageError::encode)?;
         let writes = [
-            EntityWrite::insert_archive(Bytes::copy_from_slice(&key), encoded),
+            EntityWrite::insert_archived(Bytes::copy_from_slice(&key), encoded),
             EntityWrite::insert(Bytes::from_static(b"x"), Bytes::from_static(b"value")),
         ];
 
@@ -1168,7 +1089,7 @@ mod test {
         let switch = Switch::new(id, Address::from(42u64), SwitchModel::Explicit);
         let encoded = rkyv::to_bytes::<RkyvError>(&switch).map_err(EntityStorageError::encode)?;
         let writes = [
-            EntityWrite::insert_archive(Bytes::copy_from_slice(&key), encoded),
+            EntityWrite::insert_archived(Bytes::copy_from_slice(&key), encoded),
             EntityWrite::insert(Bytes::from_static(b"x"), Bytes::from_static(b"value")),
         ];
 

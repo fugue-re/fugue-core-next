@@ -256,7 +256,7 @@ impl IlStage {
             }
             let key = IlOverride::ID.key_for(key);
             writes.push(match &mutation.value {
-                Some(staged) => EntityWrite::insert_archive(
+                Some(staged) => EntityWrite::insert_archived(
                     key,
                     rkyv::to_bytes::<rkyv::rancor::Error>(&(staged.encode)(
                         staged.artefact.as_ref(),

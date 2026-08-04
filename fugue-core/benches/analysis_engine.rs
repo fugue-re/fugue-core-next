@@ -29,8 +29,8 @@ use fugue_core::storage::DefaultPersistentSegmentStorage;
 use fugue_core::storage::PersistentStorageProvider;
 use fugue_core::storage::{
     BufferedEntityWriter, DEFAULT_SPACE_ID, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityStorage, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityBytesReadTransaction, EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityStorage,
+    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
     InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT, SegmentStorage, StorageContainer,
     StoragePersistence, StorageProvider, StorageProviderError,
 };
@@ -250,15 +250,13 @@ impl EntityStorageProvider for CountingEntityStorage {
         self.inner.iter_prefix_as(prefix, f)
     }
 
-    fn transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
-        Ok(Box::new(BufferedEntityWriter::new(self)))
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction<'_>, EntityStorageError> {
+        Err(EntityStorageError::unsupported_with(
+            "counting storage does not support read transactions",
+        ))
     }
 
-    fn transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction<'_>, EntityStorageError> {
         Ok(Box::new(BufferedEntityWriter::new(self)))
     }
 

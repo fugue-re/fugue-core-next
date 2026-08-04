@@ -10,11 +10,10 @@ use fugue_core::loader::Loadable;
 use fugue_core::project::Project;
 use fugue_core::storage::{
     DefaultPersistentSegmentStorage, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
+    EntityBytesReadTransaction, EntityBytesWriteTransaction, EntityKeyBytesIterator,
     EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    EntityStorageProviderFromStorage, EntityStorageTransactionalReader,
-    EntityStorageTransactionalWriter, PERSISTENT, PersistentStorageProvider, SqliteEntityStorage,
-    StoragePersistence,
+    EntityStorageProviderFromStorage, EntityStorageWriteTransaction, PERSISTENT,
+    PersistentStorageProvider, SqliteEntityStorage, StoragePersistence,
 };
 use fugue_core::types::{ATTRIBUTE_PROJECT_PATH, AttributeMap, BytesOrSlice};
 
@@ -34,7 +33,7 @@ struct InterruptingSqliteStorage {
 }
 
 struct InterruptingSqliteWriter<'a> {
-    inner: EntityBytesTransactionalWriter<'a>,
+    inner: EntityBytesWriteTransaction<'a>,
 }
 
 impl InterruptingSqliteStorage {
@@ -49,23 +48,13 @@ impl InterruptingSqliteStorage {
     }
 }
 
-impl<'a> EntityStorageTransactionalReader<'a> for InterruptingSqliteWriter<'a> {
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        self.inner.get(key)
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        self.inner.contains(key)
-    }
-}
-
-impl<'a> EntityStorageTransactionalWriter<'a> for InterruptingSqliteWriter<'a> {
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+impl EntityStorageWriteTransaction for InterruptingSqliteWriter<'_> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         InterruptingSqliteStorage::interrupt_write()?;
         self.inner.insert(key, value)
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
         InterruptingSqliteStorage::interrupt_write()?;
         self.inner.remove(key)
     }
@@ -159,13 +148,13 @@ impl EntityStorageProvider for InterruptingSqliteStorage {
         self.inner.iter_prefix_as(prefix, f)
     }
 
-    fn transactional_reader(&self) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-        self.inner.transactional_reader()
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+        self.inner.read_transaction()
     }
 
-    fn transactional_writer(&self) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
         Ok(Box::new(InterruptingSqliteWriter {
-            inner: self.inner.transactional_writer()?,
+            inner: self.inner.write_transaction()?,
         }))
     }
 

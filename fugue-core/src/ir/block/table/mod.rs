@@ -1,12 +1,14 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::vec::IntoIter;
 
 use iset::IntervalMap;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CodeBlock, Id, IdAllocator, IdSet, RawAddress,
+    Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, Id, IdAllocator, IdSet,
+    RawAddress,
 };
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_TABLE_ID;
@@ -84,39 +86,93 @@ pub enum CodeBlockTable {
 pub type CodeBlockRef<'a> = EntityRef<'a, CodeBlock>;
 pub(crate) type CodeBlockIds = SmallVec<[Id<CodeBlock>; 2]>;
 
+#[derive(Default)]
 pub(crate) struct CodeBlockIdsByStart {
-    entries: Vec<(Address, CodeBlockIds)>,
+    additional: FxHashMap<Address, CodeBlockIds>,
+    first: FxHashMap<Address, CodeBlockId>,
 }
 
 impl CodeBlockIdsByStart {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            entries: Vec::with_capacity(capacity),
+            additional: FxHashMap::default(),
+            first: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
         }
     }
 
     fn push(&mut self, address: Address, ids: CodeBlockIds) {
-        self.entries.push((address, ids));
-    }
-}
-
-impl FromIterator<(Address, CodeBlockIds)> for CodeBlockIdsByStart {
-    fn from_iter<T>(entries: T) -> Self
-    where
-        T: IntoIterator<Item = (Address, CodeBlockIds)>,
-    {
-        Self {
-            entries: entries.into_iter().collect(),
+        for id in ids {
+            self.insert(address, id);
         }
     }
-}
 
-impl IntoIterator for CodeBlockIdsByStart {
-    type Item = (Address, CodeBlockIds);
-    type IntoIter = IntoIter<Self::Item>;
+    pub(in crate::ir) fn append(&mut self, locations: Self) {
+        for (address, id) in locations.first {
+            self.insert(address, id);
+        }
+        for (address, ids) in locations.additional {
+            for id in ids {
+                self.insert(address, id);
+            }
+        }
+    }
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+    pub(in crate::ir) fn contains(&self, address: Address) -> bool {
+        self.first.contains_key(&address)
+    }
+
+    pub(in crate::ir) fn ids(&self, address: Address) -> impl Iterator<Item = CodeBlockId> + '_ {
+        self.first
+            .get(&address)
+            .copied()
+            .into_iter()
+            .chain(self.additional.get(&address).into_iter().flatten().copied())
+    }
+
+    pub(in crate::ir) fn insert(&mut self, address: Address, id: CodeBlockId) {
+        match self.first.entry(address) {
+            Entry::Vacant(entry) => {
+                entry.insert(id);
+            }
+            Entry::Occupied(_) => self.additional.entry(address).or_default().push(id),
+        }
+    }
+
+    pub(in crate::ir) fn remove(&mut self, address: Address, id: CodeBlockId) {
+        if self.first.get(&address).copied() == Some(id) {
+            let replacement = self
+                .additional
+                .get_mut(&address)
+                .and_then(|ids| (!ids.is_empty()).then(|| ids.remove(0)));
+            if self
+                .additional
+                .get(&address)
+                .is_some_and(SmallVec::is_empty)
+            {
+                self.additional.remove(&address);
+            }
+            match replacement {
+                Some(replacement) => {
+                    self.first.insert(address, replacement);
+                }
+                None => {
+                    self.first.remove(&address);
+                }
+            }
+            return;
+        }
+
+        let remove = self.additional.get_mut(&address).is_some_and(|ids| {
+            ids.retain(|candidate| *candidate != id);
+            ids.is_empty()
+        });
+        if remove {
+            self.additional.remove(&address);
+        }
+    }
+
+    pub(in crate::ir) fn reserve(&mut self, additional: usize) {
+        self.first.reserve(additional);
     }
 }
 

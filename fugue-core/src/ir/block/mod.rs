@@ -3,7 +3,7 @@ use std::ops::RangeInclusive;
 
 use smallvec::SmallVec;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id, Insn, InsnList};
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id, Insn};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
 use crate::storage::entities::{Entity, EntityId, MutableEntity};
@@ -15,7 +15,8 @@ pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
 pub(crate) use table::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES, PreparedCodeBlockMutation,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, CodeBlockIdsByStart, DEFAULT_CODE_BLOCK_CACHE_BYTES,
+    PreparedCodeBlockMutation,
 };
 pub use table::{CodeBlockRef, CodeBlockTable};
 
@@ -89,15 +90,25 @@ pub(crate) struct CodeBlockMaterialisation {
 }
 
 impl CodeBlockFlow {
-    fn from_insns(start: Address, size: usize, insns: &[Insn]) -> Self {
-        let targets = insns
-            .iter()
-            .flat_map(Insn::flow_targets)
-            .filter(|target| !target.kind().is_fall_through() || target.to() == start + size)
-            .map(|target| CodeBlockFlowTarget::from_flow(start, size, target))
-            .collect();
+    fn from_insns<'a>(
+        start: Address,
+        size: usize,
+        insns: impl IntoIterator<Item = &'a Insn>,
+    ) -> Self {
+        let mut targets = SmallVec::new();
         let mut properties = CodeBlockProperties::NONE;
-        if let Some(terminator) = insns.last() {
+        let mut terminator = None;
+        for insn in insns {
+            targets.extend(
+                insn.flow_targets()
+                    .filter(|target| {
+                        !target.kind().is_fall_through() || target.to() == start + size
+                    })
+                    .map(|target| CodeBlockFlowTarget::from_flow(start, size, target)),
+            );
+            terminator = Some(insn);
+        }
+        if let Some(terminator) = terminator {
             if terminator.is_call() {
                 properties |= CodeBlockProperties::CALL;
             }
@@ -254,13 +265,13 @@ impl CodeBlock {
 }
 
 impl CodeBlockMaterialisation {
-    pub(crate) fn new(
+    pub(crate) fn new<'a>(
         address: Address,
         size: NonZeroUsize,
-        insns: InsnList,
+        insns: impl IntoIterator<Item = &'a Insn>,
         context: ContextSet,
     ) -> Self {
-        let flow = CodeBlockFlow::from_insns(address, size.get(), &insns);
+        let flow = CodeBlockFlow::from_insns(address, size.get(), insns);
         Self {
             address,
             context,

@@ -8,9 +8,9 @@ use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityKeyBytesIterator,
-    EntityKeyPrefix, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityStorageProvider, EntityStorageProviderFromLoadable,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
@@ -217,17 +217,13 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         ))
     }
 
-    fn transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction<'_>, EntityStorageError> {
         Err(EntityStorageError::unsupported_with(
             "transactions are not supported by the in-memory storage provider",
         ))
     }
 
-    fn transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction<'_>, EntityStorageError> {
         Ok(Box::new(BufferedEntityWriter::new(self)))
     }
 
@@ -252,7 +248,7 @@ impl<'a> Iterator for InMemoryEntityKeyBytesIterator<'a> {
         let prefix = *self.borrow_prefix();
         self.with_iter_mut(|iter| {
             iter.next()
-                .map(|key| Ok(BytesOrSlice::from(prefix.join(key.as_ref()))))
+                .map(|key| Ok(BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref())))))
         })
     }
 }
@@ -274,7 +270,7 @@ impl<'a> Iterator for InMemoryEntityBytesIterator<'a> {
         self.with_iter_mut(|iter| {
             iter.next().map(|(key, bytes)| {
                 Ok((
-                    BytesOrSlice::from(prefix.join(key.as_ref())),
+                    BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref()))),
                     BytesOrSlice::from(bytes),
                 ))
             })

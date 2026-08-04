@@ -531,15 +531,6 @@ impl ProjectTransaction<'_> {
     ) -> Result<bool, ProjectError> {
         let mut replacements = replacements.into_iter().collect::<SmallVec<[_; 4]>>();
         let mut combined_coverage = AddressRangeSet::new();
-        let flow_reference_count = replacements
-            .iter()
-            .filter(|replacement| replacement.kind.is_flow())
-            .map(|replacement| replacement.references.len())
-            .sum();
-        let mut supported_flow = FxHashMap::<ReferenceKey, Reference>::with_capacity_and_hasher(
-            flow_reference_count,
-            Default::default(),
-        );
         for replacement in &mut replacements {
             for reference in &replacement.references {
                 replacement
@@ -550,21 +541,6 @@ impl ProjectTransaction<'_> {
                 combined_coverage.insert_range(range);
             }
         }
-        for replacement in &replacements {
-            if !replacement.kind.is_flow() {
-                continue;
-            }
-            for &reference in &replacement.references {
-                let key = ReferenceKey::new(reference.from(), reference.target());
-                supported_flow
-                    .entry(key)
-                    .and_modify(|supported| {
-                        *supported = supported.with_merged_properties(reference.properties());
-                    })
-                    .or_insert(reference);
-            }
-        }
-
         if combined_coverage.is_empty() {
             return Ok(false);
         }
@@ -595,6 +571,30 @@ impl ProjectTransaction<'_> {
                 changed = true;
             }
             return Ok(changed);
+        }
+
+        let flow_reference_count = replacements
+            .iter()
+            .filter(|replacement| replacement.kind.is_flow())
+            .map(|replacement| replacement.references.len())
+            .sum();
+        let mut supported_flow = FxHashMap::<ReferenceKey, Reference>::with_capacity_and_hasher(
+            flow_reference_count,
+            Default::default(),
+        );
+        for replacement in &replacements {
+            if !replacement.kind.is_flow() {
+                continue;
+            }
+            for &reference in &replacement.references {
+                let key = ReferenceKey::new(reference.from(), reference.target());
+                supported_flow
+                    .entry(key)
+                    .and_modify(|supported| {
+                        *supported = supported.with_merged_properties(reference.properties());
+                    })
+                    .or_insert(reference);
+            }
         }
 
         let mut changed = false;
@@ -2053,7 +2053,7 @@ impl ProjectTransaction<'_> {
                         .map_err(EntityStorageError::encode)?;
                     let encoded_size = encoded.len();
                     if persistent {
-                        writes.push(EntityWrite::insert_archive(
+                        writes.push(EntityWrite::insert_archived(
                             Problem::ID.key_for(&problem.id()),
                             encoded,
                         ));
@@ -2138,7 +2138,7 @@ impl ProjectTransaction<'_> {
                         .map_err(EntityStorageError::encode)?;
                     let encoded_size = encoded.len();
                     if persistent {
-                        writes.push(EntityWrite::insert_archive(
+                        writes.push(EntityWrite::insert_archived(
                             Switch::ID.key_for(&switch.id()),
                             encoded,
                         ));
@@ -2234,7 +2234,7 @@ impl ProjectTransaction<'_> {
                         .map_err(EntityStorageError::encode)?;
                     let encoded_size = encoded.len();
                     if persistent {
-                        writes.push(EntityWrite::insert_archive(
+                        writes.push(EntityWrite::insert_archived(
                             SymbolEntry::ID.key_for(&id),
                             encoded,
                         ));

@@ -18,10 +18,10 @@ use thiserror::Error;
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
-    EntityBytesTransactionalWriter, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
     EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityWrite,
+    EntityStorageReadTransaction, EntityStorageWriteTransaction, EntityWrite,
 };
 use crate::loader::Loadable;
 use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
@@ -509,15 +509,11 @@ impl<const P: StoragePersistence> EntityStorageProvider for SqliteEntityStorage<
         SqliteEntityBytesAsIterator::new(&self.pool, prefix, f)
     }
 
-    fn transactional_reader(
-        &self,
-    ) -> Result<EntityBytesTransactionalReader<'_>, EntityStorageError> {
+    fn read_transaction(&self) -> Result<EntityBytesReadTransaction<'_>, EntityStorageError> {
         SqliteEntityReader::new(self)
     }
 
-    fn transactional_writer(
-        &self,
-    ) -> Result<EntityBytesTransactionalWriter<'_>, EntityStorageError> {
+    fn write_transaction(&self) -> Result<EntityBytesWriteTransaction<'_>, EntityStorageError> {
         SqliteEntityWriter::new(self)
     }
 
@@ -757,7 +753,7 @@ impl<'a, const P: StoragePersistence> SqliteEntityReader<'a, P> {
     #[allow(clippy::new_ret_no_self)]
     fn new(
         storage: &'a SqliteEntityStorage<P>,
-    ) -> Result<EntityBytesTransactionalReader<'a>, EntityStorageError> {
+    ) -> Result<EntityBytesReadTransaction<'a>, EntityStorageError> {
         let conn = storage.pool.get().map_err(EntityStorageError::backing)?;
         conn.execute_batch("BEGIN TRANSACTION")?;
 
@@ -780,9 +776,7 @@ impl<'a, const P: StoragePersistence> SqliteEntityReader<'a, P> {
     }
 }
 
-impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
-    for SqliteEntityReader<'a, P>
-{
+impl<const P: StoragePersistence> EntityStorageReadTransaction for SqliteEntityReader<'_, P> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let (prefix, key_rest) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
@@ -825,7 +819,7 @@ impl<const P: StoragePersistence> Drop for SqliteEntityReader<'_, P> {
 struct SqliteEntityWriter<'a, const P: StoragePersistence> {
     conn: r2d2::PooledConnection<SqliteConnectionManager>,
     committed: bool,
-    pending_tables: RefCell<SmallVec<[EntityKeyPrefix; 4]>>,
+    pending_tables: SmallVec<[EntityKeyPrefix; 4]>,
     schema: Arc<SqliteSchema>,
     _marker: PhantomData<&'a SqliteEntityStorage<P>>,
 }
@@ -834,25 +828,25 @@ impl<'a, const P: StoragePersistence> SqliteEntityWriter<'a, P> {
     #[allow(clippy::new_ret_no_self)]
     fn new(
         storage: &'a SqliteEntityStorage<P>,
-    ) -> Result<EntityBytesTransactionalWriter<'a>, EntityStorageError> {
+    ) -> Result<EntityBytesWriteTransaction<'a>, EntityStorageError> {
         let conn = storage.pool.get().map_err(EntityStorageError::backing)?;
         conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")?;
 
         Ok(Box::new(Self {
             conn,
             committed: false,
-            pending_tables: RefCell::new(SmallVec::new()),
+            pending_tables: SmallVec::new(),
             schema: storage.schema.clone(),
             _marker: PhantomData,
         }))
     }
 
-    fn ensure_table(&self, prefix: &EntityKeyPrefix) -> Result<(), EntityStorageError> {
-        if self.pending_tables.borrow().contains(prefix) {
+    fn ensure_table(&mut self, prefix: &EntityKeyPrefix) -> Result<(), EntityStorageError> {
+        if self.pending_tables.contains(prefix) {
             return Ok(());
         }
         if self.schema.prepare_table(&self.conn, prefix)? {
-            self.pending_tables.borrow_mut().push(*prefix);
+            self.pending_tables.push(*prefix);
         }
         Ok(())
     }
@@ -930,41 +924,8 @@ impl<const P: StoragePersistence> Drop for SqliteEntityWriter<'_, P> {
     }
 }
 
-impl<'a, const P: StoragePersistence> EntityStorageTransactionalReader<'a>
-    for SqliteEntityWriter<'a, P>
-{
-    fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        let (prefix, key_rest) =
-            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-        self.ensure_table(&prefix)?;
-        let query = build_select_value_query(&prefix);
-        let mut stmt = self.conn.prepare_cached(&query)?;
-
-        let result = stmt
-            .query_row(params![key_rest], |row| row.get::<_, Vec<u8>>(0))
-            .optional()?;
-
-        Ok(result.map(BytesOrSlice::from))
-    }
-
-    fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        let (prefix, key_rest) =
-            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
-
-        self.ensure_table(&prefix)?;
-        let query = build_contains_query(&prefix);
-        let mut stmt = self.conn.prepare_cached(&query)?;
-
-        let exists = stmt.query_row(params![key_rest], |row| row.get::<_, bool>(0))?;
-        Ok(exists)
-    }
-}
-
-impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
-    for SqliteEntityWriter<'a, P>
-{
-    fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+impl<const P: StoragePersistence> EntityStorageWriteTransaction for SqliteEntityWriter<'_, P> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
         let (prefix, key_rest) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
@@ -976,7 +937,7 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
         Ok(())
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), EntityStorageError> {
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
         let (prefix, key_rest) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
@@ -988,7 +949,7 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
         Ok(())
     }
 
-    fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+    fn write_batch(&mut self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
         let mut start = 0;
         while start < writes.len() {
             let write = &writes[start];
@@ -1020,8 +981,7 @@ impl<'a, const P: StoragePersistence> EntityStorageTransactionalWriter<'a>
 
     fn commit(mut self: Box<Self>) -> Result<(), EntityStorageError> {
         self.conn.execute_batch("COMMIT")?;
-        self.schema
-            .publish_tables(self.pending_tables.get_mut().drain(..));
+        self.schema.publish_tables(self.pending_tables.drain(..));
         self.committed = true;
         Ok(())
     }

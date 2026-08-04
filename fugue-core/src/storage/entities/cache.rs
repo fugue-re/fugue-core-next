@@ -375,7 +375,7 @@ where
             WriteSink::WriteThrough => self.storage.remove::<K, E>(key)?,
             WriteSink::Worker(worker) => {
                 let key_bytes = E::ID.key_for(key);
-                worker.enqueue(key_bytes, None)?;
+                worker.enqueue(key_bytes.into(), None)?;
             }
         }
 
@@ -482,8 +482,8 @@ where
 
     fn range_start_key(start: Bound<&K>) -> Bound<Bytes> {
         match start {
-            Bound::Included(key) => Bound::Included(E::ID.key_for(key)),
-            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key)),
+            Bound::Included(key) => Bound::Included(E::ID.key_for(key).into()),
+            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key).into()),
             Bound::Unbounded => Bound::Unbounded,
         }
     }
@@ -598,7 +598,7 @@ where
             }
             WriteSink::Worker(worker) => {
                 let key_bytes = E::ID.key_for(key);
-                worker.enqueue(key_bytes, Some(Bytes::from_owner(encoded)))?;
+                worker.enqueue(key_bytes.into(), Some(Bytes::from_owner(encoded)))?;
             }
         }
 
@@ -668,8 +668,8 @@ mod test {
     use super::*;
     use crate::ir::Address;
     use crate::storage::entities::{
-        Entity, EntityBytesAsIterator, EntityBytesIterator, EntityBytesTransactionalReader,
-        EntityBytesTransactionalWriter, EntityId, EntityKeyBytesIterator, EntityStorage,
+        Entity, EntityBytesAsIterator, EntityBytesIterator, EntityBytesReadTransaction,
+        EntityBytesWriteTransaction, EntityId, EntityKeyBytesIterator, EntityStorage,
         EntityStorageError, EntityStorageProvider, InMemoryEntityStorage, WriteBackWorker,
     };
     use crate::types::BytesOrSlice;
@@ -752,17 +752,13 @@ mod test {
             self.0.iter_prefix_as(prefix, f)
         }
 
-        fn transactional_reader(
-            &self,
-        ) -> Result<EntityBytesTransactionalReader, EntityStorageError> {
-            self.0.transactional_reader()
+        fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
+            self.0.read_transaction()
         }
 
-        fn transactional_writer(
-            &self,
-        ) -> Result<EntityBytesTransactionalWriter, EntityStorageError> {
+        fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
             Err(EntityStorageError::unsupported_with(
-                "failing provider has no transactional writer",
+                "failing provider has no write transaction",
             ))
         }
     }

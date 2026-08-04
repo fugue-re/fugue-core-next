@@ -103,7 +103,7 @@ impl WriteBackWorker {
             .map_err(|_| EntityStorageError::backing_with("write-back worker stopped"))
     }
 
-    pub fn pending(&self, key: &Bytes) -> Option<WriteBackAction> {
+    pub fn pending(&self, key: &[u8]) -> Option<WriteBackAction> {
         self.pending.get(key).map(|entry| match &entry.value {
             Some(bytes) => WriteBackAction::Insert(bytes.clone()),
             None => WriteBackAction::Remove,
@@ -273,7 +273,7 @@ impl Worker {
     }
 
     fn write_batch(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
-        let writer = match self.backing.transactional_writer() {
+        let mut writer = match self.backing.write_transaction() {
             Ok(writer) => writer,
             Err(EntityStorageError::Unsupported(_)) => return self.write_batch_direct(snapshot),
             Err(error) => return Err(error),

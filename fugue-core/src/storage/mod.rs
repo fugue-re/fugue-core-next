@@ -27,12 +27,12 @@ pub use entities::{
 pub use entities::{
     BufferedEntityWriter, DefaultPersistentEntityStorage, DefaultTransientEntityStorage,
     DummyEntityStorage, ENTITY_PROJECT_REVISION_ID, Entity, EntityBytesAsIterator,
-    EntityBytesIterator, EntityBytesTransactionalReader, EntityBytesTransactionalWriter, EntityId,
-    EntityIterator, EntityKey, EntityKeyBytesIterator, EntityKeyId, EntityKeyIterator,
-    EntityKeyPrefix, EntityMut, EntityRef, EntityStorage, EntityStorageError,
-    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageProviderFromStorage,
-    EntityStorageTransactionalReader, EntityStorageTransactionalWriter, EntityTransactionalReader,
-    EntityTransactionalWriter, EntityWrite, InMemoryEntityStorage, MutableEntity, ProjectEntity,
+    EntityBytesIterator, EntityBytesReadTransaction, EntityBytesWriteTransaction, EntityId,
+    EntityIterator, EntityKey, EntityKeyBytes, EntityKeyBytesIterator, EntityKeyId,
+    EntityKeyIterator, EntityKeyPrefix, EntityMut, EntityReadTransaction, EntityRef, EntityStorage,
+    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityStorageProviderFromStorage, EntityStorageReadTransaction, EntityStorageWriteTransaction,
+    EntityWrite, EntityWriteTransaction, InMemoryEntityStorage, MutableEntity, ProjectEntity,
     WriteBackAction, WriteBackWorker,
 };
 
