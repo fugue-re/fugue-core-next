@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 
 use parking_lot::RwLock;
@@ -74,6 +75,47 @@ impl RegisterSlice {
 
     pub(crate) const fn is_root(self) -> bool {
         self.offset == 0 && self.bits == self.root_bits
+    }
+}
+
+struct PreservedRegisterCoverage {
+    root_bits: u32,
+    preserved_bits: Vec<Range<u32>>,
+}
+
+impl PreservedRegisterCoverage {
+    fn new(root_bits: u32) -> Self {
+        Self {
+            root_bits,
+            preserved_bits: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, range: Range<u32>) {
+        self.preserved_bits.push(range);
+    }
+
+    fn merge(&mut self) {
+        self.preserved_bits
+            .sort_unstable_by_key(|range| (range.start, range.end));
+
+        let mut output = 0usize;
+        for input in 0..self.preserved_bits.len() {
+            let range = self.preserved_bits[input].clone();
+            if output != 0 && range.start <= self.preserved_bits[output - 1].end {
+                self.preserved_bits[output - 1].end =
+                    self.preserved_bits[output - 1].end.max(range.end);
+            } else {
+                self.preserved_bits[output] = range;
+                output += 1;
+            }
+        }
+        self.preserved_bits.truncate(output);
+    }
+
+    fn covers_root(mut self) -> bool {
+        self.merge();
+        matches!(self.preserved_bits.as_slice(), [range] if range.start == 0 && range.end >= self.root_bits)
     }
 }
 
@@ -203,28 +245,18 @@ impl RegisterBank {
     }
 
     fn preserved_roots(slices: impl IntoIterator<Item = RegisterSlice>) -> Vec<RegisterId> {
-        let mut roots: BTreeMap<RegisterId, (u32, Vec<(u32, u32)>)> = BTreeMap::new();
+        let mut roots = BTreeMap::<RegisterId, PreservedRegisterCoverage>::new();
         for slice in slices {
             let start = slice.offset() * 8;
-            let entry = roots
+            let coverage = roots
                 .entry(slice.root())
-                .or_insert_with(|| (slice.root_bits(), Vec::new()));
-            entry.1.push((start, start + slice.bits()));
+                .or_insert_with(|| PreservedRegisterCoverage::new(slice.root_bits()));
+            coverage.insert(start..start + slice.bits());
         }
 
         roots
             .into_iter()
-            .filter_map(|(root, (root_bits, mut ranges))| {
-                ranges.sort_unstable();
-                let mut covered = 0;
-                for (start, end) in ranges {
-                    if start > covered {
-                        return None;
-                    }
-                    covered = covered.max(end);
-                }
-                (covered >= root_bits).then_some(root)
-            })
+            .filter_map(|(root, coverage)| coverage.covers_root().then_some(root))
             .collect()
     }
 

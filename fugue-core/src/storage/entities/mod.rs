@@ -38,8 +38,8 @@ pub use rocksdb::{ATTRIBUTE_ENTITY_STORAGE_ROCKSDB_OPTIONS, RocksDbEntityStorage
 
 pub(crate) mod schema;
 pub use schema::{
-    ENTITY_PROJECT_REVISION_ID, Entity, EntityId, EntityKey, EntityKeyBytes, EntityKeyId,
-    EntityKeyPrefix, ProjectEntity,
+    ENTITY_PROJECT_REVISION_ID, Entity, EntityCodec, EntityId, EntityKey, EntityKeyBytes,
+    EntityKeyCodec, EntityKeyId, EntityKeyPrefix, ProjectEntity,
 };
 
 #[cfg(feature = "sqlite")]
@@ -139,7 +139,7 @@ impl EntityStorageError {
     }
 }
 
-pub(super) fn decode_entity<E: Entity>(bytes: &[u8]) -> Result<E, EntityStorageError> {
+pub(crate) fn decode_entity<E: Entity>(bytes: &[u8]) -> Result<E, EntityStorageError> {
     let root = root_position::<Archived<E>>(bytes.len());
     let root_pointer = bytes.as_ptr().wrapping_add(root);
     if root_pointer.align_offset(align_of::<Archived<E>>()) == 0
@@ -366,16 +366,12 @@ pub trait EntityStorageWriteTransaction {
 pub type EntityBytesWriteTransaction<'a> = Box<dyn EntityStorageWriteTransaction + 'a>;
 
 pub struct EntityWriteTransaction<'a> {
-    inner: Option<EntityBytesWriteTransaction<'a>>,
-    auto_commit: bool,
+    inner: EntityBytesWriteTransaction<'a>,
 }
 
 impl<'a> EntityWriteTransaction<'a> {
-    pub fn new(inner: EntityBytesWriteTransaction<'a>) -> Self {
-        Self {
-            inner: Some(inner),
-            auto_commit: false,
-        }
+    pub(crate) fn new(inner: EntityBytesWriteTransaction<'a>) -> Self {
+        Self { inner }
     }
 
     pub fn insert<K: EntityKey, E: Entity>(
@@ -387,45 +383,16 @@ impl<'a> EntityWriteTransaction<'a> {
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
         self.inner
-            .as_mut()
-            .expect("write transaction available")
             .insert(&key, BytesOrSlice::from(encoded.as_ref()))
     }
 
     pub fn remove<K: EntityKey, E: Entity>(&mut self, key: &K) -> Result<(), EntityStorageError> {
         let key = E::ID.key_for(key);
-        self.inner
-            .as_mut()
-            .expect("write transaction available")
-            .remove(&key)
+        self.inner.remove(&key)
     }
 
-    pub fn enable_auto_commit(&mut self) {
-        self.auto_commit = true;
-    }
-
-    pub fn disable_auto_commit(&mut self) {
-        self.auto_commit = false;
-    }
-
-    pub fn commit(mut self) -> Result<(), EntityStorageError> {
-        self.inner
-            .take()
-            .expect("write transaction available")
-            .commit()
-    }
-}
-
-impl Drop for EntityWriteTransaction<'_> {
-    fn drop(&mut self) {
-        let Some(inner) = self.inner.take() else {
-            return;
-        };
-        if self.auto_commit
-            && let Err(error) = inner.commit()
-        {
-            tracing::error!("failed to commit transaction: {error}");
-        }
+    pub fn commit(self) -> Result<(), EntityStorageError> {
+        self.inner.commit()
     }
 }
 
@@ -556,7 +523,7 @@ where
     }
 }
 
-pub trait ErasedEntityStorageProvider: Send + Sync {
+pub(crate) trait ErasedEntityStorageProvider: Send + Sync {
     fn erased_get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn erased_get_as<'a>(
         &self,
@@ -744,7 +711,7 @@ where
 type OutMapFn<'a> = dyn FnMut(&[u8]) -> Result<Out, EntityStorageError> + 'a;
 type OutMapPairFn<'a> = dyn FnMut(&[u8], &[u8]) -> Result<Out, EntityStorageError> + 'a;
 
-pub struct OutMapper<'a> {
+pub(crate) struct OutMapper<'a> {
     f: Box<OutMapFn<'a>>,
 }
 
@@ -763,7 +730,7 @@ impl<'a> OutMapper<'a> {
     }
 }
 
-pub struct OutMapper2<'a> {
+pub(crate) struct OutMapper2<'a> {
     f: Box<OutMapPairFn<'a>>,
 }
 
@@ -941,7 +908,7 @@ impl EntityStorage {
         matches!(self.backing.persistence(), TRANSIENT)
     }
 
-    pub fn storage_provider(&self) -> Arc<dyn ErasedEntityStorageProvider> {
+    pub(crate) fn storage_provider(&self) -> Arc<dyn ErasedEntityStorageProvider> {
         self.backing.clone()
     }
 }

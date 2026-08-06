@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fugue_core::engine::AnalysisEngine;
-use fugue_core::engine::change::ChangeRecord;
 use fugue_core::il::common::{
     IlArtefact as CoreIlArtefact, IlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
@@ -24,7 +23,7 @@ use fugue_core::il::pcode::{
     PCodeOpcode as CorePCodeOpcode,
 };
 use fugue_core::ir::{Address as CoreAddress, FunctionId as CoreFunctionId};
-use fugue_core::project::Project as CoreProject;
+use fugue_core::project::{ChangeRecord, Project as CoreProject};
 use fugue_core::queries::QueryReader;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

@@ -4,23 +4,22 @@ use std::ops::ControlFlow;
 
 use indexmap::{IndexMap, IndexSet};
 use itertools::Either;
-use rayon::prelude::*;
-use rayon::{ThreadPool, ThreadPoolBuilder};
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 
 use super::structuring::CodeBlockStructurer;
-use super::{FUNCTION_RECOVERY_ANALYSER, FunctionRecoveryConfig, FunctionRecoveryError};
+use super::{FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::engine::{ProjectView, ReadSet};
+use crate::engine::ProjectView;
 use crate::ir::function::FunctionInsnIndex;
 use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget, IncompleteCodeBlockId,
     IncompleteFunction, InsnEntry, ProblemKind,
 };
 use crate::lifter::{ContextSet, InsnResolver};
+use crate::project::ReadSet;
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 use crate::types::Confidence;
 
@@ -46,13 +45,13 @@ struct CandidateAnalysis<'a, 'p> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct FunctionBuilderInputs<'a> {
+pub(crate) struct FunctionBuilderInputs<'a> {
     function_entries: &'a [Address],
     non_returning_targets: &'a [Address],
 }
 
 impl<'a> FunctionBuilderInputs<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         function_entries: &'a [Address],
         non_returning_targets: &'a [Address],
     ) -> Self {
@@ -71,7 +70,7 @@ struct InsnResolution<'a, 'p> {
     token: &'a CancellationToken,
 }
 
-pub(super) struct FunctionCandidateOutcome {
+pub(crate) struct FunctionCandidateOutcome {
     address: Address,
     avoids: AddressRangeSet,
     confidence: Confidence,
@@ -98,23 +97,27 @@ impl FunctionCandidateOutcome {
         }
     }
 
-    pub(super) fn address(&self) -> Address {
+    pub(crate) fn address(&self) -> Address {
         self.address
     }
 
-    pub(super) fn confidence(&self) -> Confidence {
+    pub(crate) fn confidence(&self) -> Confidence {
         self.confidence
     }
 
-    pub(super) fn drain_problems(&mut self) -> impl Iterator<Item = (Address, ProblemKind)> + '_ {
+    pub(crate) fn avoids(&self) -> &AddressRangeSet {
+        &self.avoids
+    }
+
+    pub(crate) fn drain_problems(&mut self) -> impl Iterator<Item = (Address, ProblemKind)> + '_ {
         self.problems.drain(..)
     }
 
-    pub(super) fn drain_targets(&mut self) -> impl Iterator<Item = AddressWithContext> + '_ {
+    pub(crate) fn drain_targets(&mut self) -> impl Iterator<Item = AddressWithContext> + '_ {
         self.targets.drain(..)
     }
 
-    pub(super) fn take_result(
+    pub(crate) fn take_result(
         &mut self,
     ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
         self.result
@@ -123,7 +126,7 @@ impl FunctionCandidateOutcome {
     }
 }
 
-struct FunctionCandidateState<'p> {
+pub(crate) struct FunctionCandidateState<'p> {
     address: Address,
     candidate: AddressWithContext,
     cancelled: Option<Cancelled>,
@@ -251,7 +254,6 @@ pub struct FunctionBuilderContext {
 }
 
 pub struct FunctionBuilder {
-    candidate_pool: Option<ThreadPool>,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
     initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
@@ -261,7 +263,6 @@ pub struct FunctionBuilder {
 impl FunctionBuilder {
     pub fn new(config: FunctionRecoveryConfig) -> Self {
         FunctionBuilder {
-            candidate_pool: None,
             config,
             context: FunctionBuilderContext::new(),
             initialisation_passes: AnalysisGroup::new(),
@@ -321,21 +322,7 @@ impl FunctionBuilder {
         })
     }
 
-    pub(super) fn candidate_worker_count(
-        &self,
-        candidate_count: usize,
-        worker_limit: usize,
-    ) -> usize {
-        if !self.initialisation_passes.is_empty() {
-            return 1;
-        }
-        std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(worker_limit)
-            .min(candidate_count)
-    }
-
-    pub(super) fn analyse_candidate(
+    pub(crate) fn analyse_candidate(
         &mut self,
         project: &ProjectView<'_>,
         inputs: FunctionBuilderInputs<'_>,
@@ -353,80 +340,6 @@ impl FunctionBuilder {
             result,
             self.context.global_targets.drain(..).collect(),
         )
-    }
-
-    pub(super) fn analyse_candidates_in_parallel(
-        &mut self,
-        project: &ProjectView<'_>,
-        inputs: FunctionBuilderInputs<'_>,
-        candidates: Vec<AddressWithContext>,
-        token: &CancellationToken,
-        workers: usize,
-        mut on_outcome: impl FnMut(FunctionCandidateOutcome) -> Result<bool, AnalysisError>,
-    ) -> Result<Vec<AddressWithContext>, AnalysisError> {
-        debug_assert!(workers > 1);
-        debug_assert!(self.initialisation_passes.is_empty());
-
-        if self
-            .candidate_pool
-            .as_ref()
-            .is_none_or(|pool| pool.current_num_threads() != workers)
-        {
-            self.candidate_pool = Some(
-                ThreadPoolBuilder::new()
-                    .num_threads(workers)
-                    .thread_name(|index| format!("fugue-recovery-{index}"))
-                    .build()
-                    .map_err(|error| {
-                        AnalysisError::pass_configuration_failed(FUNCTION_RECOVERY_ANALYSER, error)
-                    })?,
-            );
-        }
-
-        let avoidance_baseline = &self.context.avoids;
-        let mut tasks = candidates
-            .into_iter()
-            .map(|candidate| FunctionCandidateState::new(project.fork(), candidate, &self.config))
-            .collect::<Vec<_>>();
-        let pool = self
-            .candidate_pool
-            .as_ref()
-            .expect("candidate pool must be initialised");
-        let config = &self.config;
-
-        loop {
-            let chunk = tasks.len().div_ceil(workers);
-            pool.install(|| {
-                tasks.par_chunks_mut(chunk).for_each(|tasks| {
-                    let mut resolver = InsnResolver::new(tasks[0].view.arch());
-                    for task in tasks {
-                        task.resolve(config, inputs, token, &mut resolver, avoidance_baseline);
-                    }
-                });
-            });
-
-            let mut pending = false;
-            for task in &mut tasks {
-                task.run_post_structuring(&self.config, &mut self.post_structuring_passes, token);
-                pending |= !task.is_complete();
-            }
-            if !pending {
-                break;
-            }
-        }
-
-        let mut tasks = tasks.into_iter();
-        while let Some(task) = tasks.next() {
-            let (reads, outcome) = task.finish();
-            project.merge_reads(&reads);
-            for range in outcome.avoids.ranges() {
-                self.context.avoids.insert_range(range);
-            }
-            if on_outcome(outcome)? {
-                return Ok(tasks.map(FunctionCandidateState::into_candidate).collect());
-            }
-        }
-        Ok(Vec::new())
     }
 
     pub fn avoids(&self) -> &AddressRangeSet {
@@ -581,7 +494,7 @@ impl FunctionBuilderContext {
         self.structurer.clear();
     }
 
-    pub(super) fn function_entry_after_padding(
+    pub(crate) fn function_entry_after_padding(
         &mut self,
         segments: &SegmentStorage,
         arch: &Arch,
@@ -1120,7 +1033,7 @@ impl FunctionBuilderContext {
 }
 
 impl<'p> FunctionCandidateState<'p> {
-    fn new(
+    pub(crate) fn new(
         view: ProjectView<'p>,
         mut candidate: AddressWithContext,
         config: &FunctionRecoveryConfig,
@@ -1163,7 +1076,7 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    fn resolve(
+    pub(crate) fn resolve(
         &mut self,
         config: &FunctionRecoveryConfig,
         inputs: FunctionBuilderInputs<'_>,
@@ -1213,7 +1126,7 @@ impl<'p> FunctionCandidateState<'p> {
         self.structured = true;
     }
 
-    fn run_post_structuring(
+    pub(crate) fn run_post_structuring(
         &mut self,
         config: &FunctionRecoveryConfig,
         passes: &mut AnalysisGroup<FunctionRecoveryState>,
@@ -1257,15 +1170,15 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.complete || self.failure.is_some() || self.cancelled.is_some()
     }
 
-    fn into_candidate(self) -> AddressWithContext {
+    pub(crate) fn into_candidate(self) -> AddressWithContext {
         self.candidate
     }
 
-    fn finish(mut self) -> (ReadSet, FunctionCandidateOutcome) {
+    pub(crate) fn finish(mut self) -> (ReadSet, FunctionCandidateOutcome) {
         let succeeded = self.failure.is_none() && self.cancelled.is_none();
         if succeeded {
             self.function.set_tail_call_sites(

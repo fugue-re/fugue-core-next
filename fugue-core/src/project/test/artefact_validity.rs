@@ -20,9 +20,9 @@ fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error
         Vec::new(),
         Vec::new(),
     );
-    let mut stage = crate::il::storage::IlStage::default();
-    stage.replace(&project.storage, ir)?;
-    let writes = stage.prepare()?;
+    let mut staging = crate::il::storage::IlStaging::default();
+    staging.replace(&project.storage, ir)?;
+    let writes = staging.prepare()?;
     project.storage.entities().apply_batch(&writes)?;
 
     assert!(matches!(

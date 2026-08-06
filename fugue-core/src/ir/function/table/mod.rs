@@ -8,12 +8,12 @@ use std::{fmt, mem, slice};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::ir::function::FunctionMaterialisation;
+use crate::ir::function::NormalisedFunctionRecord;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockIdsByStart,
-    CodeBlockMaterialisation, CodeBlockTable, Function, FunctionId, FunctionProperties, Id,
-    IdAllocator, IdSet, IncompleteFunctionError, PreparedCodeBlockMutation, RawAddress, Reference,
-    ReferenceOrigin,
+    CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator, IdSet,
+    IncompleteFunctionError, NormalisedCodeBlockRecord, PreparedCodeBlockRecord, RawAddress,
+    Reference, ReferenceOrigin,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
@@ -37,7 +37,6 @@ use transient::FunctionTable as TransientFunctionTable;
 
 pub type FunctionRef<'a> = EntityRef<'a, Function>;
 pub type FunctionMut<'a> = EntityMut<'a, Function>;
-type CodeBlockOwners = IdSet<Function>;
 
 const FUNCTION_TABLE_VERSION: u32 = 1;
 
@@ -53,7 +52,7 @@ impl Entity for FunctionTableHeader {
 struct FunctionIndex {
     allocator: IdAllocator<Function>,
     addresses: BTreeMap<Address, Id<Function>>,
-    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
+    by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
 }
 
 impl FunctionIndex {
@@ -61,67 +60,67 @@ impl FunctionIndex {
         Self {
             allocator,
             addresses,
-            owners: FxHashMap::default(),
+            by_block: FxHashMap::default(),
         }
     }
 
     fn insert_membership(&mut self, function: &Function) {
-        self.insert_members(function.id(), function.blocks().map(|(_, block)| block));
+        self.insert_memberships(function.id(), function.blocks().map(|(_, block)| block));
     }
 
-    fn insert_members(
+    fn insert_memberships(
         &mut self,
         function: FunctionId,
         blocks: impl IntoIterator<Item = CodeBlockId>,
     ) {
         for block in blocks {
-            self.owners.entry(block).or_default().insert(function);
+            self.by_block.entry(block).or_default().insert(function);
         }
     }
 
     fn remove_membership(&mut self, function: &Function) {
-        self.remove_members(function.id(), function.blocks().map(|(_, block)| block));
+        self.remove_memberships(function.id(), function.blocks().map(|(_, block)| block));
     }
 
-    fn remove_members(
+    fn remove_memberships(
         &mut self,
         function: FunctionId,
         blocks: impl IntoIterator<Item = CodeBlockId>,
     ) {
         for block in blocks {
-            let remove = self.owners.get_mut(&block).is_some_and(|owners| {
-                owners.remove(function);
-                owners.is_empty()
+            let remove = self.by_block.get_mut(&block).is_some_and(|functions| {
+                functions.remove(function);
+                functions.is_empty()
             });
 
             if remove {
-                self.owners.remove(&block);
+                self.by_block.remove(&block);
             }
         }
     }
 
-    fn owners(&self, block: CodeBlockId) -> CodeBlockOwners {
-        self.owners.get(&block).cloned().unwrap_or_default()
+    fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        self.by_block.get(&block).cloned().unwrap_or_default()
     }
 
-    fn publish_owners(&mut self, mut staged: FxHashMap<CodeBlockId, CodeBlockOwners>) {
-        if self.owners.is_empty() {
-            staged.retain(|_, owners| !owners.is_empty());
-            self.owners = staged;
+    fn publish_membership(&mut self, mut by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+        if self.by_block.is_empty() {
+            by_block.retain(|_, functions| !functions.is_empty());
+            self.by_block = by_block;
             return;
         }
 
-        for (block, owners) in staged {
-            if owners.is_empty() {
-                self.owners.remove(&block);
+        for (block, functions) in by_block {
+            if functions.is_empty() {
+                self.by_block.remove(&block);
             } else {
-                self.owners.insert(block, owners);
+                self.by_block.insert(block, functions);
             }
         }
     }
 }
 
-enum StagedEntities<T, V> {
+enum StagedEntityRecords<T, V> {
     Empty {
         capacity: usize,
     },
@@ -132,13 +131,13 @@ enum StagedEntities<T, V> {
     Sparse(FxHashMap<Id<T>, V>),
 }
 
-impl<T, V> Default for StagedEntities<T, V> {
+impl<T, V> Default for StagedEntityRecords<T, V> {
     fn default() -> Self {
         Self::Empty { capacity: 0 }
     }
 }
 
-impl<T, V> StagedEntities<T, V> {
+impl<T, V> StagedEntityRecords<T, V> {
     fn reserve(&mut self, additional: usize) {
         match self {
             Self::Empty { capacity } => {
@@ -214,11 +213,11 @@ impl<T, V> StagedEntities<T, V> {
         }
     }
 
-    fn iter(&self) -> StagedEntityIter<'_, T, V> {
+    fn iter(&self) -> StagedEntityRecordIter<'_, T, V> {
         match self {
-            Self::Empty { .. } => StagedEntityIter::Empty,
-            Self::Ordered { entries, .. } => StagedEntityIter::Ordered(entries.iter()),
-            Self::Sparse(entries) => StagedEntityIter::Sparse(entries.iter()),
+            Self::Empty { .. } => StagedEntityRecordIter::Empty,
+            Self::Ordered { entries, .. } => StagedEntityRecordIter::Ordered(entries.iter()),
+            Self::Sparse(entries) => StagedEntityRecordIter::Sparse(entries.iter()),
         }
     }
 
@@ -243,13 +242,13 @@ impl<T, V> StagedEntities<T, V> {
     }
 }
 
-enum StagedEntityIter<'a, T, V> {
+enum StagedEntityRecordIter<'a, T, V> {
     Empty,
     Ordered(slice::Iter<'a, (Id<T>, V)>),
     Sparse(HashMapIter<'a, Id<T>, V>),
 }
 
-impl<'a, T, V> Iterator for StagedEntityIter<'a, T, V> {
+impl<'a, T, V> Iterator for StagedEntityRecordIter<'a, T, V> {
     type Item = (Id<T>, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -262,41 +261,41 @@ impl<'a, T, V> Iterator for StagedEntityIter<'a, T, V> {
 }
 
 #[derive(Default)]
-pub(crate) struct FunctionTableStage {
-    function_mutations: StagedEntities<Function, StagedFunction>,
+pub(crate) struct FunctionTableStaging {
+    staged_functions: StagedEntityRecords<Function, StagedFunctionRecord>,
     function_addresses: FxHashMap<Address, Option<FunctionId>>,
     function_reservations: Vec<FunctionId>,
     cancelled_functions: BTreeSet<FunctionId>,
-    block_mutations: StagedEntities<CodeBlock, StagedBlock>,
+    staged_code_blocks: StagedEntityRecords<CodeBlock, StagedCodeBlockRecord>,
     block_locations: CodeBlockIdsByStart,
     block_reservations: Vec<CodeBlockId>,
     cancelled_blocks: BTreeSet<CodeBlockId>,
-    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
-    original_owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
+    by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+    original_by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
 }
 
-struct StagedFunction {
+struct StagedFunctionRecord {
     function: Option<Function>,
     is_new: bool,
 }
 
-struct StagedBlock {
+struct StagedCodeBlockRecord {
     block: Option<CodeBlock>,
     is_new: bool,
 }
 
-pub(crate) struct PreparedFunctionTables {
+pub(crate) struct PreparedFunctionBatch {
     block_reservations: Vec<CodeBlockId>,
-    blocks: Vec<PreparedCodeBlockMutation>,
+    blocks: Vec<PreparedCodeBlockRecord>,
     blocks_are_new: bool,
     cancelled_blocks: BTreeSet<CodeBlockId>,
     cancelled_functions: BTreeSet<FunctionId>,
     function_reservations: Vec<FunctionId>,
-    functions: Vec<PreparedFunctionEntry>,
-    owners: FxHashMap<CodeBlockId, CodeBlockOwners>,
+    functions: Vec<PreparedFunctionRecord>,
+    by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
 }
 
-pub(crate) struct PreparedFunctionMutation {
+pub(crate) struct StagedFunctionChangeRecord {
     affected_blocks: SmallVec<[CodeBlockId; 16]>,
     call_targets: BTreeSet<Address>,
     coverage: AddressRangeSet,
@@ -306,12 +305,12 @@ pub(crate) struct PreparedFunctionMutation {
     replaces_existing: bool,
 }
 
-pub(crate) struct RemovedFunction {
+pub(crate) struct StagedFunctionRemovalRecord {
     coverage: AddressRangeSet,
     function: Function,
 }
 
-impl RemovedFunction {
+impl StagedFunctionRemovalRecord {
     fn new(function: Function, coverage: AddressRangeSet) -> Self {
         Self { coverage, function }
     }
@@ -325,7 +324,7 @@ impl RemovedFunction {
     }
 }
 
-impl PreparedFunctionMutation {
+impl StagedFunctionChangeRecord {
     pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
         mem::take(&mut self.call_targets)
     }
@@ -351,23 +350,23 @@ impl PreparedFunctionMutation {
     }
 }
 
-struct PreparedFunctionEntry {
+pub(crate) struct PreparedFunctionRecord {
     encoded_size: usize,
     function: Option<Function>,
     id: FunctionId,
     previous: Option<Address>,
 }
 
-impl FunctionTableStage {
+impl FunctionTableStaging {
     fn reserve_blocks(&mut self, additional: usize) {
         self.block_locations.reserve(additional);
-        self.block_mutations.reserve(additional);
+        self.staged_code_blocks.reserve(additional);
         self.block_reservations.reserve(additional);
-        self.owners.reserve(additional);
+        self.by_block.reserve(additional);
     }
 
     pub(crate) fn reserve_functions(&mut self, additional: usize) {
-        self.function_mutations.reserve(additional);
+        self.staged_functions.reserve(additional);
         self.function_addresses.reserve(additional);
         self.function_reservations.reserve(additional);
     }
@@ -376,8 +375,8 @@ impl FunctionTableStage {
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
-        mut function: FunctionMaterialisation,
-    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        mut function: NormalisedFunctionRecord,
+    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
         self.reserve_blocks(function.block_count());
         self.load_existing_block_locations(blocks, &function)?;
         let entry = function.entry();
@@ -394,7 +393,7 @@ impl FunctionTableStage {
         let coverage = function.take_coverage();
         let references = function.take_references();
         let function = function.materialise(id, |block| self.resolve_block(blocks, block))?;
-        let mutation = PreparedFunctionMutation {
+        let record = StagedFunctionChangeRecord {
             affected_blocks: SmallVec::new(),
             call_targets,
             coverage,
@@ -403,7 +402,7 @@ impl FunctionTableStage {
             references,
             replaces_existing: !is_new,
         };
-        self.stage_mutation(functions, blocks, function, previous, is_new, mutation)
+        self.stage_change(functions, blocks, function, previous, is_new, record)
     }
 
     fn stage_membership(
@@ -411,7 +410,7 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         mut function: Function,
-    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
         let entry = function.entry();
         let previous = self.function_by_address(functions, entry)?;
         let (id, is_new) = match previous.as_ref() {
@@ -451,7 +450,7 @@ impl FunctionTableStage {
             .map(|target| target.to())
             .collect();
         let references = Function::flow_references_from(targets);
-        let mutation = PreparedFunctionMutation {
+        let record = StagedFunctionChangeRecord {
             affected_blocks: SmallVec::new(),
             call_targets,
             coverage,
@@ -460,29 +459,29 @@ impl FunctionTableStage {
             references,
             replaces_existing: !is_new,
         };
-        self.stage_mutation(functions, blocks, function, previous, is_new, mutation)
+        self.stage_change(functions, blocks, function, previous, is_new, record)
     }
 
-    fn stage_mutation(
+    fn stage_change(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         function: Function,
         previous: Option<Function>,
         is_new: bool,
-        mut mutation: PreparedFunctionMutation,
-    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
+        mut record: StagedFunctionChangeRecord,
+    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
         let entry = function.entry();
         let id = function.id();
 
         let replaces_existing = previous.is_some();
         if let Some(previous) = &previous {
             for (_, block) in previous.blocks() {
-                mutation.affected_blocks.push(block);
+                record.affected_blocks.push(block);
                 self.with_block(blocks, block, |block| {
-                    block.coverage_into(&mut mutation.previous_coverage);
+                    block.coverage_into(&mut record.previous_coverage);
                 })?;
-                self.owners_mut(functions, block).remove(id);
+                self.by_block_mut(functions, block).remove(id);
             }
             if previous.entry() != entry {
                 self.function_addresses.insert(previous.entry(), None);
@@ -490,37 +489,37 @@ impl FunctionTableStage {
         }
 
         for (_, block) in function.blocks() {
-            mutation.affected_blocks.push(block);
-            self.owners_mut(functions, block).insert(id);
+            record.affected_blocks.push(block);
+            self.by_block_mut(functions, block).insert(id);
             if self
-                .block_mutations
+                .staged_code_blocks
                 .get(&block)
-                .is_some_and(|mutation| mutation.block.is_none())
+                .is_some_and(|record| record.block.is_none())
             {
-                self.block_mutations.remove(&block);
+                self.staged_code_blocks.remove(&block);
             }
         }
 
-        mutation.affected_blocks.sort_unstable();
-        mutation.affected_blocks.dedup();
+        record.affected_blocks.sort_unstable();
+        record.affected_blocks.dedup();
         if replaces_existing {
-            for &block in &mutation.affected_blocks {
-                if self.owners_mut(functions, block).is_empty() {
+            for &block in &record.affected_blocks {
+                if self.by_block_mut(functions, block).is_empty() {
                     self.stage_block_removal(blocks, block)?;
                 }
             }
         }
 
         self.function_addresses.insert(entry, Some(id));
-        self.function_mutations.insert(
+        self.staged_functions.insert(
             id,
-            StagedFunction {
+            StagedFunctionRecord {
                 function: Some(function),
                 is_new,
             },
         );
 
-        Ok(mutation)
+        Ok(record)
     }
 
     fn set_properties(
@@ -551,17 +550,17 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         id: FunctionId,
-    ) -> Result<Option<RemovedFunction>, IncompleteFunctionError> {
+    ) -> Result<Option<StagedFunctionRemovalRecord>, IncompleteFunctionError> {
         let Some(function) = self.function_by_id(functions, id)? else {
             return Ok(None);
         };
         let coverage = self.coverage(blocks, function.blocks().map(|(_, block)| block))?;
         self.stage_function(functions, blocks, id, None)?;
         if self.new_function(id) {
-            self.function_mutations.remove(&id);
+            self.staged_functions.remove(&id);
             self.cancelled_functions.insert(id);
         }
-        Ok(Some(RemovedFunction::new(function, coverage)))
+        Ok(Some(StagedFunctionRemovalRecord::new(function, coverage)))
     }
 
     fn function_by_address(
@@ -584,8 +583,8 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         id: FunctionId,
     ) -> Result<Option<Function>, IncompleteFunctionError> {
-        match self.function_mutations.get(&id) {
-            Some(mutation) => Ok(mutation.function.clone()),
+        match self.staged_functions.get(&id) {
+            Some(record) => Ok(record.function.clone()),
             None => functions
                 .try_get_by_id(id)
                 .map(|function| function.map(|function| function.as_ref().clone()))
@@ -598,8 +597,8 @@ impl FunctionTableStage {
         functions: &FunctionTable,
         id: FunctionId,
     ) -> Result<Option<ReferenceOrigin>, IncompleteFunctionError> {
-        match self.function_mutations.get(&id) {
-            Some(mutation) => Ok(mutation.function.as_ref().map(Function::origin)),
+        match self.staged_functions.get(&id) {
+            Some(record) => Ok(record.function.as_ref().map(Function::origin)),
             None => functions
                 .try_get_by_id(id)
                 .map(|function| function.map(|function| function.origin()))
@@ -610,26 +609,26 @@ impl FunctionTableStage {
     fn resolve_block(
         &mut self,
         blocks: &CodeBlockTable,
-        materialisation: CodeBlockMaterialisation,
+        materialisation: NormalisedCodeBlockRecord,
     ) -> Result<CodeBlockId, IncompleteFunctionError> {
         if self.block_locations.contains(materialisation.address()) {
             for id in self.block_locations.ids(materialisation.address()) {
-                let matches = match self.block_mutations.get(&id) {
-                    Some(StagedBlock {
+                let matches = match self.staged_code_blocks.get(&id) {
+                    Some(StagedCodeBlockRecord {
                         block: Some(block), ..
                     }) => materialisation.matches(block),
-                    Some(StagedBlock { block: None, .. }) | None => blocks
+                    Some(StagedCodeBlockRecord { block: None, .. }) | None => blocks
                         .try_get_by_id(id)
                         .map_err(IncompleteFunctionError::block_creation)?
                         .is_some_and(|block| materialisation.matches(&block)),
                 };
                 if matches {
                     if self
-                        .block_mutations
+                        .staged_code_blocks
                         .get(&id)
-                        .is_some_and(|mutation| mutation.block.is_none())
+                        .is_some_and(|record| record.block.is_none())
                     {
-                        self.block_mutations.remove(&id);
+                        self.staged_code_blocks.remove(&id);
                     }
                     return Ok(id);
                 }
@@ -641,22 +640,24 @@ impl FunctionTableStage {
             && let Some(block) = blocks.find_by_range_and_context(
                 materialisation.address_range(),
                 materialisation.context(),
-                |block| match self.block_mutations.get(&block.id()) {
-                    Some(StagedBlock {
+                |block| match self.staged_code_blocks.get(&block.id()) {
+                    Some(StagedCodeBlockRecord {
                         block: Some(staged),
                         ..
                     }) => materialisation.matches(staged),
-                    Some(StagedBlock { block: None, .. }) | None => materialisation.matches(block),
+                    Some(StagedCodeBlockRecord { block: None, .. }) | None => {
+                        materialisation.matches(block)
+                    }
                 },
             )
         {
             let id = block.id();
             if self
-                .block_mutations
+                .staged_code_blocks
                 .get(&id)
-                .is_some_and(|mutation| mutation.block.is_none())
+                .is_some_and(|record| record.block.is_none())
             {
-                self.block_mutations.remove(&id);
+                self.staged_code_blocks.remove(&id);
             }
             return Ok(id);
         }
@@ -664,10 +665,10 @@ impl FunctionTableStage {
         let id = blocks.pending_id(self.block_reservations.len());
         self.block_reservations.push(id);
         let address = materialisation.address();
-        let block = materialisation.into_block(id);
-        self.block_mutations.insert(
+        let block = materialisation.materialise(id);
+        self.staged_code_blocks.insert(
             id,
-            StagedBlock {
+            StagedCodeBlockRecord {
                 block: Some(block),
                 is_new: true,
             },
@@ -679,7 +680,7 @@ impl FunctionTableStage {
     fn load_existing_block_locations(
         &mut self,
         blocks: &CodeBlockTable,
-        function: &FunctionMaterialisation,
+        function: &NormalisedFunctionRecord,
     ) -> Result<(), IncompleteFunctionError> {
         if !blocks.is_persistent() {
             return Ok(());
@@ -708,7 +709,7 @@ impl FunctionTableStage {
         let previous = self.function_by_id(functions, id)?;
         if let Some(previous) = &previous {
             for (_, block) in previous.blocks() {
-                self.owners_mut(functions, block).remove(id);
+                self.by_block_mut(functions, block).remove(id);
             }
             if function
                 .as_ref()
@@ -719,15 +720,15 @@ impl FunctionTableStage {
         }
         if let Some(function) = &function {
             for (_, block) in function.blocks() {
-                self.owners_mut(functions, block).insert(id);
+                self.by_block_mut(functions, block).insert(id);
             }
             self.function_addresses
                 .insert(function.entry(), Some(function.id()));
         }
         let is_new = self.new_function(id);
-        self.function_mutations.insert(
+        self.staged_functions.insert(
             id,
-            StagedFunction {
+            StagedFunctionRecord {
                 function: function.clone(),
                 is_new,
             },
@@ -735,20 +736,20 @@ impl FunctionTableStage {
 
         if let Some(previous) = previous {
             for (_, block) in previous.blocks() {
-                if self.owners_mut(functions, block).is_empty() {
+                if self.by_block_mut(functions, block).is_empty() {
                     self.stage_block_removal(blocks, block)?;
                 }
             }
         }
         if let Some(function) = function {
             for (_, block) in function.blocks() {
-                if !self.owners_mut(functions, block).is_empty()
+                if !self.by_block_mut(functions, block).is_empty()
                     && self
-                        .block_mutations
+                        .staged_code_blocks
                         .get(&block)
-                        .is_some_and(|mutation| mutation.block.is_none())
+                        .is_some_and(|record| record.block.is_none())
                 {
-                    self.block_mutations.remove(&block);
+                    self.staged_code_blocks.remove(&block);
                 }
             }
         }
@@ -761,9 +762,9 @@ impl FunctionTableStage {
         id: CodeBlockId,
     ) -> Result<(), IncompleteFunctionError> {
         if self.new_block(id) {
-            if let Some(StagedBlock {
+            if let Some(StagedCodeBlockRecord {
                 block: Some(block), ..
-            }) = self.block_mutations.remove(&id)
+            }) = self.staged_code_blocks.remove(&id)
             {
                 self.remove_block_location(block.address(), id);
             }
@@ -776,9 +777,9 @@ impl FunctionTableStage {
             .map_err(IncompleteFunctionError::block_creation)?
             .is_some()
         {
-            self.block_mutations.insert(
+            self.staged_code_blocks.insert(
                 id,
-                StagedBlock {
+                StagedCodeBlockRecord {
                     block: None,
                     is_new: false,
                 },
@@ -809,11 +810,11 @@ impl FunctionTableStage {
         id: CodeBlockId,
         f: impl FnOnce(&CodeBlock) -> R,
     ) -> Result<Option<R>, IncompleteFunctionError> {
-        match self.block_mutations.get(&id) {
-            Some(StagedBlock {
+        match self.staged_code_blocks.get(&id) {
+            Some(StagedCodeBlockRecord {
                 block: Some(block), ..
             }) => Ok(Some(f(block))),
-            Some(StagedBlock { block: None, .. }) => Ok(None),
+            Some(StagedCodeBlockRecord { block: None, .. }) => Ok(None),
             None => blocks
                 .try_get_by_id(id)
                 .map(|block| block.map(|block| f(&block)))
@@ -829,20 +830,20 @@ impl FunctionTableStage {
     ) -> Result<SmallVec<[FunctionId; 4]>, IncompleteFunctionError> {
         let mut containing = SmallVec::new();
         for id in functions.functions_containing(blocks, address) {
-            let contains = match self.function_mutations.get(&id) {
-                Some(StagedFunction {
+            let contains = match self.staged_functions.get(&id) {
+                Some(StagedFunctionRecord {
                     function: Some(function),
                     ..
                 }) => self.function_contains(blocks, function, address)?,
-                Some(StagedFunction { function: None, .. }) => false,
+                Some(StagedFunctionRecord { function: None, .. }) => false,
                 None => true,
             };
             if contains {
                 containing.push(id);
             }
         }
-        for (id, mutation) in self.function_mutations.iter() {
-            let Some(function) = &mutation.function else {
+        for (id, record) in self.staged_functions.iter() {
+            let Some(function) = &record.function else {
                 continue;
             };
             if containing.binary_search(&id).is_ok()
@@ -858,19 +859,19 @@ impl FunctionTableStage {
 
     pub(crate) fn supported_backing_flow_reference(
         &self,
-        functions: &FunctionTable,
+        table: &FunctionTable,
         blocks: &CodeBlockTable,
         reference: Reference,
     ) -> Result<Option<Reference>, IncompleteFunctionError> {
         let mut supported = None::<Reference>;
         for block in blocks.overlaps(reference.from()) {
-            let owners = self
-                .owners
+            let functions = self
+                .by_block
                 .get(&block.id())
                 .cloned()
-                .unwrap_or_else(|| functions.block_owners(block.id()));
-            for owner in owners.iter() {
-                let Some(function) = self.function_by_id(functions, owner)? else {
+                .unwrap_or_else(|| table.get_by_block_id(block.id()));
+            for function in functions.iter() {
+                let Some(function) = self.function_by_id(table, function)? else {
                     continue;
                 };
                 for target in block.flow_targets() {
@@ -901,8 +902,8 @@ impl FunctionTableStage {
     ) -> Result<SmallVec<[FunctionId; 8]>, IncompleteFunctionError> {
         let mut overlapping = functions.overlaps(blocks, range).collect::<SmallVec<_>>();
 
-        for (id, mutation) in self.function_mutations.iter() {
-            let intersects = match &mutation.function {
+        for (id, record) in self.staged_functions.iter() {
+            let intersects = match &record.function {
                 Some(function) => self.function_intersects(blocks, function, range)?,
                 None => false,
             };
@@ -918,7 +919,7 @@ impl FunctionTableStage {
         Ok(overlapping)
     }
 
-    fn function_owning_address(
+    fn unique_function_containing_address(
         &self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
@@ -971,67 +972,68 @@ impl FunctionTableStage {
         Ok(false)
     }
 
-    fn owners_mut<'a>(
+    fn by_block_mut<'a>(
         &'a mut self,
         functions: &FunctionTable,
         block: CodeBlockId,
-    ) -> &'a mut CodeBlockOwners {
+    ) -> &'a mut IdSet<Function> {
         let is_new = self.new_block(block);
-        let original_owners = &mut self.original_owners;
-        self.owners.entry(block).or_insert_with(|| {
+        let original_by_block = &mut self.original_by_block;
+        self.by_block.entry(block).or_insert_with(|| {
             if is_new {
-                CodeBlockOwners::new()
+                IdSet::new()
             } else {
-                let current = functions.block_owners(block);
-                original_owners.insert(block, current.clone());
+                let current = functions.get_by_block_id(block);
+                original_by_block.insert(block, current.clone());
                 current
             }
         })
     }
 
     fn new_function(&self, id: FunctionId) -> bool {
-        self.function_mutations
+        self.staged_functions
             .get(&id)
-            .is_some_and(|mutation| mutation.is_new)
+            .is_some_and(|record| record.is_new)
     }
 
     fn new_block(&self, id: CodeBlockId) -> bool {
-        self.block_mutations
+        self.staged_code_blocks
             .get(&id)
-            .is_some_and(|mutation| mutation.is_new)
+            .is_some_and(|record| record.is_new)
     }
 
     pub(crate) fn prepare(
         self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
-    ) -> Result<(PreparedFunctionTables, EntityWriteBatch), EntityStorageError> {
+    ) -> Result<(PreparedFunctionBatch, EntityWriteBatch), EntityStorageError> {
         let Self {
-            block_mutations,
+            staged_code_blocks,
             block_reservations,
             cancelled_blocks,
             cancelled_functions,
-            function_mutations,
+            staged_functions,
             function_reservations,
-            owners,
-            original_owners,
+            by_block,
+            original_by_block,
             ..
         } = self;
-        let mut prepared_blocks = Vec::with_capacity(block_mutations.len());
-        let mut prepared_functions = Vec::with_capacity(function_mutations.len());
+        let mut block_records = Vec::with_capacity(staged_code_blocks.len());
+        let mut function_records = Vec::with_capacity(staged_functions.len());
         let mut writes = EntityWriteBatch::with_capacity(
-            block_mutations
+            staged_code_blocks
                 .len()
-                .saturating_add(function_mutations.len()),
+                .saturating_add(staged_functions.len()),
         );
 
-        let blocks_are_new = block_mutations
+        let blocks_are_new = staged_code_blocks
             .iter()
-            .all(|(_, mutation)| mutation.is_new && mutation.block.is_some());
-        let (mut block_mutations, block_mutations_ordered) = block_mutations.into_entries();
+            .all(|(_, record)| record.is_new && record.block.is_some());
+        let (mut staged_code_blocks, staged_code_blocks_ordered) =
+            staged_code_blocks.into_entries();
         if blocks_are_new {
-            block_mutations.sort_unstable_by_key(|(id, mutation)| {
-                let block = mutation
+            staged_code_blocks.sort_unstable_by_key(|(id, record)| {
+                let block = record
                     .block
                     .as_ref()
                     .expect("new block batch contains only insertions");
@@ -1042,11 +1044,11 @@ impl FunctionTableStage {
                     *id,
                 )
             });
-        } else if !block_mutations_ordered {
-            block_mutations.sort_unstable_by_key(|(id, _)| *id);
+        } else if !staged_code_blocks_ordered {
+            staged_code_blocks.sort_unstable_by_key(|(id, _)| *id);
         }
-        for (id, mutation) in block_mutations {
-            let StagedBlock { block, is_new } = mutation;
+        for (id, record) in staged_code_blocks {
+            let StagedCodeBlockRecord { block, is_new } = record;
             let previous = if is_new {
                 None
             } else {
@@ -1081,7 +1083,7 @@ impl FunctionTableStage {
                     0
                 }
             };
-            prepared_blocks.push(PreparedCodeBlockMutation::new(
+            block_records.push(PreparedCodeBlockRecord::new(
                 id,
                 block,
                 previous,
@@ -1089,13 +1091,12 @@ impl FunctionTableStage {
             ));
         }
 
-        let (mut function_mutations, function_mutations_ordered) =
-            function_mutations.into_entries();
-        if !function_mutations_ordered {
-            function_mutations.sort_unstable_by_key(|(id, _)| *id);
+        let (mut staged_functions, staged_functions_ordered) = staged_functions.into_entries();
+        if !staged_functions_ordered {
+            staged_functions.sort_unstable_by_key(|(id, _)| *id);
         }
-        for (id, mutation) in function_mutations {
-            let StagedFunction { function, is_new } = mutation;
+        for (id, record) in staged_functions {
+            let StagedFunctionRecord { function, is_new } = record;
             let previous = if is_new {
                 None
             } else {
@@ -1130,7 +1131,7 @@ impl FunctionTableStage {
                     0
                 }
             };
-            prepared_functions.push(PreparedFunctionEntry {
+            function_records.push(PreparedFunctionRecord {
                 encoded_size,
                 function,
                 id,
@@ -1139,18 +1140,18 @@ impl FunctionTableStage {
         }
 
         if let FunctionTable::Persistent(table) = functions {
-            table.append_stage_writes(
-                &prepared_functions,
+            table.append_prepared_writes(
+                &function_records,
                 &function_reservations,
                 &cancelled_functions,
-                &owners,
-                &original_owners,
+                &by_block,
+                &original_by_block,
                 &mut writes,
             )?;
         }
         if let CodeBlockTable::Persistent(table) = blocks {
-            table.append_stage_writes(
-                &prepared_blocks,
+            table.append_prepared_writes(
+                &block_records,
                 &block_reservations,
                 &cancelled_blocks,
                 &mut writes,
@@ -1158,22 +1159,22 @@ impl FunctionTableStage {
         }
 
         Ok((
-            PreparedFunctionTables {
+            PreparedFunctionBatch {
                 block_reservations,
-                blocks: prepared_blocks,
+                blocks: block_records,
                 blocks_are_new,
                 cancelled_blocks,
                 cancelled_functions,
                 function_reservations,
-                functions: prepared_functions,
-                owners,
+                functions: function_records,
+                by_block,
             },
             writes,
         ))
     }
 }
 
-impl PreparedFunctionTables {
+impl PreparedFunctionBatch {
     pub(crate) fn publish(self, functions: &mut FunctionTable, blocks: &mut CodeBlockTable) {
         let Self {
             block_reservations,
@@ -1183,7 +1184,7 @@ impl PreparedFunctionTables {
             cancelled_functions,
             function_reservations,
             functions: function_entries,
-            owners,
+            by_block,
         } = self;
 
         let functions_added = function_entries
@@ -1223,7 +1224,7 @@ impl PreparedFunctionTables {
             }));
         } else {
             for entry in block_entries {
-                blocks.publish_mutation(entry);
+                blocks.publish_record(entry);
             }
         }
         for entry in function_entries {
@@ -1239,7 +1240,7 @@ impl PreparedFunctionTables {
                 ),
             }
         }
-        functions.publish_owners(owners);
+        functions.publish_membership(by_block);
     }
 }
 
@@ -1315,81 +1316,81 @@ impl FunctionTable {
     pub(crate) fn stage_materialisation(
         &self,
         blocks: &CodeBlockTable,
-        stage: &mut FunctionTableStage,
-        function: FunctionMaterialisation,
-    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
-        stage.stage_materialisation(self, blocks, function)
+        staging: &mut FunctionTableStaging,
+        function: NormalisedFunctionRecord,
+    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
+        staging.stage_materialisation(self, blocks, function)
     }
 
     pub(crate) fn stage_membership(
         &self,
         blocks: &CodeBlockTable,
-        stage: &mut FunctionTableStage,
+        staging: &mut FunctionTableStaging,
         function: Function,
-    ) -> Result<PreparedFunctionMutation, IncompleteFunctionError> {
-        stage.stage_membership(self, blocks, function)
+    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
+        staging.stage_membership(self, blocks, function)
     }
 
     pub(crate) fn stage_properties(
         &self,
         blocks: &CodeBlockTable,
-        stage: &mut FunctionTableStage,
+        staging: &mut FunctionTableStaging,
         entry: Address,
         properties: FunctionProperties,
         input_revision: Revision,
     ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
-        stage.set_properties(self, blocks, entry, properties, input_revision)
+        staging.set_properties(self, blocks, entry, properties, input_revision)
     }
 
     pub(crate) fn stage_removal(
         &self,
         blocks: &CodeBlockTable,
-        stage: &mut FunctionTableStage,
+        staging: &mut FunctionTableStaging,
         id: FunctionId,
-    ) -> Result<Option<RemovedFunction>, IncompleteFunctionError> {
-        stage.remove(self, blocks, id)
+    ) -> Result<Option<StagedFunctionRemovalRecord>, IncompleteFunctionError> {
+        staging.remove(self, blocks, id)
     }
 
     pub(crate) fn staged_by_address(
         &self,
-        stage: &FunctionTableStage,
+        staging: &FunctionTableStaging,
         entry: Address,
     ) -> Result<Option<Function>, IncompleteFunctionError> {
-        stage.function_by_address(self, entry)
+        staging.function_by_address(self, entry)
     }
 
     pub(crate) fn staged_by_id(
         &self,
-        stage: &FunctionTableStage,
+        staging: &FunctionTableStaging,
         id: FunctionId,
     ) -> Result<Option<Function>, IncompleteFunctionError> {
-        stage.function_by_id(self, id)
+        staging.function_by_id(self, id)
     }
 
     pub(crate) fn staged_origin(
         &self,
-        stage: &FunctionTableStage,
+        staging: &FunctionTableStaging,
         id: FunctionId,
     ) -> Result<Option<ReferenceOrigin>, IncompleteFunctionError> {
-        stage.function_origin(self, id)
+        staging.function_origin(self, id)
     }
 
     pub(crate) fn staged_overlaps(
         &self,
         blocks: &CodeBlockTable,
-        stage: &FunctionTableStage,
+        staging: &FunctionTableStaging,
         range: &AddressRange,
     ) -> Result<SmallVec<[FunctionId; 8]>, IncompleteFunctionError> {
-        stage.functions_overlapping(self, blocks, range)
+        staging.functions_overlapping(self, blocks, range)
     }
 
-    pub(crate) fn staged_function_owning_address(
+    pub(crate) fn staged_unique_function_containing_address(
         &self,
         blocks: &CodeBlockTable,
-        stage: &FunctionTableStage,
+        staging: &FunctionTableStaging,
         address: Address,
     ) -> Result<Option<FunctionId>, IncompleteFunctionError> {
-        stage.function_owning_address(self, blocks, address)
+        staging.unique_function_containing_address(self, blocks, address)
     }
 
     pub(crate) fn is_persistent(&self) -> bool {
@@ -1433,10 +1434,10 @@ impl FunctionTable {
         }
     }
 
-    fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, CodeBlockOwners>) {
+    fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
         match self {
             Self::Persistent(_) => {}
-            Self::Transient(table) => table.publish_owners(owners),
+            Self::Transient(table) => table.publish_membership(by_block),
         }
     }
 
@@ -1634,7 +1635,7 @@ impl FunctionTable {
     ) -> impl Iterator<Item = Id<Function>> + 'a {
         let mut functions = SmallVec::<[FunctionId; 8]>::new();
         for block in blocks.overlaps_range(range) {
-            for function in self.block_owners(block.id()).iter() {
+            for function in self.get_by_block_id(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
                 }
@@ -1643,14 +1644,11 @@ impl FunctionTable {
         functions.into_iter()
     }
 
-    pub fn functions_containing_block(
-        &self,
-        block: CodeBlockId,
-    ) -> impl ExactSizeIterator<Item = FunctionId> + '_ {
-        self.block_owners(block)
-            .iter()
-            .collect::<SmallVec<[FunctionId; 2]>>()
-            .into_iter()
+    pub fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        match self {
+            Self::Persistent(table) => table.get_by_block_id(block),
+            Self::Transient(table) => table.get_by_block_id(block),
+        }
     }
 
     pub(crate) fn functions_containing(
@@ -1661,7 +1659,7 @@ impl FunctionTable {
         let mut functions = SmallVec::new();
 
         for block in blocks.overlaps(address) {
-            for function in self.block_owners(block.id()).iter() {
+            for function in self.get_by_block_id(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
                 }
@@ -1670,14 +1668,6 @@ impl FunctionTable {
 
         functions
     }
-
-    fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
-        match self {
-            Self::Persistent(table) => table.block_owners(block),
-            Self::Transient(table) => table.block_owners(block),
-        }
-    }
-
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
@@ -1740,7 +1730,7 @@ mod test {
 
     #[test]
     fn staged_entities_retain_contiguous_order() {
-        let mut entries = StagedEntities::<Function, _>::default();
+        let mut entries = StagedEntityRecords::<Function, _>::default();
         let first = FunctionId::from_index(7);
         let second = FunctionId::from_index(8);
 
@@ -1757,7 +1747,7 @@ mod test {
 
     #[test]
     fn staged_entities_promote_discontinuous_ids() {
-        let mut entries = StagedEntities::<Function, _>::default();
+        let mut entries = StagedEntityRecords::<Function, _>::default();
         let first = FunctionId::from_index(7);
         let third = FunctionId::from_index(9);
 
@@ -1772,7 +1762,7 @@ mod test {
 
     #[test]
     fn staged_entities_promote_before_removal() {
-        let mut entries = StagedEntities::<Function, _>::default();
+        let mut entries = StagedEntityRecords::<Function, _>::default();
         let first = FunctionId::from_index(7);
         let second = FunctionId::from_index(8);
 

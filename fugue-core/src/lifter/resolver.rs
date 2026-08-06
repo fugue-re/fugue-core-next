@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, Insn, InsnError, InsnList};
+use crate::ir::{Address, Insn, InsnError};
 use crate::lifter::{
     ContextSet, Disassembler, DisassemblerError, Language, Lifter, LifterError, LiftingContext, Op,
     RawPCodeOp,
@@ -160,7 +160,7 @@ impl InsnResolver {
         size: usize,
         context: &ContextSet,
         bytes: &[u8],
-    ) -> Result<InsnList, InsnExtentError> {
+    ) -> Result<Vec<Insn>, InsnExtentError> {
         let bytes = bytes
             .get(..size)
             .ok_or_else(|| InsnExtentError::insufficient_bytes(address, bytes.len(), size))?;

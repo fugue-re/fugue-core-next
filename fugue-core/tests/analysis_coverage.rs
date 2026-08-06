@@ -8,9 +8,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "sqlite")]
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::AnalysisPhase;
-#[cfg(feature = "sqlite")]
-use fugue_core::engine::change::ChangeKinds;
 #[cfg(feature = "sqlite")]
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
@@ -19,7 +16,9 @@ use fugue_core::engine::{
 use fugue_core::extension;
 #[cfg(feature = "sqlite")]
 use fugue_core::ir::{AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
-use fugue_core::project::Project;
+#[cfg(feature = "sqlite")]
+use fugue_core::project::ChangeKinds;
+use fugue_core::project::{AnalysisPhase, Project};
 use fugue_core::storage::TransientStorageProvider;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{

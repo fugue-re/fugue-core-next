@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::AnalysisEngine;
 
 #[test]
 fn project_remove_lifted_preserves_derived_data_references()
@@ -25,7 +26,7 @@ fn project_remove_lifted_preserves_derived_data_references()
 
     {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
+        assert!(transaction.remove_lifted::<PCodeIr>(function)?);
         transaction.commit()?;
     }
 
@@ -43,7 +44,7 @@ fn project_remove_lifted_preserves_derived_data_references()
 
     {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
+        assert!(transaction.remove_lifted::<PCodeIr>(function)?);
         drop(transaction);
     }
 
@@ -83,6 +84,79 @@ fn project_materialised_references_are_idempotent() -> Result<(), Box<dyn std::e
             .any(|record| matches!(record, ChangeRecord::ReferencesChanged { .. }))
     );
 
+    Ok(())
+}
+
+#[test]
+fn derived_replacement_normalises_and_retracts_default_references()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient("tests/ls.elf")?;
+    let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
+    let target = Address::new(AddressSpaceId::new(1), 0x2000u64);
+    let mut coverage = AddressRangeSet::new();
+    coverage.insert_range(AddressRange::point(source));
+
+    {
+        let mut transaction = project.transaction("test");
+        transaction.replace_derived_references(
+            coverage.clone(),
+            ReferenceKind::Data,
+            [Reference::data(source, target, ReferenceProperties::READ)],
+        )?;
+        transaction.commit()?;
+    }
+
+    let stored = project
+        .references
+        .get(source, ReferenceTarget::from(target))?
+        .expect("derived replacement should insert the reference");
+    assert!(stored.origin().is_derived());
+
+    {
+        let mut transaction = project.transaction("test");
+        transaction.replace_derived_references(coverage, ReferenceKind::Data, [])?;
+        transaction.commit()?;
+    }
+
+    assert!(
+        project
+            .references
+            .get(source, ReferenceTarget::from(target))?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn derived_replacement_preserves_an_asserted_reference() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient("tests/ls.elf")?;
+    let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
+    let target = Address::new(AddressSpaceId::new(1), 0x2000u64);
+    let mut coverage = AddressRangeSet::new();
+    coverage.insert_range(AddressRange::point(source));
+
+    {
+        let mut transaction = project.transaction("test");
+        transaction.add_reference(Reference::data(source, target, ReferenceProperties::WRITE))?;
+        transaction.commit()?;
+    }
+    {
+        let mut transaction = project.transaction("test");
+        transaction.replace_derived_references(
+            coverage,
+            ReferenceKind::Data,
+            [Reference::data(source, target, ReferenceProperties::READ)],
+        )?;
+        transaction.commit()?;
+    }
+
+    let stored = project
+        .references
+        .get(source, ReferenceTarget::from(target))?
+        .expect("derived replacement must preserve the asserted reference");
+    assert!(stored.origin().is_asserted());
+    assert!(stored.is_write());
+    assert!(!stored.is_read());
     Ok(())
 }
 
@@ -482,7 +556,7 @@ fn project_ecode_materialise_preserves_flushed_references() -> Result<(), Box<dy
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(ecode.clone())?;
+        transaction.replace_lifted(ecode.clone())?;
         transaction.commit()?;
     }
 

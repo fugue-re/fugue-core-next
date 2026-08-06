@@ -4,22 +4,20 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use super::super::change::ChangeKinds;
-use super::super::{
-    Analyser, AnalysisContext, AnalysisPhase, Priority, ProjectUpdate, ProjectView,
-};
+use super::super::{Analyser, AnalysisContext, Priority, ProjectUpdate, ProjectView};
+use super::{AnalyserId, AnalyserOrder};
 use crate::analysis::AnalysisError;
 use crate::il::common::{IlAnalyser, IlArtefact, IlError, IlFormId};
 use crate::il::registry::GeneratedArtefact;
 use crate::ir::{AddressRange, AddressRangeSet, FunctionId};
-use crate::project::Project;
+use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
-pub struct IlAnalyserAdapter<A> {
+pub(crate) struct IlAnalyserAdapter<A> {
     analyser: A,
 }
 
 impl<A> IlAnalyserAdapter<A> {
-    pub fn new(analyser: A) -> Self {
+    pub(crate) fn new(analyser: A) -> Self {
         Self { analyser }
     }
 }
@@ -115,7 +113,7 @@ where
     A: IlAnalyser,
 {
     fn name(&self) -> &'static str {
-        self.analyser.name()
+        A::NAME
     }
 
     fn triggers(&self) -> ChangeKinds {
@@ -141,7 +139,6 @@ where
         cx: &AnalysisContext,
         updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
-        let name = self.analyser.name();
         let mut functions = SmallVec::<[FunctionId; 4]>::new();
         if let Some(function) = project.il_analysis_function() {
             functions.push(function);
@@ -151,8 +148,8 @@ where
 
         for function in functions {
             let Some(input) = project
-                .il::<A::Input>(function)
-                .map_err(|error| AnalysisError::pass_failed(name, error))?
+                .lifted::<A::Input>(function)
+                .map_err(|error| AnalysisError::pass_failed(A::NAME, error))?
             else {
                 continue;
             };
@@ -175,16 +172,21 @@ where
 pub(crate) struct ScheduledAnalyser {
     analyser: Box<dyn Analyser>,
     claimed: AddressRangeSet,
+    id: AnalyserId,
     il_input: Option<IlFormId>,
     max_attempts: usize,
-    order: u32,
+    order: AnalyserOrder,
     phase: AnalysisPhase,
     priority: Priority,
     triggers: ChangeKinds,
 }
 
 impl ScheduledAnalyser {
-    pub(crate) fn new(analyser: Box<dyn Analyser>, il_input: Option<IlFormId>) -> Self {
+    pub(crate) fn new(
+        id: AnalyserId,
+        analyser: Box<dyn Analyser>,
+        il_input: Option<IlFormId>,
+    ) -> Self {
         let max_attempts = analyser.max_attempts();
         let phase = analyser.phase();
         let priority = analyser.priority();
@@ -193,9 +195,10 @@ impl ScheduledAnalyser {
         Self {
             analyser,
             claimed: AddressRangeSet::new(),
+            id,
             il_input,
             max_attempts,
-            order: 0,
+            order: AnalyserOrder::new(0),
             phase,
             priority,
             triggers,
@@ -226,7 +229,11 @@ impl ScheduledAnalyser {
         self.il_input.as_ref()
     }
 
-    pub(crate) fn order(&self) -> u32 {
+    pub(crate) fn id(&self) -> AnalyserId {
+        self.id
+    }
+
+    pub(crate) fn order(&self) -> AnalyserOrder {
         self.order
     }
 
@@ -242,7 +249,7 @@ impl ScheduledAnalyser {
         self.claimed.remove_range(range);
     }
 
-    pub(crate) fn set_order(&mut self, order: u32) {
+    pub(crate) fn set_order(&mut self, order: AnalyserOrder) {
         self.order = order;
     }
 

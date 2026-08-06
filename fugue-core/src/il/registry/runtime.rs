@@ -12,17 +12,17 @@ type IlConverterFactory = fn() -> Box<dyn ErasedIlConverter>;
 type IlProducerFactory = fn() -> Box<dyn ErasedIlProducer>;
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum IlRecipe {
+pub(crate) enum IlRecipe {
     Converter(IlConverterFactory),
     Producer(IlProducerFactory),
 }
 
 impl IlRecipe {
-    pub(super) const fn converter<T: IlConverter>() -> Self {
+    pub(crate) const fn converter<T: IlConverter>() -> Self {
         Self::Converter(new_converter::<T>)
     }
 
-    pub(super) const fn producer<T: IlProducer>() -> Self {
+    pub(crate) const fn producer<T: IlProducer>() -> Self {
         Self::Producer(new_producer::<T>)
     }
 
@@ -34,7 +34,7 @@ impl IlRecipe {
     }
 }
 
-pub(super) trait ErasedIlConverter: Send {
+pub(crate) trait ErasedIlConverter: Send {
     fn convert(
         &mut self,
         source: &(dyn Any + Send + Sync),
@@ -58,7 +58,7 @@ impl<T: IlConverter> ErasedIlConverter for T {
     }
 }
 
-pub(super) trait ErasedIlProducer: Send {
+pub(crate) trait ErasedIlProducer: Send {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,

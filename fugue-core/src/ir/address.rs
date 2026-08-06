@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
+use std::mem;
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
@@ -8,6 +9,8 @@ use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
 
 use crate::lifter::{ContextSet, Language, Varnode};
+use crate::storage::entities::schema::{ENTITY_KEY_ADDRESS_ID, ENTITY_KEY_RAW_ADDRESS_ID};
+use crate::storage::entities::{EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Confidence;
 
@@ -29,6 +32,22 @@ use crate::types::Confidence;
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct RawAddress(u64);
+
+impl EntityKeyCodec for RawAddress {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (value, rest) = input.split_at_checked(mem::size_of::<u64>())?;
+        *input = rest;
+        Some(Self::from(u64::from_be_bytes(value.try_into().ok()?)))
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend(self.offset().to_be_bytes())
+    }
+}
+
+impl EntityKey for RawAddress {
+    const ID: EntityKeyId = ENTITY_KEY_RAW_ADDRESS_ID;
+}
 
 impl Debug for RawAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1119,6 +1138,23 @@ fn raw_address_bounds(range: &impl RangeBounds<RawAddress>) -> Option<RangeInclu
 pub struct Address {
     space: AddressSpaceId,
     address: RawAddress,
+}
+
+impl EntityKeyCodec for Address {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let space = AddressSpaceId::decode(input)?;
+        let address = RawAddress::decode(input)?;
+        Some(Self { space, address })
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        self.space.encode(output);
+        self.address.encode(output);
+    }
+}
+
+impl EntityKey for Address {
+    const ID: EntityKeyId = ENTITY_KEY_ADDRESS_ID;
 }
 
 impl Debug for Address {

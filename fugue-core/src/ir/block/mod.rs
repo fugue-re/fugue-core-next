@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 
 use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id, Insn};
 use crate::lifter::ContextSet;
-use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::entities::schema::{ENTITY_CODE_BLOCK_ID, ENTITY_KEY_CODE_BLOCK_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::common::archived_bitflags;
 
@@ -16,11 +16,15 @@ pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 mod table;
 pub(crate) use table::{
     ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, CodeBlockIdsByStart, DEFAULT_CODE_BLOCK_CACHE_BYTES,
-    PreparedCodeBlockMutation,
+    PreparedCodeBlockRecord,
 };
 pub use table::{CodeBlockRef, CodeBlockTable};
 
 pub type CodeBlockId = Id<CodeBlock>;
+
+impl EntityKey for CodeBlockId {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_ID;
+}
 
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -82,7 +86,7 @@ pub(crate) struct CodeBlockFlowCursor {
     target: usize,
 }
 
-pub(crate) struct CodeBlockMaterialisation {
+pub(crate) struct NormalisedCodeBlockRecord {
     address: Address,
     context: ContextSet,
     flow: CodeBlockFlow,
@@ -264,7 +268,7 @@ impl CodeBlock {
     }
 }
 
-impl CodeBlockMaterialisation {
+impl NormalisedCodeBlockRecord {
     pub(crate) fn new<'a>(
         address: Address,
         size: NonZeroUsize,
@@ -307,7 +311,7 @@ impl CodeBlockMaterialisation {
             && block.flow == self.flow
     }
 
-    pub(crate) fn into_block(self, id: CodeBlockId) -> CodeBlock {
+    pub(crate) fn materialise(self, id: CodeBlockId) -> CodeBlock {
         CodeBlock {
             id,
             start: self.address,

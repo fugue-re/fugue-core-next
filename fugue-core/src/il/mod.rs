@@ -43,7 +43,7 @@
 //! submit! { IlFormRegistration::of::<CallSummary>() }
 //! ```
 //!
-//! `reader.il::<CallSummary>(function)` now type-checks and participates in the shared
+//! `reader.lifted::<CallSummary>(function)` now type-checks and participates in the shared
 //! byte-bounded cache. Registering an [`IlProducer`](common::IlProducer) with
 //! [`IlFormRegistration::root`](registry::IlFormRegistration::root), or an
 //! [`IlConverter`](common::IlConverter) with
@@ -58,7 +58,7 @@
 //! - [`ControlFlowIl`](common::ControlFlowIl) — the artefact has an
 //!   [`IlGraph`](common::IlGraph), which unlocks dominance and the structural verifier.
 //! - [`PersistableIl`](common::PersistableIl) — the artefact has a schema and can be written
-//!   to the project as a durable override through `ProjectTransaction::replace_il`. Overrides
+//!   to the project as a durable override through `ProjectTransaction::replace_lifted`. Overrides
 //!   are stored in one entity family keyed by `(FunctionId, IlFormId)`, and the recorded
 //!   schema is checked on load.
 

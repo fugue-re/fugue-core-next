@@ -1,15 +1,90 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt::{self, Display, Formatter};
 use std::mem;
 
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use super::AnalysisPhase;
 use crate::ir::{Address, AddressRange, AddressRangeSet};
 use crate::storage::entities::schema::ENTITY_COVERAGE_ID;
 use crate::storage::entities::{Entity, EntityId, ProjectEntity};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[repr(u8)]
+pub enum AnalysisPhase {
+    #[default]
+    Decode = 1,
+    Derive = 3,
+    Identify = 5,
+    Partition = 2,
+    Propagate = 4,
+    Retract = 0,
+}
+
+impl AnalysisPhase {
+    pub const ALL: [AnalysisPhase; 6] = [
+        AnalysisPhase::Retract,
+        AnalysisPhase::Decode,
+        AnalysisPhase::Partition,
+        AnalysisPhase::Derive,
+        AnalysisPhase::Propagate,
+        AnalysisPhase::Identify,
+    ];
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Decode => "decode",
+            Self::Derive => "derive",
+            Self::Identify => "identify",
+            Self::Partition => "partition",
+            Self::Propagate => "propagate",
+            Self::Retract => "retract",
+        }
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Retract => 0,
+            Self::Decode => 1,
+            Self::Partition => 2,
+            Self::Derive => 3,
+            Self::Propagate => 4,
+            Self::Identify => 5,
+        }
+    }
+}
+
+impl Ord for AnalysisPhase {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for AnalysisPhase {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Display for AnalysisPhase {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnalysisCoverage {
@@ -441,12 +516,49 @@ impl PersistableProjectEntity for AnalysisCoverage {
 
 #[cfg(test)]
 mod test {
+    use std::error::Error;
+
     use super::*;
+    #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+    use crate::loader::Shellcode;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::TRANSIENT;
+    #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+    use crate::storage::entities::EntityStorageProviderFromLoadable;
     use crate::storage::entities::InMemoryEntityStorage;
+    #[cfg(feature = "mdbx")]
+    use crate::storage::entities::MdbxEntityStorage;
+    #[cfg(feature = "rocksdb")]
+    use crate::storage::entities::RocksDbEntityStorage;
+    #[cfg(feature = "sqlite")]
+    use crate::storage::entities::SqliteEntityStorage;
     use crate::storage::segments::DEFAULT_SPACE_ID;
+    #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+    use crate::types::AttributeMap;
+    #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+    use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
     fn range(start: u64, end: u64) -> AddressRange {
         AddressRange::new(DEFAULT_SPACE_ID, start.into(), end.into())
+    }
+
+    fn assert_coverage_round_trip(storage: EntityStorage) -> Result<(), EntityStorageError> {
+        let mut expected = AnalysisCoverage::new();
+        expected.configure([
+            ("decoder", AnalysisPhase::Decode),
+            ("partitioner", AnalysisPhase::Partition),
+        ]);
+        expected.mark("decoder", AnalysisPhase::Decode, range(0x1000, 0x1fff));
+        expected.mark(
+            "partitioner",
+            AnalysisPhase::Partition,
+            range(0x2000, 0x2fff),
+        );
+        expected.clear(range(0x1800, 0x18ff));
+        expected.persist(&storage)?;
+
+        assert_eq!(AnalysisCoverage::from_storage(&storage)?, expected);
+        Ok(())
     }
 
     #[test]
@@ -477,6 +589,37 @@ mod test {
 
         coverage.mark("second", AnalysisPhase::Decode, range);
         assert!(coverage.is_covered(AnalysisPhase::Decode, Address::from(0x1000u64)));
+    }
+
+    #[test]
+    fn coverage_round_trips_on_enabled_entity_backends() -> Result<(), Box<dyn Error>> {
+        assert_coverage_round_trip(EntityStorage::new(InMemoryEntityStorage::new()))?;
+
+        #[cfg(feature = "sqlite")]
+        assert_coverage_round_trip(EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?))?;
+
+        #[cfg(any(feature = "mdbx", feature = "rocksdb"))]
+        let loader = Shellcode::new("x86:LE:64", 0u64, &[0u8])?;
+
+        #[cfg(feature = "rocksdb")]
+        {
+            let directory = tempfile::tempdir()?;
+            let mut attributes = AttributeMap::new();
+            attributes.set_attr(ATTRIBUTE_PROJECT_PATH, directory.path().to_path_buf());
+            let provider = RocksDbEntityStorage::from_loadable(&loader, &mut attributes)?;
+            assert_coverage_round_trip(EntityStorage::new(provider))?;
+        }
+
+        #[cfg(feature = "mdbx")]
+        {
+            let directory = tempfile::tempdir()?;
+            let mut attributes = AttributeMap::new();
+            attributes.set_attr(ATTRIBUTE_PROJECT_PATH, directory.path().to_path_buf());
+            let provider = MdbxEntityStorage::from_loadable(&loader, &mut attributes)?;
+            assert_coverage_round_trip(EntityStorage::new(provider))?;
+        }
+
+        Ok(())
     }
 
     #[test]

@@ -18,7 +18,6 @@ use fugue_core::analysis::function::{
 };
 use fugue_core::analysis::switch::SwitchRecovery;
 use fugue_core::arch::Arch;
-use fugue_core::engine::change::{ChangeCategory, ChangeKinds, ChangeRecord};
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, EngineError,
     MappingMetadataUpdate, Priority, ProjectUpdate, ProjectView, Subscription,
@@ -40,12 +39,13 @@ use fugue_core::loader::{
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
     ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
 };
-use fugue_core::project::{Project, ProjectError};
-use fugue_core::queries::{CallEdge, MappingRow, QueryError, QueryPage, SymbolRow};
+use fugue_core::project::{
+    ChangeCategory, ChangeKinds, ChangeRecord, ChangeSource, Project, ProjectError,
+};
+use fugue_core::queries::{CallEdge, MappingEntity, QueryError, QueryPage, SymbolEntity};
 use fugue_core::storage::{
-    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesAsIterator,
-    EntityBytesIterator, EntityBytesReadTransaction, EntityBytesWriteTransaction,
-    EntityKeyBytesIterator, EntityStorage, EntityStorageError, EntityStorageProvider,
+    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable, EntityStorageWriteTransaction, InMemoryEntityStorage,
     InMemorySegmentStorage, PERSISTENT, ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags,
     SegmentMappingKind, SegmentMappingProvenance, SegmentStorage, StorageContainer,
@@ -180,11 +180,23 @@ impl EntityStorageProvider for FailingEntityStorage {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<BytesOrSlice<'_>, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
         self.inner.iter_prefix_keys(prefix)
     }
 
-    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    fn iter_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         self.inner.iter_prefix(prefix)
     }
 
@@ -192,7 +204,13 @@ impl EntityStorageProvider for FailingEntityStorage {
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
-    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         self.inner.iter_range(prefix, start)
     }
 
@@ -200,7 +218,7 @@ impl EntityStorageProvider for FailingEntityStorage {
         &'a self,
         prefix: &[u8],
         f: F,
-    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    ) -> Result<Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a,
@@ -956,10 +974,10 @@ fn test_query_pages_advance_from_cursor() -> Result<(), Box<dyn Error>> {
     assert!(!functions.is_empty());
 
     let symbols =
-        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolEntity, _>(|cursor| reader.symbol_page(cursor, 1))?;
     assert!(!symbols.is_empty());
 
-    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingEntity, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     assert!(!mappings.is_empty());
@@ -994,17 +1012,17 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Er
     let reader = engine.query_reader()?;
     let mut expected = inserted
         .iter()
-        .map(|entry| SymbolRow::new(entry.address(), entry.symbol(), entry.properties()))
+        .map(|entry| SymbolEntity::new(entry.address(), entry.symbol(), entry.properties()))
         .collect::<Vec<_>>();
     expected.sort();
 
-    let symbols_at = assert_strict_cursor_pages::<SymbolRow, _>(|cursor| {
+    let symbols_at = assert_strict_cursor_pages::<SymbolEntity, _>(|cursor| {
         reader.symbol_page_at(address, cursor, 1)
     })?;
     assert_eq!(symbols_at, expected);
 
     let symbol_page =
-        assert_strict_cursor_pages::<SymbolRow, _>(|cursor| reader.symbol_page(cursor, 1))?;
+        assert_strict_cursor_pages::<SymbolEntity, _>(|cursor| reader.symbol_page(cursor, 1))?;
     let shared_address = symbol_page
         .into_iter()
         .filter(|record| record.address() == address)
@@ -1066,7 +1084,7 @@ fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn E
     let _ = (first, second);
     let reader = engine.query_reader()?;
 
-    let mappings = assert_strict_cursor_pages::<MappingRow, _>(|cursor| {
+    let mappings = assert_strict_cursor_pages::<MappingEntity, _>(|cursor| {
         reader.mapping_page(DEFAULT_SPACE_ID, cursor, 1)
     })?;
     let shared_start_records = mappings
@@ -1746,10 +1764,13 @@ fn test_engine_applies_update_batch_in_one_revision() -> Result<(), Box<dyn Erro
     engine.analyse()?;
     let revision = engine.query_reader()?.revision()?;
 
-    let changes = engine.apply_updates(vec![
-        ProjectUpdate::add_function(one_block_function(entry, 1)),
-        ProjectUpdate::add_function(one_block_function(entry + 0x10u64, 1)),
-    ])?;
+    let changes = engine.apply_updates(
+        ChangeSource::agent("test"),
+        vec![
+            ProjectUpdate::add_function(one_block_function(entry, 1)),
+            ProjectUpdate::add_function(one_block_function(entry + 0x10u64, 1)),
+        ],
+    )?;
 
     assert_eq!(
         changes
@@ -1780,7 +1801,7 @@ fn test_oversized_update_batch_resynchronises_and_records_degradation() -> Resul
             )
         })
         .collect::<Vec<_>>();
-    let changes = engine.apply_updates(updates)?;
+    let changes = engine.apply_updates(ChangeSource::agent("test"), updates)?;
     assert_eq!(
         changes.records(),
         [ChangeRecord::Resynchronise {
@@ -2497,6 +2518,74 @@ fn test_drop_persists_revision_and_reopen_sends_resynchronisation() -> Result<()
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn test_into_project_returns_project_to_existing_persistence_lifecycle()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let project_path = directory.path().join("engine-into-project.fdbz");
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path);
+
+    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes.clone(),
+    )?;
+    let entry = project
+        .entry_point()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
+
+    let reader = engine.query_reader()?;
+    assert!(reader.function_id_at(entry)?.is_some());
+    drop(reader);
+
+    let mut project = engine.into_project()?;
+    let symbol = SymbolEntry::new(
+        entry,
+        "after_engine_symbol",
+        SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+    );
+    let symbol_name = symbol.symbol();
+    let mut transaction = project.transaction("test");
+    transaction.add_symbol(SymbolIndex::new(SymbolTableSelector::new(253), 0), symbol)?;
+    let revision = transaction.commit()?.revision();
+    drop(project);
+
+    let reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
+        "tests/ls.elf",
+        attributes,
+    )?;
+    assert_eq!(reopened.revision(), revision);
+    assert!(
+        reopened
+            .symbols()
+            .iter()
+            .any(|(_, symbol)| symbol.address() == entry && symbol.symbol() == symbol_name)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_into_project_rejects_a_retained_query_reader() -> Result<(), Box<dyn Error>> {
+    let project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
+    let engine = AnalysisEngine::new(project)?;
+    let reader = engine.query_reader()?;
+
+    let error = match engine.into_project() {
+        Ok(_) => {
+            return Err(io::Error::other("retained reader must prevent project recovery").into());
+        }
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, EngineError::ProjectRetained));
+    assert!(matches!(reader.revision(), Err(QueryError::Stopped)));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn test_drop_reopen_queries_persisted_state_and_single_resynchronisation()
 -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
@@ -2643,19 +2732,10 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
 
-    let mut reader = engine.query_reader()?;
+    let reader = engine.query_reader()?;
     let function = reader
         .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after analysis"))?;
-    let block = reader
-        .project()?
-        .functions()
-        .get_by_id(function)
-        .and_then(|function| function.blocks().next().map(|(_, block)| block))
-        .ok_or_else(|| io::Error::other("function block missing after analysis"))?;
-    let insns = reader
-        .insns(block)?
-        .ok_or_else(|| io::Error::other("generated insns missing"))?;
     let pcode = reader
         .pcode(function)?
         .ok_or_else(|| io::Error::other("generated PCode missing"))?;
@@ -2681,8 +2761,7 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     assert!(reopened.ecode_ssa(function)?.is_none());
 
     let engine = AnalysisEngine::new(reopened)?;
-    let mut reader = engine.query_reader()?;
-    assert_eq!(reader.insns(block)?.as_deref(), Some(insns.as_ref()));
+    let reader = engine.query_reader()?;
     assert_eq!(reader.pcode(function)?.as_deref(), Some(pcode.as_ref()));
     assert_eq!(
         reader.ecode_ssa(function)?.as_deref(),
@@ -2977,7 +3056,7 @@ fn test_derived_analyser_runs_after_function_discovery() -> Result<(), Box<dyn E
 
 #[test]
 fn test_engine_storm_regions_coalesce_to_single_analyser_task() -> Result<(), Box<dyn Error>> {
-    let run_scenario = |storm: bool| -> Result<(usize, Vec<SymbolRow>), Box<dyn Error>> {
+    let run_scenario = |storm: bool| -> Result<(usize, Vec<SymbolEntity>), Box<dyn Error>> {
         STORM_ANALYSER_RUNS.store(0, Ordering::SeqCst);
 
         let project = project_with_test_analyser("storm-test")?;

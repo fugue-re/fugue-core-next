@@ -269,14 +269,14 @@ impl<'a> SegmentView<'a> {
     }
 }
 
-pub(super) struct SegmentRangeOverlap {
+struct SegmentRangeOverlap {
     window_offset: usize,
     run_offset: usize,
     len: usize,
 }
 
 impl SegmentRangeOverlap {
-    pub(super) fn new(run_start: usize, run_len: usize, offset: usize, end: usize) -> Option<Self> {
+    fn new(run_start: usize, run_len: usize, offset: usize, end: usize) -> Option<Self> {
         let from = offset.max(run_start);
         let to = end.min(run_start + run_len);
         (from < to).then(|| Self {
@@ -286,15 +286,15 @@ impl SegmentRangeOverlap {
         })
     }
 
-    pub(super) fn window_offset(&self) -> usize {
+    fn window_offset(&self) -> usize {
         self.window_offset
     }
 
-    pub(super) fn window(&self) -> Range<usize> {
+    fn window(&self) -> Range<usize> {
         self.window_offset..self.window_offset + self.len
     }
 
-    pub(super) fn source(&self) -> Range<usize> {
+    fn source(&self) -> Range<usize> {
         self.run_offset..self.run_offset + self.len
     }
 }

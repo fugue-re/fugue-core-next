@@ -87,7 +87,7 @@ impl Drop for Any {
     }
 }
 
-pub struct Out(Any);
+pub(crate) struct Out(Any);
 
 impl Out {
     pub(crate) unsafe fn new<T>(t: T) -> Self {

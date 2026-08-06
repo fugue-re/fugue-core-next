@@ -6,13 +6,12 @@ use thiserror::Error;
 use crate::il::common::{IlError, IlFormId, PersistableIl};
 use crate::ir::FunctionId;
 use crate::storage::entities::schema::{
-    ENTITY_IL_OVERRIDE_ID, ENTITY_KEY_IL_OVERRIDE_ID, Entity, EntityId, EntityKey, EntityKeyId,
+    ENTITY_IL_OVERRIDE_ID, ENTITY_KEY_IL_OVERRIDE_ID, Entity, EntityId, EntityKey, EntityKeyCodec,
+    EntityKeyId,
 };
 use crate::storage::entities::{EntityWrite, EntityWriteBatch};
 use crate::storage::{EntityStorageError, StorageContainer};
 use crate::types::common::Revision;
-
-const FUNCTION_KEY_SIZE: usize = 8;
 
 #[derive(Debug, Error)]
 pub(crate) enum IlStorageError {
@@ -42,21 +41,22 @@ impl IlOverrideKey {
     }
 }
 
-impl EntityKey for IlOverrideKey {
-    const ID: EntityKeyId = ENTITY_KEY_IL_OVERRIDE_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        let (function, form) = buf.split_at_checked(FUNCTION_KEY_SIZE)?;
+impl EntityKeyCodec for IlOverrideKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
         Some(Self {
-            function: FunctionId::decode(function)?,
-            form: IlFormId::from_stored(str::from_utf8(form).ok()?),
+            function: FunctionId::decode(input)?,
+            form: IlFormId::decode(input)?,
         })
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        EntityKey::encode(&self.function, output);
-        output.extend(self.form.as_str().bytes());
+        self.function.encode(output);
+        self.form.encode(output);
     }
+}
+
+impl EntityKey for IlOverrideKey {
+    const ID: EntityKeyId = ENTITY_KEY_IL_OVERRIDE_ID;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -150,23 +150,23 @@ pub(crate) trait IlPersist: PersistableIl {
 
 impl<T: PersistableIl> IlPersist for T {}
 
-struct IlStagedArtefact {
+struct StagedIlArtefact {
     artefact: Box<dyn Any + Send + Sync>,
     encode: IlEncodeFn,
 }
 
-struct IlMutation {
+struct StagedIlRecord {
     base_present: bool,
-    value: Option<IlStagedArtefact>,
+    value: Option<StagedIlArtefact>,
 }
 
 #[derive(Default)]
-pub(crate) struct IlStage {
-    mutations: BTreeMap<IlOverrideKey, IlMutation>,
+pub(crate) struct IlStaging {
+    records: BTreeMap<IlOverrideKey, StagedIlRecord>,
     stored: Option<BTreeMap<FunctionId, Vec<IlFormId>>>,
 }
 
-impl IlStage {
+impl IlStaging {
     pub(crate) fn replace<T>(
         &mut self,
         storage: &StorageContainer,
@@ -176,19 +176,19 @@ impl IlStage {
         T: PersistableIl,
     {
         let key = IlOverrideKey::new(artefact.metadata().function(), T::FORM);
-        let staged = IlStagedArtefact {
+        let staged = StagedIlArtefact {
             artefact: Box::new(artefact),
             encode: encode_erased::<T>,
         };
-        if let Some(mutation) = self.mutations.get_mut(&key) {
-            mutation.value = Some(staged);
+        if let Some(record) = self.records.get_mut(&key) {
+            record.value = Some(staged);
             return Ok(());
         }
 
         let base_present = storage.contains_entity::<IlOverrideKey, IlOverride>(&key)?;
-        self.mutations.insert(
+        self.records.insert(
             key,
-            IlMutation {
+            StagedIlRecord {
                 base_present,
                 value: Some(staged),
             },
@@ -205,8 +205,8 @@ impl IlStage {
         T: PersistableIl,
     {
         let key = IlOverrideKey::new(function, T::FORM);
-        if let Some(mutation) = self.mutations.get_mut(&key) {
-            return Ok(mutation.value.take().and_then(|staged| {
+        if let Some(record) = self.records.get_mut(&key) {
+            return Ok(record.value.take().and_then(|staged| {
                 staged
                     .artefact
                     .downcast::<T>()
@@ -216,9 +216,9 @@ impl IlStage {
         }
 
         let previous = T::load(storage, function)?;
-        self.mutations.insert(
+        self.records.insert(
             key,
-            IlMutation {
+            StagedIlRecord {
                 base_present: previous.is_some(),
                 value: None,
             },
@@ -233,14 +233,14 @@ impl IlStage {
         form: &IlFormId,
     ) -> Result<bool, EntityStorageError> {
         let key = IlOverrideKey::new(function, form.clone());
-        if let Some(mutation) = self.mutations.get_mut(&key) {
-            return Ok(mutation.value.take().is_some());
+        if let Some(record) = self.records.get_mut(&key) {
+            return Ok(record.value.take().is_some());
         }
 
         let base_present = storage.contains_entity::<IlOverrideKey, IlOverride>(&key)?;
-        self.mutations.insert(
+        self.records.insert(
             key,
-            IlMutation {
+            StagedIlRecord {
                 base_present,
                 value: None,
             },
@@ -249,13 +249,13 @@ impl IlStage {
     }
 
     pub(crate) fn prepare(&self) -> Result<EntityWriteBatch, EntityStorageError> {
-        let mut writes = EntityWriteBatch::with_capacity(self.mutations.len());
-        for (key, mutation) in &self.mutations {
-            if !mutation.base_present && mutation.value.is_none() {
+        let mut writes = EntityWriteBatch::with_capacity(self.records.len());
+        for (key, record) in &self.records {
+            if !record.base_present && record.value.is_none() {
                 continue;
             }
             let key = IlOverride::ID.key_for(key);
-            writes.push(match &mutation.value {
+            writes.push(match &record.value {
                 Some(staged) => EntityWrite::insert_archived(
                     key,
                     rkyv::to_bytes::<rkyv::rancor::Error>(&(staged.encode)(
@@ -275,7 +275,7 @@ impl IlStage {
         function: FunctionId,
     ) -> Result<usize, EntityStorageError> {
         if self.stored.is_none() {
-            let mut stored: BTreeMap<FunctionId, Vec<IlFormId>> = BTreeMap::new();
+            let mut stored = BTreeMap::<FunctionId, Vec<IlFormId>>::new();
             for key in storage.entities().keys::<IlOverrideKey, IlOverride>()? {
                 let key = key?;
                 stored.entry(key.function()).or_default().push(key.form);
@@ -292,10 +292,10 @@ impl IlStage {
         let mut removed = 0usize;
         for form in forms {
             if self
-                .mutations
+                .records
                 .insert(
                     IlOverrideKey::new(function, form.clone()),
-                    IlMutation {
+                    StagedIlRecord {
                         base_present: true,
                         value: None,
                     },
@@ -309,9 +309,9 @@ impl IlStage {
     }
 
     pub(crate) fn for_each_change(&self, mut f: impl FnMut(FunctionId, IlFormId, bool)) {
-        for (key, mutation) in &self.mutations {
-            if mutation.base_present || mutation.value.is_some() {
-                f(key.function(), key.form().clone(), mutation.value.is_some());
+        for (key, record) in &self.records {
+            if record.base_present || record.value.is_some() {
+                f(key.function(), key.form().clone(), record.value.is_some());
             }
         }
     }

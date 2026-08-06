@@ -8,13 +8,13 @@ use crate::il::common::IlValueId;
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::ir::RawAddress;
 
-pub(super) struct SwitchTableLayout {
+pub(crate) struct SwitchTableLayout {
     address: RawAddress,
     element_size: u32,
     index: IlValueId,
 }
 
-pub(super) struct SwitchInlineTableLayout {
+pub(crate) struct SwitchInlineTableLayout {
     address: RawAddress,
     stride: u32,
     index: IlValueId,
@@ -49,35 +49,35 @@ impl BaseScaleIndex {
 }
 
 impl SwitchTableLayout {
-    pub(super) fn address(&self) -> RawAddress {
+    pub(crate) fn address(&self) -> RawAddress {
         self.address
     }
 
-    pub(super) fn element_size(&self) -> u32 {
+    pub(crate) fn element_size(&self) -> u32 {
         self.element_size
     }
 
-    pub(super) fn index(&self) -> IlValueId {
+    pub(crate) fn index(&self) -> IlValueId {
         self.index
     }
 }
 
 impl SwitchInlineTableLayout {
-    pub(super) fn address(&self) -> RawAddress {
+    pub(crate) fn address(&self) -> RawAddress {
         self.address
     }
 
-    pub(super) fn stride(&self) -> u32 {
+    pub(crate) fn stride(&self) -> u32 {
         self.stride
     }
 
-    pub(super) fn index(&self) -> IlValueId {
+    pub(crate) fn index(&self) -> IlValueId {
         self.index
     }
 }
 
 impl SwitchIntervalRecovery<'_> {
-    pub(super) fn table_layout(&self, target: IlValueId) -> Option<SwitchTableLayout> {
+    pub(crate) fn table_layout(&self, target: IlValueId) -> Option<SwitchTableLayout> {
         let mut queue = VecDeque::from([target]);
         let mut visited = FxHashSet::default();
         let mut steps = 0usize;
@@ -134,7 +134,7 @@ impl SwitchIntervalRecovery<'_> {
         (indexed.stride() == u64::from(element_size)).then_some((indexed.base(), indexed.index()))
     }
 
-    pub(super) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
+    pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
         let mut target = self.canonical_value(target);
         if let Some(operation) = self.ssa.defining_operation(target)
             && operation.opcode() == ECodeSsaOpcode::And

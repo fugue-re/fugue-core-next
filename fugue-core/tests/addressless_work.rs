@@ -2,14 +2,13 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
 };
 use fugue_core::extension;
 use fugue_core::ir::AddressRangeSet;
 use fugue_core::loader::Loader;
-use fugue_core::project::Project;
+use fugue_core::project::{ChangeKinds, Project};
 use fugue_core::storage::TransientStorageProvider;
 use fugue_core::types::AttributeMap;
 

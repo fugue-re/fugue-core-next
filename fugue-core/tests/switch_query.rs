@@ -1,8 +1,7 @@
 use fugue_core::engine::AnalysisEngine;
-use fugue_core::engine::change::{ChangeKinds, ChangeRecord};
 use fugue_core::ir::{Address, AddressTable, Switch, SwitchModel};
 use fugue_core::loader::Loader;
-use fugue_core::project::Project;
+use fugue_core::project::{ChangeKinds, ChangeRecord, Project};
 
 fn absolute(model_table: Address) -> SwitchModel {
     SwitchModel::Absolute(AddressTable::new(model_table, 4).with_element_count(3))

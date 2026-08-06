@@ -1,8 +1,10 @@
 use std::fmt;
-use std::str::FromStr;
+use std::str::{self, FromStr};
 
 use smol_str::SmolStr;
 use thiserror::Error;
+
+use crate::storage::EntityKeyCodec;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IlFormIdError {
@@ -16,41 +18,13 @@ pub enum IlFormIdError {
     MissingFormComponent { identifier: String },
 }
 
-enum ValidationFailure {
+enum IlValidationError {
     EmptyComponent,
     InvalidCharacter(usize),
     Missing,
 }
 
-impl ValidationFailure {
-    const fn check(identifier: &str) -> Result<(), Self> {
-        let bytes = identifier.as_bytes();
-        if bytes.is_empty() {
-            return Err(Self::Missing);
-        }
-
-        let mut index = 0;
-        let mut component_start = 0;
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if byte == b'.' {
-                if index == component_start {
-                    return Err(Self::EmptyComponent);
-                }
-                component_start = index + 1;
-            } else if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
-                return Err(Self::InvalidCharacter(index));
-            }
-            index += 1;
-        }
-
-        if component_start == bytes.len() {
-            return Err(Self::EmptyComponent);
-        }
-
-        Ok(())
-    }
-
+impl IlValidationError {
     fn into_error(self, identifier: &str) -> IlFormIdError {
         match self {
             Self::EmptyComponent => IlFormIdError::EmptyComponent {
@@ -75,7 +49,7 @@ impl DialectId {
     pub const RESERVED_NAMESPACE: &str = "fugue";
 
     pub const fn from_static(identifier: &'static str) -> Self {
-        if ValidationFailure::check(identifier).is_err() {
+        if Self::check(identifier).is_err() {
             panic!("dialect identifier is not a dot-separated lower-case ASCII name");
         }
         Self(SmolStr::new_static(identifier))
@@ -83,7 +57,7 @@ impl DialectId {
 
     pub fn new(identifier: impl AsRef<str>) -> Result<Self, IlFormIdError> {
         let identifier = identifier.as_ref();
-        ValidationFailure::check(identifier).map_err(|failure| failure.into_error(identifier))?;
+        Self::check(identifier).map_err(|failure| failure.into_error(identifier))?;
         Ok(Self(SmolStr::new(identifier)))
     }
 
@@ -99,6 +73,34 @@ impl DialectId {
         self.as_str()
             .split_once('.')
             .map_or(self.as_str(), |(namespace, _)| namespace)
+    }
+
+    const fn check(identifier: &str) -> Result<(), IlValidationError> {
+        let bytes = identifier.as_bytes();
+        if bytes.is_empty() {
+            return Err(IlValidationError::Missing);
+        }
+
+        let mut index = 0;
+        let mut component_start = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte == b'.' {
+                if index == component_start {
+                    return Err(IlValidationError::EmptyComponent);
+                }
+                component_start = index + 1;
+            } else if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+                return Err(IlValidationError::InvalidCharacter(index));
+            }
+            index += 1;
+        }
+
+        if component_start == bytes.len() {
+            return Err(IlValidationError::EmptyComponent);
+        }
+
+        Ok(())
     }
 }
 
@@ -121,7 +123,7 @@ pub struct IlFormId(SmolStr);
 
 impl IlFormId {
     pub const fn from_static(identifier: &'static str) -> Self {
-        if ValidationFailure::check(identifier).is_err() {
+        if DialectId::check(identifier).is_err() {
             panic!("form identifier is not a dot-separated lower-case ASCII name");
         }
         if Self::component_count(identifier) < 2 {
@@ -132,7 +134,7 @@ impl IlFormId {
 
     pub fn new(identifier: impl AsRef<str>) -> Result<Self, IlFormIdError> {
         let identifier = identifier.as_ref();
-        ValidationFailure::check(identifier).map_err(|failure| failure.into_error(identifier))?;
+        DialectId::check(identifier).map_err(|failure| failure.into_error(identifier))?;
         if Self::component_count(identifier) < 2 {
             return Err(IlFormIdError::MissingFormComponent {
                 identifier: String::from(identifier),
@@ -143,7 +145,7 @@ impl IlFormId {
 
     pub(crate) fn from_stored(identifier: &str) -> Self {
         debug_assert!(
-            ValidationFailure::check(identifier).is_ok() && Self::component_count(identifier) >= 2,
+            DialectId::check(identifier).is_ok() && Self::component_count(identifier) >= 2,
             "a stored form identifier was written malformed"
         );
         Self(SmolStr::new(identifier))
@@ -172,6 +174,19 @@ impl IlFormId {
             index += 1;
         }
         count
+    }
+}
+
+impl EntityKeyCodec for IlFormId {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let identifier = str::from_utf8(input).ok()?;
+        let form = Self::from_stored(identifier);
+        *input = &[];
+        Some(form)
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend(self.as_str().bytes());
     }
 }
 

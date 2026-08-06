@@ -2,24 +2,21 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{
-    CallEdge, MAX_QUERY_PAGE_LIMIT, MappingRow, ProblemRow, QueryError, QueryPage, SwitchRow,
-    SymbolRow,
+    CallEdge, MAX_QUERY_PAGE_SIZE, MappingEntity, ProblemEntity, QueryPage, SwitchEntity,
+    SymbolEntity,
 };
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{
-    Address, CallGraphEdgeKey, CodeBlockId, FunctionRef, InsnList, ProblemKey, ProblemKind,
-    Reference, ReferenceTarget,
+    Address, CallGraphEdgeKey, FunctionRef, ProblemKey, ProblemKind, Reference, ReferenceTarget,
 };
-use crate::lifter::InsnResolver;
 use crate::project::{Project, ProjectError};
 use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::{SegmentMappingCache, SegmentStorageError};
 
-pub(crate) struct ProjectRead<'p> {
+pub(crate) struct ProjectQuery<'p> {
     project: &'p Project,
 }
 
-impl<'p> ProjectRead<'p> {
+impl<'p> ProjectQuery<'p> {
     pub(crate) fn new(project: &'p Project) -> Self {
         Self { project }
     }
@@ -87,32 +84,6 @@ impl<'p> ProjectRead<'p> {
         Arc::new(FlowTargets::new(targets))
     }
 
-    pub(crate) fn insns(
-        &self,
-        block: CodeBlockId,
-        mappings: &mut SegmentMappingCache,
-        resolver: &mut InsnResolver,
-    ) -> Result<Option<InsnList>, QueryError> {
-        let Some(block) = self.project.blocks().get_by_id(block) else {
-            return Ok(None);
-        };
-
-        let view = mappings
-            .contiguous_view_from(self.project.segments(), block.address())
-            .map_err(ProjectError::from)?;
-        let bytes = view
-            .as_contiguous()
-            .ok_or(SegmentStorageError::InvalidAddressRange)
-            .map_err(ProjectError::from)?;
-
-        Ok(Some(resolver.resolve_extent(
-            block.address(),
-            block.size(),
-            block.context(),
-            bytes,
-        )?))
-    }
-
     pub(crate) fn function_page(
         &self,
         space: AddressSpaceId,
@@ -130,90 +101,90 @@ impl<'p> ProjectRead<'p> {
     pub(crate) fn mapping_page(
         &self,
         space: AddressSpaceId,
-        after: Option<MappingRow>,
+        after: Option<MappingEntity>,
         limit: usize,
-    ) -> Result<QueryPage<MappingRow>, ProjectError> {
+    ) -> Result<QueryPage<MappingEntity>, ProjectError> {
         let views = self
             .project
             .segments()
             .iter_views_from(space, after.map(|row| row.start()))?;
 
         Ok(Self::page_grouped(
-            views.map(|view| MappingRow::from_view(&view)),
+            views.map(|view| MappingEntity::from(&view)),
             after,
             limit,
-            MappingRow::start,
+            MappingEntity::start,
         ))
     }
 
     pub(crate) fn symbol_page(
         &self,
-        after: Option<SymbolRow>,
+        after: Option<SymbolEntity>,
         limit: usize,
-    ) -> QueryPage<SymbolRow> {
+    ) -> QueryPage<SymbolEntity> {
         let start = after.map_or(Bound::Unbounded, |after| Bound::Included(after.address()));
         let symbols = self
             .project
             .symbols()
             .range_by_address((start, Bound::Unbounded))
-            .map(|(_, entry)| SymbolRow::from_entry(&entry));
+            .map(|(_, entry)| SymbolEntity::from(&*entry));
 
-        Self::page_grouped(symbols, after, limit, SymbolRow::address)
+        Self::page_grouped(symbols, after, limit, SymbolEntity::address)
     }
 
-    pub(crate) fn problem_at(&self, address: Address, kind: ProblemKind) -> Option<ProblemRow> {
+    pub(crate) fn problem_at(&self, address: Address, kind: ProblemKind) -> Option<ProblemEntity> {
         self.project
             .problems()
             .get(address, kind)
-            .map(|problem| ProblemRow::from(&*problem))
+            .map(|problem| ProblemEntity::from(&*problem))
     }
 
     pub(crate) fn problem_page(
         &self,
         after: Option<ProblemKey>,
         limit: usize,
-    ) -> QueryPage<ProblemRow, ProblemKey> {
+    ) -> QueryPage<ProblemEntity, ProblemKey> {
         let rows = self
             .project
             .problems()
             .entries_after(after)
-            .map(|problem| ProblemRow::from(&*problem));
+            .map(|problem| ProblemEntity::from(&*problem));
 
-        Self::page_by(rows, limit, ProblemRow::key)
+        Self::page_by(rows, limit, ProblemEntity::key)
     }
 
-    pub(crate) fn switch_at(&self, branch: Address) -> Option<SwitchRow> {
+    pub(crate) fn switch_at(&self, branch: Address) -> Option<SwitchEntity> {
         self.project
             .switches()
             .get_by_branch(branch)
-            .map(|switch| SwitchRow::from(&*switch))
+            .map(|switch| SwitchEntity::from(&*switch))
     }
 
     pub(crate) fn switch_page(
         &self,
         after: Option<Address>,
         limit: usize,
-    ) -> QueryPage<SwitchRow, Address> {
+    ) -> QueryPage<SwitchEntity, Address> {
         let rows = self
             .project
             .switches()
             .entries_after(after)
-            .map(|switch| SwitchRow::from(&*switch));
+            .map(|switch| SwitchEntity::from(&*switch));
 
-        Self::page_by(rows, limit, SwitchRow::branch)
+        Self::page_by(rows, limit, SwitchEntity::branch)
     }
 
     pub(crate) fn symbol_page_at(
         &self,
         address: Address,
-        after: Option<SymbolRow>,
+        after: Option<SymbolEntity>,
         limit: usize,
-    ) -> QueryPage<SymbolRow> {
+    ) -> QueryPage<SymbolEntity> {
         let mut rows = self
             .project
             .symbols()
             .get_by_address(address)
-            .map(|(_, entry)| SymbolRow::from_entry(&entry))
+            .map(|(_, entry)| SymbolEntity::from(&*entry))
             .filter(|row| after.is_none_or(|after| *row > after))
             .collect::<Vec<_>>();
         rows.sort();
@@ -270,7 +241,7 @@ impl<'p> ProjectRead<'p> {
     }
 
     fn limit(limit: usize) -> usize {
-        limit.clamp(1, MAX_QUERY_PAGE_LIMIT)
+        limit.clamp(1, MAX_QUERY_PAGE_SIZE)
     }
 
     fn push_ordered_group<T>(rows: &mut Vec<T>, group: &mut Vec<T>, after: Option<T>, limit: usize)

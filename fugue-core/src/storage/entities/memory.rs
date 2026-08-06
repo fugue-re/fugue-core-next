@@ -285,6 +285,7 @@ mod test {
     use super::*;
     use crate::ir::Address;
     use crate::storage::entities::schema::EntityId;
+    use crate::storage::entities::schema::test::assert_domain_keys_round_trip;
     use crate::storage::entities::{Entity, EntityStorage};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -303,29 +304,25 @@ mod test {
     }
 
     #[test]
-    fn iter_range_respects_inclusive_and_exclusive_bounds() {
+    fn iter_range_respects_inclusive_and_exclusive_bounds() -> Result<(), EntityStorageError> {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        assert_domain_keys_round_trip(&storage)?;
 
         for value in 1..=4 {
-            storage
-                .insert(&Address::from(value), &TestEntity::new(value))
-                .unwrap();
+            storage.insert(&Address::from(value), &TestEntity::new(value))?;
         }
 
         let included = storage
-            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))
-            .unwrap()
+            .iter_range::<Address, TestEntity>(Bound::Included(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(included, vec![2, 3, 4]);
 
         let excluded = storage
-            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))
-            .unwrap()
+            .iter_range::<Address, TestEntity>(Bound::Excluded(&Address::from(2u64)))?
             .map(|entry| entry.map(|(_, entity)| entity.value))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(excluded, vec![3, 4]);
+        Ok(())
     }
 }

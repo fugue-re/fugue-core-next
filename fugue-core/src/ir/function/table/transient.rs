@@ -4,8 +4,8 @@ use std::ops::RangeBounds;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use super::{CodeBlockOwners, FunctionIndex, FunctionTableError};
-use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, RawAddress};
+use super::{FunctionIndex, FunctionTableError};
+use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, IdSet, RawAddress};
 use crate::storage::EntityStorageError;
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -32,11 +32,11 @@ impl FunctionTable {
         Ok(())
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> FunctionId {
+    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
         self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
+    pub(crate) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
         let mut required = self.entries.len();
         for &id in reservations {
             let allocated = self.index.allocator.allocate();
@@ -48,11 +48,11 @@ impl FunctionTable {
         }
     }
 
-    pub(super) fn publish_release(&mut self, id: FunctionId) {
+    pub(crate) fn publish_release(&mut self, id: FunctionId) {
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_upsert(&mut self, function: Function, previous_entry: Option<Address>) {
+    pub(crate) fn publish_upsert(&mut self, function: Function, previous_entry: Option<Address>) {
         if let Some(previous_entry) = previous_entry {
             self.index.addresses.remove(&previous_entry);
         }
@@ -65,14 +65,14 @@ impl FunctionTable {
         self.entries[index] = Some(function);
     }
 
-    pub(super) fn publish_remove(&mut self, id: FunctionId, entry: Address) {
+    pub(crate) fn publish_remove(&mut self, id: FunctionId, entry: Address) {
         self.index.addresses.remove(&entry);
         self.entries[id.index()] = None;
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_owners(&mut self, owners: FxHashMap<CodeBlockId, CodeBlockOwners>) {
-        self.index.publish_owners(owners);
+    pub(crate) fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+        self.index.publish_membership(by_block);
     }
 
     pub(crate) fn insert_with<R, F>(
@@ -102,8 +102,8 @@ impl FunctionTable {
                 .collect::<SmallVec<[_; 8]>>();
             self.entries[existing.index()] = Some(function);
             self.index
-                .remove_members(existing, previous_blocks.iter().flatten().copied());
-            self.index.insert_members(existing, blocks);
+                .remove_memberships(existing, previous_blocks.iter().flatten().copied());
+            self.index.insert_memberships(existing, blocks);
 
             return Ok((existing, value));
         }
@@ -220,8 +220,8 @@ impl FunctionTable {
             .map(|(address, _)| *address)
     }
 
-    pub(super) fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
-        self.index.owners(block)
+    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        self.index.get_by_block_id(block)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {

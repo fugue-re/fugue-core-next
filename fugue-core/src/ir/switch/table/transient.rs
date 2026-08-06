@@ -30,20 +30,20 @@ impl SwitchTable {
         self.index.branches_of_function(function)
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> SwitchId {
+    pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
         self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_reservation(&mut self, id: SwitchId) {
+    pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
         let allocated = self.index.allocator.allocate();
         debug_assert_eq!(allocated, id);
     }
 
-    pub(super) fn publish_release(&mut self, id: SwitchId) {
+    pub(crate) fn publish_release(&mut self, id: SwitchId) {
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_upsert(&mut self, switch: Switch, previous_function: Option<FunctionId>) {
+    pub(crate) fn publish_upsert(&mut self, switch: Switch, previous_function: Option<FunctionId>) {
         let id = switch.id();
         let branch = switch.branch();
         if let Some(previous_function) = previous_function {
@@ -57,7 +57,7 @@ impl SwitchTable {
         self.entries[slot] = Some(switch);
     }
 
-    pub(super) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
         self.entries[id.index()] = None;
         self.index.remove(function, branch);
         self.index.allocator.release(id);

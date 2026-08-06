@@ -3,10 +3,10 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
 
 const MAX_INSN_BYTES: usize = 32;
-pub(super) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
+pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
 
 #[derive(Debug, Default)]
-pub(super) struct NonReturningThunk;
+pub(crate) struct NonReturningThunk;
 
 impl AnalysisPass<FunctionRecoveryState> for NonReturningThunk {
     fn analyse_with(
@@ -23,7 +23,7 @@ impl AnalysisPass<FunctionRecoveryState> for NonReturningThunk {
         };
 
         let Some(terminator) = block
-            .insns()
+            .insn_ids()
             .last()
             .and_then(|&id| state.function().insn(id))
             .filter(|insn| insn.is_flow())

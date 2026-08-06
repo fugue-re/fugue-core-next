@@ -10,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::Level;
 
 use super::builder::{FunctionBuilderInputs, FunctionCandidateOutcome};
+use super::executor::{FunctionCandidateBatch, FunctionRecoveryExecutor};
 use super::{
     FUNCTION_RECOVERY_BLOCKING_PROBLEMS, FunctionBuilder, FunctionBuilderContext,
     FunctionRecoveryCommitContext, FunctionRecoveryCommitHook, FunctionRecoveryConfig,
@@ -17,10 +18,8 @@ use super::{
 };
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
-use crate::engine::change::ChangeKinds;
 use crate::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisPhase, Priority, ProjectUpdate,
-    ProjectView,
+    Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdate, ProjectView,
 };
 use crate::extension::{self, Registration, submit};
 use crate::ir::{
@@ -28,7 +27,7 @@ use crate::ir::{
     FunctionTable, IncompleteFunction, ProblemKind, RawAddress, RawAddressRangeSet,
 };
 use crate::lifter::InsnResolver;
-use crate::project::Project;
+use crate::project::{AnalysisPhase, ChangeKinds, Project};
 use crate::storage::{AddressSpaceId, SegmentStorage};
 use crate::types::{Confidence, EstimateSize};
 
@@ -75,6 +74,7 @@ pub struct FunctionRecovery {
     reanalysis_candidates: FxHashSet<Address>,
     recovery_active: bool,
     discovered_targets: Vec<AddressWithContext>,
+    executor: FunctionRecoveryExecutor,
     cancellation: CancellationToken,
     progress: Progress,
     wave_active: bool,
@@ -280,7 +280,7 @@ impl FunctionDiscoveryContext {
         self.coverage.gaps(space_id)
     }
 
-    pub(super) fn available_ranges(
+    pub(crate) fn available_ranges(
         &self,
         space_id: AddressSpaceId,
     ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
@@ -665,6 +665,7 @@ impl FunctionRecovery {
             reanalysis_candidates: FxHashSet::default(),
             recovery_active: false,
             discovered_targets: Vec::new(),
+            executor: FunctionRecoveryExecutor::new(),
             cancellation: CancellationToken::default(),
             progress: Progress::default(),
             wave_active: false,
@@ -1380,50 +1381,32 @@ impl FunctionRecovery {
                     Ok(should_yield)
                 };
 
-                let workers = builder.candidate_worker_count(batch.len(), worker_limit);
                 let builder_inputs = FunctionBuilderInputs::new(
                     &inputs.function_entries,
                     &inputs.non_returning_targets,
                 );
-                if workers <= 1 {
-                    let mut batch = batch.into_iter();
-                    while let Some(candidate) = batch.next() {
-                        let outcome = builder.analyse_candidate(
-                            project,
-                            builder_inputs,
-                            &mut resolver_slot,
-                            candidate,
-                            cancellation,
-                        );
+                let batch = FunctionCandidateBatch::new(
+                    project,
+                    builder_inputs,
+                    batch,
+                    cancellation,
+                    worker_limit,
+                );
+                let remaining = self.executor.analyse_candidates(
+                    builder,
+                    &mut resolver_slot,
+                    batch,
+                    |outcome| {
                         let should_yield = handle_outcome(outcome, discovered_targets)?;
                         candidates.extend(discovered_targets.drain(..));
-                        if should_yield {
-                            for candidate in batch.rev() {
-                                candidates.push_front(candidate);
-                            }
-                            yield_after_pass = true;
-                            break;
-                        }
+                        Ok(should_yield)
+                    },
+                )?;
+                if !remaining.is_empty() {
+                    for candidate in remaining.into_iter().rev() {
+                        candidates.push_front(candidate);
                     }
-                } else {
-                    let remaining = builder.analyse_candidates_in_parallel(
-                        project,
-                        builder_inputs,
-                        batch,
-                        cancellation,
-                        workers,
-                        |outcome| {
-                            let should_yield = handle_outcome(outcome, discovered_targets)?;
-                            candidates.extend(discovered_targets.drain(..));
-                            Ok(should_yield)
-                        },
-                    )?;
-                    if !remaining.is_empty() {
-                        for candidate in remaining.into_iter().rev() {
-                            candidates.push_front(candidate);
-                        }
-                        yield_after_pass = true;
-                    }
+                    yield_after_pass = true;
                 }
 
                 if yield_after_pass

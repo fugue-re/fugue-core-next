@@ -11,8 +11,8 @@ use crate::storage::entities::schema::{
     ENTITY_CALL_GRAPH_EDGE_ID, ENTITY_KEY_CALL_GRAPH_FORWARD_ID, ENTITY_KEY_CALL_GRAPH_INVERSE_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, EntityWrite,
-    EntityWriteBatch, ProjectEntity, WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId, EntityStorageError,
+    EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
 };
 use crate::types::Revision;
 use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
@@ -24,8 +24,6 @@ pub struct CallGraphEdgeKey {
 }
 
 impl CallGraphEdgeKey {
-    const KEY_SIZE: usize = Address::ENCODED_SIZE * 2;
-
     pub fn new(source: Address, target: Address) -> Self {
         Self { source, target }
     }
@@ -43,17 +41,10 @@ impl CallGraphEdgeKey {
     }
 }
 
-impl EntityKey for CallGraphEdgeKey {
-    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_FORWARD_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() != Self::KEY_SIZE {
-            return None;
-        }
-
-        let source = Address::decode(&buf[..Address::ENCODED_SIZE])?;
-        let target = Address::decode(&buf[Address::ENCODED_SIZE..])?;
-
+impl EntityKeyCodec for CallGraphEdgeKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let source = Address::decode(input)?;
+        let target = Address::decode(input)?;
         Some(Self::new(source, target))
     }
 
@@ -61,6 +52,10 @@ impl EntityKey for CallGraphEdgeKey {
         self.source.encode(output);
         self.target.encode(output);
     }
+}
+
+impl EntityKey for CallGraphEdgeKey {
+    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_FORWARD_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,17 +82,10 @@ impl InverseCallGraphEdgeKey {
     }
 }
 
-impl EntityKey for InverseCallGraphEdgeKey {
-    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_INVERSE_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() != CallGraphEdgeKey::KEY_SIZE {
-            return None;
-        }
-
-        let callee = Address::decode(&buf[..Address::ENCODED_SIZE])?;
-        let caller = Address::decode(&buf[Address::ENCODED_SIZE..])?;
-
+impl EntityKeyCodec for InverseCallGraphEdgeKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let callee = Address::decode(input)?;
+        let caller = Address::decode(input)?;
         Some(Self::new(callee, caller))
     }
 
@@ -105,6 +93,10 @@ impl EntityKey for InverseCallGraphEdgeKey {
         self.callee.encode(output);
         self.caller.encode(output);
     }
+}
+
+impl EntityKey for InverseCallGraphEdgeKey {
+    const ID: EntityKeyId = ENTITY_KEY_CALL_GRAPH_INVERSE_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -204,26 +196,26 @@ impl Iterator for TransientCallGraphEdges {
 }
 
 #[derive(Default)]
-pub(crate) struct CallGraphStage {
-    functions: BTreeMap<Address, StagedFunctionEdges>,
+pub(crate) struct CallGraphStaging {
+    functions: BTreeMap<Address, StagedFunctionEdgesRecord>,
 }
 
-struct StagedFunctionEdges {
+struct StagedFunctionEdgesRecord {
     base_known_empty: bool,
     targets: BTreeSet<Address>,
 }
 
-pub(crate) struct PreparedCallGraphStage {
-    edges: Vec<PreparedCallGraphEdge>,
+pub(crate) struct PreparedCallGraphBatch {
+    edges: Vec<PreparedCallGraphEdgeRecord>,
 }
 
-struct PreparedCallGraphEdge {
+struct PreparedCallGraphEdgeRecord {
     encoded_size: usize,
     key: CallGraphEdgeKey,
     present: bool,
 }
 
-impl CallGraphStage {
+impl CallGraphStaging {
     pub(crate) fn set_function_edges(
         &mut self,
         caller: Address,
@@ -236,7 +228,7 @@ impl CallGraphStage {
                 edges.base_known_empty |= base_known_empty;
                 edges.targets = targets.clone();
             })
-            .or_insert(StagedFunctionEdges {
+            .or_insert(StagedFunctionEdgesRecord {
                 base_known_empty,
                 targets,
             });
@@ -246,7 +238,7 @@ impl CallGraphStage {
         self.functions
             .entry(caller)
             .and_modify(|edges| edges.targets.clear())
-            .or_insert(StagedFunctionEdges {
+            .or_insert(StagedFunctionEdgesRecord {
                 base_known_empty: false,
                 targets: BTreeSet::new(),
             });
@@ -304,10 +296,10 @@ impl CallGraphIndex {
         Ok(())
     }
 
-    pub(crate) fn prepare_stage(
+    pub(crate) fn prepare(
         &self,
-        stage: &CallGraphStage,
-    ) -> Result<(PreparedCallGraphStage, EntityWriteBatch), EntityStorageError> {
+        staging: &CallGraphStaging,
+    ) -> Result<(PreparedCallGraphBatch, EntityWriteBatch), EntityStorageError> {
         let encoded = self
             .persistent()
             .map(|_| {
@@ -320,13 +312,13 @@ impl CallGraphIndex {
         let mut edges = Vec::new();
         let mut writes = EntityWriteBatch::new();
 
-        for (&caller, staged) in &stage.functions {
-            let current = if staged.base_known_empty {
+        for (&caller, record) in &staging.functions {
+            let current = if record.base_known_empty {
                 BTreeSet::new()
             } else {
                 self.callees_set(caller)?
             };
-            for &target in current.difference(&staged.targets) {
+            for &target in current.difference(&record.targets) {
                 let key = CallGraphEdgeKey::new(caller, target);
                 if encoded.is_some() {
                     writes.push(EntityWrite::remove(CallGraphEdgeRecord::ID.key_for(&key)));
@@ -335,13 +327,13 @@ impl CallGraphIndex {
                             .key_for(&InverseCallGraphEdgeKey::new(target, caller)),
                     ));
                 }
-                edges.push(PreparedCallGraphEdge {
+                edges.push(PreparedCallGraphEdgeRecord {
                     encoded_size: 0,
                     key,
                     present: false,
                 });
             }
-            for &target in staged.targets.difference(&current) {
+            for &target in record.targets.difference(&current) {
                 let key = CallGraphEdgeKey::new(caller, target);
                 if let Some(encoded) = &encoded {
                     writes.push(EntityWrite::insert(
@@ -354,7 +346,7 @@ impl CallGraphIndex {
                         encoded.clone(),
                     ));
                 }
-                edges.push(PreparedCallGraphEdge {
+                edges.push(PreparedCallGraphEdgeRecord {
                     encoded_size,
                     key,
                     present: true,
@@ -362,15 +354,15 @@ impl CallGraphIndex {
             }
         }
 
-        Ok((PreparedCallGraphStage { edges }, writes))
+        Ok((PreparedCallGraphBatch { edges }, writes))
     }
 
-    pub(crate) fn publish_stage(&self, stage: PreparedCallGraphStage) {
+    pub(crate) fn publish(&self, batch: PreparedCallGraphBatch) {
         match &self.backing {
             CallGraphIndexBacking::Persistent {
                 forward, inverse, ..
             } => {
-                for edge in stage.edges {
+                for edge in batch.edges {
                     let inverse_key =
                         InverseCallGraphEdgeKey::new(edge.key.target(), edge.key.source());
                     if edge.present {
@@ -384,7 +376,7 @@ impl CallGraphIndex {
             }
             CallGraphIndexBacking::Transient(index) => {
                 let mut index = index.write();
-                for edge in stage.edges {
+                for edge in batch.edges {
                     let inverse =
                         InverseCallGraphEdgeKey::new(edge.key.target(), edge.key.source());
                     if edge.present {
@@ -628,7 +620,7 @@ mod test {
 
     use super::*;
     use crate::ir::{
-        FunctionId, FunctionTable, FunctionTableStage, IncompleteCodeBlock, IncompleteFunction,
+        FunctionId, FunctionTable, FunctionTableStaging, IncompleteCodeBlock, IncompleteFunction,
         Insn, InsnEntry,
     };
     use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
@@ -763,13 +755,13 @@ mod test {
             .ok_or_else(|| io::Error::other("block construction failed"))?;
         function.push_block(block);
 
-        let mut stage = FunctionTableStage::default();
-        let function = function.prepare_materialisation()?;
-        let mutation = functions.stage_materialisation(blocks, &mut stage, function)?;
-        let id = mutation.id();
-        let (prepared, writes) = stage.prepare(functions, blocks)?;
+        let mut staging = FunctionTableStaging::default();
+        let function = function.normalise()?;
+        let record = functions.stage_materialisation(blocks, &mut staging, function)?;
+        let id = record.id();
+        let (batch, writes) = staging.prepare(functions, blocks)?;
         assert!(writes.is_empty());
-        prepared.publish(functions, blocks);
+        batch.publish(functions, blocks);
         Ok(id)
     }
 
@@ -803,13 +795,13 @@ mod test {
         let entry = function.entry();
         drop(function);
 
-        let mut stage = FunctionTableStage::default();
+        let mut staging = FunctionTableStaging::default();
         functions
-            .stage_removal(blocks, &mut stage, function_id)
+            .stage_removal(blocks, &mut staging, function_id)
             .map_err(EntityStorageError::backing)?;
-        let (prepared, writes) = stage.prepare(functions, blocks)?;
+        let (batch, writes) = staging.prepare(functions, blocks)?;
         assert!(writes.is_empty());
-        prepared.publish(functions, blocks);
+        batch.publish(functions, blocks);
         Ok(Some(entry))
     }
 

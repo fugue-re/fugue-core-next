@@ -7,8 +7,8 @@ use crate::il::common::{
     IlSchemaVersion, IlSourceSpan, IlValueId, PersistableIl,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode,
-    ECodeSsaValue, ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaConstantInterner, ECodeSsaMemoryDomain,
+    ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
@@ -30,24 +30,9 @@ pub struct ECodeSsaIr {
     constant_storage: Vec<u8>,
 }
 
-pub(crate) struct ECodeSsaIrParts {
-    pub(crate) metadata: IlMetadata,
-    pub(crate) graph: IlGraph,
-    pub(crate) source_spans: Vec<IlSourceSpan>,
-    pub(crate) parent_spans: Vec<IlParentSpan>,
-    pub(crate) values: Vec<ECodeSsaValue>,
-    pub(crate) block_arguments: Vec<ECodeSsaBlockArg>,
-    pub(crate) edge_arguments: Vec<IlIndexRange>,
-    pub(crate) edge_argument_values: Vec<IlValueId>,
-    pub(crate) operations: Vec<ECodeSsaOp>,
-    pub(crate) value_operands: Vec<IlValueId>,
-    pub(crate) memory_domains: Vec<ECodeSsaMemoryDomain>,
-    pub(crate) constant_storage: Vec<u8>,
-}
-
 impl ECodeSsaIr {
-    pub(crate) fn new(parts: ECodeSsaIrParts) -> Self {
-        let ECodeSsaIrParts {
+    pub(crate) fn new(context: ECodeSsaBuilderContext) -> Self {
+        let ECodeSsaBuilderContext {
             metadata,
             graph,
             source_spans,
@@ -60,7 +45,7 @@ impl ECodeSsaIr {
             value_operands,
             memory_domains,
             constant_storage,
-        } = parts;
+        } = context;
         Self {
             metadata,
             graph,

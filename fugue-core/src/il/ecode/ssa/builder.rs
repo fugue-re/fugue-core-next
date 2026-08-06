@@ -4,7 +4,8 @@ use crate::il::common::{
     IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaValue,
+    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp,
+    ECodeSsaValue,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -142,7 +143,7 @@ impl ECodeSsaBuilder {
             self.edge_arguments = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }
 
-        let mut ir = ECodeSsaIr::new(ECodeSsaIrParts {
+        let mut ir = ECodeSsaIr::new(ECodeSsaBuilderContext {
             metadata: self.metadata,
             graph: self.graph,
             source_spans: self.source_spans,

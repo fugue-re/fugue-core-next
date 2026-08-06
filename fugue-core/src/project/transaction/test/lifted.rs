@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::AnalysisEngine;
 
 #[test]
 fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +9,7 @@ fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn st
 
     let changes = {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(materialised.clone())?;
+        transaction.replace_lifted(materialised.clone())?;
         transaction.commit()?
     };
 
@@ -24,7 +25,7 @@ fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn st
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[4, 5, 6]))?;
+        transaction.replace_lifted(tagged_pcode(function, &[4, 5, 6]))?;
         drop(transaction);
     }
 
@@ -32,7 +33,7 @@ fn rejecting_lifted_removal_preserves_materialised_ir() -> Result<(), Box<dyn st
 
     let changes = {
         let mut transaction = project.transaction("test");
-        assert!(transaction.remove_lifted(function, &PCodeIr::FORM)?);
+        assert!(transaction.remove_lifted::<PCodeIr>(function)?);
         transaction.commit()?
     };
 
@@ -52,7 +53,7 @@ fn lifted_materialise_and_read() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(body.clone())?;
+        transaction.replace_lifted(body.clone())?;
         transaction.commit()?;
     }
 
@@ -76,9 +77,9 @@ fn project_reads_ecode_ssa_derived_tables() -> Result<(), Box<dyn std::error::Er
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(pcode_for_test(function, single_block_graph()))?;
-        transaction.materialise_lifted(ecode_for_test(function, single_block_graph()))?;
-        transaction.materialise_lifted(ecode_ssa_for_test(function, single_block_graph()))?;
+        transaction.replace_lifted(pcode_for_test(function, single_block_graph()))?;
+        transaction.replace_lifted(ecode_for_test(function, single_block_graph()))?;
+        transaction.replace_lifted(ecode_ssa_for_test(function, single_block_graph()))?;
         transaction.commit()?;
     }
 
@@ -116,7 +117,7 @@ fn ensure_lifted_builds_ecode_from_pcode() -> Result<(), Box<dyn std::error::Err
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(body)?;
+        transaction.replace_lifted(body)?;
         transaction.commit()?;
     }
     assert!(project.pcode(function)?.is_some());
@@ -157,7 +158,7 @@ fn ensure_lifted_builds_ssa_through_ecode() -> Result<(), Box<dyn std::error::Er
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(body)?;
+        transaction.replace_lifted(body)?;
         transaction.commit()?;
     }
 
@@ -193,15 +194,18 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
-        transaction.materialise_lifted(ecode_for_test(function, IlGraph::default()))?;
-        transaction.materialise_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(ecode_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
         transaction.commit()?;
     }
 
     {
         let mut transaction = project.transaction("test");
-        assert_eq!(transaction.remove_lifted_from(function, &ECodeIr::FORM)?, 2);
+        assert_eq!(
+            transaction.remove_lifted_descendants(function, &ECodeIr::FORM)?,
+            2
+        );
         drop(transaction);
     }
 
@@ -210,7 +214,10 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
 
     let changes = {
         let mut transaction = project.transaction("test");
-        assert_eq!(transaction.remove_lifted_from(function, &ECodeIr::FORM)?, 2);
+        assert_eq!(
+            transaction.remove_lifted_descendants(function, &ECodeIr::FORM)?,
+            2
+        );
         transaction.commit()?
     };
 

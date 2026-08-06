@@ -137,7 +137,7 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn append_stage_writes(
+    pub(crate) fn append_prepared_writes(
         &self,
         id: SymbolId,
         entry: Option<&SymbolEntry>,
@@ -145,12 +145,12 @@ impl SymbolTable {
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         if let Self::Persistent(table) = self {
-            table.append_stage_writes(id, entry, previous, writes)?;
+            table.append_prepared_writes(id, entry, previous, writes)?;
         }
         Ok(())
     }
 
-    pub(crate) fn append_stage_transition_writes(
+    pub(crate) fn append_prepared_transition_writes(
         &self,
         reservations: &[SymbolId],
         releases: &[SymbolId],
@@ -159,7 +159,13 @@ impl SymbolTable {
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         if let Self::Persistent(table) = self {
-            table.append_stage_transition_writes(reservations, releases, added, removed, writes)?;
+            table.append_prepared_transition_writes(
+                reservations,
+                releases,
+                added,
+                removed,
+                writes,
+            )?;
         }
         Ok(())
     }

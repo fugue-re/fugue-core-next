@@ -1,21 +1,20 @@
 use super::IlArtefact;
 use crate::analysis::AnalysisError;
-use crate::engine::change::ChangeKinds;
 use crate::engine::{
-    AnalysisContext, AnalysisPhase, DEFAULT_WORK_ITEM_MAX_ATTEMPTS, Priority, ProjectUpdate,
-    ProjectView,
+    AnalysisContext, DEFAULT_WORK_ITEM_MAX_ATTEMPTS, Priority, ProjectUpdate, ProjectView,
 };
 use crate::ir::FunctionId;
-use crate::project::Project;
+use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
 pub trait IlAnalysis<I: IlArtefact>: Sized {
     fn analyse(ir: &I) -> Self;
 }
 
-pub trait IlAnalyser: Send + 'static {
+pub trait IlAnalyser: Send + Sized + 'static {
+    const NAME: &'static str;
     type Input: IlArtefact;
 
-    fn name(&self) -> &'static str;
+    fn build(project: &Project) -> Result<Self, AnalysisError>;
 
     fn triggers(&self) -> ChangeKinds;
 

@@ -8,8 +8,8 @@ use crate::ir::{
     Address, CodeBlockId, CodeBlockRef, CodeBlockTable, FlowKind, FlowTarget, Id, Reference,
     ReferenceKey, ReferenceOrigin, ReferenceProperties,
 };
-use crate::storage::entities::schema::ENTITY_FUNCTION_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
 use crate::types::common::archived_bitflags;
 use crate::types::{Confidence, Revision};
 
@@ -17,17 +17,21 @@ pub(crate) mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
 pub(crate) mod incomplete;
-pub(crate) use incomplete::{FunctionInsnIndex, FunctionMaterialisation};
+pub(crate) use incomplete::{FunctionInsnIndex, NormalisedFunctionRecord};
 pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
 
 mod table;
 pub(crate) use table::{
-    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES, FunctionTableStage,
-    PreparedFunctionMutation,
+    ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES, FunctionTableStaging,
+    StagedFunctionChangeRecord,
 };
 pub use table::{FunctionMut, FunctionRef, FunctionTable, FunctionTableError};
 
 pub type FunctionId = Id<Function>;
+
+impl EntityKey for FunctionId {
+    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_ID;
+}
 
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,

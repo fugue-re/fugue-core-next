@@ -53,20 +53,20 @@ impl SwitchTable {
         self.entries.flush()
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> SwitchId {
+    pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
         self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_reservation(&mut self, id: SwitchId) {
+    pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
         let allocated = self.index.allocator.allocate();
         debug_assert_eq!(allocated, id);
     }
 
-    pub(super) fn publish_release(&mut self, id: SwitchId) {
+    pub(crate) fn publish_release(&mut self, id: SwitchId) {
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_upsert(
+    pub(crate) fn publish_upsert(
         &mut self,
         switch: Switch,
         previous_function: Option<FunctionId>,
@@ -82,7 +82,7 @@ impl SwitchTable {
         self.index.insert(id, function, branch);
     }
 
-    pub(super) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
         self.entries.publish_remove(&id);
         self.index.remove(function, branch);
         self.index.allocator.release(id);

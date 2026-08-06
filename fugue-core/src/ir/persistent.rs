@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ops::Bound;
 use std::sync::Mutex;
 
@@ -8,8 +9,8 @@ use crate::storage::entities::schema::{
     ENTITY_FREE_ID_RECORD_ID, ENTITY_KEY_FREE_ID, ENTITY_TABLE_INDEX_STATE_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityId, EntityKey, EntityKeyId, EntityStorage, EntityStorageError, EntityWriteBatch,
-    ProjectEntity,
+    Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId, EntityStorage, EntityStorageError,
+    EntityWriteBatch, ProjectEntity,
 };
 
 const TABLE_INDEX_SCHEMA: u32 = 1;
@@ -48,6 +49,18 @@ impl PersistentTable {
     }
 }
 
+impl EntityKeyCodec for PersistentTable {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (&value, rest) = input.split_first()?;
+        *input = rest;
+        Self::from_byte(value)
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend([*self as u8]);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FreeIdKey {
     table: PersistentTable,
@@ -60,22 +73,25 @@ impl FreeIdKey {
     }
 }
 
-impl EntityKey for FreeIdKey {
-    const ID: EntityKeyId = ENTITY_KEY_FREE_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        let (&table, index) = buf.split_first()?;
-        let index = u32::from_be_bytes(index.try_into().ok()?);
+impl EntityKeyCodec for FreeIdKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let table = PersistentTable::decode(input)?;
+        let (index, rest) = input.split_at_checked(size_of::<u32>())?;
+        *input = rest;
         Some(Self {
-            table: PersistentTable::from_byte(table)?,
-            index,
+            table,
+            index: u32::from_be_bytes(index.try_into().ok()?),
         })
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend([self.table as u8]);
+        self.table.encode(output);
         output.extend(self.index.to_be_bytes());
     }
+}
+
+impl EntityKey for FreeIdKey {
+    const ID: EntityKeyId = ENTITY_KEY_FREE_ID;
 }
 
 #[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

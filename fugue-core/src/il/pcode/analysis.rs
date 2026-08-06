@@ -1,30 +1,19 @@
 use crate::analysis::AnalysisError;
-use crate::engine::change::ChangeKinds;
-use crate::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisPhase, IlAnalyserAdapter, ProjectUpdate,
-    ProjectView,
-};
+use crate::engine::{AnalyserProvider, AnalysisContext, ProjectUpdate, ProjectView};
 use crate::extension;
 use crate::il::common::IlAnalyser;
 use crate::il::pcode::PCodeIr;
 use crate::ir::{AddressRangeSet, FunctionId, ReferenceKind};
-use crate::project::Project;
-
-const PCODE_REFERENCE_ANALYSER: &str = "pcode-references";
+use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
 struct PCodeReferenceAnalyser;
 
-impl PCodeReferenceAnalyser {
-    fn build(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-        Ok(Box::new(IlAnalyserAdapter::new(Self)))
-    }
-}
-
 impl IlAnalyser for PCodeReferenceAnalyser {
+    const NAME: &'static str = "pcode-references";
     type Input = PCodeIr;
 
-    fn name(&self) -> &'static str {
-        PCODE_REFERENCE_ANALYSER
+    fn build(_project: &Project) -> Result<Self, AnalysisError> {
+        Ok(Self)
     }
 
     fn triggers(&self) -> ChangeKinds {
@@ -69,5 +58,5 @@ impl IlAnalyser for PCodeReferenceAnalyser {
 }
 
 extension::submit! {
-    AnalyserProvider::for_il::<PCodeIr>(PCODE_REFERENCE_ANALYSER, PCodeReferenceAnalyser::build)
+    AnalyserProvider::for_il::<PCodeReferenceAnalyser>()
 }

@@ -27,20 +27,20 @@ fn storage() -> StorageContainer {
 fn repeated_replacement_retains_only_the_final_artefact() {
     let storage = storage();
     let function = FunctionId::new(7);
-    let mut stage = IlStage::default();
+    let mut staging = IlStaging::default();
 
-    stage
+    staging
         .replace(&storage, pcode(function, Revision::from(1)))
         .expect("first replacement should stage");
-    stage
+    staging
         .replace(&storage, pcode(function, Revision::from(2)))
         .expect("second replacement should coalesce");
 
-    let writes = stage.prepare().expect("stage should prepare");
+    let writes = staging.prepare().expect("staging should prepare");
     assert_eq!(writes.len(), 1);
 
     let mut changes = Vec::new();
-    stage.for_each_change(|function, form, present| {
+    staging.for_each_change(|function, form, present| {
         changes.push((function, form, present));
     });
     assert_eq!(changes.len(), 1);
@@ -53,36 +53,41 @@ fn repeated_replacement_retains_only_the_final_artefact() {
 fn removing_an_unpublished_replacement_elides_the_mutation() {
     let storage = storage();
     let function = FunctionId::new(7);
-    let mut stage = IlStage::default();
+    let mut staging = IlStaging::default();
 
-    stage
+    staging
         .replace(&storage, pcode(function, Revision::from(1)))
         .expect("replacement should stage");
     assert!(
-        stage
+        staging
             .remove::<PCodeIr>(&storage, function)
             .expect("replacement should be removable")
             .is_some()
     );
 
-    assert!(stage.prepare().expect("stage should prepare").is_empty());
-    stage.for_each_change(|_, _, _| panic!("elided mutation must not publish a change"));
+    assert!(
+        staging
+            .prepare()
+            .expect("staging should prepare")
+            .is_empty()
+    );
+    staging.for_each_change(|_, _, _| panic!("elided record must not publish a change"));
 }
 
 #[test]
 fn removing_a_missing_artefact_caches_its_absence() {
     let storage = storage();
     let function = FunctionId::new(7);
-    let mut stage = IlStage::default();
+    let mut staging = IlStaging::default();
 
     assert!(
-        stage
+        staging
             .remove::<PCodeIr>(&storage, function)
             .expect("missing artefact lookup should succeed")
             .is_none()
     );
     assert!(
-        stage
+        staging
             .remove::<PCodeIr>(&storage, function)
             .expect("cached missing artefact lookup should succeed")
             .is_none()
@@ -93,9 +98,11 @@ fn removing_a_missing_artefact_caches_its_absence() {
 fn an_override_key_round_trips_through_its_encoding() {
     let key = IlOverrideKey::new(FunctionId::new(9), PCodeIr::FORM);
     let mut encoded = Vec::new();
-    EntityKey::encode(&key, &mut encoded);
+    key.encode(&mut encoded);
+    let mut input = encoded.as_slice();
 
-    assert_eq!(IlOverrideKey::decode(&encoded), Some(key));
+    assert_eq!(IlOverrideKey::decode(&mut input), Some(key));
+    assert!(input.is_empty());
 }
 
 #[test]
@@ -132,32 +139,32 @@ fn an_override_for_an_unregistered_form_reports_its_dialect_as_unavailable() {
 fn deleting_a_function_sweeps_every_stored_form_without_decoding() {
     let storage = storage();
     let function = FunctionId::new(7);
-    let mut stage = IlStage::default();
+    let mut staging = IlStaging::default();
 
-    stage
+    staging
         .replace(&storage, pcode(function, Revision::from(1)))
         .expect("replacement should stage");
-    let writes = stage.prepare().expect("stage should prepare");
+    let writes = staging.prepare().expect("staging should prepare");
     storage
         .entities()
         .apply_batch(&writes)
         .expect("writes should apply");
 
-    let mut stage = IlStage::default();
+    let mut staging = IlStaging::default();
     assert_eq!(
-        stage
+        staging
             .remove_function(&storage, function)
             .expect("the sweep should succeed"),
         1
     );
     assert_eq!(
-        stage
+        staging
             .remove_function(&storage, FunctionId::new(8))
             .expect("an unrelated function has no overrides"),
         0
     );
 
     let mut swept = Vec::new();
-    stage.for_each_change(|function, form, present| swept.push((function, form, present)));
+    staging.for_each_change(|function, form, present| swept.push((function, form, present)));
     assert_eq!(swept, vec![(function, PCodeIr::FORM, false)]);
 }

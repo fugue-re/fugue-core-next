@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::engine::change::{ChangeKinds, ChangeSet, Revision};
 use crate::ir::{AddressRange, AddressRangeSet, RawAddressMap};
+use crate::project::{ChangeKinds, ChangeSet};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::Revision;
 
 pub(crate) const MAX_CHANGE_RUNS: usize = 4096;
 pub(crate) const CENSUS_INTERVAL: usize = 256;
@@ -269,10 +270,59 @@ impl ChangeIndex {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::engine::change::ChangeRecord;
     use crate::il::common::IlArtefact;
     use crate::il::ecode::ECodeIr;
     use crate::ir::{FunctionId, RawAddress};
+    use crate::project::ChangeRecord;
+
+    #[test]
+    fn test_change_index_compaction_is_conservative() {
+        let space = AddressSpaceId::from(0u8);
+        let mut index = ChangeIndex::new(Revision::new(0));
+        let mut truth = Vec::new();
+
+        for step in 1..(MAX_CHANGE_RUNS as u64 + 512) {
+            let range = AddressRange::new(
+                space,
+                RawAddress::from(step * 0x400),
+                RawAddress::from(step * 0x400 + 0x3f),
+            );
+            let revision = Revision::new(step);
+            index.apply(&ChangeSet::with_records(
+                revision,
+                [ChangeRecord::BytesWritten { range }],
+            ));
+            truth.push((range, revision));
+        }
+
+        let probes = (0..16u64).map(|i| {
+            AddressRange::new(
+                space,
+                RawAddress::from(i * 0x4000),
+                RawAddress::from(i * 0x4000 + 0x1ff),
+            )
+        });
+        let snapshots = (0..8u64)
+            .map(|i| Revision::new(i * (MAX_CHANGE_RUNS as u64 / 8)))
+            .collect::<Vec<_>>();
+
+        for probe in probes {
+            let mut region = AddressRangeSet::new();
+            region.insert_range(probe);
+
+            for &snapshot in &snapshots {
+                let truly_changed = truth
+                    .iter()
+                    .any(|&(range, revision)| revision > snapshot && range.intersects(&probe));
+                if truly_changed {
+                    assert!(
+                        index.changed_since(snapshot, ChangeKinds::BYTES_WRITTEN, &region),
+                        "compaction reported unchanged where a real change occurred"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn census_bounds_run_count() {

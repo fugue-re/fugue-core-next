@@ -6,7 +6,7 @@ use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
 use crate::ir::{Address, CodeBlock, FunctionProperties, Insn};
 
-pub(super) const NON_RETURNING_PROPAGATION_ANALYSER: &str = "non-returning-propagation";
+pub(crate) const NON_RETURNING_PROPAGATION_ANALYSER: &str = "non-returning-propagation";
 
 enum BlockExit {
     Returns,
@@ -99,7 +99,7 @@ impl ExitGraph {
                     &mut exits,
                     caller,
                     block.successors().is_empty(),
-                    block.insns().last().and_then(|&id| function.insn(id)),
+                    block.insn_ids().last().and_then(|&id| function.insn(id)),
                 );
             }
 

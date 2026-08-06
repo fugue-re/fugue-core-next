@@ -5,9 +5,6 @@ use std::ops::Deref;
 use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::ir::symbol::Symbol;
-use crate::ir::{Address, CodeBlock, Function, Id, Problem, RawAddress, Switch};
-use crate::storage::segments::space::AddressSpaceId;
 use crate::types::BytesOrSlice;
 
 const INLINE_ENTITY_KEY_SIZE: usize = 16;
@@ -74,7 +71,7 @@ pub const ENTITY_KEY_SWITCH_ID: EntityKeyId = EntityKeyId::new(10);
 pub const ENTITY_KEY_CALL_GRAPH_INVERSE_ID: EntityKeyId = EntityKeyId::new(11);
 pub const ENTITY_KEY_PROBLEM_ID: EntityKeyId = EntityKeyId::new(12);
 pub const ENTITY_KEY_FREE_ID: EntityKeyId = EntityKeyId::new(13);
-pub const ENTITY_KEY_FUNCTION_OWNER_ID: EntityKeyId = EntityKeyId::new(14);
+pub const ENTITY_KEY_FUNCTION_BLOCK_ID: EntityKeyId = EntityKeyId::new(14);
 pub const ENTITY_KEY_CODE_BLOCK_START_ID: EntityKeyId = EntityKeyId::new(15);
 pub const ENTITY_KEY_CODE_BLOCK_SIZE_BUCKET_ID: EntityKeyId = EntityKeyId::new(16);
 pub const ENTITY_KEY_CODE_BLOCK_SIZE_BUCKETS_ID: EntityKeyId = EntityKeyId::new(17);
@@ -106,7 +103,7 @@ pub const ENTITY_COVERAGE_ID: EntityId = EntityId::new(23);
 pub const ENTITY_TABLE_INDEX_STATE_ID: EntityId = EntityId::new(24);
 pub const ENTITY_FREE_ID_RECORD_ID: EntityId = EntityId::new(25);
 pub const ENTITY_FUNCTION_ENTRY_INDEX_ID: EntityId = EntityId::new(26);
-pub const ENTITY_FUNCTION_OWNER_INDEX_ID: EntityId = EntityId::new(27);
+pub const ENTITY_FUNCTION_BLOCK_INDEX_ID: EntityId = EntityId::new(27);
 pub const ENTITY_CODE_BLOCK_START_INDEX_ID: EntityId = EntityId::new(28);
 pub const ENTITY_CODE_BLOCK_SIZE_BUCKET_INDEX_ID: EntityId = EntityId::new(29);
 pub const ENTITY_CODE_BLOCK_SIZE_BUCKETS_INDEX_ID: EntityId = EntityId::new(30);
@@ -128,10 +125,13 @@ impl EntityKeyPrefix {
     }
 
     pub fn extract<K: EntityKey, E: Entity>(bytes: BytesOrSlice<'_>) -> Option<K> {
-        let (prefix, key) = Self::split(bytes.as_ref())?;
-        (prefix == Self::of::<K, E>())
-            .then(|| K::decode(key))
-            .flatten()
+        let (prefix, mut key) = Self::split(bytes.as_ref())?;
+        if prefix != Self::of::<K, E>() {
+            return None;
+        }
+
+        let decoded = K::decode(&mut key)?;
+        key.is_empty().then_some(decoded)
     }
 
     pub fn join(self, key: &[u8]) -> EntityKeyBytes {
@@ -210,13 +210,13 @@ impl Deref for EntityKeyBytes {
     }
 }
 
-pub trait EntityKey: Clone + PartialEq + Eq + Hash {
-    const ID: EntityKeyId;
-
-    fn decode(buf: &[u8]) -> Option<Self>
-    where
-        Self: Sized;
+pub trait EntityKeyCodec: Sized {
+    fn decode(input: &mut &[u8]) -> Option<Self>;
     fn encode(&self, output: &mut impl Extend<u8>);
+}
+
+pub trait EntityKey: EntityKeyCodec + Clone + PartialEq + Eq + Hash {
+    const ID: EntityKeyId;
 }
 
 #[derive(
@@ -238,28 +238,24 @@ pub enum ProjectEntity {
     Coverage = 0b0000_1011,
 }
 
-impl EntityKey for ProjectEntity {
-    const ID: EntityKeyId = ENTITY_KEY_PROJECT_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() == 1 {
-            match buf[0] {
-                0b0000_0000 => Some(ProjectEntity::Architecture),
-                0b0000_1001 => Some(ProjectEntity::Platform),
-                0b0000_0001 => Some(ProjectEntity::Attributes),
-                0b0000_0010 => Some(ProjectEntity::FunctionTable),
-                0b0000_0011 => Some(ProjectEntity::SymbolTable),
-                0b0000_0100 => Some(ProjectEntity::CodeBlockTable),
-                0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
-                0b0000_0110 => Some(ProjectEntity::Revision),
-                0b0000_0111 => Some(ProjectEntity::ReferenceIndex),
-                0b0000_1000 => Some(ProjectEntity::SwitchTable),
-                0b0000_1010 => Some(ProjectEntity::ProblemTable),
-                0b0000_1011 => Some(ProjectEntity::Coverage),
-                _ => None,
-            }
-        } else {
-            None
+impl EntityKeyCodec for ProjectEntity {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (&value, rest) = input.split_first()?;
+        *input = rest;
+        match value {
+            0b0000_0000 => Some(ProjectEntity::Architecture),
+            0b0000_1001 => Some(ProjectEntity::Platform),
+            0b0000_0001 => Some(ProjectEntity::Attributes),
+            0b0000_0010 => Some(ProjectEntity::FunctionTable),
+            0b0000_0011 => Some(ProjectEntity::SymbolTable),
+            0b0000_0100 => Some(ProjectEntity::CodeBlockTable),
+            0b0000_0101 => Some(ProjectEntity::CallGraphIndex),
+            0b0000_0110 => Some(ProjectEntity::Revision),
+            0b0000_0111 => Some(ProjectEntity::ReferenceIndex),
+            0b0000_1000 => Some(ProjectEntity::SwitchTable),
+            0b0000_1010 => Some(ProjectEntity::ProblemTable),
+            0b0000_1011 => Some(ProjectEntity::Coverage),
+            _ => None,
         }
     }
 
@@ -268,105 +264,8 @@ impl EntityKey for ProjectEntity {
     }
 }
 
-impl EntityKey for RawAddress {
-    const ID: EntityKeyId = ENTITY_KEY_RAW_ADDRESS_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        <[u8; mem::size_of::<Self>()]>::try_from(buf)
-            .ok()
-            .map(|val| RawAddress::from(u64::from_be_bytes(val)))
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend(self.offset().to_be_bytes())
-    }
-}
-
-impl EntityKey for Address {
-    const ID: EntityKeyId = ENTITY_KEY_ADDRESS_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        const SPACE_SIZE: usize = mem::size_of::<AddressSpaceId>();
-
-        if buf.len() != Self::ENCODED_SIZE {
-            return None;
-        }
-
-        let space = AddressSpaceId::from(u16::from_be_bytes(buf[..SPACE_SIZE].try_into().ok()?));
-        let address = u64::from_be_bytes(buf[SPACE_SIZE..Self::ENCODED_SIZE].try_into().ok()?);
-
-        Some(Address::new(space, address))
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend((self.space().index() as u16).to_be_bytes());
-        output.extend(self.offset().to_be_bytes());
-    }
-}
-
-impl Address {
-    pub(crate) const ENCODED_SIZE: usize =
-        mem::size_of::<AddressSpaceId>() + mem::size_of::<RawAddress>();
-}
-
-impl EntityKey for Id<Function> {
-    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<Function>::decode_as_key(buf)
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        Id::<Function>::encode(self, output);
-    }
-}
-
-impl EntityKey for Id<CodeBlock> {
-    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<CodeBlock>::decode_as_key(buf)
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        Id::<CodeBlock>::encode(self, output);
-    }
-}
-
-impl EntityKey for Id<Symbol> {
-    const ID: EntityKeyId = ENTITY_KEY_SYMBOL_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<Symbol>::decode_as_key(buf)
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        Id::<Symbol>::encode(self, output);
-    }
-}
-
-impl EntityKey for Id<Switch> {
-    const ID: EntityKeyId = ENTITY_KEY_SWITCH_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<Switch>::decode_as_key(buf)
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        Id::<Switch>::encode(self, output);
-    }
-}
-
-impl EntityKey for Id<Problem> {
-    const ID: EntityKeyId = ENTITY_KEY_PROBLEM_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Id::<Problem>::decode_as_key(buf)
-    }
-
-    fn encode(&self, output: &mut impl Extend<u8>) {
-        Id::<Problem>::encode(self, output);
-    }
+impl EntityKey for ProjectEntity {
+    const ID: EntityKeyId = ENTITY_KEY_PROJECT_ID;
 }
 
 pub trait EntityCodec:
@@ -410,20 +309,107 @@ pub trait Entity: EntityCodec {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
+    use crate::ir::{Address, CodeBlockId, FunctionId, ProblemId, RawAddress, SwitchId, SymbolId};
+    use crate::storage::entities::{EntityStorage, EntityStorageError};
+    use crate::storage::segments::space::AddressSpaceId;
+
+    #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct DomainKeyValue {
+        value: u64,
+    }
+
+    impl DomainKeyValue {
+        fn new(value: u64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl Entity for DomainKeyValue {
+        const ID: EntityId = EntityId::new(123);
+    }
+
+    pub(crate) fn assert_domain_keys_round_trip(
+        storage: &EntityStorage,
+    ) -> Result<(), EntityStorageError> {
+        let raw_address = RawAddress::from(0x0123_4567_89ab_cdefu64);
+        storage.insert(&raw_address, &DomainKeyValue::new(1))?;
+        assert_eq!(storage.get(&raw_address)?, Some(DomainKeyValue::new(1)));
+
+        let address = Address::new(AddressSpaceId::new(300), 0x0123_4567_89ab_cdefu64);
+        storage.insert(&address, &DomainKeyValue::new(2))?;
+        assert_eq!(storage.get(&address)?, Some(DomainKeyValue::new(2)));
+
+        let block = CodeBlockId::with_generation(0x1122_3344, 0x5566_7788);
+        storage.insert(&block, &DomainKeyValue::new(3))?;
+        assert_eq!(storage.get(&block)?, Some(DomainKeyValue::new(3)));
+
+        let function = FunctionId::with_generation(0x1122_3344, 0x5566_7788);
+        storage.insert(&function, &DomainKeyValue::new(4))?;
+        assert_eq!(storage.get(&function)?, Some(DomainKeyValue::new(4)));
+
+        let problem = ProblemId::with_generation(0x1122_3344, 0x5566_7788);
+        storage.insert(&problem, &DomainKeyValue::new(5))?;
+        assert_eq!(storage.get(&problem)?, Some(DomainKeyValue::new(5)));
+
+        let switch = SwitchId::with_generation(0x1122_3344, 0x5566_7788);
+        storage.insert(&switch, &DomainKeyValue::new(6))?;
+        assert_eq!(storage.get(&switch)?, Some(DomainKeyValue::new(6)));
+
+        let symbol = SymbolId::with_generation(0x1122_3344, 0x5566_7788);
+        storage.insert(&symbol, &DomainKeyValue::new(7))?;
+        assert_eq!(storage.get(&symbol)?, Some(DomainKeyValue::new(7)));
+
+        Ok(())
+    }
 
     #[test]
-    fn test_address_key_roundtrips_wide_space() {
+    fn domain_entity_key_encoding_is_stable() {
+        let raw_address = RawAddress::from(0x0123_4567_89ab_cdefu64);
+        assert_eq!(
+            DomainKeyValue::ID.key_for(&raw_address).as_ref(),
+            &[1, 123, 1, 35, 69, 103, 137, 171, 205, 239]
+        );
+
+        let address = Address::new(AddressSpaceId::new(300), 0x0123_4567_89ab_cdefu64);
+        assert_eq!(
+            DomainKeyValue::ID.key_for(&address).as_ref(),
+            &[5, 123, 1, 44, 1, 35, 69, 103, 137, 171, 205, 239]
+        );
+
+        let id_bytes = [85, 102, 119, 136, 17, 34, 51, 68];
+        let block = CodeBlockId::with_generation(0x1122_3344, 0x5566_7788);
+        let function = FunctionId::with_generation(0x1122_3344, 0x5566_7788);
+        let problem = ProblemId::with_generation(0x1122_3344, 0x5566_7788);
+        let switch = SwitchId::with_generation(0x1122_3344, 0x5566_7788);
+        let symbol = SymbolId::with_generation(0x1122_3344, 0x5566_7788);
+
+        for (key, prefix) in [
+            (DomainKeyValue::ID.key_for(&block), 3),
+            (DomainKeyValue::ID.key_for(&function), 2),
+            (DomainKeyValue::ID.key_for(&problem), 12),
+            (DomainKeyValue::ID.key_for(&switch), 10),
+            (DomainKeyValue::ID.key_for(&symbol), 6),
+        ] {
+            assert_eq!(&key[..ENTITY_PREFIX_SIZE], &[prefix, 123]);
+            assert_eq!(&key[ENTITY_PREFIX_SIZE..], &id_bytes);
+        }
+    }
+
+    #[test]
+    fn an_address_key_round_trips_a_wide_space() {
         let address = Address::new(AddressSpaceId::new(300), 0xdead_beefu64);
         let encoded = ENTITY_ARCHITECTURE_ID.key_for(&address);
-        let decoded = Address::decode(&encoded[ENTITY_PREFIX_SIZE..]).expect("decodes");
+        let mut key = &encoded[ENTITY_PREFIX_SIZE..];
+        let decoded = Address::decode(&mut key).expect("decodes");
+        assert!(key.is_empty());
         assert_eq!(decoded, address);
         assert_eq!(decoded.space().index(), 300);
     }
 
     #[test]
-    fn test_project_entity_key_roundtrips() {
+    fn project_entity_keys_round_trip() {
         for entity in [
             ProjectEntity::Architecture,
             ProjectEntity::Attributes,
@@ -434,10 +420,14 @@ mod test {
             ProjectEntity::Revision,
         ] {
             let encoded = ENTITY_ARCHITECTURE_ID.key_for(&entity);
+            let (prefix, mut key) =
+                EntityKeyPrefix::split(encoded.as_ref()).expect("encoded key has prefix");
             assert_eq!(
-                ProjectEntity::decode(&encoded[ENTITY_PREFIX_SIZE..]),
-                Some(entity)
+                prefix,
+                EntityKeyPrefix::new(ProjectEntity::ID, ENTITY_ARCHITECTURE_ID)
             );
+            assert_eq!(ProjectEntity::decode(&mut key), Some(entity));
+            assert!(key.is_empty());
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::il::common::{
 };
 use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaMemoryDomain,
+    ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaBuilderContext, ECodeSsaIr, ECodeSsaMemoryDomain,
     ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
 };
 use crate::ir::FunctionId;
@@ -69,7 +69,7 @@ impl SsaFixture {
     }
 
     fn build(self, metadata: IlMetadata, graph: IlGraph) -> ECodeSsaIr {
-        ECodeSsaIr::new(ECodeSsaIrParts {
+        ECodeSsaIr::new(ECodeSsaBuilderContext {
             metadata,
             graph,
             source_spans: Vec::new(),

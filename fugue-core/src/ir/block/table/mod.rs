@@ -43,14 +43,14 @@ struct CodeBlockIndex {
     live: usize,
 }
 
-pub(crate) struct PreparedCodeBlockMutation {
+pub(crate) struct PreparedCodeBlockRecord {
     block: Option<CodeBlock>,
     encoded_size: usize,
     id: Id<CodeBlock>,
     previous: Option<AddressRange>,
 }
 
-impl PreparedCodeBlockMutation {
+impl PreparedCodeBlockRecord {
     pub(crate) fn new(
         id: Id<CodeBlock>,
         block: Option<CodeBlock>,
@@ -256,13 +256,13 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn publish_mutation(&mut self, mutation: PreparedCodeBlockMutation) {
-        let PreparedCodeBlockMutation {
+    pub(crate) fn publish_record(&mut self, record: PreparedCodeBlockRecord) {
+        let PreparedCodeBlockRecord {
             block,
             encoded_size,
             id,
             previous,
-        } = mutation;
+        } = record;
         match block {
             Some(block) => self.publish_upsert(block, encoded_size),
             None => self.publish_remove(

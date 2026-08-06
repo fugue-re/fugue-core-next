@@ -21,7 +21,7 @@ use evaluator::SwitchTargetEvaluator;
 use guard::SwitchGuard;
 use layout::{SwitchInlineTableLayout, SwitchTableLayout};
 
-pub(super) struct SwitchIntervalRecovery<'analysis> {
+pub(crate) struct SwitchIntervalRecovery<'analysis> {
     ssa: &'analysis ECodeSsaIr,
     blocks_by_source: FxHashMap<Address, IlBlockId>,
     config: SwitchRecoveryConfig,
@@ -73,7 +73,7 @@ impl SwitchCaseEnumeration {
 }
 
 impl<'analysis> SwitchIntervalRecovery<'analysis> {
-    pub(super) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
+    pub(crate) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
         let mut blocks_by_source = FxHashMap::default();
         for (block, source) in ssa.graph().blocks_with_sources() {
             blocks_by_source.entry(source).or_insert(block);
@@ -89,7 +89,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         }
     }
 
-    pub(super) fn recover(
+    pub(crate) fn recover(
         &mut self,
         branch: Address,
         context: &ContextSet,

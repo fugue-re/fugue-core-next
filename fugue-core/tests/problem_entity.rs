@@ -1,8 +1,7 @@
 use std::error::Error;
 
-use fugue_core::engine::change::ChangeRecord;
 use fugue_core::ir::{Address, ProblemKind};
-use fugue_core::project::Project;
+use fugue_core::project::{ChangeRecord, Project};
 use fugue_core::storage::TransientStorageProvider;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{

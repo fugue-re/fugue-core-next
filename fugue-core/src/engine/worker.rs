@@ -7,21 +7,16 @@ use flume::{Receiver, Sender, TryRecvError};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 
-use super::change::{
-    ChangeKinds, ChangeProvenance, ChangeRecord, ChangeSet, ChangeSource,
-    MAX_DETAILED_CHANGE_RECORDS, Revision,
-};
 use super::scheduler::{
-    AnalysisWorkQueue, Degradation, DegradationReport, IlAnalysisInputs, ScheduledAnalyser,
-    WORK_SLICE_BYTES, WorkBatch,
+    AnalyserId, AnalyserOrder, AnalysisWorkQueue, Degradation, DegradationReport, IlAnalysisInputs,
+    ScheduledAnalyser, WORK_SLICE_BYTES, WorkBatch,
 };
 use super::subscription::Subscriber;
 use super::update::{MappingCreationResult, ProjectUpdate, SpaceCreationResult};
 use super::view::DependencyIndex;
 use super::{
-    AnalyserProvider, AnalysisContext, AnalysisEngineConfig, AnalysisPhase, EngineError,
-    EngineMetrics, MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, ReadSet,
-    WORK_BATCH_ITEMS, WorkCause, coverage,
+    AnalyserProvider, AnalysisContext, AnalysisEngineConfig, EngineError, EngineMetrics,
+    MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, WORK_BATCH_ITEMS, WorkCause,
 };
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Cancelled, Progress};
@@ -29,9 +24,14 @@ use crate::extension;
 use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
 use crate::il::registry::{GeneratedArtefact, IlGenerationSession, IlRegistry};
 use crate::ir::{AddressRangeSet, FunctionId, ProblemKind, ProblemScope};
-use crate::project::{Project, ProjectError, ProjectTransaction};
-use crate::queries::{LiftedLookup, QueryEngine};
+use crate::project::{
+    AnalysisPhase, ChangeKinds, ChangeProvenance, ChangeRecord, ChangeSet, ChangeSource,
+    CoverageReconfiguration, MAX_DETAILED_CHANGE_RECORDS, Project, ProjectError,
+    ProjectTransaction, ReadSet,
+};
+use crate::queries::{IlLookup, QueryEngine};
 use crate::storage::segments::mapping::SegmentMappingBuilder;
+use crate::types::Revision;
 
 pub(crate) enum Intake {
     Analyse(Sender<Result<(), EngineError>>),
@@ -58,6 +58,7 @@ pub(crate) enum Intake {
     Shutdown,
     Subscribe(Subscriber),
     Updates {
+        source: ChangeSource,
         updates: SmallVec<[ProjectUpdate; 1]>,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
@@ -116,7 +117,7 @@ enum AnalysisAdmissionResult {
     Rejected(AnalysisError),
 }
 
-pub(super) struct Worker {
+pub(crate) struct Worker {
     analysers: Vec<ScheduledAnalyser>,
     config: AnalysisEngineConfig,
     pending_diagnostics: PendingDiagnostics,
@@ -136,12 +137,12 @@ pub(super) struct Worker {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AdmissionConflict {
+enum AdmissionConflict {
     InputsChanged,
     ResynchronisationRequired,
 }
 
-pub(super) struct RecentChanges {
+struct RecentChanges {
     changes: VecDeque<ChangeSet>,
     floor: Revision,
     latest: Revision,
@@ -149,7 +150,7 @@ pub(super) struct RecentChanges {
 }
 
 impl RecentChanges {
-    pub(super) fn new(revision: Revision) -> Self {
+    fn new(revision: Revision) -> Self {
         Self {
             changes: VecDeque::new(),
             floor: revision,
@@ -158,7 +159,7 @@ impl RecentChanges {
         }
     }
 
-    pub(super) fn record(&mut self, changes: &ChangeSet) {
+    fn record(&mut self, changes: &ChangeSet) {
         debug_assert!(changes.revision() >= self.latest);
         self.latest = changes.revision();
 
@@ -181,7 +182,7 @@ impl RecentChanges {
         }
     }
 
-    pub(super) fn conflict(&self, base: Revision, reads: &ReadSet) -> Option<AdmissionConflict> {
+    fn conflict(&self, base: Revision, reads: &ReadSet) -> Option<AdmissionConflict> {
         if base == self.latest {
             return None;
         }
@@ -203,12 +204,12 @@ impl Drop for Worker {
 }
 
 #[derive(Default)]
-pub(super) struct PendingDiagnostics {
+struct PendingDiagnostics {
     scopes: BTreeMap<ProblemKind, ProblemScope>,
 }
 
 impl PendingDiagnostics {
-    pub(super) fn defer(&mut self, scope: ProblemScope, kind: ProblemKind) {
+    fn defer(&mut self, scope: ProblemScope, kind: ProblemKind) {
         self.scopes
             .entry(kind)
             .and_modify(|existing| *existing = existing.covering(scope))
@@ -219,11 +220,11 @@ impl PendingDiagnostics {
         self.scopes.is_empty()
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = (ProblemScope, ProblemKind)> + '_ {
+    fn iter(&self) -> impl Iterator<Item = (ProblemScope, ProblemKind)> + '_ {
         self.scopes.iter().map(|(&kind, &scope)| (scope, kind))
     }
 
-    pub(super) fn acknowledge(&mut self, diagnostics: &[(ProblemScope, ProblemKind)]) {
+    fn acknowledge(&mut self, diagnostics: &[(ProblemScope, ProblemKind)]) {
         for (_, kind) in diagnostics {
             self.scopes.remove(kind);
         }
@@ -250,7 +251,7 @@ impl PreparedLiftedArtefacts {
 }
 
 impl Worker {
-    pub(super) fn new(
+    pub(crate) fn new(
         config: AnalysisEngineConfig,
         project: Arc<RwLock<Project>>,
         queries: QueryEngine,
@@ -265,15 +266,20 @@ impl Worker {
         for provider in extension::iter::<AnalyserProvider>() {
             let analyser = provider.build(&project_read)?;
             if analyser.can_analyse(&project_read) {
-                analysers.push(ScheduledAnalyser::new(analyser, provider.il_input()));
+                let id = AnalyserId::new(analysers.len());
+                analysers.push(ScheduledAnalyser::new(id, analyser, provider.il_input()));
             }
         }
         drop(project_read);
 
-        let mut order = (0..analysers.len()).collect::<Vec<_>>();
-        order.sort_by_key(|&index| analysers[index].analyser().name());
-        for (rank, index) in order.into_iter().enumerate() {
-            analysers[index].set_order(rank as u32);
+        let mut order = analysers
+            .iter()
+            .map(ScheduledAnalyser::id)
+            .collect::<Vec<_>>();
+        order.sort_by_key(|id| analysers[id.index()].analyser().name());
+        for (rank, id) in order.into_iter().enumerate() {
+            let rank = u32::try_from(rank).expect("number of analysers must fit in u32");
+            analysers[id.index()].set_order(AnalyserOrder::new(rank));
         }
         let analyser_count = analysers.len();
         let coverage = project
@@ -314,10 +320,7 @@ impl Worker {
         Ok(worker)
     }
 
-    fn apply_coverage_reconfiguration(
-        &mut self,
-        reconfiguration: &coverage::CoverageReconfiguration,
-    ) {
+    fn apply_coverage_reconfiguration(&mut self, reconfiguration: &CoverageReconfiguration) {
         let invalidated = reconfiguration.invalidated();
         if !invalidated.is_empty() {
             self.pending_diagnostics.defer(
@@ -332,15 +335,16 @@ impl Worker {
         let revision = self.project.read().revision();
         let provenance = ChangeProvenance::of(ChangeSource::engine("coverage configuration"));
         for reanalysis in reconfiguration.reanalysis() {
-            let Some(index) = self
+            let Some(id) = self
                 .analysers
                 .iter()
-                .position(|state| state.analyser().name() == reanalysis.analyser())
+                .find(|state| state.analyser().name() == reanalysis.analyser())
+                .map(ScheduledAnalyser::id)
             else {
                 continue;
             };
             self.schedule_analyser(
-                index,
+                id,
                 reanalysis.regions(),
                 ChangeKinds::empty(),
                 revision,
@@ -390,7 +394,7 @@ impl Worker {
         }
     }
 
-    pub(super) fn run(mut self, rx: Receiver<Intake>) {
+    pub(crate) fn run(mut self, rx: Receiver<Intake>) {
         let mut deferred = None;
 
         loop {
@@ -458,10 +462,14 @@ impl Worker {
                         .and_then(|()| self.generate_lifted(function, &form));
                     let _ = reply.send(result);
                 }
-                Intake::Updates { updates, reply } => {
+                Intake::Updates {
+                    source,
+                    updates,
+                    reply,
+                } => {
                     let result = self
                         .drain_or_handle_cancelled()
-                        .and_then(|()| self.apply_updates(updates));
+                        .and_then(|()| self.apply_updates(source, updates));
                     let _ = reply.send(result);
                 }
                 Intake::Analyse(reply) => {
@@ -636,26 +644,26 @@ impl Worker {
 
         let scope = (!changed.is_empty()).then_some(changed);
 
-        for index in 0..self.analysers.len() {
-            let state = &self.analysers[index];
+        for id in (0..self.analysers.len()).map(AnalyserId::new) {
+            let state = &self.analysers[id.index()];
             let self_produced = provenance.contains(state.analyser().name())
                 && state.analyser().produces().contains(kind);
             if self_produced {
                 continue;
             }
 
-            let invalidated = self.dependencies.invalidated(index, kind, scope);
+            let invalidated = self.dependencies.invalidated(id, kind, scope);
             if invalidated.is_empty() {
                 continue;
             }
 
             if invalidated.has_addressless() {
                 self.metrics.record_dependency_reschedule();
-                self.schedule_analyser(index, &AddressRangeSet::new(), kind, revision, provenance);
+                self.schedule_analyser(id, &AddressRangeSet::new(), kind, revision, provenance);
             }
             if !invalidated.regions().is_empty() {
                 self.metrics.record_dependency_reschedule();
-                self.schedule_analyser(index, invalidated.regions(), kind, revision, provenance);
+                self.schedule_analyser(id, invalidated.regions(), kind, revision, provenance);
             }
         }
     }
@@ -667,14 +675,14 @@ impl Worker {
         revision: Revision,
         provenance: &ChangeProvenance,
     ) {
-        for index in 0..self.analysers.len() {
-            let state = &self.analysers[index];
+        for id in (0..self.analysers.len()).map(AnalyserId::new) {
+            let state = &self.analysers[id.index()];
             let self_produced = provenance.contains(state.analyser().name())
                 && state.analyser().produces().contains(kind);
             if self_produced || !state.triggers().intersects(kind) {
                 continue;
             }
-            self.schedule_analyser(index, regions, kind, revision, provenance);
+            self.schedule_analyser(id, regions, kind, revision, provenance);
         }
     }
 
@@ -692,12 +700,11 @@ impl Worker {
         let analysers = self
             .analysers
             .iter()
-            .enumerate()
-            .filter_map(|(index, analyser)| {
+            .filter_map(|analyser| {
                 analyser
                     .il_input()
                     .is_some_and(|form| inputs.contains(form))
-                    .then_some(index)
+                    .then_some(analyser.id())
             })
             .collect::<SmallVec<[_; 4]>>();
         if analysers.is_empty() {
@@ -720,8 +727,8 @@ impl Worker {
         drop(project);
 
         let provenance = ChangeProvenance::of(ChangeSource::engine("generated IL"));
-        for index in analysers {
-            self.schedule_analyser(index, &regions, ChangeKinds::empty(), revision, &provenance);
+        for id in analysers {
+            self.schedule_analyser(id, &regions, ChangeKinds::empty(), revision, &provenance);
         }
     }
 
@@ -749,21 +756,20 @@ impl Worker {
         let pending = self
             .analysers
             .iter()
-            .enumerate()
-            .filter(|(_, state)| state.triggers().intersects(ChangeKinds::SEGMENT_MAPPED))
-            .filter_map(|(index, state)| {
+            .filter(|state| state.triggers().intersects(ChangeKinds::SEGMENT_MAPPED))
+            .filter_map(|state| {
                 let regions = project
                     .coverage()
                     .gaps_for(state.analyser().name(), &regions);
-                (!regions.is_empty()).then_some((index, regions))
+                (!regions.is_empty()).then_some((state.id(), regions))
             })
             .collect::<SmallVec<[_; 4]>>();
         drop(project);
 
         let provenance = ChangeProvenance::of(ChangeSource::engine("startup"));
-        for (index, regions) in pending {
+        for (id, regions) in pending {
             self.schedule_analyser(
-                index,
+                id,
                 &regions,
                 ChangeKinds::SEGMENT_MAPPED,
                 revision,
@@ -781,15 +787,15 @@ impl Worker {
 
     fn schedule_analyser(
         &mut self,
-        index: usize,
+        id: AnalyserId,
         regions: &AddressRangeSet,
         kind: ChangeKinds,
         revision: Revision,
         provenance: &ChangeProvenance,
     ) {
-        let state = &self.analysers[index];
+        let state = &self.analysers[id.index()];
         let degradations = self.queue.schedule(
-            index,
+            id,
             state.order(),
             state.phase(),
             state.priority(),
@@ -799,8 +805,8 @@ impl Worker {
         self.defer_degradations(degradations);
     }
 
-    fn mark_covered(&mut self, index: usize, phase: AnalysisPhase, regions: &AddressRangeSet) {
-        let state = &mut self.analysers[index];
+    fn mark_covered(&mut self, id: AnalyserId, phase: AnalysisPhase, regions: &AddressRangeSet) {
+        let state = &mut self.analysers[id.index()];
         if state.il_input().is_some() {
             return;
         }
@@ -808,24 +814,24 @@ impl Worker {
             state.claim(range);
         }
 
-        if state.analyser().has_pending_work() || self.queue.has_pending_for(index) {
+        if state.analyser().has_pending_work() || self.queue.has_pending_for(id) {
             return;
         }
 
-        let claimed = self.analysers[index].take_claimed();
+        let claimed = self.analysers[id.index()].take_claimed();
         if claimed.is_empty() {
             return;
         }
 
-        let contended = self.analysers.iter().enumerate().any(|(other, state)| {
-            other != index && state.phase() == phase && self.queue.has_pending_for(other)
+        let contended = self.analysers.iter().any(|state| {
+            state.id() != id && state.phase() == phase && self.queue.has_pending_for(state.id())
         });
 
         let claimed = if contended {
             let mut narrowed = claimed;
-            for (other, state) in self.analysers.iter().enumerate() {
-                if other != index && state.phase() == phase {
-                    narrowed = narrowed.difference(&self.queue.pending_for(other));
+            for state in &self.analysers {
+                if state.id() != id && state.phase() == phase {
+                    narrowed = narrowed.difference(&self.queue.pending_for(state.id()));
                 }
             }
             narrowed
@@ -838,7 +844,7 @@ impl Worker {
         }
 
         let mut project = self.project.write();
-        let analyser = self.analysers[index].analyser().name();
+        let analyser = self.analysers[id.index()].analyser().name();
         for range in claimed.ranges() {
             project.coverage_mut().mark(analyser, phase, range);
         }
@@ -908,11 +914,10 @@ impl Worker {
         source: ChangeSource,
         operation: impl FnOnce(&mut Self, &mut ProjectTransaction<'_>) -> Result<T, E>,
     ) -> Result<TransactionResult<T, E>, EngineError> {
-        let query_write = self.queries.write_guard();
+        let query_publication = self.queries.begin_publication();
         let project_lock = self.project.clone();
         let mut project = project_lock.write();
         let mut transaction = project.transaction_with_registry(source, self.registry.clone());
-        transaction.set_worker_limit(self.config.worker_limit());
 
         let deferred_problems = self
             .pending_diagnostics
@@ -932,7 +937,7 @@ impl Worker {
                     self.begin_publish(&changes);
                 }
                 drop(project);
-                drop(query_write);
+                drop(query_publication);
                 if !changes.is_empty() {
                     self.finish_publish(&changes)?;
                 }
@@ -949,7 +954,7 @@ impl Worker {
                     return Err(self.poison_and_stop(rejection_error.to_string()));
                 }
                 drop(project);
-                drop(query_write);
+                drop(query_publication);
                 Ok(TransactionResult::Rejected(error))
             }
         }
@@ -960,7 +965,7 @@ impl Worker {
             return Ok(());
         };
 
-        let index = first.analyser();
+        let id = first.analyser();
         let phase = first.phase();
         self.metrics.record_dispatch(batch.len());
 
@@ -979,7 +984,7 @@ impl Worker {
             }
         }
 
-        self.dispatch(index, phase, regions, causes, continuation, batch)
+        self.dispatch(id, phase, regions, causes, continuation, batch)
     }
 
     fn admit_analysis(
@@ -1032,14 +1037,14 @@ impl Worker {
 
     fn dispatch(
         &mut self,
-        index: usize,
+        id: AnalyserId,
         phase: AnalysisPhase,
         regions: AddressRangeSet,
         causes: SmallVec<[WorkCause; 4]>,
         continuation: bool,
         batch: WorkBatch,
     ) -> Result<(), EngineError> {
-        let name = self.analysers[index].analyser().name();
+        let name = self.analysers[id.index()].analyser().name();
         self.progress.reset();
         let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone())
             .with_worker_limit(self.config.worker_limit())
@@ -1053,17 +1058,19 @@ impl Worker {
                 None => ProjectView::with_registry(&project, &self.registry),
             };
             let mut updates = Vec::new();
-            let analysis =
-                self.analysers[index]
-                    .analyser_mut()
-                    .analyse(&view, &regions, &cx, &mut updates);
+            let analysis = self.analysers[id.index()].analyser_mut().analyse(
+                &view,
+                &regions,
+                &cx,
+                &mut updates,
+            );
             let reads_collapsed = view.collapsed();
             let reads = view.into_reads();
             AnalysisProduction::from_analysis(base, analysis, reads, reads_collapsed, updates)
         };
         let production = match production {
             Ok(production) => production,
-            Err(error) => return self.handle_dispatch_failure(index, batch, error),
+            Err(error) => return self.handle_dispatch_failure(id, batch, error),
         };
         match self.admit_analysis(name, production)? {
             AnalysisAdmissionResult::Committed(AnalysisAdmission {
@@ -1071,14 +1078,14 @@ impl Worker {
                 reads,
                 reads_collapsed,
             }) => {
-                self.dependencies.record(index, &regions, reads);
+                self.dependencies.record(id, &regions, reads);
                 if reads_collapsed {
                     self.defer_read_set_collapse(&regions);
                 }
                 if phase != AnalysisPhase::Retract {
-                    self.mark_covered(index, phase, &regions);
+                    self.mark_covered(id, phase, &regions);
                 }
-                if self.analysers[index].analyser().has_pending_work() {
+                if self.analysers[id.index()].analyser().has_pending_work() {
                     let degradations = self.queue.requeue_continuation(batch);
                     self.defer_degradations(degradations);
                 }
@@ -1094,7 +1101,7 @@ impl Worker {
             }
             AnalysisAdmissionResult::Conflict => self.handle_admission_conflict(batch),
             AnalysisAdmissionResult::Rejected(error) => {
-                self.handle_dispatch_failure(index, batch, error)
+                self.handle_dispatch_failure(id, batch, error)
             }
         }
     }
@@ -1110,12 +1117,12 @@ impl Worker {
 
     fn handle_dispatch_failure(
         &mut self,
-        index: usize,
+        id: AnalyserId,
         batch: WorkBatch,
         error: AnalysisError,
     ) -> Result<(), EngineError> {
-        let name = self.analysers[index].analyser().name();
-        let bound = self.analysers[index].max_attempts();
+        let name = self.analysers[id.index()].analyser().name();
+        let bound = self.analysers[id.index()].max_attempts();
         tracing::warn!("analyser {name} failed: {error}");
 
         for mut item in batch {
@@ -1142,15 +1149,15 @@ impl Worker {
     }
 
     fn run_completion_hooks(&mut self) -> Result<(), EngineError> {
-        for index in 0..self.analysers.len() {
-            self.run_completion_hook(index)?;
+        for id in (0..self.analysers.len()).map(AnalyserId::new) {
+            self.run_completion_hook(id)?;
         }
 
         Ok(())
     }
 
-    fn run_completion_hook(&mut self, index: usize) -> Result<(), EngineError> {
-        let name = self.analysers[index].analyser().name();
+    fn run_completion_hook(&mut self, id: AnalyserId) -> Result<(), EngineError> {
+        let name = self.analysers[id.index()].analyser().name();
         self.progress.reset();
         for _ in 0..MAX_COMPLETION_ROUNDS {
             let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone())
@@ -1163,10 +1170,11 @@ impl Worker {
                     None => ProjectView::with_registry(&project, &self.registry),
                 };
                 let mut updates = Vec::new();
-                let analysis =
-                    self.analysers[index]
-                        .analyser_mut()
-                        .analysis_ended(&view, &cx, &mut updates);
+                let analysis = self.analysers[id.index()].analyser_mut().analysis_ended(
+                    &view,
+                    &cx,
+                    &mut updates,
+                );
                 let reads_collapsed = view.collapsed();
                 let reads = view.into_reads();
                 AnalysisProduction::from_analysis(base, analysis, reads, reads_collapsed, updates)
@@ -1216,9 +1224,10 @@ impl Worker {
 
     fn apply_updates(
         &mut self,
+        source: ChangeSource,
         updates: impl IntoIterator<Item = ProjectUpdate>,
     ) -> Result<ChangeSet, EngineError> {
-        match self.with_transaction(ChangeSource::engine("update"), |_, transaction| {
+        match self.with_transaction(source, |_, transaction| {
             ProjectUpdate::apply_all(updates, transaction)?;
             Ok::<(), ProjectError>(())
         })? {
@@ -1233,8 +1242,7 @@ impl Worker {
         form: &IlFormId,
     ) -> Result<ChangeSet, EngineError> {
         let cancellation = self.cancellation.child();
-        let prepared =
-            self.prepare_lifted(function, form, LiftedLookup::Persisted, &cancellation)?;
+        let prepared = self.prepare_lifted(function, form, IlLookup::Persisted, &cancellation)?;
         let result = self
             .with_transaction(ChangeSource::engine("ensure IR"), move |_, transaction| {
                 prepared.admit(transaction)
@@ -1256,7 +1264,7 @@ impl Worker {
             let project = self.project.read();
             return self
                 .queries
-                .current_lifted_erased(&project, function, form, LiftedLookup::Current)
+                .lookup_lifted_erased(&project, function, form, IlLookup::Current)
                 .map_err(EngineError::from);
         }
 
@@ -1282,7 +1290,7 @@ impl Worker {
             None => {
                 let project = self.project.read();
                 self.queries
-                    .current_lifted_erased(&project, function, form, LiftedLookup::Current)
+                    .lookup_lifted_erased(&project, function, form, IlLookup::Current)
                     .map_err(EngineError::from)
             }
         }
@@ -1294,14 +1302,14 @@ impl Worker {
         form: &IlFormId,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         let cancellation = self.cancellation.child();
-        self.prepare_lifted(function, form, LiftedLookup::Current, &cancellation)
+        self.prepare_lifted(function, form, IlLookup::Current, &cancellation)
     }
 
     fn prepare_lifted(
         &mut self,
         function: FunctionId,
         form: &IlFormId,
-        lookup: LiftedLookup,
+        lookup: IlLookup,
         cancellation: &CancellationToken,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
         cancellation.check().map_err(ProjectError::from)?;
@@ -1328,7 +1336,7 @@ impl Worker {
             .iter()
             .map(|step| {
                 self.queries
-                    .current_lifted_erased(&project, function, step, lookup)
+                    .lookup_lifted_erased(&project, function, step, lookup)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let generated = self
@@ -1410,12 +1418,12 @@ impl Worker {
 #[cfg(test)]
 mod test {
     use super::{AdmissionConflict, PendingDiagnostics, RecentChanges};
-    use crate::engine::ReadSet;
-    use crate::engine::change::{
-        ChangeKinds, ChangeRecord, ChangeSet, MAX_DETAILED_CHANGE_RECORDS, Revision,
-    };
     use crate::ir::{Address, AddressRange, ProblemKind, ProblemScope};
+    use crate::project::{
+        ChangeKinds, ChangeRecord, ChangeSet, MAX_DETAILED_CHANGE_RECORDS, ReadSet,
+    };
     use crate::storage::segments::space::AddressSpaceId;
+    use crate::types::Revision;
 
     #[test]
     fn pending_diagnostics_are_bounded_by_kind() {

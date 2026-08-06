@@ -8,10 +8,9 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId,
-    CodeBlockMaterialisation, FlowKind, FlowTarget, Function, FunctionId, FunctionProperties,
-    IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnId, InsnList, Reference, ReferenceOrigin,
-    Switch, SwitchCase, Symbol,
+    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId, FlowKind, FlowTarget,
+    Function, FunctionId, FunctionProperties, IncompleteCodeBlock, IncompleteCodeBlockId, Insn,
+    InsnId, NormalisedCodeBlockRecord, Reference, ReferenceOrigin, Switch, SwitchCase, Symbol,
 };
 use crate::types::{Confidence, EstimateSize, Revision};
 
@@ -76,8 +75,8 @@ impl EstimateSize for FunctionInsnIndex {
     }
 }
 
-pub(crate) struct FunctionMaterialisation {
-    blocks: Vec<CodeBlockMaterialisation>,
+pub(crate) struct NormalisedFunctionRecord {
+    blocks: Vec<NormalisedCodeBlockRecord>,
     call_targets: BTreeSet<Address>,
     confidence: Confidence,
     coverage: AddressRangeSet,
@@ -92,9 +91,9 @@ pub(crate) struct FunctionMaterialisation {
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
-impl FunctionMaterialisation {
+impl NormalisedFunctionRecord {
     pub(crate) fn block_addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.blocks.iter().map(CodeBlockMaterialisation::address)
+        self.blocks.iter().map(NormalisedCodeBlockRecord::address)
     }
 
     pub(crate) fn block_count(&self) -> usize {
@@ -121,7 +120,7 @@ impl FunctionMaterialisation {
         self,
         id: FunctionId,
         mut resolve_block: impl FnMut(
-            CodeBlockMaterialisation,
+            NormalisedCodeBlockRecord,
         ) -> Result<CodeBlockId, IncompleteFunctionError>,
     ) -> Result<Function, IncompleteFunctionError> {
         let mut members = Vec::with_capacity(self.blocks.len());
@@ -275,15 +274,26 @@ pub struct IncompleteFunction {
 
 impl EstimateSize for IncompleteFunction {
     fn estimate_size(&self) -> usize {
+        let insn_size = self
+            .insns
+            .iter()
+            .map(EstimateSize::estimate_size)
+            .fold(size_of::<Vec<Insn>>(), usize::saturating_add)
+            .saturating_add(
+                self.insns
+                    .capacity()
+                    .saturating_sub(self.insns.len())
+                    .saturating_mul(size_of::<Insn>()),
+            );
         let mut size = size_of::<Self>()
-            .saturating_sub(size_of::<InsnList>())
+            .saturating_sub(size_of::<Vec<Insn>>())
             .saturating_sub(size_of::<FunctionInsnIndex>())
             .saturating_add(
                 self.blocks
                     .capacity()
                     .saturating_mul(size_of::<IncompleteCodeBlock>()),
             )
-            .saturating_add(self.insns.estimate_size())
+            .saturating_add(insn_size)
             .saturating_add(self.insn_index.estimate_size())
             .saturating_add(
                 self.pending_switches
@@ -299,7 +309,7 @@ impl EstimateSize for IncompleteFunction {
         }
 
         for block in &self.blocks {
-            size = size.saturating_add(block.insns().len().saturating_mul(size_of::<InsnId>()));
+            size = size.saturating_add(block.insn_ids().len().saturating_mul(size_of::<InsnId>()));
         }
         for switch in &self.pending_switches {
             size = size.saturating_add(switch.case_count().saturating_mul(size_of::<SwitchCase>()));
@@ -565,7 +575,7 @@ impl IncompleteFunction {
             .iter()
             .enumerate()
             .flat_map(move |(block_index, block)| {
-                block.insns().iter().filter_map(move |&instruction| {
+                block.insn_ids().iter().filter_map(move |&instruction| {
                     let insn = self.insn(instruction)?;
                     (insn.is_branch() && insn.is_indirect() && !insn.is_call() && !insn.is_return())
                         .then_some((
@@ -586,7 +596,7 @@ impl IncompleteFunction {
         let start = block.address();
         let end = start + block.size();
         block
-            .insns()
+            .insn_ids()
             .iter()
             .filter_map(|id| self.insn(*id))
             .flat_map(Insn::flow_targets)
@@ -756,14 +766,12 @@ impl IncompleteFunction {
         })
     }
 
-    pub(crate) fn prepare_materialisation(
-        self,
-    ) -> Result<FunctionMaterialisation, IncompleteFunctionError> {
+    pub(crate) fn normalise(self) -> Result<NormalisedFunctionRecord, IncompleteFunctionError> {
         for block in &self.blocks {
             if block.is_empty() {
                 return Err(IncompleteFunctionError::invalid_block_size(block.address()));
             }
-            for &insn in block.insns() {
+            for &insn in block.insn_ids() {
                 if self.insn(insn).is_none() {
                     return Err(IncompleteFunctionError::invalid_insn_id(insn));
                 }
@@ -777,17 +785,17 @@ impl IncompleteFunction {
         for block in &self.blocks {
             let size = NonZeroUsize::new(block.size())
                 .ok_or_else(|| IncompleteFunctionError::invalid_block_size(block.address()))?;
-            let block_insns = block.insns().iter().map(|&id| {
+            let block_insns = block.insn_ids().iter().map(|&id| {
                 self.insn(id)
                     .expect("validated instruction must remain available")
             });
-            let materialisation = CodeBlockMaterialisation::new(
+            let normalised = NormalisedCodeBlockRecord::new(
                 block.address(),
                 size,
                 block_insns,
                 block.context().clone(),
             );
-            let block_range = materialisation.address_range();
+            let block_range = normalised.address_range();
             match pending_coverage.as_mut() {
                 Some(current)
                     if current.space() == block_range.space()
@@ -808,7 +816,7 @@ impl IncompleteFunction {
                 }
                 None => pending_coverage = Some(block_range),
             }
-            for mut target in materialisation.flow_targets() {
+            for mut target in normalised.flow_targets() {
                 if target.kind() == FlowKind::Branch
                     && self.tail_call_sites.binary_search(&target.from()).is_ok()
                 {
@@ -825,7 +833,7 @@ impl IncompleteFunction {
                         .with_origin(ReferenceOrigin::Derived),
                 );
             }
-            blocks.push(materialisation);
+            blocks.push(normalised);
         }
         if let Some(range) = pending_coverage {
             coverage.insert_range(range);
@@ -855,7 +863,7 @@ impl IncompleteFunction {
             }
         }
 
-        Ok(FunctionMaterialisation {
+        Ok(NormalisedFunctionRecord {
             blocks,
             call_targets,
             confidence: self.confidence,

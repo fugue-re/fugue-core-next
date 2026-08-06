@@ -1,13 +1,12 @@
 use std::io;
 use std::path::PathBuf;
 
-use fugue_core::engine::change::{ChangeKinds, ChangeRecord, FunctionChangeKind};
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, FunctionProperties, IncompleteCodeBlock,
     IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::project::Project;
+use fugue_core::project::{ChangeKinds, ChangeRecord, FunctionChangeKind, Project};
 use fugue_core::storage::{DEFAULT_SPACE_ID, TransientStorageProvider};
 use fugue_core::types::AttributeMap;
 

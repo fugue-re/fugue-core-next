@@ -1,13 +1,14 @@
 use std::error::Error;
 
 use fugue_core::engine::AnalysisEngine;
-use fugue_core::engine::change::ChangeRecord;
+use fugue_core::il::common::{IlGraph, IlSourceSpan};
+use fugue_core::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp};
 use fugue_core::ir::{
-    Address, CodeBlockProperties, FlowTarget, FunctionProperties, InsnList, ProblemKind, Reference,
+    Address, CodeBlockProperties, FlowTarget, FunctionProperties, Location, ProblemKind, Reference,
     ReferenceOrigin, SegmentProperties,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::project::Project;
+use fugue_core::project::{ChangeRecord, Project};
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::{DEFAULT_SPACE_ID, SegmentMappingBuilder, TransientStorageProvider};
 use fugue_core::types::Confidence;
@@ -19,8 +20,30 @@ struct BlockShape {
     address: Address,
     context: ContextSet,
     flows: Vec<FlowTarget>,
-    insns: InsnList,
     properties: CodeBlockProperties,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PCodeShape {
+    graph: IlGraph,
+    locations: Vec<PCodeLocation>,
+    operands: Vec<PCodeLocationId>,
+    operations: Vec<PCodeOp>,
+    source_spans: Vec<IlSourceSpan>,
+    targets: Vec<Location>,
+}
+
+impl From<&PCodeIr> for PCodeShape {
+    fn from(pcode: &PCodeIr) -> Self {
+        Self {
+            graph: pcode.graph().clone(),
+            locations: pcode.locations().to_vec(),
+            operands: pcode.operation_operands().to_vec(),
+            operations: pcode.operations().to_vec(),
+            source_spans: pcode.source_spans().to_vec(),
+            targets: pcode.targets().to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -29,18 +52,20 @@ struct FunctionShape {
     callees: Vec<Address>,
     confidence: Confidence,
     origin: ReferenceOrigin,
+    pcode: PCodeShape,
     properties: FunctionProperties,
     references: Vec<Reference>,
 }
 
 fn function_shape(
-    reader: &mut QueryReader,
+    reader: &QueryReader,
     entry: Address,
 ) -> Result<Option<FunctionShape>, Box<dyn Error>> {
     let project = reader.project()?;
     let Some(function) = project.functions().get_by_address(entry) else {
         return Ok(None);
     };
+    let function_id = function.id();
     let blocks = function
         .blocks()
         .map(|(address, id)| {
@@ -59,11 +84,6 @@ fn function_shape(
                 address,
                 context: block.context().clone(),
                 flows: block.flow_targets().collect(),
-                insns: reader
-                    .insns(block.id())?
-                    .ok_or("function block insns must exist")?
-                    .as_ref()
-                    .clone(),
                 properties,
             })
         })
@@ -72,12 +92,16 @@ fn function_shape(
     let origin = function.origin();
     let properties = function.properties();
     drop(project);
+    let pcode = reader
+        .pcode(function_id)?
+        .ok_or("function PCode must exist")?;
 
     Ok(Some(FunctionShape {
         blocks,
         callees: reader.callees(entry).collect::<Result<Vec<_>, _>>()?,
         confidence,
         origin,
+        pcode: PCodeShape::from(pcode.as_ref()),
         properties,
         references: reader
             .outgoing_references(entry)
@@ -149,15 +173,15 @@ fn assert_byte_change_converges(
         )
     }));
     incremental.analyse()?;
-    let mut incremental_reader = incremental.query_reader()?;
-    let incremental_shape = function_shape(&mut incremental_reader, entry)?;
+    let incremental_reader = incremental.query_reader()?;
+    let incremental_shape = function_shape(&incremental_reader, entry)?;
 
     let (project, clean_entry) = project_with_mutable_function(final_bytes)?;
     assert_eq!(clean_entry, entry);
     let clean = AnalysisEngine::new(project)?;
     clean.analyse()?;
-    let mut clean_reader = clean.query_reader()?;
-    let clean_shape = function_shape(&mut clean_reader, entry)?;
+    let clean_reader = clean.query_reader()?;
+    let clean_shape = function_shape(&clean_reader, entry)?;
 
     assert!(clean_shape.is_some());
     assert_eq!(incremental_shape, clean_shape);

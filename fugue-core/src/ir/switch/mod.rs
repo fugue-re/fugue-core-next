@@ -4,8 +4,8 @@ use crate::ir::{
     Address, AddressTable, AddressWithContext, FunctionId, Id, RawAddress, Reference,
     ReferenceOrigin, ReferenceProperties,
 };
-use crate::storage::entities::schema::ENTITY_SWITCH_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::entities::schema::{ENTITY_KEY_SWITCH_ID, ENTITY_SWITCH_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
 use crate::types::Confidence;
 use crate::types::common::archived_bitflags;
 
@@ -14,6 +14,10 @@ pub(crate) use table::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
 pub use table::{SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;
+
+impl EntityKey for SwitchId {
+    const ID: EntityKeyId = ENTITY_KEY_SWITCH_ID;
+}
 
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,

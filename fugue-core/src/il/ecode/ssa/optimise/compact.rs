@@ -4,7 +4,7 @@ use crate::il::common::{
     IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaIrParts, ECodeSsaOpcode,
+    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaConstantInterner, ECodeSsaIr, ECodeSsaOpcode,
     ECodeSsaValue, ECodeSsaValueKind,
 };
 
@@ -199,7 +199,7 @@ impl IlRewrite<ECodeSsaIr> for ECodeSsaCompaction {
 
         let metadata = *ir.metadata();
         let memory_domains = ir.memory_domains().to_vec();
-        *ir = ECodeSsaIr::new(ECodeSsaIrParts {
+        *ir = ECodeSsaIr::new(ECodeSsaBuilderContext {
             metadata,
             graph,
             source_spans,

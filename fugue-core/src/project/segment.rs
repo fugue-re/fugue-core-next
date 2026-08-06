@@ -60,7 +60,7 @@ struct MappingPlacement {
 }
 
 #[derive(Default)]
-pub(super) struct SegmentMetadataStage {
+pub(crate) struct SegmentMetadataStaging {
     created_mappings: BTreeMap<SegmentMappingId, SegmentMappingBuilder>,
     created_spaces: BTreeSet<AddressSpaceId>,
     mapping_reservations: usize,
@@ -71,8 +71,8 @@ pub(super) struct SegmentMetadataStage {
     updated_mappings: BTreeMap<SegmentMappingId, ExistingMapping>,
 }
 
-impl SegmentMetadataStage {
-    pub(super) fn create_mapping(
+impl SegmentMetadataStaging {
+    pub(crate) fn create_mapping(
         &mut self,
         storage: &SegmentStorage,
         builder: SegmentMappingBuilder,
@@ -91,7 +91,7 @@ impl SegmentMetadataStage {
         Ok(id)
     }
 
-    pub(super) fn create_space(
+    pub(crate) fn create_space(
         &mut self,
         storage: &SegmentStorage,
     ) -> Result<AddressSpaceId, SegmentStorageError> {
@@ -100,7 +100,7 @@ impl SegmentMetadataStage {
         Ok(id)
     }
 
-    pub(super) fn add_mapping(
+    pub(crate) fn add_mapping(
         &mut self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -115,7 +115,7 @@ impl SegmentMetadataStage {
         self.place_mapping(storage, space, mapping, priority)
     }
 
-    pub(super) fn add_mapping_top(
+    pub(crate) fn add_mapping_top(
         &mut self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -124,7 +124,7 @@ impl SegmentMetadataStage {
         self.place_mapping(storage, space, mapping, PlacementPriority::Top)
     }
 
-    pub(super) fn add_mapping_bottom(
+    pub(crate) fn add_mapping_bottom(
         &mut self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -133,7 +133,7 @@ impl SegmentMetadataStage {
         self.place_mapping(storage, space, mapping, PlacementPriority::Bottom)
     }
 
-    pub(super) fn remove_mapping(
+    pub(crate) fn remove_mapping(
         &mut self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
@@ -151,7 +151,7 @@ impl SegmentMetadataStage {
         Ok(placements)
     }
 
-    pub(super) fn remap_mapping(
+    pub(crate) fn remap_mapping(
         &mut self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
@@ -168,7 +168,7 @@ impl SegmentMetadataStage {
         Ok(())
     }
 
-    pub(super) fn resize_mapping(
+    pub(crate) fn resize_mapping(
         &mut self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
@@ -184,7 +184,7 @@ impl SegmentMetadataStage {
         Ok(())
     }
 
-    pub(super) fn update_mapping_metadata(
+    pub(crate) fn update_mapping_metadata(
         &mut self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
@@ -205,7 +205,7 @@ impl SegmentMetadataStage {
         Ok(())
     }
 
-    pub(super) fn prioritise_mapping(
+    pub(crate) fn prioritise_mapping(
         &mut self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -214,7 +214,7 @@ impl SegmentMetadataStage {
         self.place_mapping(storage, space, mapping, PlacementPriority::Top)
     }
 
-    pub(super) fn deprioritise_mapping(
+    pub(crate) fn deprioritise_mapping(
         &mut self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -223,7 +223,7 @@ impl SegmentMetadataStage {
         self.place_mapping(storage, space, mapping, PlacementPriority::Bottom)
     }
 
-    pub(super) fn mapping_range(
+    pub(crate) fn mapping_range(
         &self,
         storage: &SegmentStorage,
         space: AddressSpaceId,
@@ -238,7 +238,7 @@ impl SegmentMetadataStage {
             .ok_or(SegmentStorageError::InvalidAddressRange)
     }
 
-    pub(super) fn mapping_placements(
+    pub(crate) fn mapping_placements(
         &self,
         storage: &SegmentStorage,
         id: SegmentMappingId,
@@ -279,7 +279,7 @@ impl SegmentMetadataStage {
             .collect()
     }
 
-    pub(super) fn publish(self, storage: &mut SegmentStorage) {
+    pub(crate) fn publish(self, storage: &mut SegmentStorage) {
         for space in self.created_spaces {
             storage
                 .create_space_with_id(space)

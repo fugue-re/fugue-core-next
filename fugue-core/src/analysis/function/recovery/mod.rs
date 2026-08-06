@@ -15,6 +15,8 @@ pub use analysis::{
 pub(crate) mod builder;
 pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
 
+mod executor;
+
 pub(crate) mod hooks;
 pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
 
@@ -26,7 +28,7 @@ mod structuring;
 pub const DEFAULT_MAX_BLOCK_INSNS: usize = u16::MAX as usize;
 pub const DEFAULT_MAX_FUNCTION_BLOCKS: usize = u16::MAX as usize;
 pub const DEFAULT_MAX_FUNCTION_INSNS: usize = u16::MAX as usize;
-pub(super) const FUNCTION_RECOVERY_BLOCKING_PROBLEMS: [ProblemKind; 7] = [
+const FUNCTION_RECOVERY_BLOCKING_PROBLEMS: [ProblemKind; 7] = [
     ProblemKind::HinderedByAssertedFact,
     ProblemKind::AvoidedBytes,
     ProblemKind::CannotCreateFunction,

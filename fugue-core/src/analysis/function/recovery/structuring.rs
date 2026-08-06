@@ -8,14 +8,14 @@ use crate::ir::{
 use crate::lifter::ContextSet;
 
 #[derive(Default)]
-pub(super) struct CodeBlockStructurer {
+pub(crate) struct CodeBlockStructurer {
     block_starts: FxHashMap<Address, IncompleteCodeBlockId>,
     block_ends: FxHashMap<Address, IncompleteCodeBlockId>,
     cut_positions: Vec<usize>,
 }
 
 impl CodeBlockStructurer {
-    pub(super) fn block_starts(
+    pub(crate) fn block_starts(
         &self,
     ) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
         self.block_starts
@@ -23,11 +23,11 @@ impl CodeBlockStructurer {
             .map(|(address, block)| (*address, *block))
     }
 
-    pub(super) fn block_start_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+    pub(crate) fn block_start_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
         self.block_starts.get(&address).copied()
     }
 
-    pub(super) fn block_ends(
+    pub(crate) fn block_ends(
         &self,
     ) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
         self.block_ends
@@ -35,17 +35,17 @@ impl CodeBlockStructurer {
             .map(|(address, block)| (*address, *block))
     }
 
-    pub(super) fn block_end_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+    pub(crate) fn block_end_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
         self.block_ends.get(&address).copied()
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.block_starts.clear();
         self.block_ends.clear();
         self.cut_positions.clear();
     }
 
-    pub(super) fn structure<'a>(
+    pub(crate) fn structure<'a>(
         &mut self,
         function: &mut IncompleteFunction,
         config: &FunctionRecoveryConfig,
@@ -235,7 +235,7 @@ impl CodeBlockStructurer {
         for index in 0..function.blocks().len() {
             let block = &function.blocks()[index];
             let from = self.block_starts[&block.address()];
-            let Some(last) = function.blocks()[index].insns().last().copied() else {
+            let Some(last) = function.blocks()[index].insn_ids().last().copied() else {
                 continue;
             };
             let insn = function.insn(last).expect("instruction must exist");

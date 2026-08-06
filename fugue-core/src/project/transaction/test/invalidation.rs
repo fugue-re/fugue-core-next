@@ -14,8 +14,8 @@ fn replacing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Err
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
-        transaction.materialise_lifted(ecode_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(ecode_for_test(function, IlGraph::default()))?;
         transaction.commit()?;
     }
 
@@ -57,7 +57,7 @@ fn rejecting_function_replacement_preserves_lifted_ir() -> Result<(), Box<dyn st
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(materialised.clone())?;
+        transaction.replace_lifted(materialised.clone())?;
         transaction.commit()?;
     }
     let materialised = project
@@ -136,7 +136,7 @@ fn removing_function_invalidates_lifted() -> Result<(), Box<dyn std::error::Erro
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
         transaction.commit()?;
     }
 
@@ -178,7 +178,7 @@ fn byte_write_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
         transaction.commit()?;
     }
 
@@ -260,9 +260,9 @@ fn byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error:
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
-        transaction.materialise_lifted(ecode_for_test(function, IlGraph::default()))?;
-        transaction.materialise_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(ecode_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
         transaction.commit()?;
     }
 
@@ -309,9 +309,9 @@ fn symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(pcode.clone())?;
-        transaction.materialise_lifted(ecode.clone())?;
-        transaction.materialise_lifted(ssa.clone())?;
+        transaction.replace_lifted(pcode.clone())?;
+        transaction.replace_lifted(ecode.clone())?;
+        transaction.replace_lifted(ssa.clone())?;
         transaction.commit()?;
     }
     let pcode = project
@@ -367,9 +367,9 @@ fn reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(pcode.clone())?;
-        transaction.materialise_lifted(ecode.clone())?;
-        transaction.materialise_lifted(ssa.clone())?;
+        transaction.replace_lifted(pcode.clone())?;
+        transaction.replace_lifted(ecode.clone())?;
+        transaction.replace_lifted(ssa.clone())?;
         transaction.commit()?;
     }
     let pcode = project
@@ -436,7 +436,7 @@ fn rejecting_byte_write_preserves_lifted_ir() -> Result<(), Box<dyn std::error::
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(materialised.clone())?;
+        transaction.replace_lifted(materialised.clone())?;
         transaction.commit()?;
     }
     let materialised = project
@@ -469,7 +469,7 @@ fn mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(function, &[1]))?;
+        transaction.replace_lifted(tagged_pcode(function, &[1]))?;
         transaction.commit()?;
     }
 
@@ -513,7 +513,7 @@ fn rejecting_mapping_removal_preserves_lifted_ir() -> Result<(), Box<dyn std::er
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(materialised.clone())?;
+        transaction.replace_lifted(materialised.clone())?;
         transaction.commit()?;
     }
     let materialised = project
@@ -554,8 +554,8 @@ fn mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::err
 
     {
         let mut transaction = project.transaction("test");
-        transaction.materialise_lifted(tagged_pcode(old_function, &[1]))?;
-        transaction.materialise_lifted(tagged_pcode(new_function, &[2]))?;
+        transaction.replace_lifted(tagged_pcode(old_function, &[1]))?;
+        transaction.replace_lifted(tagged_pcode(new_function, &[2]))?;
         transaction.commit()?;
     }
 

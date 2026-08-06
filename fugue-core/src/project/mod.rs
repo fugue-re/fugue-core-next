@@ -6,8 +6,6 @@ use thiserror::Error;
 
 use crate::analysis::control::Cancelled;
 use crate::arch::Arch;
-use crate::engine::AnalysisCoverage;
-use crate::engine::change::{ChangeSource, Revision};
 use crate::il::common::{IlError, IlFormId, IlGenerationError, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
@@ -35,10 +33,24 @@ use crate::storage::{
     DefaultProjectStorageProvider, SegmentStorageError, StorageContainer, StorageProvider,
     StorageProviderError, TransientStorageProvider,
 };
-use crate::types::AttributeMap;
 use crate::types::attributes::{
     ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
 };
+use crate::types::{AttributeMap, Revision};
+
+mod analysis;
+pub(crate) use analysis::CoverageReconfiguration;
+pub use analysis::{AnalysisCoverage, AnalysisPhase};
+
+mod change;
+pub(crate) use change::MAX_DETAILED_CHANGE_RECORDS;
+pub use change::{
+    ChangeCategory, ChangeKinds, ChangeProvenance, ChangeRecord, ChangeSet, ChangeSource,
+    FunctionChangeKind,
+};
+
+pub(crate) mod read;
+pub use read::ReadSet;
 
 mod segment;
 pub(crate) mod transaction;

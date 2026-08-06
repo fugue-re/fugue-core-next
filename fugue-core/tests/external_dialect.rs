@@ -3,15 +3,14 @@ use std::path::Path;
 
 use fugue_core::analysis::AnalysisError;
 use fugue_core::analysis::control::CancellationToken;
-use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig,
-    IlAnalyserAdapter, ProjectUpdate, ProjectView,
+    AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig, ProjectUpdate,
+    ProjectView,
 };
 use fugue_core::extension::submit;
 use fugue_core::il::common::{
     DialectId, IlAnalyser, IlAnalysis, IlArtefact, IlConverter, IlError, IlGenerationContext,
-    IlGenerationError, IlMetadata, IlProducer, IlRewrite,
+    IlGenerationError, IlMetadata, IlProducer, IlRewrite, IlSchemaVersion, PersistableIl,
 };
 use fugue_core::il::ecode::ECodeIr as CoreECodeIr;
 use fugue_core::il::ecode::ssa::ECodeSsaIr;
@@ -21,7 +20,7 @@ use fugue_core::il::registry::{
 };
 use fugue_core::ir::{FunctionId, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector};
 use fugue_core::loader::Loader;
-use fugue_core::project::{Project, ProjectError};
+use fugue_core::project::{ChangeKinds, Project, ProjectError};
 use fugue_core::queries::{QueryError, QueryableIl};
 use fugue_core::types::EstimateSize;
 
@@ -64,22 +63,49 @@ impl IlArtefact for AcmeSummary {
 submit! { IlDialectRegistration::new("acme.summary") }
 submit! { IlFormRegistration::of::<AcmeSummary>() }
 
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct AcmePersistedSummary {
+    metadata: IlMetadata,
+    value: u64,
+}
+
+impl EstimateSize for AcmePersistedSummary {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+    }
+}
+
+impl IlArtefact for AcmePersistedSummary {
+    const FORM_IDENTIFIER: &str = "acme.summary.persisted";
+
+    fn metadata(&self) -> &IlMetadata {
+        &self.metadata
+    }
+}
+
+impl PersistableIl for AcmePersistedSummary {
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
+
+    fn metadata_mut(&mut self) -> &mut IlMetadata {
+        &mut self.metadata
+    }
+}
+
+impl QueryableIl for AcmePersistedSummary {}
+
+submit! { IlFormRegistration::persistable::<AcmePersistedSummary>() }
+
 #[derive(Default)]
 struct AcmeIlAnalyser {
     next_symbol: usize,
 }
 
-impl AcmeIlAnalyser {
-    fn build(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-        Ok(Box::new(IlAnalyserAdapter::new(Self::default())))
-    }
-}
-
 impl IlAnalyser for AcmeIlAnalyser {
+    const NAME: &'static str = "acme-il-analyser";
     type Input = PCodeIr;
 
-    fn name(&self) -> &'static str {
-        "acme-il-analyser"
+    fn build(_project: &Project) -> Result<Self, AnalysisError> {
+        Ok(Self::default())
     }
 
     fn triggers(&self) -> ChangeKinds {
@@ -124,7 +150,7 @@ impl IlAnalyser for AcmeIlAnalyser {
 }
 
 submit! {
-    AnalyserProvider::for_il::<PCodeIr>("acme-il-analyser", AcmeIlAnalyser::build)
+    AnalyserProvider::for_il::<AcmeIlAnalyser>()
 }
 
 fn analysed_engine(config: AnalysisEngineConfig) -> AnalysisEngine {
@@ -249,6 +275,53 @@ fn an_external_form_registers_through_the_extension_mechanism() {
 }
 
 #[test]
+fn an_external_persistable_form_uses_generic_replacement_and_removal() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ls.elf");
+    let loader = Loader::from_file(fixture).expect("the fixture loads");
+    let mut project = Project::new_transient(&loader).expect("the project opens");
+    let function = FunctionId::default();
+
+    {
+        let mut transaction = project.transaction("external dialect replacement");
+        transaction
+            .replace_lifted(AcmePersistedSummary {
+                metadata: IlMetadata::new(function, 0u64),
+                value: 7,
+            })
+            .expect("generic replacement succeeds");
+        transaction.commit().expect("replacement commits");
+    }
+    {
+        let mut transaction = project.transaction("external dialect removal");
+        assert!(
+            transaction
+                .remove_lifted::<AcmePersistedSummary>(function)
+                .expect("typed removal succeeds")
+        );
+        transaction.commit().expect("removal commits");
+    }
+    {
+        let mut transaction = project.transaction("external dialect replacement");
+        transaction
+            .replace_lifted(AcmePersistedSummary {
+                metadata: IlMetadata::new(function, 0u64),
+                value: 11,
+            })
+            .expect("generic replacement succeeds");
+        transaction.commit().expect("replacement commits");
+    }
+
+    let engine = AnalysisEngine::new(project).expect("the engine starts");
+    let stored = engine
+        .query_reader()
+        .expect("a reader is available")
+        .lifted::<AcmePersistedSummary>(function)
+        .expect("the external form is readable")
+        .expect("the external form is present");
+    assert_eq!(stored.value, 11);
+}
+
+#[test]
 fn an_external_form_cannot_claim_the_reserved_namespace() {
     let errors = IlRegistryBuilder::standard()
         .with_dialect(DialectId::from_static("fugue.acme"))
@@ -277,14 +350,14 @@ fn a_registered_form_without_a_recipe_is_reported() {
     };
 
     assert!(matches!(
-        reader.il::<AcmeSummary>(function),
+        reader.lifted::<AcmeSummary>(function),
         Err(QueryError::Project(ProjectError::Il(
             IlError::MissingRecipe { form }
         ))) if form == AcmeSummary::FORM
     ));
     assert!(
         reader
-            .il::<CoreECodeIr>(function)
+            .lifted::<CoreECodeIr>(function)
             .expect("a built-in form queries through the same entry point")
             .is_some()
     );
@@ -440,7 +513,7 @@ fn the_engine_generates_an_external_form_through_its_registered_recipe() {
     };
 
     let summary = reader
-        .il::<AcmeBlockCount>(function)
+        .lifted::<AcmeBlockCount>(function)
         .expect("the external form generates")
         .expect("the engine produced it through the registered conversion");
 
@@ -448,7 +521,7 @@ fn the_engine_generates_an_external_form_through_its_registered_recipe() {
     assert!(summary.blocks > 0);
 
     let ssa = reader
-        .il::<ECodeSsaIr>(function)
+        .lifted::<ECodeSsaIr>(function)
         .expect("the source form is available")
         .expect("the conversion source was generated too");
     assert_eq!(summary.blocks, ssa.graph().blocks().len());
@@ -473,11 +546,11 @@ fn the_engine_uses_a_form_registered_only_in_its_configured_registry() {
     assert_eq!(functions.len(), 2);
 
     let first = reader
-        .il::<ConfiguredBlockCount>(functions[0])
+        .lifted::<ConfiguredBlockCount>(functions[0])
         .expect("the configured form generates")
         .expect("the configured recipe produced its form");
     let second = reader
-        .il::<ConfiguredBlockCount>(functions[1])
+        .lifted::<ConfiguredBlockCount>(functions[1])
         .expect("the configured form generates again")
         .expect("the configured recipe produced its second form");
 
@@ -506,11 +579,11 @@ fn the_engine_uses_a_root_producer_from_its_configured_registry() {
     assert_eq!(functions.len(), 2);
 
     let first = reader
-        .il::<ConfiguredFunctionSummary>(functions[0])
+        .lifted::<ConfiguredFunctionSummary>(functions[0])
         .expect("the configured root form generates")
         .expect("the configured producer produced its form");
     let second = reader
-        .il::<ConfiguredFunctionSummary>(functions[1])
+        .lifted::<ConfiguredFunctionSummary>(functions[1])
         .expect("the configured root form generates again")
         .expect("the configured producer produced its second form");
 
@@ -537,7 +610,7 @@ fn inventory_does_not_override_an_engine_registry() {
         .id();
 
     assert!(matches!(
-        reader.il::<AcmeBlockCount>(function),
+        reader.lifted::<AcmeBlockCount>(function),
         Err(QueryError::Project(ProjectError::Il(
             IlError::UnregisteredForm { form }
         ))) if form == AcmeBlockCount::FORM

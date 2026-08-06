@@ -1,7 +1,8 @@
 use std::error::Error;
 
-use fugue_core::engine::{AnalysisPhase, Priority};
+use fugue_core::engine::Priority;
 use fugue_core::ir::FlowKind;
+use fugue_core::project::AnalysisPhase;
 
 #[test]
 fn phases_order_by_dependency() -> Result<(), Box<dyn Error>> {

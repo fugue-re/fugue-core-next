@@ -6,7 +6,7 @@ use crate::platform::OperatingSystem;
 use crate::platform::non_returning::is_non_returning_extern;
 use crate::project::Project;
 
-pub(super) const NON_RETURNING_EXTERNS_ANALYSER: &str = "non-returning-externs";
+const NON_RETURNING_EXTERNS_ANALYSER: &str = "non-returning-externs";
 
 #[derive(Debug, Clone, Copy)]
 pub struct NonReturningExterns {

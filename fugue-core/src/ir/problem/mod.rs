@@ -1,8 +1,7 @@
-use crate::engine::change::ChangeKinds;
 use crate::ir::{Address, AddressRange, AddressRangeSet, Id};
 use crate::storage::AddressSpaceId;
-use crate::storage::entities::schema::ENTITY_PROBLEM_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::entities::schema::{ENTITY_KEY_PROBLEM_ID, ENTITY_PROBLEM_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
 use crate::types::Revision;
 
 mod table;
@@ -10,6 +9,10 @@ pub(crate) use table::{ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES
 pub use table::{ProblemRef, ProblemTable, ProblemTableError};
 
 pub type ProblemId = Id<Problem>;
+
+impl EntityKey for ProblemId {
+    const ID: EntityKeyId = ENTITY_KEY_PROBLEM_ID;
+}
 
 #[derive(
     Debug,
@@ -57,34 +60,6 @@ impl ProblemKind {
             | Self::RetryBudgetExhausted
             | Self::WorkCausesMerged => ProblemClass::Operational,
             _ => ProblemClass::Semantic,
-        }
-    }
-
-    pub(crate) fn input_kinds(self) -> ChangeKinds {
-        let recovery = ChangeKinds::BYTES_WRITTEN
-            | ChangeKinds::FUNCTIONS
-            | ChangeKinds::SEGMENTS
-            | ChangeKinds::SYMBOLS;
-        match self {
-            Self::AvoidedBytes => ChangeKinds::BYTES_WRITTEN | ChangeKinds::SEGMENTS,
-            Self::CannotCreateFunction
-            | Self::DecodeFailed
-            | Self::FunctionTooLarge
-            | Self::PassFailed => recovery,
-            Self::HinderedByAssertedFact => ChangeKinds::FUNCTIONS,
-            Self::SwitchBoundExceeded | Self::SwitchUnresolved => {
-                ChangeKinds::BYTES_WRITTEN
-                    | ChangeKinds::FUNCTIONS
-                    | ChangeKinds::SEGMENTS
-                    | ChangeKinds::SWITCHES
-            }
-            Self::Unknown => ChangeKinds::all().difference(ChangeKinds::PROBLEMS),
-            Self::AnalysisCoverageInvalidated
-            | Self::ChangeIndexCollapsed
-            | Self::PendingWorkCollapsed
-            | Self::ReadSetCollapsed
-            | Self::RetryBudgetExhausted
-            | Self::WorkCausesMerged => ChangeKinds::empty(),
         }
     }
 }

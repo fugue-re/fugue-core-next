@@ -134,7 +134,8 @@ fn split_and_merge_follow_membership_and_control_flow() -> Result<(), Box<dyn st
     assert_eq!(
         project
             .functions()
-            .functions_containing_block(shared_block)
+            .get_by_block_id(shared_block)
+            .iter()
             .collect::<Vec<_>>(),
         vec![function, child],
     );

@@ -11,8 +11,6 @@ use crate::types::common::archived_bitflags;
 
 pub type InsnId = Id<Insn>;
 
-pub type InsnList = Vec<Insn>;
-
 #[derive(Debug, Error)]
 pub enum InsnError {
     #[error("instruction size {size} exceeds retained limit")]
@@ -496,19 +494,6 @@ impl EstimateSize for Insn {
             );
         }
         size
-    }
-}
-
-impl EstimateSize for InsnList {
-    fn estimate_size(&self) -> usize {
-        self.iter()
-            .map(EstimateSize::estimate_size)
-            .fold(size_of::<Self>(), usize::saturating_add)
-            .saturating_add(
-                self.capacity()
-                    .saturating_sub(self.len())
-                    .saturating_mul(size_of::<Insn>()),
-            )
     }
 }
 

@@ -10,23 +10,10 @@ use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowTargets;
-use crate::ir::{Address, CodeBlockId, FunctionId, InsnList};
-use crate::project::{Project, ProjectError};
-use crate::types::EstimateSize;
+use crate::ir::{Address, FunctionId};
 
 const CFG_CACHE_CAPACITY: usize = 1024;
 const ESTIMATED_LIFTED_CACHE_ENTRIES: usize = 256;
-const ESTIMATED_INSN_CACHE_ENTRIES: usize = 4096;
-
-#[derive(Clone, Copy)]
-struct InsnWeigher;
-
-impl Weighter<CodeBlockId, Option<Arc<InsnList>>> for InsnWeigher {
-    fn weight(&self, _block: &CodeBlockId, insns: &Option<Arc<InsnList>>) -> u64 {
-        let size = insns.as_ref().map_or(0, |insns| insns.estimate_size());
-        (size_of::<CodeBlockId>() + size_of::<Arc<InsnList>>() + size) as u64
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct CachedIl {
@@ -62,8 +49,6 @@ type IlCacheKey = (FunctionId, IlFormId);
 
 pub(crate) struct QueryCache {
     flow_targets: Cache<Address, Option<Arc<FlowTargets>>>,
-    insns: Cache<CodeBlockId, Option<Arc<InsnList>>, InsnWeigher>,
-    insn_cache_bytes: usize,
     lifted: Cache<IlCacheKey, Option<CachedIl>, LiftedWeigher>,
     lifted_cache_bytes: usize,
 }
@@ -84,44 +69,16 @@ impl<T: ?Sized> CacheLookup<T> {
     }
 }
 
-pub trait QueryableIl: IlArtefact {
-    fn load_persisted(
-        _project: &Project,
-        _function: FunctionId,
-    ) -> Result<Option<Self>, ProjectError> {
-        Ok(None)
-    }
-}
+pub trait QueryableIl: IlArtefact {}
 
-impl QueryableIl for PCodeIr {
-    fn load_persisted(
-        project: &Project,
-        function: FunctionId,
-    ) -> Result<Option<Self>, ProjectError> {
-        project.lifted::<Self>(function)
-    }
-}
+impl QueryableIl for PCodeIr {}
 
-impl QueryableIl for ECodeIr {
-    fn load_persisted(
-        project: &Project,
-        function: FunctionId,
-    ) -> Result<Option<Self>, ProjectError> {
-        project.lifted::<Self>(function)
-    }
-}
+impl QueryableIl for ECodeIr {}
 
-impl QueryableIl for ECodeSsaIr {
-    fn load_persisted(
-        project: &Project,
-        function: FunctionId,
-    ) -> Result<Option<Self>, ProjectError> {
-        project.lifted::<Self>(function)
-    }
-}
+impl QueryableIl for ECodeSsaIr {}
 
 impl QueryCache {
-    pub(crate) fn new(insn_cache_bytes: usize, lifted_cache_bytes: usize) -> Self {
+    pub(crate) fn new(lifted_cache_bytes: usize) -> Self {
         let lifted_options = OptionsBuilder::new()
             .shards(1)
             .estimated_items_capacity(ESTIMATED_LIFTED_CACHE_ENTRIES)
@@ -132,12 +89,6 @@ impl QueryCache {
 
         Self {
             flow_targets: Cache::new(CFG_CACHE_CAPACITY),
-            insns: Cache::with_weighter(
-                ESTIMATED_INSN_CACHE_ENTRIES,
-                insn_cache_bytes as u64,
-                InsnWeigher,
-            ),
-            insn_cache_bytes,
             lifted: Cache::with_options(
                 lifted_options,
                 LiftedWeigher,
@@ -146,28 +97,6 @@ impl QueryCache {
             ),
             lifted_cache_bytes,
         }
-    }
-
-    pub(crate) fn insns(&self, block: CodeBlockId) -> CacheLookup<InsnList> {
-        CacheLookup::from_cached(self.insns.get(&block))
-    }
-
-    pub(crate) fn insert_insns(&self, block: CodeBlockId, insns: Arc<InsnList>) {
-        let retained = InsnWeigher.weight(&block, &Some(insns.clone())) as usize;
-        if retained <= self.insn_cache_bytes {
-            self.insns.insert(block, Some(insns));
-        }
-    }
-
-    pub(crate) fn insert_missing_insns(&self, block: CodeBlockId) {
-        let retained = InsnWeigher.weight(&block, &None) as usize;
-        if retained <= self.insn_cache_bytes {
-            self.insns.insert(block, None);
-        }
-    }
-
-    pub(crate) fn clear_insns(&self) {
-        self.insns.clear();
     }
 
     pub(crate) fn lifted<T: IlArtefact>(
@@ -239,7 +168,6 @@ impl QueryCache {
 
     pub(crate) fn clear(&self) {
         self.flow_targets.clear();
-        self.clear_insns();
         self.clear_lifted();
     }
 }

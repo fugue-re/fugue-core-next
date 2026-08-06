@@ -4,12 +4,10 @@ use std::iter;
 use std::sync::Arc;
 
 use rangemap::RangeInclusiveMap;
-use smallvec::SmallVec;
 
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
-use crate::engine::change::{ChangeKinds, ChangeSet};
-use crate::engine::scheduler::IlAnalysisInputs;
+use crate::engine::scheduler::{AnalyserId, IlAnalysisInputs};
 use crate::il::common::{IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlSubject};
 use crate::il::registry::{IlGenerationSession, IlRegistry};
 use crate::ir::{
@@ -19,123 +17,13 @@ use crate::ir::{
 };
 use crate::lifter::Language;
 use crate::platform::Platform;
-use crate::project::{Project, ProjectError};
+#[cfg(test)]
+use crate::project::ChangeSet;
+#[cfg(test)]
+use crate::project::read::MAX_READ_RANGES;
+use crate::project::{ChangeKinds, Project, ProjectError, ReadSet};
 use crate::storage::segments::{AddressSpaceId, SegmentStorage, SegmentStorageError};
 use crate::types::common::Revision;
-
-const MAX_READ_RANGES: usize = 1024;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReadSet {
-    bounded: SmallVec<[(ChangeKinds, AddressRangeSet); 2]>,
-    unbounded: ChangeKinds,
-}
-
-impl ReadSet {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn record(&mut self, kinds: ChangeKinds, range: AddressRange) -> bool {
-        let kinds = kinds.difference(self.unbounded);
-        if kinds.is_empty() {
-            return false;
-        }
-
-        if let Some((_, ranges)) = self
-            .bounded
-            .iter_mut()
-            .find(|(existing, _)| *existing == kinds)
-        {
-            ranges.insert_range(range);
-            if ranges.range_count() > MAX_READ_RANGES {
-                self.record_unbounded(kinds);
-                return true;
-            }
-            return false;
-        }
-
-        let mut ranges = AddressRangeSet::new();
-        ranges.insert_range(range);
-        self.bounded.push((kinds, ranges));
-        false
-    }
-
-    pub fn record_unbounded(&mut self, kinds: ChangeKinds) {
-        self.unbounded |= kinds;
-        for (existing, _) in &mut self.bounded {
-            existing.remove(kinds);
-        }
-        self.bounded.retain(|(existing, _)| !existing.is_empty());
-    }
-
-    pub fn intersects(&self, kinds: ChangeKinds, regions: &AddressRangeSet) -> bool {
-        if self.unbounded.intersects(kinds) {
-            return true;
-        }
-
-        self.bounded
-            .iter()
-            .any(|(observed, ranges)| observed.intersects(kinds) && ranges.intersects(regions))
-    }
-
-    pub(crate) fn conflicts_with(&self, changes: &ChangeSet) -> bool {
-        changes.records().iter().any(|record| {
-            let kind = record.kind();
-            if !self.observes(kind) {
-                return false;
-            }
-
-            let ranges = record.ranges();
-            ranges.is_empty()
-                || ranges.iter().any(|range| {
-                    self.unbounded.intersects(kind)
-                        || self.bounded.iter().any(|(observed, observed_ranges)| {
-                            observed.intersects(kind) && observed_ranges.intersects_range(range)
-                        })
-                })
-        })
-    }
-
-    pub fn escapes(&self, kinds: ChangeKinds, region: &AddressRangeSet) -> bool {
-        if self.unbounded.intersects(kinds) {
-            return true;
-        }
-
-        self.bounded.iter().any(|(observed, ranges)| {
-            observed.intersects(kinds) && !ranges.difference(region).is_empty()
-        })
-    }
-
-    pub fn observes(&self, kinds: ChangeKinds) -> bool {
-        self.unbounded.intersects(kinds)
-            || self
-                .bounded
-                .iter()
-                .any(|(observed, _)| observed.intersects(kinds))
-    }
-
-    pub fn observed(&self) -> ChangeKinds {
-        self.bounded
-            .iter()
-            .fold(self.unbounded, |kinds, (observed, _)| kinds | *observed)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.unbounded.is_empty() && self.bounded.is_empty()
-    }
-
-    pub fn merge(&mut self, other: &Self) -> bool {
-        self.record_unbounded(other.unbounded);
-        let mut collapsed = false;
-        for (kinds, ranges) in &other.bounded {
-            for range in ranges.ranges() {
-                collapsed |= self.record(*kinds, range);
-            }
-        }
-        collapsed
-    }
-}
 
 struct AnalyserDependencies {
     addressless: Option<Arc<ReadSet>>,
@@ -181,10 +69,15 @@ impl DependencyIndex {
         Self { entries }
     }
 
-    pub(crate) fn record(&mut self, analyser: usize, regions: &AddressRangeSet, reads: ReadSet) {
+    pub(crate) fn record(
+        &mut self,
+        analyser: AnalyserId,
+        regions: &AddressRangeSet,
+        reads: ReadSet,
+    ) {
         let entries = self
             .entries
-            .get_mut(analyser)
+            .get_mut(analyser.index())
             .expect("scheduled analyser must have a dependency index");
 
         if regions.is_empty() {
@@ -207,11 +100,11 @@ impl DependencyIndex {
 
     pub(crate) fn invalidated(
         &self,
-        analyser: usize,
+        analyser: AnalyserId,
         kinds: ChangeKinds,
         changed: Option<&AddressRangeSet>,
     ) -> DependencyInvalidation {
-        let Some(entries) = self.entries.get(analyser) else {
+        let Some(entries) = self.entries.get(analyser.index()) else {
             return DependencyInvalidation {
                 addressless: false,
                 regions: AddressRangeSet::new(),
@@ -489,7 +382,10 @@ impl<'a> ProjectView<'a> {
         )
     }
 
-    pub fn il<T: IlArtefact>(&self, function: FunctionId) -> Result<Option<Arc<T>>, ProjectError> {
+    pub fn lifted<T: IlArtefact>(
+        &self,
+        function: FunctionId,
+    ) -> Result<Option<Arc<T>>, ProjectError> {
         self.record_unbounded(ChangeKinds::LIFTED);
         self.registry
             .registered_form::<T>()
@@ -565,8 +461,8 @@ impl<'a> ProjectView<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::engine::change::ChangeRecord;
     use crate::ir::Address;
+    use crate::project::ChangeRecord;
     use crate::storage::segments::DEFAULT_SPACE_ID;
 
     fn range(start: u64, end: u64) -> AddressRange {
@@ -684,16 +580,19 @@ mod test {
         first.insert_range(range(0x1000, 0x1fff));
         let mut first_reads = ReadSet::new();
         first_reads.record(ChangeKinds::SYMBOLS, range(0x8000, 0x80ff));
-        index.record(0, &first, first_reads);
+        index.record(AnalyserId::new(0), &first, first_reads);
 
         let mut second = AddressRangeSet::new();
         second.insert_range(range(0x3000, 0x3fff));
         let mut second_reads = ReadSet::new();
         second_reads.record(ChangeKinds::SYMBOLS, range(0x9000, 0x90ff));
-        index.record(0, &second, second_reads);
+        index.record(AnalyserId::new(0), &second, second_reads);
 
-        let invalidated =
-            index.invalidated(0, ChangeKinds::SYMBOLS, Some(&regions(0x8000, 0x80ff)));
+        let invalidated = index.invalidated(
+            AnalyserId::new(0),
+            ChangeKinds::SYMBOLS,
+            Some(&regions(0x8000, 0x80ff)),
+        );
 
         assert!(
             invalidated
@@ -714,18 +613,26 @@ mod test {
         let mut index = DependencyIndex::with_analysers(1);
         let mut old_reads = ReadSet::new();
         old_reads.record(ChangeKinds::SYMBOLS, range(0x8000, 0x80ff));
-        index.record(0, &regions(0x1000, 0x1fff), old_reads);
+        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), old_reads);
 
         let mut new_reads = ReadSet::new();
         new_reads.record(ChangeKinds::SWITCHES, range(0x9000, 0x90ff));
-        index.record(0, &regions(0x1400, 0x17ff), new_reads);
+        index.record(AnalyserId::new(0), &regions(0x1400, 0x17ff), new_reads);
 
-        let stale_old = index.invalidated(0, ChangeKinds::SYMBOLS, Some(&regions(0x8000, 0x80ff)));
+        let stale_old = index.invalidated(
+            AnalyserId::new(0),
+            ChangeKinds::SYMBOLS,
+            Some(&regions(0x8000, 0x80ff)),
+        );
         assert!(stale_old.regions().contains(Address::from(0x1200u64)));
         assert!(!stale_old.regions().contains(Address::from(0x1500u64)));
         assert!(stale_old.regions().contains(Address::from(0x1800u64)));
 
-        let stale_new = index.invalidated(0, ChangeKinds::SWITCHES, Some(&regions(0x9000, 0x90ff)));
+        let stale_new = index.invalidated(
+            AnalyserId::new(0),
+            ChangeKinds::SWITCHES,
+            Some(&regions(0x9000, 0x90ff)),
+        );
         assert!(!stale_new.regions().contains(Address::from(0x1200u64)));
         assert!(stale_new.regions().contains(Address::from(0x1500u64)));
         assert!(!stale_new.regions().contains(Address::from(0x1800u64)));
@@ -743,13 +650,13 @@ mod test {
         ));
         let mut old_reads = ReadSet::new();
         old_reads.record_unbounded(ChangeKinds::SYMBOLS);
-        index.record(0, &produced, old_reads);
+        index.record(AnalyserId::new(0), &produced, old_reads);
 
         let mut new_reads = ReadSet::new();
         new_reads.record_unbounded(ChangeKinds::SWITCHES);
-        index.record(0, &regions(0x1000, 0x1fff), new_reads);
+        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), new_reads);
 
-        let stale_old = index.invalidated(0, ChangeKinds::SYMBOLS, None);
+        let stale_old = index.invalidated(AnalyserId::new(0), ChangeKinds::SYMBOLS, None);
         assert!(!stale_old.regions().contains(Address::from(0x1800u64)));
         assert!(
             stale_old
@@ -757,7 +664,7 @@ mod test {
                 .contains(Address::new(other_space, 0x1800u64))
         );
 
-        let stale_new = index.invalidated(0, ChangeKinds::SWITCHES, None);
+        let stale_new = index.invalidated(AnalyserId::new(0), ChangeKinds::SWITCHES, None);
         assert!(stale_new.regions().contains(Address::from(0x1800u64)));
         assert!(
             !stale_new
@@ -771,11 +678,11 @@ mod test {
         let mut index = DependencyIndex::with_analysers(1);
         let mut reads = ReadSet::new();
         reads.record_unbounded(ChangeKinds::SYMBOLS);
-        index.record(0, &regions(0x1000, 0x1fff), reads);
+        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), reads);
 
-        index.record(0, &regions(0x1400, 0x17ff), ReadSet::new());
+        index.record(AnalyserId::new(0), &regions(0x1400, 0x17ff), ReadSet::new());
 
-        let invalidated = index.invalidated(0, ChangeKinds::SYMBOLS, None);
+        let invalidated = index.invalidated(AnalyserId::new(0), ChangeKinds::SYMBOLS, None);
         assert!(invalidated.regions().contains(Address::from(0x1200u64)));
         assert!(!invalidated.regions().contains(Address::from(0x1500u64)));
         assert!(invalidated.regions().contains(Address::from(0x1800u64)));
@@ -786,9 +693,9 @@ mod test {
         let mut index = DependencyIndex::with_analysers(1);
         let mut reads = ReadSet::new();
         reads.record_unbounded(ChangeKinds::SPACE_CREATED);
-        index.record(0, &AddressRangeSet::new(), reads);
+        index.record(AnalyserId::new(0), &AddressRangeSet::new(), reads);
 
-        let invalidated = index.invalidated(0, ChangeKinds::SPACE_CREATED, None);
+        let invalidated = index.invalidated(AnalyserId::new(0), ChangeKinds::SPACE_CREATED, None);
 
         assert!(invalidated.has_addressless());
         assert!(invalidated.regions().is_empty());

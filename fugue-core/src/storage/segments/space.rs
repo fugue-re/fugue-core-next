@@ -1,10 +1,12 @@
 use std::fmt;
+use std::mem::size_of;
 
 use iset::IntervalMap;
 use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{Address, AddressRangeExt, RawAddress, SegmentProperties};
+use crate::storage::EntityKeyCodec;
 use crate::storage::segments::mapping::{SegmentMappingId, SegmentMappingRef, SegmentSubMapping};
 use crate::types::Revision;
 
@@ -57,6 +59,18 @@ impl AddressSpaceId {
 
     pub const fn index(&self) -> usize {
         self.0 as usize
+    }
+}
+
+impl EntityKeyCodec for AddressSpaceId {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (value, rest) = input.split_at_checked(size_of::<u16>())?;
+        *input = rest;
+        Some(Self::from(u16::from_be_bytes(value.try_into().ok()?)))
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend((self.index() as u16).to_be_bytes());
     }
 }
 

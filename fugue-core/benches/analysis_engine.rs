@@ -12,15 +12,14 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
-use fugue_core::engine::change::ChangeKinds;
 use fugue_core::engine::{AnalysisEngine, ProjectUpdate, ProjectView};
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
     ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::loader::{Loadable, Loader};
-use fugue_core::project::Project;
-use fugue_core::queries::{Cached, Dependency, QueryReader};
+use fugue_core::project::{ChangeKinds, ChangeSource, Project};
+use fugue_core::queries::{Dependency, QueryReader, Term};
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::DefaultPersistentEntityStorage;
 #[cfg(feature = "sqlite")]
@@ -28,11 +27,10 @@ use fugue_core::storage::DefaultPersistentSegmentStorage;
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::PersistentStorageProvider;
 use fugue_core::storage::{
-    BufferedEntityWriter, DEFAULT_SPACE_ID, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesReadTransaction, EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityStorage,
-    EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
-    InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT, SegmentStorage, StorageContainer,
-    StoragePersistence, StorageProvider, StorageProviderError,
+    BufferedEntityWriter, DEFAULT_SPACE_ID, EntityBytesReadTransaction,
+    EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
+    EntityStorageProviderFromLoadable, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
+    SegmentStorage, StorageContainer, StoragePersistence, StorageProvider, StorageProviderError,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
@@ -218,12 +216,24 @@ impl EntityStorageProvider for CountingEntityStorage {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<BytesOrSlice<'_>, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
         ENTITY_READS.fetch_add(1, Ordering::Relaxed);
         self.inner.iter_prefix_keys(prefix)
     }
 
-    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    fn iter_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         ENTITY_READS.fetch_add(1, Ordering::Relaxed);
         self.inner.iter_prefix(prefix)
     }
@@ -232,7 +242,13 @@ impl EntityStorageProvider for CountingEntityStorage {
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
-    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         ENTITY_READS.fetch_add(1, Ordering::Relaxed);
         self.inner.iter_range(prefix, start)
     }
@@ -241,7 +257,7 @@ impl EntityStorageProvider for CountingEntityStorage {
         &'a self,
         prefix: &[u8],
         f: F,
-    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    ) -> Result<Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a,
@@ -638,7 +654,7 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
     results.push(output);
 
     let (admission, _) = measure("representative_function_batch_admission", || {
-        engine.apply_updates(updates)?;
+        engine.apply_updates(ChangeSource::engine("benchmark"), updates)?;
         Ok(((), SYNTHETIC_FUNCTIONS))
     })?;
     results.push(admission);
@@ -985,7 +1001,7 @@ fn bench_index_maintenance(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn
 
     let (result, _) = measure("function_batch_admission", || {
         let updates = function_updates(base, SYNTHETIC_FUNCTIONS)?;
-        engine.apply_updates(updates)?;
+        engine.apply_updates(ChangeSource::engine("benchmark"), updates)?;
         engine.analyse()?;
         Ok(((), SYNTHETIC_FUNCTIONS))
     })?;
@@ -1006,11 +1022,11 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
 
     let probe = entry;
     let compute = move |view: &ProjectView<'_>| Ok(view.function_at(probe).is_some() as usize);
-    let mut cached = Cached::new(Dependency::on(ChangeKinds::FUNCTIONS).within(region));
-    black_box(cached.get(&reader, compute)?);
+    let mut term = Term::new(Dependency::on(ChangeKinds::FUNCTIONS).within(region));
+    black_box(term.evaluate(&reader, compute)?);
 
     let (hit, _) = measure_repeated("cached_derived_hit", || {
-        black_box(cached.get(&reader, compute)?);
+        black_box(term.evaluate(&reader, compute)?);
         Ok(((), 1))
     })?;
     results.push(hit);
@@ -1021,7 +1037,7 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
     add_empty_function(&engine, new_entry)?;
 
     let (recompute, _) = measure("cached_derived_recompute", || {
-        black_box(cached.get(&reader, compute)?);
+        black_box(term.evaluate(&reader, compute)?);
         Ok(((), 1))
     })?;
     results.push(recompute);

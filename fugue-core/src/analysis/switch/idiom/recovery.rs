@@ -56,7 +56,7 @@ impl SwitchIdiomRecovery {
         let bytes = view.as_contiguous()?.get(..block.size())?;
         let output_start = self.operations.len();
 
-        for &insn_id in block.insns() {
+        for &insn_id in block.insn_ids() {
             let insn = function.insn(insn_id)?;
             let offset = usize::from(insn.address() - block.address());
             if insn_resolver

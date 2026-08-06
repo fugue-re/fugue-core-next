@@ -8,46 +8,41 @@ use parking_lot::RwLock;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use self::change::{ChangeFilter, ChangeKinds, ChangeProvenance, ChangeSet, Revision};
+use self::change::ChangeFilter;
 use crate::analysis::AnalysisError;
 use crate::analysis::control::{CancellationToken, Progress};
 use crate::extension::{self, Registration};
-use crate::il::common::{IlArtefact, IlFormId};
+use crate::il::common::{IlAnalyser, IlArtefact, IlFormId};
 use crate::il::registry::IlRegistry;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
-    ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
+    ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
-use crate::project::{Project, ProjectError};
-use crate::queries::{QueryEngine, QueryReader, QueryReaderFactory};
+use crate::project::{
+    AnalysisPhase, ChangeKinds, ChangeProvenance, ChangeSet, ChangeSource, Project, ProjectError,
+};
+use crate::queries::{QueryEngine, QueryReader};
 use crate::storage::segments::mapping::{SegmentMappingBuilder, SegmentMappingId};
 use crate::storage::segments::space::AddressSpaceId;
+use crate::types::Revision;
 
 pub mod change;
-
-pub(crate) mod coverage;
-pub use coverage::AnalysisCoverage;
 
 pub(crate) mod metrics;
 pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 
 mod scheduler;
-pub use scheduler::IlAnalyserAdapter;
 
 mod subscription;
 pub(crate) use subscription::Subscriber;
 pub use subscription::{Subscription, SubscriptionBuilder};
 
 pub(crate) mod view;
-pub use view::{ProjectView, ReadSet};
+pub use view::ProjectView;
 
 mod update;
 pub use update::{
-    BytePatch, DerivedReferenceReplacement, FunctionPatch, FunctionPropertiesUpdate,
-    FunctionRemoval, MappingCreationResult, MappingMetadataUpdate, MappingPlacement,
-    MappingPlacementMode, MappingPriorityUpdate, MappingRemap, MappingRemoval, MappingResize,
-    ProblemPatch, ProjectUpdate, ReferenceRemoval, SpaceCreationResult, SwitchPatch, SymbolPatch,
-    SymbolRemoval,
+    MappingCreationResult, MappingMetadataUpdate, ProjectUpdate, SpaceCreationResult,
 };
 
 mod worker;
@@ -55,7 +50,6 @@ pub(crate) use worker::Intake;
 use worker::Worker;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
-const DEFAULT_INSN_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_LIFTED_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 pub(crate) const DEFAULT_WORK_ITEM_MAX_ATTEMPTS: usize = 3;
@@ -129,60 +123,6 @@ impl WorkCause {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[repr(u8)]
-#[allow(unknown_lints, sorted_enum_variants)]
-pub enum AnalysisPhase {
-    Retract,
-    #[default]
-    Decode,
-    Partition,
-    Derive,
-    Propagate,
-    Identify,
-}
-
-impl AnalysisPhase {
-    pub const ALL: [AnalysisPhase; 6] = [
-        AnalysisPhase::Retract,
-        AnalysisPhase::Decode,
-        AnalysisPhase::Partition,
-        AnalysisPhase::Derive,
-        AnalysisPhase::Propagate,
-        AnalysisPhase::Identify,
-    ];
-
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Retract => "retract",
-            Self::Decode => "decode",
-            Self::Partition => "partition",
-            Self::Derive => "derive",
-            Self::Propagate => "propagate",
-            Self::Identify => "identify",
-        }
-    }
-}
-
-impl Display for AnalysisPhase {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Priority(i32);
@@ -215,7 +155,6 @@ impl Display for Priority {
 #[derive(Debug, Clone)]
 pub struct AnalysisEngineConfig {
     channel_capacity: usize,
-    insn_cache_bytes: usize,
     lifted_cache_bytes: usize,
     registry: Arc<IlRegistry>,
     worker_limit: usize,
@@ -225,7 +164,6 @@ impl Default for AnalysisEngineConfig {
     fn default() -> Self {
         Self {
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
-            insn_cache_bytes: DEFAULT_INSN_CACHE_BYTES,
             lifted_cache_bytes: DEFAULT_LIFTED_CACHE_BYTES,
             registry: IlRegistry::standard().clone(),
             worker_limit: 1,
@@ -244,19 +182,6 @@ impl AnalysisEngineConfig {
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.set_channel_capacity(capacity);
-        self
-    }
-
-    pub fn insn_cache_bytes(&self) -> usize {
-        self.insn_cache_bytes
-    }
-
-    pub fn set_insn_cache_bytes(&mut self, bytes: usize) {
-        self.insn_cache_bytes = bytes;
-    }
-
-    pub fn with_insn_cache_bytes(mut self, bytes: usize) -> Self {
-        self.set_insn_cache_bytes(bytes);
         self
     }
 
@@ -299,7 +224,7 @@ impl AnalysisEngineConfig {
         self
     }
 
-    pub(super) fn registry_handle(&self) -> Arc<IlRegistry> {
+    fn registry_handle(&self) -> Arc<IlRegistry> {
         self.registry.clone()
     }
 }
@@ -443,12 +368,20 @@ impl AnalyserProvider {
         (self.build)(project)
     }
 
-    pub const fn for_il<T: IlArtefact>(name: &'static str, build: AnalyserBuildFn) -> Self {
+    pub const fn for_il<A: IlAnalyser>() -> Self {
         Self {
-            build,
-            il_input: Some(T::FORM),
-            name,
+            build: Self::build_il_analyser::<A>,
+            il_input: Some(A::Input::FORM),
+            name: A::NAME,
         }
+    }
+
+    fn build_il_analyser<A: IlAnalyser>(
+        project: &Project,
+    ) -> Result<Box<dyn Analyser>, AnalysisError> {
+        Ok(Box::new(scheduler::IlAnalyserAdapter::new(A::build(
+            project,
+        )?)))
     }
 
     pub(crate) fn il_input(&self) -> Option<IlFormId> {
@@ -490,6 +423,8 @@ pub enum EngineError {
     Analysis(#[from] AnalysisError),
     #[error("analysis engine poisoned: {0}")]
     Poisoned(String),
+    #[error("project is retained by a live query reader or project handle")]
+    ProjectRetained,
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error("analysis engine stopped")]
@@ -505,7 +440,7 @@ pub struct AnalysisEngine {
     handle: Option<JoinHandle<()>>,
     metrics: EngineMetrics,
     poison: Arc<OnceLock<String>>,
-    query_readers: QueryReaderFactory,
+    query_reader: Option<QueryReader>,
     tx: Sender<Intake>,
     worker_done: Receiver<()>,
 }
@@ -530,10 +465,9 @@ impl AnalysisEngine {
         let queries = QueryEngine::new(
             project.clone(),
             registry.clone(),
-            config.insn_cache_bytes(),
             config.lifted_cache_bytes(),
         );
-        let query_readers = queries.reader_factory(tx.clone());
+        let query_reader = queries.reader(tx.clone());
         let worker_cancellation = cancellation.clone();
         let worker_poison = poison.clone();
         let worker_state_poison = poison.clone();
@@ -567,7 +501,7 @@ impl AnalysisEngine {
             handle: Some(handle),
             metrics,
             poison,
-            query_readers,
+            query_reader: Some(query_reader),
             tx,
             worker_done,
         })
@@ -584,16 +518,25 @@ impl AnalysisEngine {
             .map_err(|_| EngineError::Stopped)
     }
 
-    pub fn apply_update(&self, update: ProjectUpdate) -> Result<ChangeSet, EngineError> {
-        self.apply_update_batch(SmallVec::from_buf([update]))
+    pub fn apply_update(
+        &self,
+        source: impl Into<ChangeSource>,
+        update: ProjectUpdate,
+    ) -> Result<ChangeSet, EngineError> {
+        self.apply_update_batch(source.into(), SmallVec::from_buf([update]))
     }
 
-    pub fn apply_updates(&self, updates: Vec<ProjectUpdate>) -> Result<ChangeSet, EngineError> {
-        self.apply_update_batch(SmallVec::from_vec(updates))
+    pub fn apply_updates(
+        &self,
+        source: impl Into<ChangeSource>,
+        updates: Vec<ProjectUpdate>,
+    ) -> Result<ChangeSet, EngineError> {
+        self.apply_update_batch(source.into(), SmallVec::from_vec(updates))
     }
 
     fn apply_update_batch(
         &self,
+        source: ChangeSource,
         updates: SmallVec<[ProjectUpdate; 1]>,
     ) -> Result<ChangeSet, EngineError> {
         self.poison_check()?;
@@ -601,6 +544,7 @@ impl AnalysisEngine {
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
             .send(Intake::Updates {
+                source,
                 updates,
                 reply: reply_tx,
             })
@@ -614,7 +558,10 @@ impl AnalysisEngine {
         address: Address,
         bytes: impl Into<Arc<[u8]>>,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::write_bytes(address, bytes))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::write_bytes(address, bytes),
+        )
     }
 
     pub fn add_symbol(
@@ -622,15 +569,24 @@ impl AnalysisEngine {
         index: SymbolIndex,
         entry: SymbolEntry,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_symbol(index, entry))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_symbol(index, entry),
+        )
     }
 
     pub fn add_function(&self, function: IncompleteFunction) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_function(function))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_function(function),
+        )
     }
 
     pub fn add_reference(&self, reference: Reference) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_reference(reference))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_reference(reference),
+        )
     }
 
     pub fn remove_reference(
@@ -638,15 +594,24 @@ impl AnalysisEngine {
         from: Address,
         target: ReferenceTarget,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remove_reference(from, target))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_reference(from, target),
+        )
     }
 
     pub fn add_switch(&self, switch: Switch) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_switch(switch))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_switch(switch),
+        )
     }
 
     pub fn remove_switch(&self, branch: impl Into<Address>) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remove_switch(branch))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_switch(branch),
+        )
     }
 
     pub fn add_mapping_to_space(
@@ -654,7 +619,10 @@ impl AnalysisEngine {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_mapping_to_space(space, mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_mapping_to_space(space, mapping),
+        )
     }
 
     pub fn add_mapping_to_space_bottom(
@@ -662,7 +630,10 @@ impl AnalysisEngine {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_mapping_to_space_bottom(space, mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_mapping_to_space_bottom(space, mapping),
+        )
     }
 
     pub fn add_mapping_to_space_top(
@@ -670,7 +641,10 @@ impl AnalysisEngine {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::add_mapping_to_space_top(space, mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::add_mapping_to_space_top(space, mapping),
+        )
     }
 
     pub fn create_mapping(
@@ -706,7 +680,10 @@ impl AnalysisEngine {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::deprioritise_mapping(space, mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::deprioritise_mapping(space, mapping),
+        )
     }
 
     pub fn prioritise_mapping(
@@ -714,19 +691,24 @@ impl AnalysisEngine {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::prioritise_mapping(space, mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::prioritise_mapping(space, mapping),
+        )
     }
 
     pub fn remove_function(&self, entry: Address) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::RemoveFunction(
-            FunctionRemoval::new(entry).with_origin(ReferenceOrigin::Asserted),
-        ))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_asserted_function(entry),
+        )
     }
 
     pub fn remove_function_by_id(&self, id: FunctionId) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::RemoveFunction(
-            FunctionRemoval::by_id(id).with_origin(ReferenceOrigin::Asserted),
-        ))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_asserted_function_by_id(id),
+        )
     }
 
     pub fn remap_mapping(
@@ -734,15 +716,24 @@ impl AnalysisEngine {
         mapping: SegmentMappingId,
         start: Address,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remap_mapping(mapping, start))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remap_mapping(mapping, start),
+        )
     }
 
     pub fn remove_mapping(&self, mapping: SegmentMappingId) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remove_mapping(mapping))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_mapping(mapping),
+        )
     }
 
     pub fn remove_symbol(&self, index: SymbolIndex) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::remove_symbol(index))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::remove_symbol(index),
+        )
     }
 
     pub fn resize_mapping(
@@ -750,14 +741,20 @@ impl AnalysisEngine {
         mapping: SegmentMappingId,
         size: u64,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::resize_mapping(mapping, size))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::resize_mapping(mapping, size),
+        )
     }
 
     pub fn update_mapping_metadata(
         &self,
         update: MappingMetadataUpdate,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update(ProjectUpdate::update_mapping_metadata(update))
+        self.apply_update(
+            ChangeSource::engine("update"),
+            ProjectUpdate::update_mapping_metadata(update),
+        )
     }
 
     pub fn ensure_lifted(
@@ -796,7 +793,23 @@ impl AnalysisEngine {
 
     pub fn query_reader(&self) -> Result<QueryReader, EngineError> {
         self.poison_check()?;
-        Ok(self.query_readers.reader())
+        self.query_reader
+            .as_ref()
+            .cloned()
+            .ok_or(EngineError::Stopped)
+    }
+
+    pub fn into_project(mut self) -> Result<Project, EngineError> {
+        self.shutdown()?;
+
+        let project = self
+            .query_reader
+            .take()
+            .ok_or(EngineError::Stopped)?
+            .into_project_lock();
+        Arc::try_unwrap(project)
+            .map(RwLock::into_inner)
+            .map_err(|_| EngineError::ProjectRetained)
     }
 
     pub fn cancel(&self) -> Result<(), EngineError> {
@@ -836,7 +849,10 @@ impl AnalysisEngine {
         }
         if !matches!(self.worker_done.try_recv(), Err(TryRecvError::Empty))
             || self.tx.is_disconnected()
-            || !self.query_readers.is_active()
+            || !self
+                .query_reader
+                .as_ref()
+                .is_some_and(QueryReader::is_active)
             || self.handle.as_ref().is_some_and(JoinHandle::is_finished)
         {
             return Err(EngineError::Stopped);
@@ -859,14 +875,28 @@ impl AnalysisEngine {
             WorkerReply::Stopped => Err(EngineError::Stopped),
         }
     }
+
+    fn shutdown(&mut self) -> Result<(), EngineError> {
+        if let Some(reader) = &self.query_reader {
+            reader.mark_dead();
+        }
+        let _ = self.tx.send(Intake::Shutdown);
+
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| EngineError::Poisoned("analysis worker panicked".to_owned()))?;
+        }
+
+        if let Some(message) = self.poison.get() {
+            return Err(EngineError::Poisoned(message.clone()));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for AnalysisEngine {
     fn drop(&mut self) {
-        let _ = self.tx.send(Intake::Shutdown);
-
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        let _ = self.shutdown();
     }
 }

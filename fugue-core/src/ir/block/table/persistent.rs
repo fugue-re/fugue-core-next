@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use super::{CodeBlockIds, CodeBlockIdsByStart};
 use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
-use crate::ir::{Address, AddressRange, CodeBlock, Id, PreparedCodeBlockMutation, RawAddress};
+use crate::ir::{Address, AddressRange, CodeBlock, Id, PreparedCodeBlockRecord, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::{
     ENTITY_CODE_BLOCK_SIZE_BUCKET_INDEX_ID, ENTITY_CODE_BLOCK_SIZE_BUCKETS_INDEX_ID,
@@ -15,8 +15,8 @@ use crate::storage::entities::schema::{
     ENTITY_KEY_CODE_BLOCK_SIZE_BUCKETS_ID, ENTITY_KEY_CODE_BLOCK_START_ID,
 };
 use crate::storage::entities::{
-    CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorage,
-    EntityStorageError, EntityWriteBatch, WriteBackWorker,
+    CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId,
+    EntityStorage, EntityStorageError, EntityWriteBatch, WriteBackWorker,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -48,29 +48,24 @@ impl CodeBlockStartKey {
     }
 }
 
-impl EntityKey for CodeBlockStartKey {
-    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_START_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        const SPACE_SIZE: usize = size_of::<AddressSpaceId>();
-        const ADDRESS_SIZE: usize = size_of::<RawAddress>();
-        if buf.len() != SPACE_SIZE + ADDRESS_SIZE + size_of::<u64>() {
-            return None;
-        }
+impl EntityKeyCodec for CodeBlockStartKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
         Some(Self {
-            space: AddressSpaceId::from(u16::from_be_bytes(buf[..SPACE_SIZE].try_into().ok()?)),
-            start: RawAddress::from(u64::from_be_bytes(
-                buf[SPACE_SIZE..SPACE_SIZE + ADDRESS_SIZE].try_into().ok()?,
-            )),
-            id: Id::decode_as_key(&buf[SPACE_SIZE + ADDRESS_SIZE..])?,
+            space: AddressSpaceId::decode(input)?,
+            start: RawAddress::decode(input)?,
+            id: Id::decode(input)?,
         })
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend((self.space.index() as u16).to_be_bytes());
-        output.extend(self.start.offset().to_be_bytes());
+        self.space.encode(output);
+        self.start.encode(output);
         self.id.encode(output);
     }
+}
+
+impl EntityKey for CodeBlockStartKey {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_START_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,51 +87,47 @@ impl CodeBlockSizeBucketKey {
     }
 }
 
-impl EntityKey for CodeBlockSizeBucketKey {
-    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_SIZE_BUCKET_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        const SPACE_SIZE: usize = size_of::<AddressSpaceId>();
-        const ADDRESS_SIZE: usize = size_of::<RawAddress>();
-        if buf.len() != SPACE_SIZE + 1 + ADDRESS_SIZE + size_of::<u64>() {
-            return None;
-        }
+impl EntityKeyCodec for CodeBlockSizeBucketKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let space = AddressSpaceId::decode(input)?;
+        let (&bucket, rest) = input.split_first()?;
+        *input = rest;
         Some(Self {
-            space: AddressSpaceId::from(u16::from_be_bytes(buf[..SPACE_SIZE].try_into().ok()?)),
-            bucket: buf[SPACE_SIZE],
-            start: RawAddress::from(u64::from_be_bytes(
-                buf[SPACE_SIZE + 1..SPACE_SIZE + 1 + ADDRESS_SIZE]
-                    .try_into()
-                    .ok()?,
-            )),
-            id: Id::decode_as_key(&buf[SPACE_SIZE + 1 + ADDRESS_SIZE..])?,
+            space,
+            bucket,
+            start: RawAddress::decode(input)?,
+            id: Id::decode(input)?,
         })
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend((self.space.index() as u16).to_be_bytes());
+        self.space.encode(output);
         output.extend([self.bucket]);
-        output.extend(self.start.offset().to_be_bytes());
+        self.start.encode(output);
         self.id.encode(output);
     }
+}
+
+impl EntityKey for CodeBlockSizeBucketKey {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_SIZE_BUCKET_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 struct CodeBlockSizeBucketsKey(AddressSpaceId);
 
-impl EntityKey for CodeBlockSizeBucketsKey {
-    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_SIZE_BUCKETS_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        Some(Self(AddressSpaceId::from(u16::from_be_bytes(
-            buf.try_into().ok()?,
-        ))))
+impl EntityKeyCodec for CodeBlockSizeBucketsKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        AddressSpaceId::decode(input).map(Self)
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend((self.0.index() as u16).to_be_bytes());
+        self.0.encode(output);
     }
+}
+
+impl EntityKey for CodeBlockSizeBucketsKey {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_SIZE_BUCKETS_ID;
 }
 
 #[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -239,7 +230,7 @@ impl CodeBlockTable {
         })
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> Id<CodeBlock> {
+    pub(crate) fn pending_id(&self, offset: usize) -> Id<CodeBlock> {
         self.allocator
             .pending_id(offset)
             .unwrap_or_else(|error| error.into_fatal())
@@ -335,9 +326,9 @@ impl CodeBlockTable {
         self.entries.flush()
     }
 
-    pub(crate) fn append_stage_writes(
+    pub(crate) fn append_prepared_writes(
         &self,
-        entries: &[PreparedCodeBlockMutation],
+        entries: &[PreparedCodeBlockRecord],
         reservations: &[Id<CodeBlock>],
         cancelled: &BTreeSet<Id<CodeBlock>>,
         writes: &mut EntityWriteBatch,
@@ -441,7 +432,7 @@ impl CodeBlockTable {
         Ok(false)
     }
 
-    pub(super) fn publish_transition(
+    pub(crate) fn publish_transition(
         &mut self,
         reservations: &[Id<CodeBlock>],
         added: usize,
@@ -451,11 +442,11 @@ impl CodeBlockTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(super) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
+    pub(crate) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
         self.entries.publish_insert(block.id(), block, encoded_size);
     }
 
-    pub(super) fn publish_remove(&self, id: Id<CodeBlock>) {
+    pub(crate) fn publish_remove(&self, id: Id<CodeBlock>) {
         self.entries.publish_remove(&id);
     }
 
@@ -482,7 +473,7 @@ impl CodeBlockTable {
             .collect()
     }
 
-    pub(super) fn ids_at_starts(
+    pub(crate) fn ids_at_starts(
         &self,
         starts: &[Address],
     ) -> Result<CodeBlockIdsByStart, EntityStorageError> {
@@ -530,7 +521,7 @@ impl CodeBlockTable {
         )
     }
 
-    pub(super) fn find_by_range_and_context(
+    pub(crate) fn find_by_range_and_context(
         &self,
         range: AddressRange,
         context: &ContextSet,

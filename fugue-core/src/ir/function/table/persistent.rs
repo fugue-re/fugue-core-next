@@ -5,15 +5,15 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use super::{CodeBlockOwners, FunctionTableError, PreparedFunctionEntry};
+use super::{FunctionTableError, PreparedFunctionRecord};
 use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
-use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, RawAddress};
+use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdSet, RawAddress};
 use crate::storage::entities::schema::{
-    ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_FUNCTION_OWNER_INDEX_ID, ENTITY_KEY_FUNCTION_OWNER_ID,
+    ENTITY_FUNCTION_BLOCK_INDEX_ID, ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_KEY_FUNCTION_BLOCK_ID,
 };
 use crate::storage::entities::{
-    CachedMut, CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorage,
-    EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker,
+    CachedMut, CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId,
+    EntityStorage, EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -32,12 +32,12 @@ impl Entity for FunctionEntryRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FunctionOwnerKey {
+struct FunctionBlockKey {
     block: CodeBlockId,
     function: FunctionId,
 }
 
-impl FunctionOwnerKey {
+impl FunctionBlockKey {
     fn first(block: CodeBlockId) -> Self {
         Self {
             block,
@@ -46,17 +46,11 @@ impl FunctionOwnerKey {
     }
 }
 
-impl EntityKey for FunctionOwnerKey {
-    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_OWNER_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        const ID_SIZE: usize = size_of::<u64>();
-        if buf.len() != ID_SIZE * 2 {
-            return None;
-        }
+impl EntityKeyCodec for FunctionBlockKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
         Some(Self {
-            block: CodeBlockId::decode_as_key(&buf[..ID_SIZE])?,
-            function: FunctionId::decode_as_key(&buf[ID_SIZE..])?,
+            block: CodeBlockId::decode(input)?,
+            function: FunctionId::decode(input)?,
         })
     }
 
@@ -66,11 +60,15 @@ impl EntityKey for FunctionOwnerKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct FunctionOwnerRecord;
+impl EntityKey for FunctionBlockKey {
+    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_BLOCK_ID;
+}
 
-impl Entity for FunctionOwnerRecord {
-    const ID: EntityId = ENTITY_FUNCTION_OWNER_INDEX_ID;
+#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FunctionBlockRecord;
+
+impl Entity for FunctionBlockRecord {
+    const ID: EntityId = ENTITY_FUNCTION_BLOCK_INDEX_ID;
 }
 
 pub struct FunctionTable {
@@ -126,11 +124,11 @@ impl FunctionTable {
             writes.insert_entity(&function.entry(), &FunctionEntryRecord { id })?;
             for (_, block) in function.blocks() {
                 writes.insert_entity(
-                    &FunctionOwnerKey {
+                    &FunctionBlockKey {
                         block,
                         function: id,
                     },
-                    &FunctionOwnerRecord,
+                    &FunctionBlockRecord,
                 )?;
             }
             live += 1;
@@ -153,19 +151,19 @@ impl FunctionTable {
         self.entries.flush()
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> FunctionId {
+    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
         self.allocator
             .pending_id(offset)
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub(super) fn append_stage_writes(
+    pub(crate) fn append_prepared_writes(
         &self,
-        entries: &[PreparedFunctionEntry],
+        entries: &[PreparedFunctionRecord],
         reservations: &[FunctionId],
         cancelled: &BTreeSet<FunctionId>,
-        owners: &FxHashMap<CodeBlockId, CodeBlockOwners>,
-        original_owners: &FxHashMap<CodeBlockId, CodeBlockOwners>,
+        by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
+        original_by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         let mut added = 0usize;
@@ -192,29 +190,22 @@ impl FunctionTable {
             }
         }
 
-        for (&block, final_owners) in owners {
-            let previous = original_owners.get(&block);
-            for owner in previous
+        for (&block, final_functions) in by_block {
+            let previous = original_by_block.get(&block);
+            for function in previous
                 .into_iter()
-                .flat_map(CodeBlockOwners::iter)
-                .filter(|owner| !final_owners.contains(*owner))
+                .flat_map(IdSet::iter)
+                .filter(|function| !final_functions.contains(*function))
             {
-                writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
-                    block,
-                    function: owner,
-                });
+                writes
+                    .remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey { block, function });
             }
-            for owner in final_owners
+            for function in final_functions
                 .iter()
-                .filter(|owner| previous.is_none_or(|previous| !previous.contains(*owner)))
+                .filter(|function| previous.is_none_or(|previous| !previous.contains(*function)))
             {
-                writes.insert_entity(
-                    &FunctionOwnerKey {
-                        block,
-                        function: owner,
-                    },
-                    &FunctionOwnerRecord,
-                )?;
+                writes
+                    .insert_entity(&FunctionBlockKey { block, function }, &FunctionBlockRecord)?;
             }
         }
 
@@ -229,7 +220,7 @@ impl FunctionTable {
             .append_transition(reservations, &releases, added, removed, writes)
     }
 
-    pub(super) fn publish_transition(
+    pub(crate) fn publish_transition(
         &mut self,
         reservations: &[FunctionId],
         added: usize,
@@ -239,12 +230,12 @@ impl FunctionTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(super) fn publish_upsert(&self, function: Function, encoded_size: usize) {
+    pub(crate) fn publish_upsert(&self, function: Function, encoded_size: usize) {
         self.entries
             .publish_insert(function.id(), function, encoded_size);
     }
 
-    pub(super) fn publish_remove(&self, id: FunctionId) {
+    pub(crate) fn publish_remove(&self, id: FunctionId) {
         self.entries.publish_remove(&id);
     }
 
@@ -291,7 +282,7 @@ impl FunctionTable {
             .iter()
             .filter(|block| !blocks.contains(block))
         {
-            writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
+            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey {
                 block: *block,
                 function: id,
             });
@@ -301,11 +292,11 @@ impl FunctionTable {
             .filter(|block| !previous_blocks.contains(block))
         {
             writes.insert_entity(
-                &FunctionOwnerKey {
+                &FunctionBlockKey {
                     block: *block,
                     function: id,
                 },
-                &FunctionOwnerRecord,
+                &FunctionBlockRecord,
             )?;
         }
         let is_new = previous.is_none();
@@ -394,7 +385,7 @@ impl FunctionTable {
         writes.remove_entity::<_, Function>(&id);
         writes.remove_entity::<_, FunctionEntryRecord>(&address);
         for block in blocks {
-            writes.remove_entity::<_, FunctionOwnerRecord>(&FunctionOwnerKey {
+            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey {
                 block,
                 function: id,
             });
@@ -451,12 +442,12 @@ impl FunctionTable {
             })
     }
 
-    pub(super) fn block_owners(&self, block: CodeBlockId) -> CodeBlockOwners {
-        let mut owners = CodeBlockOwners::new();
-        for owner in self
+    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        let mut functions = IdSet::new();
+        for function in self
             .storage
-            .iter_range::<FunctionOwnerKey, FunctionOwnerRecord>(Bound::Included(
-                &FunctionOwnerKey::first(block),
+            .iter_range::<FunctionBlockKey, FunctionBlockRecord>(Bound::Included(
+                &FunctionBlockKey::first(block),
             ))
             .unwrap_or_else(|error| error.into_fatal())
             .map_while(|entry| {
@@ -464,9 +455,9 @@ impl FunctionTable {
                 (key.block == block).then_some(key.function)
             })
         {
-            owners.insert(owner);
+            functions.insert(function);
         }
-        owners
+        functions
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {

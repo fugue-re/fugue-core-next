@@ -9,8 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use fugue_core::loader::Loadable;
 use fugue_core::project::Project;
 use fugue_core::storage::{
-    DefaultPersistentSegmentStorage, EntityBytesAsIterator, EntityBytesIterator,
-    EntityBytesReadTransaction, EntityBytesWriteTransaction, EntityKeyBytesIterator,
+    DefaultPersistentSegmentStorage, EntityBytesReadTransaction, EntityBytesWriteTransaction,
     EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
     EntityStorageProviderFromStorage, EntityStorageWriteTransaction, PERSISTENT,
     PersistentStorageProvider, SqliteEntityStorage, StoragePersistence,
@@ -120,11 +119,23 @@ impl EntityStorageProvider for InterruptingSqliteStorage {
     fn iter_prefix_keys(
         &self,
         prefix: &[u8],
-    ) -> Result<EntityKeyBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<BytesOrSlice<'_>, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
         self.inner.iter_prefix_keys(prefix)
     }
 
-    fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    fn iter_prefix(
+        &self,
+        prefix: &[u8],
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         self.inner.iter_prefix(prefix)
     }
 
@@ -132,7 +143,13 @@ impl EntityStorageProvider for InterruptingSqliteStorage {
         &self,
         prefix: &[u8],
         start: Bound<&[u8]>,
-    ) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
+    ) -> Result<
+        Box<
+            dyn Iterator<Item = Result<(BytesOrSlice<'_>, BytesOrSlice<'_>), EntityStorageError>>
+                + '_,
+        >,
+        EntityStorageError,
+    > {
         self.inner.iter_range(prefix, start)
     }
 
@@ -140,7 +157,7 @@ impl EntityStorageProvider for InterruptingSqliteStorage {
         &'a self,
         prefix: &[u8],
         f: F,
-    ) -> Result<EntityBytesAsIterator<'a, T>, EntityStorageError>
+    ) -> Result<Box<dyn Iterator<Item = Result<T, EntityStorageError>> + 'a>, EntityStorageError>
     where
         F: FnMut(&[u8], &[u8]) -> Result<T, EntityStorageError> + 'a,
         T: 'a,

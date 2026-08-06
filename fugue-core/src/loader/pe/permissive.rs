@@ -20,7 +20,7 @@ enum SectionTableRepairError {
     InvalidSectionTable,
 }
 
-pub(super) fn try_repair<'data>(
+pub(crate) fn try_repair<'data>(
     data: BytesOrMapping<'data>,
 ) -> Result<Option<BytesOrMapping<'data>>, LoaderError> {
     match FileKind::parse(data.as_ref()).map_err(LoaderError::format)? {

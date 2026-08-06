@@ -35,11 +35,11 @@ impl CodeBlockTable {
         Ok(())
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> Id<CodeBlock> {
+    pub(crate) fn pending_id(&self, offset: usize) -> Id<CodeBlock> {
         self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_reservations(&mut self, reservations: &[Id<CodeBlock>]) {
+    pub(crate) fn publish_reservations(&mut self, reservations: &[Id<CodeBlock>]) {
         let mut required = self.entries.len();
         for &id in reservations {
             let allocated = self.index.allocator.allocate();
@@ -51,11 +51,11 @@ impl CodeBlockTable {
         }
     }
 
-    pub(super) fn publish_release(&mut self, id: Id<CodeBlock>) {
+    pub(crate) fn publish_release(&mut self, id: Id<CodeBlock>) {
         self.index.allocator.release(id);
     }
 
-    pub(super) fn publish_upsert(&mut self, block: CodeBlock) {
+    pub(crate) fn publish_upsert(&mut self, block: CodeBlock) {
         let id = block.id();
         let index = id.index();
         if index >= self.entries.len() {
@@ -73,7 +73,7 @@ impl CodeBlockTable {
         self.index.live += 1;
     }
 
-    pub(super) fn publish_batch(&mut self, blocks: impl IntoIterator<Item = CodeBlock>) {
+    pub(crate) fn publish_batch(&mut self, blocks: impl IntoIterator<Item = CodeBlock>) {
         let mut blocks = blocks.into_iter().peekable();
 
         while let Some(space) = blocks.peek().map(|block| block.space()) {
@@ -135,7 +135,7 @@ impl CodeBlockTable {
         self.index.live += 1;
     }
 
-    pub(super) fn publish_remove(&mut self, id: Id<CodeBlock>, previous: AddressRange) {
+    pub(crate) fn publish_remove(&mut self, id: Id<CodeBlock>, previous: AddressRange) {
         let range = previous.start()..=previous.end();
         if let Some(Entry::Occupied(mut entry)) = self
             .index
@@ -202,7 +202,7 @@ impl CodeBlockTable {
             })
     }
 
-    pub(super) fn find_by_range_and_context(
+    pub(crate) fn find_by_range_and_context(
         &self,
         range: AddressRange,
         context: &ContextSet,
@@ -219,7 +219,7 @@ impl CodeBlockTable {
         })
     }
 
-    pub(super) fn ids_at_starts(&self, starts: &[Address]) -> CodeBlockIdsByStart {
+    pub(crate) fn ids_at_starts(&self, starts: &[Address]) -> CodeBlockIdsByStart {
         let mut locations = CodeBlockIdsByStart::with_capacity(starts.len());
         for &address in starts {
             locations.push(

@@ -75,7 +75,7 @@ fn two_functions_sharing_a_tail_share_one_block() -> Result<(), Box<dyn Error>> 
         .blocks()
         .find(|(address, _)| *address == tail)
         .map(|(_, id)| id)
-        .ok_or("first function must own the tail")?;
+        .ok_or("first function must contain the tail")?;
 
     let second_tail = project
         .functions()
@@ -84,18 +84,19 @@ fn two_functions_sharing_a_tail_share_one_block() -> Result<(), Box<dyn Error>> 
         .blocks()
         .find(|(address, _)| *address == tail)
         .map(|(_, id)| id)
-        .ok_or("second function must own the tail")?;
+        .ok_or("second function must contain the tail")?;
 
     assert_eq!(
         first_tail, second_tail,
-        "a shared tail must be one block with two parents, not two clones"
+        "a shared tail must be one block contained by two functions, not two clones"
     );
 
     assert!(project.blocks().get_by_id(first_tail).is_some());
     assert_eq!(
         project
             .functions()
-            .functions_containing_block(first_tail)
+            .get_by_block_id(first_tail)
+            .iter()
             .collect::<Vec<_>>(),
         vec![first, second]
     );
@@ -104,7 +105,7 @@ fn two_functions_sharing_a_tail_share_one_block() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
+fn removing_one_function_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
     let entry = project
         .entry_point()
@@ -126,7 +127,7 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
         .blocks()
         .find(|(address, _)| *address == tail)
         .map(|(_, id)| id)
-        .ok_or("second function must own the tail")?;
+        .ok_or("second function must contain the tail")?;
 
     let mut transaction = project.transaction("test");
     transaction.remove_function_by_id(first, ReferenceOrigin::Derived)?;
@@ -134,13 +135,14 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
 
     assert!(
         project.blocks().get_by_id(shared).is_some(),
-        "removing one parent must not delete a block the other parent still owns"
+        "removing one function must not delete a block still contained by another function"
     );
 
     assert_eq!(
         project
             .functions()
-            .functions_containing_block(shared)
+            .get_by_block_id(shared)
+            .iter()
             .collect::<Vec<_>>(),
         vec![second]
     );
@@ -151,7 +153,7 @@ fn removing_one_parent_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>
 
     assert!(
         project.blocks().get_by_id(shared).is_none(),
-        "the last parent leaving must delete the block"
+        "removing the final membership must delete the block"
     );
 
     Ok(())
@@ -207,7 +209,7 @@ fn context_distinct_blocks_at_one_address_remain_distinct() -> Result<(), Box<dy
 #[test]
 fn context_distinct_blocks_survive_persistent_admission_and_reopen() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
-    let project_path = directory.path().join("block-ownership.fdbz");
+    let project_path = directory.path().join("function-membership.fdbz");
     let mut project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
         "tests/ls.elf",
         attributes![ATTRIBUTE_PROJECT_PATH => project_path.clone()],
@@ -258,7 +260,7 @@ fn context_distinct_blocks_survive_persistent_admission_and_reopen() -> Result<(
 #[test]
 fn persistent_functions_added_separately_share_one_block() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
-    let project_path = directory.path().join("block-ownership.fdbz");
+    let project_path = directory.path().join("function-membership.fdbz");
     let mut project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
         "tests/ls.elf",
         attributes![ATTRIBUTE_PROJECT_PATH => project_path],
@@ -278,7 +280,7 @@ fn persistent_functions_added_separately_share_one_block() -> Result<(), Box<dyn
         .ok_or("first function must exist")?
         .blocks_at(tail)
         .next()
-        .ok_or("first function must own the tail")?;
+        .ok_or("first function must contain the tail")?;
 
     let mut transaction = project.transaction("test");
     let second = transaction.add_function(function_sharing_tail(second_entry, tail, 8))?;
@@ -289,13 +291,14 @@ fn persistent_functions_added_separately_share_one_block() -> Result<(), Box<dyn
         .ok_or("second function must exist")?
         .blocks_at(tail)
         .next()
-        .ok_or("second function must own the tail")?;
+        .ok_or("second function must contain the tail")?;
 
     assert_eq!(first_tail, second_tail);
     assert_eq!(
         project
             .functions()
-            .functions_containing_block(first_tail)
+            .get_by_block_id(first_tail)
+            .iter()
             .collect::<Vec<_>>(),
         vec![first, second]
     );
@@ -314,20 +317,20 @@ fn a_shared_block_can_be_entry_for_one_function_and_ordinary_for_another()
     let other = shared - 0x40u64;
 
     let mut transaction = project.transaction("test");
-    let entry_owner = transaction.add_function(common_one_block(shared, 4))?;
-    let ordinary_owner = transaction.add_function(function_sharing_tail(other, shared, 4))?;
+    let entry_function = transaction.add_function(common_one_block(shared, 4))?;
+    let ordinary_function = transaction.add_function(function_sharing_tail(other, shared, 4))?;
     transaction.commit()?;
 
     let shared_block = project
         .functions()
-        .get_by_id(entry_owner)
-        .ok_or("entry owner must exist")?
+        .get_by_id(entry_function)
+        .ok_or("entry function must exist")?
         .entry_block()
-        .ok_or("entry owner must have an entry block")?;
+        .ok_or("entry function must have an entry block")?;
     let ordinary = project
         .functions()
-        .get_by_id(ordinary_owner)
-        .ok_or("ordinary owner must exist")?;
+        .get_by_id(ordinary_function)
+        .ok_or("ordinary function must exist")?;
 
     assert!(!ordinary.is_entry_block(shared_block));
     assert!(
@@ -338,9 +341,10 @@ fn a_shared_block_can_be_entry_for_one_function_and_ordinary_for_another()
     assert_eq!(
         project
             .functions()
-            .functions_containing_block(shared_block)
+            .get_by_block_id(shared_block)
+            .iter()
             .collect::<Vec<_>>(),
-        vec![entry_owner, ordinary_owner]
+        vec![entry_function, ordinary_function]
     );
 
     Ok(())
@@ -393,12 +397,9 @@ fn splitting_a_function_moves_its_tail_to_a_new_function() -> Result<(), Box<dyn
 
     let block = child.blocks().next().map(|(_, id)| id).unwrap();
     assert_eq!(
-        project
-            .functions()
-            .functions_containing_block(block)
-            .count(),
+        project.functions().get_by_block_id(block).len(),
         1,
-        "ownership must transfer, not copy"
+        "membership must transfer, not copy"
     );
 
     Ok(())
@@ -449,7 +450,7 @@ fn common_one_block(entry: Address, len: usize) -> IncompleteFunction {
 }
 
 #[test]
-fn rejecting_one_parent_replacement_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
+fn rejecting_one_function_replacement_keeps_a_shared_block_alive() -> Result<(), Box<dyn Error>> {
     let mut project = Project::from_file_with_provider::<TransientStorageProvider>("tests/ls.elf")?;
     let entry = project
         .entry_point()
@@ -471,7 +472,7 @@ fn rejecting_one_parent_replacement_keeps_a_shared_block_alive() -> Result<(), B
         .blocks()
         .find(|(address, _)| *address == tail)
         .map(|(_, id)| id)
-        .ok_or("second function must own the tail")?;
+        .ok_or("second function must contain the tail")?;
 
     let mut transaction = project.transaction("test");
     transaction.add_function(function_sharing_tail(first_entry, tail, 8))?;
@@ -479,14 +480,14 @@ fn rejecting_one_parent_replacement_keeps_a_shared_block_alive() -> Result<(), B
 
     assert!(
         project.blocks().get_by_id(shared).is_some(),
-        "rejecting one parent replacement must not delete a block the other parent still owns"
+        "rejecting one function replacement must preserve the other function's membership"
     );
     assert!(
         project
             .functions()
             .get_by_id(second)
             .is_some_and(|function| function.blocks().any(|(address, _)| address == tail)),
-        "the surviving parent must still reference the shared tail"
+        "the surviving function must still contain the shared tail"
     );
 
     Ok(())

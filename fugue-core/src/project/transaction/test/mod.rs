@@ -5,24 +5,24 @@ use fugue_lifter::runtime::pcode::Inputs;
 use super::*;
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
-use crate::engine::AnalysisEngine;
-use crate::engine::change::ChangeRecord;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlIndexRange,
+    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlError, IlGraph, IlIndexRange,
     IlMetadata, IlSourceSpan, IlValueId,
 };
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaLiveness, ECodeSsaUses};
-use crate::il::ecode::{ECodeBuilder, ECodeStmtOpcode, PCodeToECode};
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaLiveness, ECodeSsaUses};
+use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeStmtOpcode, PCodeToECode};
 use crate::il::pcode::{
-    LifterSpaceHandle, PCodeBuilder, PCodeLocation, PCodeLocationProperties, PCodeOp, PCodeOpcode,
+    LifterSpaceHandle, PCodeBuilder, PCodeIr, PCodeLocation, PCodeLocationProperties, PCodeOp,
+    PCodeOpcode,
 };
 use crate::ir::{
     AddressRange, AddressRangeSet, AddressWithContext, IncompleteCodeBlock, IncompleteFunction,
-    Insn, InsnEntry, InsnProperties, RawAddress, Reference, ReferenceKind, ReferenceProperties,
-    ReferenceTarget, Switch, SwitchCase, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties,
-    SymbolTableSelector,
+    Insn, InsnEntry, InsnProperties, ProblemKind, RawAddress, Reference, ReferenceKind,
+    ReferenceOrigin, ReferenceProperties, ReferenceTarget, Switch, SwitchCase, SwitchModel,
+    SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
+use crate::project::FunctionChangeKind;
 use crate::storage::segments::DEFAULT_SPACE_ID;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -126,7 +126,7 @@ fn stage_pcode_with_references(
     let mut coverage = AddressRangeSet::new();
     pcode.reference_coverage_into(&mut coverage);
     let references = pcode.data_references().collect::<Vec<_>>();
-    transaction.materialise_lifted(pcode)?;
+    transaction.replace_lifted(pcode)?;
     transaction.replace_derived_references(coverage, ReferenceKind::Data, references)?;
     Ok(())
 }
@@ -307,7 +307,7 @@ fn first_mapping_placement(
 
 #[test]
 fn repeated_function_changes_keep_one_semantic_record() {
-    let mut changes = StagedChanges::default();
+    let mut changes = ChangeStaging::default();
     let entry = Address::in_default_space(0x1000u64);
     let mut coverage = AddressRangeSet::new();
     coverage.insert(entry);
@@ -334,7 +334,7 @@ fn repeated_function_changes_keep_one_semantic_record() {
 
 #[test]
 fn adding_then_removing_a_function_has_no_change() {
-    let mut changes = StagedChanges::default();
+    let mut changes = ChangeStaging::default();
     let entry = Address::in_default_space(0x2000u64);
     let mut coverage = AddressRangeSet::new();
     coverage.insert(entry);
@@ -352,7 +352,7 @@ fn adding_then_removing_a_function_has_no_change() {
 
 #[test]
 fn removing_then_adding_a_function_has_only_the_net_change_kind() {
-    let mut changes = StagedChanges::default();
+    let mut changes = ChangeStaging::default();
     let entry = Address::in_default_space(0x2000u64);
     let mut coverage = AddressRangeSet::new();
     coverage.insert(entry);
@@ -379,7 +379,7 @@ fn removing_then_adding_a_function_has_only_the_net_change_kind() {
 
 #[test]
 fn staged_change_detail_collapses_at_its_memory_bound() {
-    let mut changes = StagedChanges::default();
+    let mut changes = ChangeStaging::default();
 
     for index in 0..=MAX_DETAILED_CHANGE_RECORDS {
         changes.push(ChangeRecord::FunctionAdded {

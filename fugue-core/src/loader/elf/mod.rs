@@ -1622,36 +1622,95 @@ impl ElfLoaderProperties {
     }
 }
 
+struct ElfImageContext<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    elf: &'file ElfFile<'data, Elf, R>,
+    arch: &'file Arch,
+    symbols: &'file TransientSymbolTable<ImageAddress>,
+    sections: &'file ElfSectionMap,
+    extern_segm: &'file ExternSegment,
+    region_bank: &'file ElfRegionBankMap,
+    config: ElfLoaderProperties,
+}
+
+impl<'data, 'file, Elf, R> ElfImageContext<'data, 'file, Elf, R>
+where
+    Elf: FileHeader,
+    R: ReadRef<'data>,
+    'file: 'data,
+{
+    fn new(
+        elf: &'file ElfFile<'data, Elf, R>,
+        arch: &'file Arch,
+        symbols: &'file TransientSymbolTable<ImageAddress>,
+        sections: &'file ElfSectionMap,
+        extern_segm: &'file ExternSegment,
+        region_bank: &'file ElfRegionBankMap,
+        mut config: ElfLoaderProperties,
+    ) -> Self {
+        if elf.kind() == ObjectKind::Relocatable {
+            config.insert(ElfLoaderProperties::IS_OBJECT);
+        }
+
+        Self {
+            elf,
+            arch,
+            symbols,
+            sections,
+            extern_segm,
+            region_bank,
+            config,
+        }
+    }
+
+    fn elf(&self) -> &'file ElfFile<'data, Elf, R> {
+        self.elf
+    }
+
+    fn arch(&self) -> &'file Arch {
+        self.arch
+    }
+
+    fn symbols(&self) -> &'file TransientSymbolTable<ImageAddress> {
+        self.symbols
+    }
+
+    fn sections(&self) -> &'file ElfSectionMap {
+        self.sections
+    }
+
+    fn extern_segment(&self) -> &'file ExternSegment {
+        self.extern_segm
+    }
+
+    fn region_bank(&self) -> &'file ElfRegionBankMap {
+        self.region_bank
+    }
+
+    fn config(&self) -> &ElfLoaderProperties {
+        &self.config
+    }
+}
+
 pub(crate) struct ElfImageSegmentContents<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
     'file: 'data,
 {
-    // reference to the ELF
-    pub(crate) elf: &'file ElfFile<'data, Elf, R>,
-    pub(crate) arch: &'file Arch,
-    // segments iterator
-    pub(crate) segms: ElfSegmentIterator<'data, 'file, Elf, R>,
-    // sections iterator
-    pub(crate) sects: ElfSectionIterator<'data, 'file, Elf, R>,
+    context: ElfImageContext<'data, 'file, Elf, R>,
+    segms: ElfSegmentIterator<'data, 'file, Elf, R>,
+    sects: ElfSectionIterator<'data, 'file, Elf, R>,
     headers: ElfHeaderRegions<'data>,
-    // ranges already covered, grouped by image bank
     covered: ElfCoveredRegions,
-    // current base address
-    pub(crate) current_base: RawAddress,
-    // the binary's preferred load address
-    pub(crate) preferred_base: RawAddress,
-    // mapping of local and external symbols
-    pub(crate) symbols: &'file TransientSymbolTable<ImageAddress>,
-    // assigned base address per section index (relocatable objects)
-    pub(crate) sections: &'file ElfSectionMap,
-    // virtual segment containing externals
-    pub(crate) extern_segm: Option<&'file ExternSegment>,
-    region_bank: &'file ElfRegionBankMap,
+    current_base: RawAddress,
+    preferred_base: RawAddress,
+    extern_pending: bool,
     segment_ordinal: usize,
-    // loader config
-    config: ElfLoaderProperties,
 }
 
 impl<'data, 'file, Elf, R> ElfImageSegmentContents<'data, 'file, Elf, R>
@@ -1660,45 +1719,38 @@ where
     R: ReadRef<'data>,
     'file: 'data,
 {
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        elf: &'file ElfFile<'data, Elf, R>,
-        arch: &'file Arch,
+        context: ElfImageContext<'data, 'file, Elf, R>,
         base: RawAddress,
         preferred_base: RawAddress,
-        symbols: &'file TransientSymbolTable<ImageAddress>,
-        sections: &'file ElfSectionMap,
-        externs: &'file ExternSegment,
-        region_bank: &'file ElfRegionBankMap,
-        mut config: ElfLoaderProperties,
     ) -> Result<Self, LoaderError> {
-        if elf.kind() == ObjectKind::Relocatable {
-            config.insert(ElfLoaderProperties::IS_OBJECT);
-        }
+        let elf = context.elf();
+
         Ok(Self {
-            elf,
+            context,
             sects: elf.sections(),
             segms: elf.segments(),
             headers: ElfHeaderRegions::new(elf, base, preferred_base)?,
             covered: ElfCoveredRegions::new(),
             current_base: base,
             preferred_base,
-            symbols,
-            sections,
-            extern_segm: Some(externs),
-            region_bank,
+            extern_pending: true,
             segment_ordinal: 0,
-            arch,
-            config,
         })
     }
 
     pub(crate) fn extern_segment(
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
-        let Some(externs) = self.extern_segm.take().filter(|e| !e.is_empty()) else {
+        if !self.extern_pending {
             return Ok(None);
-        };
+        }
+        self.extern_pending = false;
+
+        let externs = self.context.extern_segment();
+        if externs.is_empty() {
+            return Ok(None);
+        }
         let extern_size = externs.size();
         let extern_padding = externs.aligned_template_size() - externs.template().size();
 
@@ -1708,7 +1760,8 @@ where
         let mut contents = Vec::with_capacity(extern_size);
 
         let function_offsets = self
-            .symbols
+            .context
+            .symbols()
             .iter()
             .filter_map(|(_, sym)| {
                 if sym
@@ -1735,8 +1788,11 @@ where
         self.covered
             .insert_range(ImageBankHandle::default(), extern_range);
 
-        let mut bytes =
-            ImageSegmentContents::new(externs.address(), self.arch.endian(), Cow::Owned(contents));
+        let mut bytes = ImageSegmentContents::new(
+            externs.address(),
+            self.context.arch().endian(),
+            Cow::Owned(contents),
+        );
         for offset in function_offsets {
             bytes.add_function_hint(offset);
         }
@@ -1747,7 +1803,7 @@ where
     pub(crate) fn header_segment(
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
-        if !self.config.load_headers() {
+        if !self.context.config().load_headers() {
             return Ok(None);
         }
 
@@ -1758,14 +1814,18 @@ where
             .address
             .checked_add(header.size().wrapping_sub(1))
             .ok_or_else(|| LoaderError::address_overflow(header.address))?;
-        let bank = self.region_bank.bank_for(header.source).unwrap_or_default();
+        let bank = self
+            .context
+            .region_bank()
+            .bank_for(header.source)
+            .unwrap_or_default();
         self.covered
             .insert_range(bank, header.address..=last_address);
 
         Ok(Some(ImageSegmentContents::new_sparse_in_bank(
             bank,
             header.address,
-            self.arch.endian(),
+            self.context.arch().endian(),
             header.data(),
             header.size(),
         )))
@@ -1779,7 +1839,7 @@ where
         }
 
         for sect in self.sects.by_ref() {
-            let Some(address) = self.sections.get(sect.index().0) else {
+            let Some(address) = self.context.sections().get(sect.index().0) else {
                 continue;
             };
 
@@ -1798,14 +1858,15 @@ where
             let emit = (data.len() as u64).min(span) as usize;
 
             let bank = self
-                .region_bank
+                .context
+                .region_bank()
                 .bank_for(ElfRegionSource::section(sect.index().0))
                 .unwrap_or_default();
 
             let mut bytes = ImageSegmentContents::new_sparse_in_bank(
                 bank,
                 address,
-                self.arch.endian(),
+                self.context.arch().endian(),
                 &data[..emit],
                 span,
             );
@@ -1813,11 +1874,11 @@ where
             self.covered.insert_range(bank, vrange);
 
             let relocator = ElfSegmentRelocator::new(
-                self.elf,
-                self.arch,
+                self.context.elf(),
+                self.context.arch(),
                 address,
-                self.symbols,
-                self.config.is_object(),
+                self.context.symbols(),
+                self.context.config().is_object(),
             );
 
             relocator.apply(address, &mut bytes, &sect)?;
@@ -1831,11 +1892,11 @@ where
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
-            self.elf,
-            self.arch,
+            self.context.elf(),
+            self.context.arch(),
             self.current_base - self.preferred_base,
-            self.symbols,
-            self.config.is_object(),
+            self.context.symbols(),
+            self.context.config().is_object(),
         );
 
         for sect in self.sects.by_ref() {
@@ -1865,7 +1926,8 @@ where
 
             let vrange = address..=last_address;
             let bank = self
-                .region_bank
+                .context
+                .region_bank()
                 .bank_for(ElfRegionSource::section(sect.index().0))
                 .unwrap_or_default();
             if self.covered.intersects_range(bank, vrange.clone()) {
@@ -1884,7 +1946,7 @@ where
             let mut bytes = ImageSegmentContents::new_sparse_in_bank(
                 bank,
                 address,
-                self.arch.endian(),
+                self.context.arch().endian(),
                 &data[..emit],
                 sect.size(),
             );
@@ -1903,11 +1965,11 @@ where
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
         let relocator = ElfSegmentRelocator::new(
-            self.elf,
-            self.arch,
+            self.context.elf(),
+            self.context.arch(),
             self.current_base - self.preferred_base,
-            self.symbols,
-            self.config.is_object(),
+            self.context.symbols(),
+            self.context.config().is_object(),
         );
 
         for segm in self.segms.by_ref() {
@@ -1928,7 +1990,8 @@ where
 
             let vrange = address..=last_address;
             let bank = self
-                .region_bank
+                .context
+                .region_bank()
                 .bank_for(ElfRegionSource::segment(ordinal))
                 .unwrap_or_default();
             self.covered.insert_range(bank, vrange);
@@ -1944,7 +2007,7 @@ where
             let mut bytes = ImageSegmentContents::new_sparse_in_bank(
                 bank,
                 address,
-                self.arch.endian(),
+                self.context.arch().endian(),
                 &data[..emit],
                 size,
             );
@@ -1986,7 +2049,7 @@ where
     type Item = ImageSegmentContents<'data>;
 
     fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
-        if self.config.is_object() {
+        if self.context.config().is_object() {
             self.next_unlinked()
         } else {
             self.next_linked()
@@ -2089,20 +2152,21 @@ impl Loadable for Elf<'_> {
 
         with_elf!(
             view,
-            elf | match ElfImageSegmentContents::new(
-                elf,
-                &self.architecture,
-                self.base,
-                self.preferred_base,
-                &self.image_symbols,
-                &self.sections,
-                &self.extern_segm,
-                &self.region_bank,
-                props,
-            ) {
-                Ok(contents) => Box::new(contents) as ImageSegmentContentsIterator<'b>,
-                Err(err) =>
-                    Box::new(fallible_iterator::once_err(err)) as ImageSegmentContentsIterator<'b>,
+            elf | {
+                let context = ElfImageContext::new(
+                    elf,
+                    &self.architecture,
+                    &self.image_symbols,
+                    &self.sections,
+                    &self.extern_segm,
+                    &self.region_bank,
+                    props,
+                );
+                match ElfImageSegmentContents::new(context, self.base, self.preferred_base) {
+                    Ok(contents) => Box::new(contents) as ImageSegmentContentsIterator<'b>,
+                    Err(err) => Box::new(fallible_iterator::once_err(err))
+                        as ImageSegmentContentsIterator<'b>,
+                }
             }
         )
     }

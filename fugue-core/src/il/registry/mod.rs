@@ -15,7 +15,7 @@ use crate::il::common::{
 use crate::il::ecode::PCodeToECode;
 use crate::il::ecode::ssa::ECodeToSsa;
 use crate::il::pcode::PCodeCanonicaliser;
-use crate::il::storage::{IlPersist, IlStage, IlStorageError};
+use crate::il::storage::{IlPersist, IlStaging, IlStorageError};
 use crate::ir::FunctionId;
 use crate::storage::StorageContainer;
 use crate::types::EstimateSize;
@@ -106,7 +106,7 @@ impl Registration for IlDialectRegistration {
 
 extension::collect!(IlDialectRegistration);
 
-pub(super) type IlProduced = Box<dyn Any + Send + Sync>;
+pub(crate) type IlProduced = Box<dyn Any + Send + Sync>;
 
 pub(crate) type IlSizeFn = fn(&(dyn Any + Send + Sync)) -> Result<usize, IlError>;
 
@@ -130,10 +130,10 @@ fn load_erased<T: PersistableIl>(
 }
 
 pub(crate) type IlAdmitFn =
-    fn(&mut IlStage, &StorageContainer, IlProduced, Revision) -> Result<(), IlStorageError>;
+    fn(&mut IlStaging, &StorageContainer, IlProduced, Revision) -> Result<(), IlStorageError>;
 
 fn admit_erased<T: PersistableIl>(
-    stage: &mut IlStage,
+    staging: &mut IlStaging,
     storage: &StorageContainer,
     value: IlProduced,
     input_revision: Revision,
@@ -143,7 +143,7 @@ fn admit_erased<T: PersistableIl>(
         .map_err(|_| IlError::mismatched_source(T::FORM))?;
     artefact.metadata_mut().set_input_revision(input_revision);
 
-    Ok(stage.replace(storage, artefact)?)
+    Ok(staging.replace(storage, artefact)?)
 }
 
 #[derive(Debug)]
@@ -400,7 +400,7 @@ impl IlRegistryBuilder {
             .values()
             .map(|registration| (registration.type_id, registration.form().clone()))
             .collect();
-        let mut dependants: BTreeMap<IlFormId, Vec<IlFormId>> = BTreeMap::new();
+        let mut dependants = BTreeMap::<IlFormId, Vec<IlFormId>>::new();
         for registration in forms.values() {
             if let Some(source) = registration.source() {
                 dependants
@@ -493,9 +493,9 @@ impl IlRegistryBuilder {
         duplicates: &BTreeSet<IlFormId>,
         errors: &mut Vec<IlRegistryError>,
     ) {
-        let mut settled: BTreeSet<&IlFormId> = BTreeSet::new();
-        let mut visited: BTreeMap<&IlFormId, usize> = BTreeMap::new();
-        let mut walk: Vec<&IlFormId> = Vec::new();
+        let mut settled = BTreeSet::<&IlFormId>::new();
+        let mut visited = BTreeMap::<&IlFormId, usize>::new();
+        let mut walk = Vec::<&IlFormId>::new();
         for start in forms.keys().filter(|form| !duplicates.contains(*form)) {
             walk.clear();
             visited.clear();

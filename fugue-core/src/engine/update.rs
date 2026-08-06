@@ -1,51 +1,46 @@
 use std::sync::Arc;
 
-use crate::engine::change::ChangeSet;
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
     Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
 };
-use crate::project::{ProjectError, ProjectTransaction};
+use crate::project::{ChangeSet, ProjectError, ProjectTransaction};
 use crate::storage::segments::mapping::{
     SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BytePatch {
+struct ByteWrite {
     address: Address,
     bytes: Arc<[u8]>,
 }
 
-impl BytePatch {
-    pub fn new(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
+impl ByteWrite {
+    fn new(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
         Self {
             address: address.into(),
             bytes: bytes.into(),
         }
     }
 
-    pub fn address(&self) -> Address {
+    fn address(&self) -> Address {
         self.address
     }
 
-    pub fn bytes(&self) -> &[u8] {
+    fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionPatch {
+struct FunctionAddition {
     function: IncompleteFunction,
 }
 
-impl FunctionPatch {
-    pub fn new(function: IncompleteFunction) -> Self {
+impl FunctionAddition {
+    fn new(function: IncompleteFunction) -> Self {
         Self { function }
-    }
-
-    pub fn function(&self) -> &IncompleteFunction {
-        &self.function
     }
 
     fn into_function(self) -> IncompleteFunction {
@@ -54,45 +49,37 @@ impl FunctionPatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FunctionPropertiesUpdate {
+struct FunctionPropertiesUpdate {
     entry: Address,
     properties: FunctionProperties,
 }
 
 impl FunctionPropertiesUpdate {
-    pub fn new(entry: impl Into<Address>, properties: FunctionProperties) -> Self {
+    fn new(entry: impl Into<Address>, properties: FunctionProperties) -> Self {
         Self {
             entry: entry.into(),
             properties,
         }
     }
 
-    pub fn entry(&self) -> Address {
+    fn entry(&self) -> Address {
         self.entry
     }
 
-    pub fn properties(&self) -> FunctionProperties {
+    fn properties(&self) -> FunctionProperties {
         self.properties
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymbolPatch {
+struct SymbolAddition {
     index: SymbolIndex,
     entry: SymbolEntry,
 }
 
-impl SymbolPatch {
-    pub fn new(index: SymbolIndex, entry: SymbolEntry) -> Self {
+impl SymbolAddition {
+    fn new(index: SymbolIndex, entry: SymbolEntry) -> Self {
         Self { index, entry }
-    }
-
-    pub fn index(&self) -> SymbolIndex {
-        self.index
-    }
-
-    pub fn entry(&self) -> &SymbolEntry {
-        &self.entry
     }
 
     fn into_parts(self) -> (SymbolIndex, SymbolEntry) {
@@ -101,13 +88,13 @@ impl SymbolPatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchPatch {
+struct SwitchAddition {
     asserted: bool,
     switch: Switch,
 }
 
-impl SwitchPatch {
-    pub fn new(switch: Switch) -> Self {
+impl SwitchAddition {
+    fn new(switch: Switch) -> Self {
         Self {
             asserted: true,
             switch,
@@ -121,34 +108,30 @@ impl SwitchPatch {
         }
     }
 
-    pub fn switch(&self) -> &Switch {
-        &self.switch
-    }
-
     fn into_parts(self) -> (Switch, bool) {
         (self.switch, self.asserted)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProblemPatch {
+struct ProblemAddition {
     address: Address,
     kind: ProblemKind,
 }
 
-impl ProblemPatch {
-    pub fn new(address: impl Into<Address>, kind: ProblemKind) -> Self {
+impl ProblemAddition {
+    fn new(address: impl Into<Address>, kind: ProblemKind) -> Self {
         Self {
             address: address.into(),
             kind,
         }
     }
 
-    pub fn address(&self) -> Address {
+    fn address(&self) -> Address {
         self.address
     }
 
-    pub fn kind(&self) -> ProblemKind {
+    fn kind(&self) -> ProblemKind {
         self.kind
     }
 }
@@ -160,51 +143,29 @@ enum FunctionRemovalTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FunctionRemoval {
+struct FunctionRemoval {
     origin: ReferenceOrigin,
     target: FunctionRemovalTarget,
 }
 
 impl FunctionRemoval {
-    pub fn new(entry: impl Into<Address>) -> Self {
+    fn new(entry: impl Into<Address>) -> Self {
         Self {
             origin: ReferenceOrigin::Derived,
             target: FunctionRemovalTarget::Address(entry.into()),
         }
     }
 
-    pub fn by_id(id: FunctionId) -> Self {
+    fn by_id(id: FunctionId) -> Self {
         Self {
             origin: ReferenceOrigin::Derived,
             target: FunctionRemovalTarget::Id(id),
         }
     }
 
-    pub fn origin(&self) -> ReferenceOrigin {
-        self.origin
-    }
-
-    pub fn set_origin(&mut self, origin: ReferenceOrigin) {
-        self.origin = origin;
-    }
-
-    pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
-        self.set_origin(origin);
+    fn asserted(mut self) -> Self {
+        self.origin = ReferenceOrigin::Asserted;
         self
-    }
-
-    pub fn entry(&self) -> Option<Address> {
-        match self.target {
-            FunctionRemovalTarget::Address(entry) => Some(entry),
-            FunctionRemovalTarget::Id(_) => None,
-        }
-    }
-
-    pub fn id(&self) -> Option<FunctionId> {
-        match self.target {
-            FunctionRemovalTarget::Address(_) => None,
-            FunctionRemovalTarget::Id(id) => Some(id),
-        }
     }
 
     fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
@@ -222,52 +183,40 @@ impl FunctionRemoval {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SymbolRemoval {
+struct SymbolRemoval {
     index: SymbolIndex,
 }
 
 impl SymbolRemoval {
-    pub fn new(index: SymbolIndex) -> Self {
+    fn new(index: SymbolIndex) -> Self {
         Self { index }
     }
 
-    pub fn index(&self) -> SymbolIndex {
+    fn index(&self) -> SymbolIndex {
         self.index
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReferenceRemoval {
+struct ReferenceRemoval {
     from: Address,
     target: ReferenceTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DerivedReferenceReplacement {
+struct DerivedReferenceReplacement {
     coverage: AddressRangeSet,
     kind: ReferenceKind,
     references: Vec<Reference>,
 }
 
 impl DerivedReferenceReplacement {
-    pub fn new(coverage: AddressRangeSet, kind: ReferenceKind, references: Vec<Reference>) -> Self {
+    fn new(coverage: AddressRangeSet, kind: ReferenceKind, references: Vec<Reference>) -> Self {
         Self {
             coverage,
             kind,
             references,
         }
-    }
-
-    pub fn coverage(&self) -> &AddressRangeSet {
-        &self.coverage
-    }
-
-    pub fn kind(&self) -> ReferenceKind {
-        self.kind
-    }
-
-    pub fn references(&self) -> &[Reference] {
-        &self.references
     }
 
     fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
@@ -277,39 +226,35 @@ impl DerivedReferenceReplacement {
 }
 
 impl ReferenceRemoval {
-    pub fn new(from: Address, target: ReferenceTarget) -> Self {
+    fn new(from: Address, target: ReferenceTarget) -> Self {
         Self { from, target }
     }
 
-    pub fn from(&self) -> Address {
+    fn from(&self) -> Address {
         self.from
     }
 
-    pub fn target(&self) -> ReferenceTarget {
+    fn target(&self) -> ReferenceTarget {
         self.target
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MappingPlacementMode {
+enum MappingPlacementMode {
     Bottom,
     Default,
     Top,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MappingPlacement {
+struct MappingPlacement {
     mapping: SegmentMappingId,
     mode: MappingPlacementMode,
     space: AddressSpaceId,
 }
 
 impl MappingPlacement {
-    pub fn new(
-        space: AddressSpaceId,
-        mapping: SegmentMappingId,
-        mode: MappingPlacementMode,
-    ) -> Self {
+    fn new(space: AddressSpaceId, mapping: SegmentMappingId, mode: MappingPlacementMode) -> Self {
         Self {
             mapping,
             mode,
@@ -317,35 +262,35 @@ impl MappingPlacement {
         }
     }
 
-    pub fn mapping(&self) -> SegmentMappingId {
+    fn mapping(&self) -> SegmentMappingId {
         self.mapping
     }
 
-    pub fn mode(&self) -> MappingPlacementMode {
+    fn mode(&self) -> MappingPlacementMode {
         self.mode
     }
 
-    pub fn space(&self) -> AddressSpaceId {
+    fn space(&self) -> AddressSpaceId {
         self.space
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MappingPriorityUpdate {
+struct MappingPriorityUpdate {
     mapping: SegmentMappingId,
     space: AddressSpaceId,
 }
 
 impl MappingPriorityUpdate {
-    pub fn new(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    fn new(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
         Self { mapping, space }
     }
 
-    pub fn mapping(&self) -> SegmentMappingId {
+    fn mapping(&self) -> SegmentMappingId {
         self.mapping
     }
 
-    pub fn space(&self) -> AddressSpaceId {
+    fn space(&self) -> AddressSpaceId {
         self.space
     }
 }
@@ -413,59 +358,59 @@ impl MappingMetadataUpdate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MappingRemap {
+struct MappingRemap {
     mapping: SegmentMappingId,
     start: Address,
 }
 
 impl MappingRemap {
-    pub fn new(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
+    fn new(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
         Self {
             mapping,
             start: start.into(),
         }
     }
 
-    pub fn mapping(&self) -> SegmentMappingId {
+    fn mapping(&self) -> SegmentMappingId {
         self.mapping
     }
 
-    pub fn start(&self) -> Address {
+    fn start(&self) -> Address {
         self.start
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MappingRemoval {
+struct MappingRemoval {
     mapping: SegmentMappingId,
 }
 
 impl MappingRemoval {
-    pub fn new(mapping: SegmentMappingId) -> Self {
+    fn new(mapping: SegmentMappingId) -> Self {
         Self { mapping }
     }
 
-    pub fn mapping(&self) -> SegmentMappingId {
+    fn mapping(&self) -> SegmentMappingId {
         self.mapping
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MappingResize {
+struct MappingResize {
     mapping: SegmentMappingId,
     size: u64,
 }
 
 impl MappingResize {
-    pub fn new(mapping: SegmentMappingId, size: u64) -> Self {
+    fn new(mapping: SegmentMappingId, size: u64) -> Self {
         Self { mapping, size }
     }
 
-    pub fn mapping(&self) -> SegmentMappingId {
+    fn mapping(&self) -> SegmentMappingId {
         self.mapping
     }
 
-    pub fn size(&self) -> u64 {
+    fn size(&self) -> u64 {
         self.size
     }
 }
@@ -511,13 +456,18 @@ impl SpaceCreationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProjectUpdate {
-    AddFunction(FunctionPatch),
+pub struct ProjectUpdate {
+    operation: ProjectOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectOperation {
+    AddFunction(FunctionAddition),
     AddMappingToSpace(MappingPlacement),
-    AddProblem(ProblemPatch),
+    AddProblem(ProblemAddition),
     AddReference(Reference),
-    AddSwitch(SwitchPatch),
-    AddSymbol(SymbolPatch),
+    AddSwitch(SwitchAddition),
+    AddSymbol(SymbolAddition),
     DeprioritiseMapping(MappingPriorityUpdate),
     PrioritiseMapping(MappingPriorityUpdate),
     RemapMapping(MappingRemap),
@@ -530,72 +480,100 @@ pub enum ProjectUpdate {
     ResizeMapping(MappingResize),
     SetFunctionProperties(FunctionPropertiesUpdate),
     UpdateMappingMetadata(MappingMetadataUpdate),
-    WriteBytes(BytePatch),
+    WriteBytes(ByteWrite),
 }
 
 impl ProjectUpdate {
     pub fn add_function(function: IncompleteFunction) -> Self {
-        Self::AddFunction(FunctionPatch::new(function))
+        Self::new(ProjectOperation::AddFunction(FunctionAddition::new(
+            function,
+        )))
     }
 
     pub fn add_mapping_to_space(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
-        Self::AddMappingToSpace(MappingPlacement::new(
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
             MappingPlacementMode::Default,
-        ))
+        )))
     }
 
     pub fn add_mapping_to_space_bottom(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
-        Self::AddMappingToSpace(MappingPlacement::new(
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
             MappingPlacementMode::Bottom,
-        ))
+        )))
     }
 
     pub fn add_mapping_to_space_top(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
-        Self::AddMappingToSpace(MappingPlacement::new(
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
             MappingPlacementMode::Top,
-        ))
+        )))
     }
 
     pub fn deprioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
-        Self::DeprioritiseMapping(MappingPriorityUpdate::new(space, mapping))
+        Self::new(ProjectOperation::DeprioritiseMapping(
+            MappingPriorityUpdate::new(space, mapping),
+        ))
     }
 
     pub fn add_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
-        Self::AddSymbol(SymbolPatch::new(index, entry))
+        Self::new(ProjectOperation::AddSymbol(SymbolAddition::new(
+            index, entry,
+        )))
     }
 
     pub fn prioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
-        Self::PrioritiseMapping(MappingPriorityUpdate::new(space, mapping))
+        Self::new(ProjectOperation::PrioritiseMapping(
+            MappingPriorityUpdate::new(space, mapping),
+        ))
     }
 
     pub fn remap_mapping(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
-        Self::RemapMapping(MappingRemap::new(mapping, start))
+        Self::new(ProjectOperation::RemapMapping(MappingRemap::new(
+            mapping, start,
+        )))
     }
 
     pub fn remove_function(entry: impl Into<Address>) -> Self {
-        Self::RemoveFunction(FunctionRemoval::new(entry))
+        Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::new(
+            entry,
+        )))
     }
 
     pub fn remove_function_by_id(id: FunctionId) -> Self {
-        Self::RemoveFunction(FunctionRemoval::by_id(id))
+        Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::by_id(id)))
+    }
+
+    pub(crate) fn remove_asserted_function(entry: impl Into<Address>) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(
+            FunctionRemoval::new(entry).asserted(),
+        ))
+    }
+
+    pub(crate) fn remove_asserted_function_by_id(id: FunctionId) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(
+            FunctionRemoval::by_id(id).asserted(),
+        ))
     }
 
     pub fn remove_mapping(mapping: SegmentMappingId) -> Self {
-        Self::RemoveMapping(MappingRemoval::new(mapping))
+        Self::new(ProjectOperation::RemoveMapping(MappingRemoval::new(
+            mapping,
+        )))
     }
 
     pub fn add_reference(reference: Reference) -> Self {
-        Self::AddReference(reference)
+        Self::new(ProjectOperation::AddReference(reference))
     }
 
     pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
-        Self::RemoveReference(ReferenceRemoval::new(from, target))
+        Self::new(ProjectOperation::RemoveReference(ReferenceRemoval::new(
+            from, target,
+        )))
     }
 
     pub fn replace_derived_references(
@@ -603,58 +581,70 @@ impl ProjectUpdate {
         kind: ReferenceKind,
         references: Vec<Reference>,
     ) -> Self {
-        Self::ReplaceDerivedReferences(DerivedReferenceReplacement::new(coverage, kind, references))
+        Self::new(ProjectOperation::ReplaceDerivedReferences(
+            DerivedReferenceReplacement::new(coverage, kind, references),
+        ))
     }
 
     pub fn add_switch(switch: Switch) -> Self {
-        Self::AddSwitch(SwitchPatch::new(switch))
+        Self::new(ProjectOperation::AddSwitch(SwitchAddition::new(switch)))
     }
 
     pub(crate) fn add_derived_switch(switch: Switch) -> Self {
-        Self::AddSwitch(SwitchPatch::derived(switch))
+        Self::new(ProjectOperation::AddSwitch(SwitchAddition::derived(switch)))
     }
 
     pub fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
-        Self::AddProblem(ProblemPatch::new(address, kind))
+        Self::new(ProjectOperation::AddProblem(ProblemAddition::new(
+            address, kind,
+        )))
     }
 
     pub fn set_function_properties(
         entry: impl Into<Address>,
         properties: FunctionProperties,
     ) -> Self {
-        Self::SetFunctionProperties(FunctionPropertiesUpdate::new(entry, properties))
+        Self::new(ProjectOperation::SetFunctionProperties(
+            FunctionPropertiesUpdate::new(entry, properties),
+        ))
     }
 
     pub fn remove_switch(branch: impl Into<Address>) -> Self {
-        Self::RemoveSwitch(branch.into())
+        Self::new(ProjectOperation::RemoveSwitch(branch.into()))
     }
 
     pub fn remove_symbol(index: SymbolIndex) -> Self {
-        Self::RemoveSymbol(SymbolRemoval::new(index))
+        Self::new(ProjectOperation::RemoveSymbol(SymbolRemoval::new(index)))
     }
 
     pub fn resize_mapping(mapping: SegmentMappingId, size: u64) -> Self {
-        Self::ResizeMapping(MappingResize::new(mapping, size))
+        Self::new(ProjectOperation::ResizeMapping(MappingResize::new(
+            mapping, size,
+        )))
     }
 
     pub fn update_mapping_metadata(update: MappingMetadataUpdate) -> Self {
-        Self::UpdateMappingMetadata(update)
+        Self::new(ProjectOperation::UpdateMappingMetadata(update))
     }
 
     pub fn write_bytes(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
-        Self::WriteBytes(BytePatch::new(address, bytes))
+        Self::new(ProjectOperation::WriteBytes(ByteWrite::new(address, bytes)))
+    }
+
+    fn new(operation: ProjectOperation) -> Self {
+        Self { operation }
     }
 
     pub(crate) fn apply(
         self,
         transaction: &mut ProjectTransaction<'_>,
     ) -> Result<(), ProjectError> {
-        match self {
-            Self::AddFunction(patch) => {
-                transaction.add_function(patch.into_function())?;
+        match self.operation {
+            ProjectOperation::AddFunction(addition) => {
+                transaction.add_function(addition.into_function())?;
                 Ok(())
             }
-            Self::AddMappingToSpace(placement) => match placement.mode() {
+            ProjectOperation::AddMappingToSpace(placement) => match placement.mode() {
                 MappingPlacementMode::Bottom => {
                     transaction.add_mapping_to_space_bottom(placement.space(), placement.mapping())
                 }
@@ -665,15 +655,15 @@ impl ProjectUpdate {
                     transaction.add_mapping_to_space_top(placement.space(), placement.mapping())
                 }
             },
-            Self::DeprioritiseMapping(priority) => {
+            ProjectOperation::DeprioritiseMapping(priority) => {
                 transaction.deprioritise_mapping(priority.space(), priority.mapping())
             }
-            Self::AddReference(reference) => {
+            ProjectOperation::AddReference(reference) => {
                 transaction.add_reference(reference)?;
                 Ok(())
             }
-            Self::AddSwitch(patch) => {
-                let (mut switch, asserted) = patch.into_parts();
+            ProjectOperation::AddSwitch(addition) => {
+                let (mut switch, asserted) = addition.into_parts();
                 if asserted {
                     switch.mark_override();
                 }
@@ -681,45 +671,55 @@ impl ProjectUpdate {
                 transaction.add_switch(branch, move |id, _| switch.with_id(id))?;
                 Ok(())
             }
-            Self::AddSymbol(patch) => {
-                let (index, entry) = patch.into_parts();
+            ProjectOperation::AddSymbol(addition) => {
+                let (index, entry) = addition.into_parts();
                 transaction.add_symbol(index, entry)?;
                 Ok(())
             }
-            Self::AddProblem(problem) => transaction.add_problem(problem.address(), problem.kind()),
-            Self::PrioritiseMapping(priority) => {
+            ProjectOperation::AddProblem(problem) => {
+                transaction.add_problem(problem.address(), problem.kind())
+            }
+            ProjectOperation::PrioritiseMapping(priority) => {
                 transaction.prioritise_mapping(priority.space(), priority.mapping())
             }
-            Self::RemapMapping(remap) => transaction.remap_mapping(remap.mapping(), remap.start()),
-            Self::RemoveFunction(removal) => removal.apply(transaction),
-            Self::RemoveMapping(removal) => transaction.remove_mapping(removal.mapping()),
-            Self::RemoveReference(removal) => {
+            ProjectOperation::RemapMapping(remap) => {
+                transaction.remap_mapping(remap.mapping(), remap.start())
+            }
+            ProjectOperation::RemoveFunction(removal) => removal.apply(transaction),
+            ProjectOperation::RemoveMapping(removal) => {
+                transaction.remove_mapping(removal.mapping())
+            }
+            ProjectOperation::RemoveReference(removal) => {
                 transaction.remove_reference(removal.from(), removal.target())?;
                 Ok(())
             }
-            Self::RemoveSwitch(branch) => {
+            ProjectOperation::RemoveSwitch(branch) => {
                 transaction.remove_switch(branch)?;
                 Ok(())
             }
-            Self::RemoveSymbol(removal) => {
+            ProjectOperation::RemoveSymbol(removal) => {
                 transaction.remove_symbol_by_index(removal.index())?;
                 Ok(())
             }
-            Self::ReplaceDerivedReferences(replacement) => replacement.apply(transaction),
-            Self::ResizeMapping(resize) => {
+            ProjectOperation::ReplaceDerivedReferences(replacement) => {
+                replacement.apply(transaction)
+            }
+            ProjectOperation::ResizeMapping(resize) => {
                 transaction.resize_mapping(resize.mapping(), resize.size())
             }
-            Self::SetFunctionProperties(update) => {
+            ProjectOperation::SetFunctionProperties(update) => {
                 transaction.set_function_properties(update.entry(), update.properties())?;
                 Ok(())
             }
-            Self::UpdateMappingMetadata(update) => transaction.update_mapping_metadata(
+            ProjectOperation::UpdateMappingMetadata(update) => transaction.update_mapping_metadata(
                 update.mapping(),
                 update.kind(),
                 update.provenance(),
                 update.flags(),
             ),
-            Self::WriteBytes(patch) => transaction.write_bytes(patch.address(), patch.bytes()),
+            ProjectOperation::WriteBytes(write) => {
+                transaction.write_bytes(write.address(), write.bytes())
+            }
         }
     }
 
@@ -730,12 +730,12 @@ impl ProjectUpdate {
         let mut functions = Vec::new();
 
         for update in updates {
-            let update = match update {
-                Self::AddFunction(patch) => {
-                    functions.push(patch.into_function());
+            let update = match update.operation {
+                ProjectOperation::AddFunction(addition) => {
+                    functions.push(addition.into_function());
                     continue;
                 }
-                update => update,
+                operation => Self::new(operation),
             };
 
             if !functions.is_empty() {
@@ -749,5 +749,232 @@ impl ProjectUpdate {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ir::{
+        ReferenceProperties, SwitchId, SwitchModel, SymbolProperties, SymbolTableSelector, symbol,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TransactionVerb {
+        AddFunction,
+        AddMappingToSpace,
+        AddMappingToSpaceBottom,
+        AddMappingToSpaceTop,
+        AddProblem,
+        AddReference,
+        AddSwitch,
+        AddSymbol,
+        DeprioritiseMapping,
+        PrioritiseMapping,
+        RemapMapping,
+        RemoveAssertedFunction,
+        RemoveAssertedFunctionById,
+        RemoveDerivedFunction,
+        RemoveDerivedFunctionById,
+        RemoveMapping,
+        RemoveReference,
+        RemoveSwitch,
+        RemoveSymbol,
+        ReplaceDerivedReferences,
+        ResizeMapping,
+        SetFunctionProperties,
+        UpdateMappingMetadata,
+        WriteBytes,
+    }
+
+    fn transaction_verb(update: ProjectUpdate) -> TransactionVerb {
+        match update.operation {
+            ProjectOperation::AddFunction(_) => TransactionVerb::AddFunction,
+            ProjectOperation::AddMappingToSpace(placement) => match placement.mode {
+                MappingPlacementMode::Bottom => TransactionVerb::AddMappingToSpaceBottom,
+                MappingPlacementMode::Default => TransactionVerb::AddMappingToSpace,
+                MappingPlacementMode::Top => TransactionVerb::AddMappingToSpaceTop,
+            },
+            ProjectOperation::AddProblem(_) => TransactionVerb::AddProblem,
+            ProjectOperation::AddReference(_) => TransactionVerb::AddReference,
+            ProjectOperation::AddSwitch(_) => TransactionVerb::AddSwitch,
+            ProjectOperation::AddSymbol(_) => TransactionVerb::AddSymbol,
+            ProjectOperation::DeprioritiseMapping(_) => TransactionVerb::DeprioritiseMapping,
+            ProjectOperation::PrioritiseMapping(_) => TransactionVerb::PrioritiseMapping,
+            ProjectOperation::RemapMapping(_) => TransactionVerb::RemapMapping,
+            ProjectOperation::RemoveFunction(removal) => match (removal.origin, removal.target) {
+                (ReferenceOrigin::Asserted, FunctionRemovalTarget::Address(_)) => {
+                    TransactionVerb::RemoveAssertedFunction
+                }
+                (ReferenceOrigin::Asserted, FunctionRemovalTarget::Id(_)) => {
+                    TransactionVerb::RemoveAssertedFunctionById
+                }
+                (ReferenceOrigin::Derived, FunctionRemovalTarget::Address(_)) => {
+                    TransactionVerb::RemoveDerivedFunction
+                }
+                (ReferenceOrigin::Derived, FunctionRemovalTarget::Id(_)) => {
+                    TransactionVerb::RemoveDerivedFunctionById
+                }
+            },
+            ProjectOperation::RemoveMapping(_) => TransactionVerb::RemoveMapping,
+            ProjectOperation::RemoveReference(_) => TransactionVerb::RemoveReference,
+            ProjectOperation::RemoveSwitch(_) => TransactionVerb::RemoveSwitch,
+            ProjectOperation::RemoveSymbol(_) => TransactionVerb::RemoveSymbol,
+            ProjectOperation::ReplaceDerivedReferences(_) => {
+                TransactionVerb::ReplaceDerivedReferences
+            }
+            ProjectOperation::ResizeMapping(_) => TransactionVerb::ResizeMapping,
+            ProjectOperation::SetFunctionProperties(_) => TransactionVerb::SetFunctionProperties,
+            ProjectOperation::UpdateMappingMetadata(_) => TransactionVerb::UpdateMappingMetadata,
+            ProjectOperation::WriteBytes(_) => TransactionVerb::WriteBytes,
+        }
+    }
+
+    #[test]
+    fn every_update_constructor_selects_one_transaction_verb() {
+        let address = Address::from(0x1000u64);
+        let function = FunctionId::INVALID;
+        let mapping = SegmentMappingId::new(1);
+        let space = AddressSpaceId::new(1);
+        let symbol_index = SymbolIndex::new(SymbolTableSelector::new(0), 0);
+        let symbol_entry = SymbolEntry::new(address, symbol("entry"), SymbolProperties::default());
+        let reference = Reference::data(address, address, ReferenceProperties::default());
+        let switch = Switch::new(SwitchId::INVALID, address, SwitchModel::Explicit);
+
+        let cases = [
+            (
+                "add_function",
+                ProjectUpdate::add_function(IncompleteFunction::new(address)),
+                TransactionVerb::AddFunction,
+            ),
+            (
+                "add_mapping_to_space",
+                ProjectUpdate::add_mapping_to_space(space, mapping),
+                TransactionVerb::AddMappingToSpace,
+            ),
+            (
+                "add_mapping_to_space_bottom",
+                ProjectUpdate::add_mapping_to_space_bottom(space, mapping),
+                TransactionVerb::AddMappingToSpaceBottom,
+            ),
+            (
+                "add_mapping_to_space_top",
+                ProjectUpdate::add_mapping_to_space_top(space, mapping),
+                TransactionVerb::AddMappingToSpaceTop,
+            ),
+            (
+                "add_problem",
+                ProjectUpdate::add_problem(address, ProblemKind::Unknown),
+                TransactionVerb::AddProblem,
+            ),
+            (
+                "add_reference",
+                ProjectUpdate::add_reference(reference),
+                TransactionVerb::AddReference,
+            ),
+            (
+                "add_switch",
+                ProjectUpdate::add_switch(switch.clone()),
+                TransactionVerb::AddSwitch,
+            ),
+            (
+                "add_derived_switch",
+                ProjectUpdate::add_derived_switch(switch),
+                TransactionVerb::AddSwitch,
+            ),
+            (
+                "add_symbol",
+                ProjectUpdate::add_symbol(symbol_index, symbol_entry),
+                TransactionVerb::AddSymbol,
+            ),
+            (
+                "deprioritise_mapping",
+                ProjectUpdate::deprioritise_mapping(space, mapping),
+                TransactionVerb::DeprioritiseMapping,
+            ),
+            (
+                "prioritise_mapping",
+                ProjectUpdate::prioritise_mapping(space, mapping),
+                TransactionVerb::PrioritiseMapping,
+            ),
+            (
+                "remap_mapping",
+                ProjectUpdate::remap_mapping(mapping, address),
+                TransactionVerb::RemapMapping,
+            ),
+            (
+                "remove_function",
+                ProjectUpdate::remove_function(address),
+                TransactionVerb::RemoveDerivedFunction,
+            ),
+            (
+                "remove_function_by_id",
+                ProjectUpdate::remove_function_by_id(function),
+                TransactionVerb::RemoveDerivedFunctionById,
+            ),
+            (
+                "remove_asserted_function",
+                ProjectUpdate::remove_asserted_function(address),
+                TransactionVerb::RemoveAssertedFunction,
+            ),
+            (
+                "remove_asserted_function_by_id",
+                ProjectUpdate::remove_asserted_function_by_id(function),
+                TransactionVerb::RemoveAssertedFunctionById,
+            ),
+            (
+                "remove_mapping",
+                ProjectUpdate::remove_mapping(mapping),
+                TransactionVerb::RemoveMapping,
+            ),
+            (
+                "remove_reference",
+                ProjectUpdate::remove_reference(address, address.into()),
+                TransactionVerb::RemoveReference,
+            ),
+            (
+                "remove_switch",
+                ProjectUpdate::remove_switch(address),
+                TransactionVerb::RemoveSwitch,
+            ),
+            (
+                "remove_symbol",
+                ProjectUpdate::remove_symbol(symbol_index),
+                TransactionVerb::RemoveSymbol,
+            ),
+            (
+                "replace_derived_references",
+                ProjectUpdate::replace_derived_references(
+                    AddressRangeSet::new(),
+                    ReferenceKind::Data,
+                    Vec::new(),
+                ),
+                TransactionVerb::ReplaceDerivedReferences,
+            ),
+            (
+                "resize_mapping",
+                ProjectUpdate::resize_mapping(mapping, 1),
+                TransactionVerb::ResizeMapping,
+            ),
+            (
+                "set_function_properties",
+                ProjectUpdate::set_function_properties(address, FunctionProperties::NONE),
+                TransactionVerb::SetFunctionProperties,
+            ),
+            (
+                "update_mapping_metadata",
+                ProjectUpdate::update_mapping_metadata(MappingMetadataUpdate::new(mapping)),
+                TransactionVerb::UpdateMappingMetadata,
+            ),
+            (
+                "write_bytes",
+                ProjectUpdate::write_bytes(address, Arc::<[u8]>::from([0u8])),
+                TransactionVerb::WriteBytes,
+            ),
+        ];
+
+        for (constructor, update, expected) in cases {
+            assert_eq!(transaction_verb(update), expected, "{constructor}");
+        }
     }
 }

@@ -1,7 +1,8 @@
-use crate::engine::change::{ChangeKinds, Revision};
-use crate::engine::{ProjectView, ReadSet};
+use crate::engine::ProjectView;
 use crate::ir::AddressRangeSet;
+use crate::project::{ChangeKinds, ReadSet};
 use crate::queries::{QueryError, QueryReader};
+use crate::types::Revision;
 
 struct DependencyClause {
     kinds: ChangeKinds,
@@ -52,16 +53,13 @@ impl Dependency {
     }
 }
 
-pub struct Cached<T> {
+pub struct Term<T> {
     dependency: Dependency,
     watermark: Option<Revision>,
     value: Option<T>,
 }
 
-impl<T> Cached<T>
-where
-    T: Clone,
-{
+impl<T> Term<T> {
     pub fn new(dependency: Dependency) -> Self {
         Self {
             dependency,
@@ -70,16 +68,17 @@ where
         }
     }
 
-    pub fn get<F>(&mut self, reader: &QueryReader, compute: F) -> Result<T, QueryError>
+    pub fn evaluate<F>(&mut self, reader: &QueryReader, compute: F) -> Result<&T, QueryError>
     where
         F: FnOnce(&ProjectView<'_>) -> Result<T, QueryError>,
     {
         let latest = self.dependency.latest(reader)?;
 
-        if let Some(value) = &self.value
-            && self.watermark == Some(latest)
-        {
-            return Ok(value.clone());
+        if self.watermark == Some(latest) {
+            return Ok(self
+                .value
+                .as_ref()
+                .expect("a cached value exists at its watermark"));
         }
 
         let handle = reader.project()?;
@@ -91,9 +90,8 @@ where
             return Err(QueryError::UndeclaredDependency(reads.observed()));
         }
 
-        self.value = Some(value.clone());
         self.watermark = Some(latest);
-        Ok(value)
+        Ok(self.value.insert(value))
     }
 }
 
@@ -171,7 +169,7 @@ mod test {
         assert!(
             !declared.covers(&reads),
             "a cached computation that reads symbols while declaring only functions must be \
-             rejected by `Cached::get` in every build"
+             rejected by `Term::evaluate` in every build"
         );
     }
 

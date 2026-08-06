@@ -5,11 +5,11 @@ use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use smol_str::SmolStr;
 
 use super::{AnalysisEngine, DEFAULT_SUBSCRIPTION_CAPACITY, EngineError};
-use crate::engine::change::{
-    ChangeCategory, ChangeFilter, ChangeKinds, ChangeRecord, ChangeSet, ChangeSource,
-    MAX_DETAILED_CHANGE_RECORDS,
-};
+use crate::engine::change::ChangeFilter;
 use crate::ir::AddressRangeSet;
+use crate::project::{
+    ChangeCategory, ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, MAX_DETAILED_CHANGE_RECORDS,
+};
 
 pub(crate) struct Subscriber {
     rx: Receiver<Arc<ChangeSet>>,
@@ -18,7 +18,7 @@ pub(crate) struct Subscriber {
 }
 
 impl Subscriber {
-    pub(super) fn new(
+    pub(crate) fn new(
         tx: Sender<Arc<ChangeSet>>,
         rx: Receiver<Arc<ChangeSet>>,
         filter: ChangeFilter,
@@ -26,7 +26,7 @@ impl Subscriber {
         Self { rx, tx, filter }
     }
 
-    pub(super) fn materialise(
+    pub(crate) fn materialise(
         &self,
         changes: &ChangeSet,
         resync: &mut Option<Arc<ChangeSet>>,
@@ -69,7 +69,7 @@ impl Subscriber {
             .clone()
     }
 
-    pub(super) fn resync(&self, changes: Arc<ChangeSet>) -> bool {
+    pub(crate) fn resync(&self, changes: Arc<ChangeSet>) -> bool {
         loop {
             match self.rx.try_recv() {
                 Ok(_) => {}
@@ -89,7 +89,7 @@ pub struct SubscriptionBuilder<'a> {
 }
 
 impl<'a> SubscriptionBuilder<'a> {
-    pub(super) fn new(engine: &'a AnalysisEngine) -> Self {
+    pub(crate) fn new(engine: &'a AnalysisEngine) -> Self {
         Self {
             engine,
             filter: ChangeFilter::new(),
@@ -132,7 +132,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub(super) fn new(rx: Receiver<Arc<ChangeSet>>) -> Self {
+    pub(crate) fn new(rx: Receiver<Arc<ChangeSet>>) -> Self {
         Self { rx }
     }
 
@@ -187,11 +187,11 @@ mod test {
     use std::sync::Arc;
 
     use super::Subscriber;
-    use crate::engine::change::{
-        ChangeFilter, ChangeRecord, ChangeSet, MAX_DETAILED_CHANGE_RECORDS, Revision,
-    };
+    use crate::engine::change::ChangeFilter;
     use crate::ir::{Address, AddressRange};
+    use crate::project::{ChangeRecord, ChangeSet, MAX_DETAILED_CHANGE_RECORDS};
     use crate::storage::segments::space::AddressSpaceId;
+    use crate::types::Revision;
 
     #[test]
     fn lagged_subscriber_receives_resync_change() -> Result<(), Box<dyn std::error::Error>> {

@@ -22,13 +22,13 @@ pub struct SymbolTable<A = Address> {
 }
 
 #[derive(Clone)]
-pub(super) struct SymbolEntryIter<'a, A = Address> {
+struct SymbolEntryIter<'a, A = Address> {
     ids: Iter<'a, SymbolId>,
     symbols: &'a [SymbolEntry<A>],
 }
 
 impl<'a, A> SymbolEntryIter<'a, A> {
-    pub(super) fn new(ids: &'a [SymbolId], symbols: &'a [SymbolEntry<A>]) -> Self {
+    fn new(ids: &'a [SymbolId], symbols: &'a [SymbolEntry<A>]) -> Self {
         Self {
             ids: ids.iter(),
             symbols,
@@ -51,13 +51,13 @@ impl<'a, A> Iterator for SymbolEntryIter<'a, A> {
 
 impl<'a, A> ExactSizeIterator for SymbolEntryIter<'a, A> {}
 
-pub(super) struct SymbolEntryIterMut<'a, A = Address> {
+struct SymbolEntryIterMut<'a, A = Address> {
     ids: Iter<'a, SymbolId>,
     symbols: &'a mut [SymbolEntry<A>],
 }
 
 impl<'a, A> SymbolEntryIterMut<'a, A> {
-    pub(super) fn new(ids: &'a [SymbolId], symbols: &'a mut [SymbolEntry<A>]) -> Self {
+    fn new(ids: &'a [SymbolId], symbols: &'a mut [SymbolEntry<A>]) -> Self {
         Self {
             ids: ids.iter(),
             symbols,
@@ -128,11 +128,11 @@ where
         true
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> SymbolId {
+    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
         self.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_reservation(&mut self, id: SymbolId) {
+    pub(crate) fn publish_reservation(&mut self, id: SymbolId) {
         let allocated = self.allocator.allocate();
         debug_assert_eq!(allocated, id);
         if id.index() >= self.symbols.len() {
@@ -143,12 +143,12 @@ where
         self.generations[id.index()] = id.generation();
     }
 
-    pub(super) fn publish_release(&mut self, id: SymbolId) {
+    pub(crate) fn publish_release(&mut self, id: SymbolId) {
         self.generations[id.index()] = id.next_generation().generation();
         self.allocator.release(id);
     }
 
-    pub(super) fn publish_upsert(
+    pub(crate) fn publish_upsert(
         &mut self,
         id: SymbolId,
         entry: SymbolEntry<A>,
@@ -167,14 +167,14 @@ where
         }
     }
 
-    pub(super) fn publish_remove(&mut self, id: SymbolId, _previous: &SymbolIndexState) {
+    pub(crate) fn publish_remove(&mut self, id: SymbolId, _previous: &SymbolIndexState) {
         let removed = self.clear_entry(id);
         debug_assert!(removed);
         self.generations[id.index()] = id.next_generation().generation();
         self.allocator.release(id);
     }
 
-    pub(super) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         self.indices.get(&index).copied()
     }
 
@@ -468,7 +468,7 @@ where
             })
     }
 
-    pub(super) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
+    pub(crate) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
         self.symbols.into_iter().filter(SymbolEntry::is_valid)
     }
 

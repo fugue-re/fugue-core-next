@@ -1,4 +1,6 @@
 use std::fmt::{self, Debug, Display, Formatter};
+use std::mem::size_of;
+use std::str;
 use std::sync::LazyLock;
 
 use smallvec::SmallVec;
@@ -8,8 +10,8 @@ pub use ustr::{
 };
 
 use crate::ir::{Address, Id};
-use crate::storage::entities::schema::ENTITY_SYMBOL_ID;
-use crate::storage::entities::{Entity, EntityId};
+use crate::storage::entities::schema::{ENTITY_KEY_SYMBOL_ID, ENTITY_SYMBOL_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::types::common::archived_bitflags;
 
 mod table;
@@ -19,6 +21,27 @@ pub use table::{SymbolInsertion, SymbolRef, SymbolTable, TransientSymbolTable};
 
 pub type SymbolId = Id<Symbol>;
 pub type LazySymbol = LazyLock<Symbol>;
+
+impl EntityKeyCodec for Symbol {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (size, rest) = input.split_at_checked(size_of::<u32>())?;
+        let size = u32::from_be_bytes(size.try_into().ok()?) as usize;
+        let (symbol_bytes, rest) = rest.split_at_checked(size)?;
+        *input = rest;
+        Some(symbol(str::from_utf8(symbol_bytes).ok()?))
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        let bytes = self.as_bytes();
+        let size = u32::try_from(bytes.len()).expect("symbol name fits persistent index key");
+        output.extend(size.to_be_bytes());
+        output.extend(bytes.iter().copied());
+    }
+}
+
+impl EntityKey for SymbolId {
+    const ID: EntityKeyId = ENTITY_KEY_SYMBOL_ID;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SymbolTableSelector(usize);

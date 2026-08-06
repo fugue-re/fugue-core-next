@@ -26,11 +26,11 @@ impl ProblemTable {
         Ok(())
     }
 
-    pub(super) fn pending_id(&self, offset: usize) -> ProblemId {
+    pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
         self.index.allocator.pending_id(offset)
     }
 
-    pub(super) fn publish_upsert(&mut self, problem: Problem, is_new: bool) {
+    pub(crate) fn publish_upsert(&mut self, problem: Problem, is_new: bool) {
         let id = problem.id();
         let key = problem.key();
         let slot = id.index();
@@ -45,7 +45,7 @@ impl ProblemTable {
         }
     }
 
-    pub(super) fn publish_remove(&mut self, key: ProblemKey) {
+    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
         let Some(id) = self.index.id(key) else {
             return;
         };
@@ -114,7 +114,7 @@ impl ProblemTable {
         self.index.contains(address)
     }
 
-    pub(super) fn for_each_address_key_in(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
+    pub(crate) fn for_each_address_key_in(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
         self.index.for_each_address_key_in(range, f);
     }
 

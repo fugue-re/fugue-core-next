@@ -1,10 +1,13 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::mem;
 
 use smallvec::{IntoIter, SmallVec};
 
-use super::super::{AnalysisPhase, Priority, WorkCause};
+use super::super::{Priority, WorkCause};
+use super::{AnalyserId, AnalyserOrder};
 use crate::ir::{Address, AddressRange, AddressRangeSet, ProblemScope, RawAddress};
+use crate::project::AnalysisPhase;
 use crate::storage::segments::space::AddressSpaceId;
 
 pub(crate) const MAX_WORK_ITEMS_PER_ANALYSER: usize = 4096;
@@ -12,7 +15,6 @@ pub(crate) const MAX_WORK_ITEM_CAUSES: usize = 256;
 pub(crate) const WORK_SLICE_BYTES: u64 = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(unknown_lints, sorted_enum_variants)]
 pub(crate) enum Degradation {
     CausesMerged,
     RangesCollapsed,
@@ -72,11 +74,31 @@ impl IntoIterator for DegradationReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[allow(unknown_lints, sorted_enum_variants)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkKind {
-    Region,
     Continuation,
+    Region,
+}
+
+impl WorkKind {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Region => 0,
+            Self::Continuation => 1,
+        }
+    }
+}
+
+impl Ord for WorkKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for WorkKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,15 +106,15 @@ struct WorkKey {
     phase: AnalysisPhase,
     address: Option<Address>,
     priority: Priority,
-    analyser_order: u32,
+    analyser_order: AnalyserOrder,
     kind: WorkKind,
     end: RawAddress,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkItem {
-    analyser: usize,
-    analyser_order: u32,
+    analyser: AnalyserId,
+    analyser_order: AnalyserOrder,
     phase: AnalysisPhase,
     priority: Priority,
     range: Option<AddressRange>,
@@ -104,7 +126,7 @@ pub(crate) struct WorkItem {
 pub(crate) type WorkBatch = SmallVec<[WorkItem; 8]>;
 
 impl WorkItem {
-    pub(crate) fn analyser(&self) -> usize {
+    pub(crate) fn analyser(&self) -> AnalyserId {
         self.analyser
     }
 
@@ -196,21 +218,27 @@ impl WorkItem {
     }
 }
 
+struct CollapsedWork {
+    causes_merged: bool,
+    item: WorkItem,
+    ranges_collapsed: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct AnalysisWorkQueue {
     items: BTreeMap<WorkKey, WorkItem>,
-    locations: Vec<BTreeMap<(Option<AddressRange>, WorkKind), WorkKey>>,
+    keys_by_analyser_and_range: Vec<BTreeMap<(Option<AddressRange>, WorkKind), WorkKey>>,
     degradations: DegradationReport,
 }
 
 impl AnalysisWorkQueue {
     pub(crate) fn with_analysers(count: usize) -> Self {
-        let mut locations = Vec::with_capacity(count);
-        locations.resize_with(count, BTreeMap::new);
+        let mut keys_by_analyser_and_range = Vec::with_capacity(count);
+        keys_by_analyser_and_range.resize_with(count, BTreeMap::new);
 
         Self {
             items: BTreeMap::new(),
-            locations,
+            keys_by_analyser_and_range,
             degradations: DegradationReport::default(),
         }
     }
@@ -219,13 +247,13 @@ impl AnalysisWorkQueue {
         self.items.is_empty()
     }
 
-    pub(crate) fn pending_for(&self, analyser: usize) -> AddressRangeSet {
+    pub(crate) fn pending_for(&self, analyser: AnalyserId) -> AddressRangeSet {
         let mut pending = AddressRangeSet::new();
-        let Some(locations) = self.locations.get(analyser) else {
+        let Some(keys) = self.keys_by_analyser_and_range.get(analyser.index()) else {
             return pending;
         };
 
-        for (range, _) in locations.keys() {
+        for (range, _) in keys.keys() {
             if let Some(range) = range {
                 pending.insert_range(*range);
             }
@@ -233,16 +261,16 @@ impl AnalysisWorkQueue {
         pending
     }
 
-    pub(crate) fn has_pending_for(&self, analyser: usize) -> bool {
-        self.locations
-            .get(analyser)
-            .is_some_and(|locations| !locations.is_empty())
+    pub(crate) fn has_pending_for(&self, analyser: AnalyserId) -> bool {
+        self.keys_by_analyser_and_range
+            .get(analyser.index())
+            .is_some_and(|keys| !keys.is_empty())
     }
 
     pub(crate) fn schedule(
         &mut self,
-        analyser: usize,
-        analyser_order: u32,
+        analyser: AnalyserId,
+        analyser_order: AnalyserOrder,
         phase: AnalysisPhase,
         priority: Priority,
         regions: &AddressRangeSet,
@@ -293,12 +321,12 @@ impl AnalysisWorkQueue {
         let analyser = item.analyser;
         let range = item.range;
         let location = (range, item.kind);
-        let locations = self
-            .locations
-            .get_mut(analyser)
+        let keys = self
+            .keys_by_analyser_and_range
+            .get_mut(analyser.index())
             .expect("scheduled analyser must have a queue index");
 
-        if let Some(existing_key) = locations.get(&location).copied()
+        if let Some(existing_key) = keys.get(&location).copied()
             && let Some(mut existing) = self.items.remove(&existing_key)
         {
             let merged = existing.absorb(&item.causes);
@@ -310,7 +338,7 @@ impl AnalysisWorkQueue {
                 replaced.is_none(),
                 "promoted work must retain a unique queue key"
             );
-            locations.insert(location, key);
+            keys.insert(location, key);
             let mut degradations = DegradationReport::default();
             if merged {
                 degradations.push(DegradationEvent::new(
@@ -323,7 +351,7 @@ impl AnalysisWorkQueue {
 
         self.insert_distinct(item);
 
-        if self.locations[analyser].len() > MAX_WORK_ITEMS_PER_ANALYSER {
+        if self.keys_by_analyser_and_range[analyser.index()].len() > MAX_WORK_ITEMS_PER_ANALYSER {
             return self.collapse(analyser);
         }
 
@@ -337,23 +365,23 @@ impl AnalysisWorkQueue {
         let key = item.key();
 
         let previous_item = self.items.insert(key, item);
-        let previous_location = self.locations[analyser].insert(location, key);
+        let previous_location =
+            self.keys_by_analyser_and_range[analyser.index()].insert(location, key);
         assert!(
             previous_item.is_none() && previous_location.is_none(),
             "distinct work must have a unique queue key and location"
         );
     }
 
-    fn collapse(&mut self, analyser: usize) -> DegradationReport {
-        let locations = mem::take(
-            self.locations
-                .get_mut(analyser)
+    fn collapse(&mut self, analyser: AnalyserId) -> DegradationReport {
+        let keys = mem::take(
+            self.keys_by_analyser_and_range
+                .get_mut(analyser.index())
                 .expect("scheduled analyser must have a queue index"),
         );
-        let mut collapsed =
-            BTreeMap::<(Option<AddressSpaceId>, WorkKind), (WorkItem, usize, bool)>::new();
+        let mut collapsed = BTreeMap::<(Option<AddressSpaceId>, WorkKind), CollapsedWork>::new();
 
-        for (_, key) in locations {
+        for key in keys.into_values() {
             let item = self
                 .items
                 .remove(&key)
@@ -361,14 +389,14 @@ impl AnalysisWorkQueue {
 
             let group = (item.range.map(|range| range.space()), item.kind);
             match collapsed.get_mut(&group) {
-                Some((current, count, causes_merged)) => {
-                    *causes_merged |= !current.has_same_causes(&item);
-                    *causes_merged |= current.absorb(&item.causes);
-                    *count += 1;
-                    current.attempts = current.attempts.max(item.attempts);
-                    current.priority = current.priority.min(item.priority);
+                Some(collapsed) => {
+                    collapsed.causes_merged |= !collapsed.item.has_same_causes(&item);
+                    collapsed.causes_merged |= collapsed.item.absorb(&item.causes);
+                    collapsed.ranges_collapsed += 1;
+                    collapsed.item.attempts = collapsed.item.attempts.max(item.attempts);
+                    collapsed.item.priority = collapsed.item.priority.min(item.priority);
                     if let (Some(current_range), Some(item_range)) =
-                        (current.range.as_mut(), item.range)
+                        (collapsed.item.range.as_mut(), item.range)
                     {
                         *current_range = AddressRange::new(
                             current_range.space(),
@@ -378,18 +406,30 @@ impl AnalysisWorkQueue {
                     }
                 }
                 None => {
-                    collapsed.insert(group, (item, 1, false));
+                    collapsed.insert(
+                        group,
+                        CollapsedWork {
+                            causes_merged: false,
+                            item,
+                            ranges_collapsed: 0,
+                        },
+                    );
                 }
             }
         }
 
         let mut degradations = DegradationReport::default();
-        for (_, (item, count, causes_merged)) in collapsed {
+        for CollapsedWork {
+            causes_merged,
+            item,
+            ranges_collapsed,
+        } in collapsed.into_values()
+        {
             let scope = item.scope();
             if causes_merged {
                 degradations.push(DegradationEvent::new(Degradation::CausesMerged, scope));
             }
-            if count > 1 {
+            if ranges_collapsed != 0 {
                 degradations.push(DegradationEvent::new(Degradation::RangesCollapsed, scope));
             }
             self.insert_distinct(item);
@@ -439,7 +479,7 @@ impl AnalysisWorkQueue {
 
         let key = *self.items.keys().next()?;
         let mut item = self.items.remove(&key)?;
-        self.locations[item.analyser].remove(&(item.range, item.kind));
+        self.keys_by_analyser_and_range[item.analyser.index()].remove(&(item.range, item.kind));
 
         if item.range.is_some_and(|range| range.size() > budget) {
             let range = item.range.expect("checked as present");
@@ -477,7 +517,7 @@ impl AnalysisWorkQueue {
             let Some(item) = self.items.remove(&key) else {
                 continue;
             };
-            self.locations[item.analyser].remove(&(item.range, item.kind));
+            self.keys_by_analyser_and_range[item.analyser.index()].remove(&(item.range, item.kind));
 
             for surviving in item.regions().difference(region).ranges() {
                 degradations.extend(self.insert(item.with_range(surviving)));
@@ -493,8 +533,8 @@ impl AnalysisWorkQueue {
 
     pub(crate) fn clear(&mut self) {
         self.items.clear();
-        for locations in &mut self.locations {
-            locations.clear();
+        for keys in &mut self.keys_by_analyser_and_range {
+            keys.clear();
         }
         self.degradations = DegradationReport::default();
     }
@@ -503,13 +543,14 @@ impl AnalysisWorkQueue {
 #[cfg(test)]
 mod test {
     use super::{
-        AnalysisWorkQueue, Degradation, DegradationEvent, DegradationReport,
-        MAX_WORK_ITEMS_PER_ANALYSER, WORK_SLICE_BYTES,
+        AnalyserId, AnalyserOrder, AnalysisWorkQueue, Degradation, DegradationEvent,
+        DegradationReport, MAX_WORK_ITEMS_PER_ANALYSER, WORK_SLICE_BYTES,
     };
-    use crate::engine::change::{ChangeKinds, Revision};
-    use crate::engine::{AnalysisPhase, Priority, WorkCause};
+    use crate::engine::{Priority, WorkCause};
     use crate::ir::{Address, AddressRange, AddressRangeSet, ProblemScope};
+    use crate::project::{AnalysisPhase, ChangeKinds};
     use crate::storage::segments::space::AddressSpaceId;
+    use crate::types::Revision;
 
     fn queue_with(analysers: usize) -> AnalysisWorkQueue {
         AnalysisWorkQueue::with_analysers(analysers)
@@ -560,8 +601,8 @@ mod test {
         let mut later = AddressRangeSet::new();
         later.insert(Address::in_default_space(0x2000u64));
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &later,
@@ -571,8 +612,8 @@ mod test {
         let mut earlier = AddressRangeSet::new();
         earlier.insert(Address::in_default_space(0x1000u64));
         queue.schedule(
-            1,
-            1,
+            AnalyserId::new(1),
+            AnalyserOrder::new(1),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &earlier,
@@ -585,7 +626,7 @@ mod test {
             Address::in_default_space(0x1000u64),
             "the earliest address must dispatch first regardless of registration order"
         );
-        assert_eq!(first.analyser(), 1);
+        assert_eq!(first.analyser(), AnalyserId::new(1));
     }
 
     #[test]
@@ -595,8 +636,8 @@ mod test {
         let mut late = AddressRangeSet::new();
         late.insert(Address::in_default_space(0x1000u64));
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Identify,
             Priority::DISCOVERY,
             &late,
@@ -606,8 +647,8 @@ mod test {
         let mut early = AddressRangeSet::new();
         early.insert(Address::in_default_space(0x9000u64));
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &early,
@@ -625,24 +666,24 @@ mod test {
         regions.insert(Address::in_default_space(0x1000u64));
 
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::ENRICHMENT,
             &regions,
             |range| WorkCause::new(range, ChangeKinds::SYMBOL_CHANGED, Revision::new(1)),
         );
         queue.schedule(
-            1,
-            1,
+            AnalyserId::new(1),
+            AnalyserOrder::new(1),
             AnalysisPhase::Decode,
             Priority::new(500),
             &regions,
             |range| WorkCause::new(range, ChangeKinds::SYMBOL_CHANGED, Revision::new(1)),
         );
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
@@ -652,7 +693,7 @@ mod test {
         let first = queue.pop(WORK_SLICE_BYTES).expect("work is queued");
         assert_eq!(
             first.analyser(),
-            0,
+            AnalyserId::new(0),
             "the repeated item must be re-keyed at its most urgent priority"
         );
         assert_eq!(first.causes().len(), 2);
@@ -664,16 +705,16 @@ mod test {
         let regions = AddressRangeSet::new();
 
         queue.schedule(
-            0,
-            1,
+            AnalyserId::new(0),
+            AnalyserOrder::new(1),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
             |range| WorkCause::new(range, ChangeKinds::SPACE_CREATED, Revision::new(1)),
         );
         queue.schedule(
-            1,
-            0,
+            AnalyserId::new(1),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
@@ -681,7 +722,7 @@ mod test {
         );
 
         let first = queue.pop(WORK_SLICE_BYTES).expect("global work is queued");
-        assert_eq!(first.analyser(), 1);
+        assert_eq!(first.analyser(), AnalyserId::new(1));
         assert_eq!(first.range(), None);
         assert_eq!(first.causes()[0].range(), None);
     }
@@ -696,8 +737,8 @@ mod test {
         let mut regions = AddressRangeSet::new();
         regions.insert_range(range);
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
@@ -730,8 +771,8 @@ mod test {
         regions.insert(Address::in_default_space(0x1000u64));
 
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Partition,
             Priority::DISCOVERY,
             &regions,
@@ -741,8 +782,8 @@ mod test {
         yielded[0].record_attempt();
 
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Partition,
             Priority::DISCOVERY,
             &regions,
@@ -776,8 +817,8 @@ mod test {
         let mut regions = AddressRangeSet::new();
         regions.insert_range(range);
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
@@ -820,8 +861,8 @@ mod test {
             let mut regions = AddressRangeSet::new();
             regions.insert_range(AddressRange::new(space, base.into(), (base + 0x0f).into()));
             degradations.extend(queue.schedule(
-                0,
-                0,
+                AnalyserId::new(0),
+                AnalyserOrder::new(0),
                 AnalysisPhase::Decode,
                 Priority::DISCOVERY,
                 &regions,
@@ -864,8 +905,8 @@ mod test {
                 (index * 2).into(),
             ));
             queue.schedule(
-                0,
-                0,
+                AnalyserId::new(0),
+                AnalyserOrder::new(0),
                 AnalysisPhase::Decode,
                 if index == 0 {
                     Priority::ENRICHMENT
@@ -895,8 +936,8 @@ mod test {
             let mut regions = AddressRangeSet::new();
             regions.insert_range(AddressRange::new(space, start.into(), end.into()));
             queue.schedule(
-                0,
-                0,
+                AnalyserId::new(0),
+                AnalyserOrder::new(0),
                 AnalysisPhase::Decode,
                 Priority::DISCOVERY,
                 &regions,
@@ -929,8 +970,8 @@ mod test {
         regions.insert(address);
 
         queue.schedule(
-            0,
-            0,
+            AnalyserId::new(0),
+            AnalyserOrder::new(0),
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,

@@ -2,12 +2,13 @@ use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter, LowerHex, UpperHex};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::mem::size_of;
 
 pub use fugue_bytes::Endian;
 use tinyset::SetU64;
 
 use crate::storage::entities::schema::ENTITY_INDEX_HEADER_ID;
-use crate::storage::entities::{Entity, EntityId};
+use crate::storage::entities::{Entity, EntityId, EntityKeyCodec};
 use crate::types::Revision;
 
 pub(crate) mod address;
@@ -21,10 +22,10 @@ pub use block::{
     CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockRef, CodeBlockTable, IncompleteCodeBlock,
     IncompleteCodeBlockId,
 };
-pub(crate) use block::{CodeBlockIdsByStart, CodeBlockMaterialisation, PreparedCodeBlockMutation};
+pub(crate) use block::{CodeBlockIdsByStart, NormalisedCodeBlockRecord, PreparedCodeBlockRecord};
 
 pub(crate) mod call_graph;
-pub(crate) use call_graph::CallGraphStage;
+pub(crate) use call_graph::CallGraphStaging;
 pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
 
 pub(crate) mod cfg;
@@ -35,10 +36,12 @@ pub use function::{
     Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
     FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
 };
-pub(crate) use function::{FunctionMaterialisation, FunctionTableStage, PreparedFunctionMutation};
+pub(crate) use function::{
+    FunctionTableStaging, NormalisedFunctionRecord, StagedFunctionChangeRecord,
+};
 
 pub(crate) mod insn;
-pub use insn::{Insn, InsnError, InsnId, InsnList, InsnProperties, InsnTarget, InsnTargetKind};
+pub use insn::{Insn, InsnError, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
 
 pub(crate) mod location;
 pub use location::Location;
@@ -52,7 +55,7 @@ pub use problem::{
 pub(crate) mod persistent;
 
 pub(crate) mod reference;
-pub(crate) use reference::ReferenceMutation;
+pub(crate) use reference::PreparedReferenceIndexRecord;
 pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
@@ -207,22 +210,6 @@ impl<T> Id<T> {
     }
 
     #[inline(always)]
-    pub(crate) fn decode_as_key(buf: &[u8]) -> Option<Self> {
-        if buf.len() == 8 {
-            Some(Self::from_key(u64::from_be_bytes(
-                buf.try_into().expect("entity ID key is eight bytes"),
-            )))
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend(self.key().to_be_bytes());
-    }
-
-    #[inline(always)]
     const fn key(&self) -> u64 {
         ((self.generation as u64) << 32) | self.id as u64
     }
@@ -230,6 +217,20 @@ impl<T> Id<T> {
     #[inline(always)]
     const fn from_key(key: u64) -> Self {
         Self::with_generation(key as u32, (key >> 32) as u32)
+    }
+}
+
+impl<T> EntityKeyCodec for Id<T> {
+    #[inline(always)]
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (value, rest) = input.split_at_checked(size_of::<u64>())?;
+        *input = rest;
+        Some(Self::from_key(u64::from_be_bytes(value.try_into().ok()?)))
+    }
+
+    #[inline(always)]
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend(self.key().to_be_bytes());
     }
 }
 

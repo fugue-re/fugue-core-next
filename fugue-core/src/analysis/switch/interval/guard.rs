@@ -9,7 +9,7 @@ use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, AddressWithContext};
 use crate::lifter::{ContextSet, InsnResolver};
 
-pub(super) struct SwitchGuard {
+pub(crate) struct SwitchGuard {
     interval: StridedInterval,
     default_block: Option<IlBlockId>,
 }
@@ -83,13 +83,13 @@ impl Relation {
 }
 
 impl SwitchGuard {
-    pub(super) fn interval(&self) -> &StridedInterval {
+    pub(crate) fn interval(&self) -> &StridedInterval {
         &self.interval
     }
 }
 
 impl<'analysis> SwitchIntervalRecovery<'analysis> {
-    pub(super) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
+    pub(crate) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
         if let Some(guard) = self.guard_within_branch_instruction(index, branch) {
             tracing::trace!("switch at {branch}: using intra-instruction guard");
             return Some(guard);
@@ -437,7 +437,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         current
     }
 
-    pub(super) fn resolve_default_branch_target(
+    pub(crate) fn resolve_default_branch_target(
         &self,
         guard: Option<&SwitchGuard>,
         branch: Address,

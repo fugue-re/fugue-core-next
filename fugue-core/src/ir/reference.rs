@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Bound;
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -17,8 +17,8 @@ use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_KEY_REFERENCE_INVERSE_ID, ENTITY_REFERENCE_RECORD_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityCache, EntityId, EntityKey, EntityKeyId, EntityStorageError, EntityWrite,
-    ProjectEntity, WriteBackWorker,
+    Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId, EntityStorageError,
+    EntityWrite, ProjectEntity, WriteBackWorker,
 };
 use crate::types::Revision;
 use crate::types::common::{archived_bitflags, cursor_bound, cursor_bound_or_minimum};
@@ -91,7 +91,7 @@ bitflags::bitflags! {
         const CONDITIONAL   = 0x0004;
         const COMPUTED      = 0x0008;
         const TERMINAL      = 0x0010;
-        const FALL_THROUGH = 0x0020;
+        const FALL_THROUGH  = 0x0020;
         const OVERRIDE      = 0x0040;
         const READ          = 0x0080;
         const WRITE         = 0x0100;
@@ -124,10 +124,13 @@ pub enum ReferenceTarget {
     Address(Address),
 }
 
-impl ReferenceTarget {
-    const TAG_ADDRESS: u8 = 0;
-    const ADDRESS_BODY_SIZE: usize = Address::ENCODED_SIZE;
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum ReferenceTargetKind {
+    Address,
+}
 
+impl ReferenceTarget {
     pub fn address(&self) -> Option<Address> {
         match self {
             Self::Address(address) => Some(*address),
@@ -137,35 +140,26 @@ impl ReferenceTarget {
     fn minimum() -> Self {
         Self::Address(Address::MINIMUM)
     }
+}
 
-    fn tag(&self) -> u8 {
-        match self {
-            Self::Address(_) => Self::TAG_ADDRESS,
-        }
-    }
-
-    pub(crate) fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend([self.tag()]);
-        match self {
-            Self::Address(address) => address.encode(output),
-        }
-    }
-
-    pub(crate) fn decode(buf: &mut &[u8]) -> Option<Self> {
-        if buf.remaining() < 1 {
-            return None;
-        }
-        match buf.get_u8() {
-            Self::TAG_ADDRESS => {
-                if buf.remaining() < Self::ADDRESS_BODY_SIZE {
-                    return None;
-                }
-                let body = &buf[..Self::ADDRESS_BODY_SIZE];
-                let address = Address::decode(body)?;
-                buf.advance(Self::ADDRESS_BODY_SIZE);
-                Some(Self::Address(address))
+impl EntityKeyCodec for ReferenceTarget {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (&kind, rest) = input.split_first()?;
+        *input = rest;
+        match kind {
+            kind if kind == ReferenceTargetKind::Address as u8 => {
+                Address::decode(input).map(Self::Address)
             }
             _ => None,
+        }
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        match self {
+            Self::Address(address) => {
+                output.extend([ReferenceTargetKind::Address as u8]);
+                address.encode(output);
+            }
         }
     }
 }
@@ -357,19 +351,10 @@ impl ReferenceKey {
     }
 }
 
-impl EntityKey for ReferenceKey {
-    const ID: EntityKeyId = ENTITY_KEY_REFERENCE_FORWARD_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < Address::ENCODED_SIZE {
-            return None;
-        }
-        let from = Address::decode(&buf[..Address::ENCODED_SIZE])?;
-        let mut rest = &buf[Address::ENCODED_SIZE..];
-        let target = ReferenceTarget::decode(&mut rest)?;
-        if !rest.is_empty() {
-            return None;
-        }
+impl EntityKeyCodec for ReferenceKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let from = Address::decode(input)?;
+        let target = ReferenceTarget::decode(input)?;
         Some(Self { from, target })
     }
 
@@ -377,6 +362,10 @@ impl EntityKey for ReferenceKey {
         self.from.encode(output);
         self.target.encode(output);
     }
+}
+
+impl EntityKey for ReferenceKey {
+    const ID: EntityKeyId = ENTITY_KEY_REFERENCE_FORWARD_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -403,16 +392,10 @@ impl InverseReferenceKey {
     }
 }
 
-impl EntityKey for InverseReferenceKey {
-    const ID: EntityKeyId = ENTITY_KEY_REFERENCE_INVERSE_ID;
-
-    fn decode(buf: &[u8]) -> Option<Self> {
-        let mut rest = buf;
-        let target = ReferenceTarget::decode(&mut rest)?;
-        if rest.len() != Address::ENCODED_SIZE {
-            return None;
-        }
-        let from = Address::decode(rest)?;
+impl EntityKeyCodec for InverseReferenceKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let target = ReferenceTarget::decode(input)?;
+        let from = Address::decode(input)?;
         Some(Self { target, from })
     }
 
@@ -420,6 +403,10 @@ impl EntityKey for InverseReferenceKey {
         self.target.encode(output);
         self.from.encode(output);
     }
+}
+
+impl EntityKey for InverseReferenceKey {
+    const ID: EntityKeyId = ENTITY_KEY_REFERENCE_INVERSE_ID;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -461,13 +448,13 @@ pub struct ReferenceIndex {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReferenceMutation {
+pub(crate) struct PreparedReferenceIndexRecord {
     encoded_size: usize,
     key: ReferenceKey,
     reference: Option<Reference>,
 }
 
-impl ReferenceMutation {
+impl PreparedReferenceIndexRecord {
     pub(crate) fn new(
         key: ReferenceKey,
         reference: Option<Reference>,
@@ -684,16 +671,16 @@ impl ReferenceIndex {
         }
     }
 
-    pub(crate) fn encode_mutation(
+    pub(crate) fn prepare_record(
         key: ReferenceKey,
         reference: Option<Reference>,
-    ) -> Result<(ReferenceMutation, [EntityWrite; 2]), EntityStorageError> {
+    ) -> Result<(PreparedReferenceIndexRecord, [EntityWrite; 2]), EntityStorageError> {
         let forward = ReferenceRecord::ID.key_for(&key);
         let inverse_key = InverseReferenceKey::new(key.target(), key.from());
         let inverse = ReferenceRecord::ID.key_for(&inverse_key);
         let Some(reference) = reference else {
             return Ok((
-                ReferenceMutation::new(key, None, 0),
+                PreparedReferenceIndexRecord::new(key, None, 0),
                 [EntityWrite::remove(forward), EntityWrite::remove(inverse)],
             ));
         };
@@ -704,7 +691,7 @@ impl ReferenceIndex {
         let encoded = Bytes::from_owner(encoded);
         let encoded_size = encoded.len();
         Ok((
-            ReferenceMutation::new(key, Some(reference), encoded_size),
+            PreparedReferenceIndexRecord::new(key, Some(reference), encoded_size),
             [
                 EntityWrite::insert(forward, encoded.clone()),
                 EntityWrite::insert(inverse, encoded),
@@ -712,19 +699,22 @@ impl ReferenceIndex {
         ))
     }
 
-    pub(crate) fn publish_mutations(&self, mutations: impl IntoIterator<Item = ReferenceMutation>) {
+    pub(crate) fn publish_records(
+        &self,
+        records: impl IntoIterator<Item = PreparedReferenceIndexRecord>,
+    ) {
         match &self.backing {
             ReferenceIndexBacking::Persistent {
                 forward,
                 inverse: inverse_index,
                 ..
             } => {
-                for mutation in mutations {
-                    let ReferenceMutation {
+                for record in records {
+                    let PreparedReferenceIndexRecord {
                         encoded_size,
                         key,
                         reference,
-                    } = mutation;
+                    } = record;
                     let inverse = InverseReferenceKey::new(key.target(), key.from());
                     match reference {
                         Some(reference) => {
@@ -741,8 +731,8 @@ impl ReferenceIndex {
             }
             ReferenceIndexBacking::Transient(index) => {
                 let mut index = index.write();
-                for mutation in mutations {
-                    let ReferenceMutation { key, reference, .. } = mutation;
+                for record in records {
+                    let PreparedReferenceIndexRecord { key, reference, .. } = record;
                     match reference {
                         Some(reference) => index.insert(reference),
                         None => index.remove(key.from(), key.target()),
@@ -1031,12 +1021,11 @@ mod test {
         AddressAnnotation, AddressAnnotationValue, PCodeAddressContext, PCodeBuilder,
     };
     use crate::ir::{
-        CodeBlockTable, FunctionId, FunctionTable, FunctionTableStage, IncompleteCodeBlock,
+        CodeBlockTable, FunctionId, FunctionTable, FunctionTableStaging, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry,
     };
     use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
-    use crate::storage::entities::InMemoryEntityStorage;
-    use crate::storage::entities::schema::ENTITY_PREFIX_SIZE;
+    use crate::storage::entities::{EntityKeyPrefix, InMemoryEntityStorage};
     use crate::storage::segments::space::AddressSpaceId;
 
     fn address(space: u16, offset: u64) -> Address {
@@ -1053,6 +1042,61 @@ mod test {
 
     fn derived_read(from: Address, to: Address) -> Reference {
         Reference::data(from, to, ReferenceProperties::READ).with_origin(ReferenceOrigin::Derived)
+    }
+
+    fn insert_function(
+        functions: &mut FunctionTable,
+        blocks: &mut CodeBlockTable,
+        language: &'static Language,
+        entry: Address,
+        targets: &[Address],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let instructions = targets
+            .iter()
+            .enumerate()
+            .map(|(offset, target)| {
+                let operations = [RawPCodeOp {
+                    op: Op::Call,
+                    inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
+                    output: Varnode::INVALID,
+                }];
+
+                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        insert_function_insns(functions, blocks, entry, instructions)?;
+
+        Ok(())
+    }
+
+    fn insert_function_insns(
+        functions: &mut FunctionTable,
+        blocks: &mut CodeBlockTable,
+        entry: Address,
+        insns: Vec<Insn>,
+    ) -> Result<FunctionId, Box<dyn std::error::Error>> {
+        let mut function = IncompleteFunction::new(entry);
+        let ids = insns
+            .into_iter()
+            .map(|insn| match function.insn_entry(insn.address()) {
+                InsnEntry::Vacant(entry) => entry.insert(insn),
+                InsnEntry::Occupied(entry) => entry.id(),
+            })
+            .collect::<Vec<_>>();
+        let block =
+            IncompleteCodeBlock::try_new(entry, ids.len().max(1), ids, ContextSet::default())
+                .ok_or_else(|| io::Error::other("block construction failed"))?;
+        function.push_block(block);
+
+        let mut staging = FunctionTableStaging::default();
+        let function = function.normalise()?;
+        let record = functions.stage_materialisation(blocks, &mut staging, function)?;
+        let id = record.id();
+        let (batch, writes) = staging.prepare(functions, blocks)?;
+        assert!(writes.is_empty());
+        batch.publish(functions, blocks);
+        Ok(id)
     }
 
     #[test]
@@ -1176,10 +1220,11 @@ mod test {
         assert!(low_encoded < mid_encoded);
         assert!(mid_encoded < high_encoded);
 
-        let target_start = ENTITY_PREFIX_SIZE + Address::ENCODED_SIZE;
-        let mut slice = &low_encoded[target_start..];
-        assert_eq!(ReferenceTarget::decode(&mut slice), Some(low));
-        assert!(slice.is_empty());
+        let (_, mut encoded) =
+            EntityKeyPrefix::split(&low_encoded).expect("encoded key has prefix");
+        assert_eq!(Address::decode(&mut encoded), Some(from));
+        assert_eq!(ReferenceTarget::decode(&mut encoded), Some(low));
+        assert!(encoded.is_empty());
     }
 
     #[test]
@@ -1532,60 +1577,5 @@ mod test {
         }));
 
         Ok(())
-    }
-
-    fn insert_function(
-        functions: &mut FunctionTable,
-        blocks: &mut CodeBlockTable,
-        language: &'static Language,
-        entry: Address,
-        targets: &[Address],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let instructions = targets
-            .iter()
-            .enumerate()
-            .map(|(offset, target)| {
-                let operations = [RawPCodeOp {
-                    op: Op::Call,
-                    inputs: Inputs::one(Varnode::new(language.default_space(), target.offset(), 8)),
-                    output: Varnode::INVALID,
-                }];
-
-                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        insert_function_insns(functions, blocks, entry, instructions)?;
-
-        Ok(())
-    }
-
-    fn insert_function_insns(
-        functions: &mut FunctionTable,
-        blocks: &mut CodeBlockTable,
-        entry: Address,
-        insns: Vec<Insn>,
-    ) -> Result<FunctionId, Box<dyn std::error::Error>> {
-        let mut function = IncompleteFunction::new(entry);
-        let ids = insns
-            .into_iter()
-            .map(|insn| match function.insn_entry(insn.address()) {
-                InsnEntry::Vacant(entry) => entry.insert(insn),
-                InsnEntry::Occupied(entry) => entry.id(),
-            })
-            .collect::<Vec<_>>();
-        let block =
-            IncompleteCodeBlock::try_new(entry, ids.len().max(1), ids, ContextSet::default())
-                .ok_or_else(|| io::Error::other("block construction failed"))?;
-        function.push_block(block);
-
-        let mut stage = FunctionTableStage::default();
-        let function = function.prepare_materialisation()?;
-        let mutation = functions.stage_materialisation(blocks, &mut stage, function)?;
-        let id = mutation.id();
-        let (prepared, writes) = stage.prepare(functions, blocks)?;
-        assert!(writes.is_empty());
-        prepared.publish(functions, blocks);
-        Ok(id)
     }
 }
