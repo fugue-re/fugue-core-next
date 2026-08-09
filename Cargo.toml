@@ -21,6 +21,7 @@ members = [
   "fugue-sleigh-language",
   "fugue-sleigh-marshal",
   "fugue-sleigh-semantics",
+  "fugue-workbench",
 ]
 resolver = "2"
 
