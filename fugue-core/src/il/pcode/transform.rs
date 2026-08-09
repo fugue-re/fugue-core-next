@@ -50,7 +50,7 @@ impl PCodeCanonicaliser {
             by_target
                 .iter()
                 .find(|(to, _)| Some(*to) == target)
-                .map_or(IlEdgeKinds::UNCONDITIONAL, |(_, kinds)| *kinds)
+                .map_or(IlEdgeKinds::FALL_THROUGH, |(_, kinds)| *kinds)
         }));
     }
 }

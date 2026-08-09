@@ -9,6 +9,7 @@ use crate::il::pcode::{
     RegisterId, RegisterSlice,
 };
 use crate::lifter::Varnode;
+use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum LocationRole {
@@ -20,6 +21,7 @@ enum LocationRole {
 pub(crate) struct ECodeLiftScratch<V> {
     intrinsic_args: Vec<Varnode>,
     operands: Vec<V>,
+    space: Option<AddressSpaceId>,
 }
 
 impl<V> Default for ECodeLiftScratch<V> {
@@ -27,6 +29,7 @@ impl<V> Default for ECodeLiftScratch<V> {
         Self {
             intrinsic_args: Vec::new(),
             operands: Vec::new(),
+            space: None,
         }
     }
 }
@@ -92,7 +95,9 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
                 .get(source_span)
                 .filter(|span| span.destination().start() == index)
             {
-                self.sink.begin_instruction(span.address())?;
+                let address = span.address();
+                self.scratch.space = Some(address.space());
+                self.sink.begin_instruction(address)?;
                 self.values.clear();
                 self.register_values.clear();
                 self.register_reads.clear();
@@ -211,6 +216,8 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
             self.effects += 1;
         } else if location.is_register() {
             self.assign_register(&location, value)?;
+        } else if location.lifter_space().value() == self.arch.language().default_space() {
+            self.lift_memory_write(&location, value)?;
         } else {
             self.values.insert((output, LocationRole::Value), value);
         }
@@ -351,6 +358,8 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
             return Ok(value);
         } else if location.is_register() {
             return self.lift_register(id, &location);
+        } else if location.lifter_space().value() == self.arch.language().default_space() {
+            return self.lift_memory_read(&location);
         } else {
             self.sink
                 .undefined(location.bits(), u64::from(id.value()))?
@@ -359,6 +368,41 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
         self.values.insert(key, value);
 
         Ok(value)
+    }
+
+    fn lift_memory_read(&mut self, location: &PCodeLocation) -> Result<S::Value, IlError> {
+        let space = self
+            .scratch
+            .space
+            .expect("operations are preceded by an instruction span");
+        let pointer = self
+            .sink
+            .address(self.arch.language().address_bits(), location.offset())?;
+        self.sink.apply(
+            ECodeExprOpcode::Load,
+            location.bits(),
+            &[pointer],
+            u64::from(location.lifter_space().value()),
+            Some(space),
+        )
+    }
+
+    fn lift_memory_write(
+        &mut self,
+        location: &PCodeLocation,
+        value: S::Value,
+    ) -> Result<(), IlError> {
+        let space = self
+            .scratch
+            .space
+            .expect("operations are preceded by an instruction span");
+        let pointer = self
+            .sink
+            .address(self.arch.language().address_bits(), location.offset())?;
+        self.sink.store(&[pointer, value], Some(space))?;
+        self.effects += 1;
+
+        Ok(())
     }
 
     fn lift_register(

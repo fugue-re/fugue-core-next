@@ -167,7 +167,7 @@ impl fmt::Display for ECodeSsaMemoryDomainDisplay<'_> {
         let index = self.index;
         let space = self.domain.space().index();
 
-        write!(f, "@mem{index} @fugue_space<{space}>")
+        write!(f, "@mem{index} @space<{space}>")
     }
 }
 
@@ -269,7 +269,7 @@ impl<'a> ECodeSsaOpDisplay<'a> {
 
         if let Some(space) = self.operation.address_space() {
             let space = space.index();
-            write!(f, " @fugue_space<{space}>")?;
+            write!(f, " @space<{space}>")?;
         }
 
         if let Some(address) = self.operation.address() {

@@ -109,7 +109,7 @@ impl fmt::Display for PCodeLocationDisplay<'_> {
 
         write!(
             f,
-            "%l{index}:bytes<{size}>@lifter_space<{lifter_space}>[0x{offset:x}]{{{kind}}}"
+            "%l{index}:bytes<{size}>@space<{lifter_space}>[0x{offset:x}]{{{kind}}}"
         )
     }
 }
@@ -155,7 +155,7 @@ impl<'a> PCodeOpDisplay<'a> {
     fn write_effects(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(space) = self.operation.address_space() {
             let space = space.index();
-            write!(f, " @fugue_space<{space}>")?;
+            write!(f, " @space<{space}>")?;
         }
 
         if matches!(
@@ -163,7 +163,7 @@ impl<'a> PCodeOpDisplay<'a> {
             PCodeOpcode::Load | PCodeOpcode::Store
         ) {
             let lifter_space = self.operation.immediate();
-            write!(f, " @lifter_space<{lifter_space}>")?;
+            write!(f, " @space<{lifter_space}>")?;
         }
 
         if matches!(self.operation.opcode(), PCodeOpcode::UserOp) {
@@ -271,8 +271,8 @@ mod test {
 
         assert_eq!(
             ir.display().to_string(),
-            "@0 %l1:bytes<8>@lifter_space<1>[0x20]{register} = pcode.copy %l0:bytes<8>@lifter_space<0>[0x11]{constant}\n\
-             @1 pcode.branch %l0:bytes<8>@lifter_space<0>[0x11]{constant} -> 0x2:0x2000"
+            "@0 %l1:bytes<8>@space<1>[0x20]{register} = pcode.copy %l0:bytes<8>@space<0>[0x11]{constant}\n\
+             @1 pcode.branch %l0:bytes<8>@space<0>[0x11]{constant} -> 0x2:0x2000"
         );
     }
 
@@ -330,7 +330,7 @@ mod test {
         assert_eq!(operations[0].1.opcode(), PCodeOpcode::IntNeg);
         assert_eq!(
             ir.display_source(second).to_string(),
-            "@1 %l1:bytes<8>@lifter_space<1>[0x20]{register} = pcode.int_neg %l1:bytes<8>@lifter_space<1>[0x20]{register}"
+            "@1 %l1:bytes<8>@space<1>[0x20]{register} = pcode.int_neg %l1:bytes<8>@space<1>[0x20]{register}"
         );
         assert_eq!(
             ir.display_source(Address::new(AddressSpaceId::new(1), 0x2000u64))

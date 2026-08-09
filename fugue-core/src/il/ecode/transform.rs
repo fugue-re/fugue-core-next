@@ -189,12 +189,16 @@ impl PCodeToECode {
                     .successors()
                     .slice(source.graph().successor_kinds());
 
-                match range.end().checked_sub(1).and_then(|index| {
-                    source
-                        .operations()
-                        .get(index)
-                        .map(|operation| (index, operation))
-                }) {
+                match range
+                    .end()
+                    .checked_sub(1)
+                    .filter(|index| *index >= range.start())
+                    .and_then(|index| {
+                        source
+                            .operations()
+                            .get(index)
+                            .map(|operation| (index, operation))
+                    }) {
                     Some((operation_index, operation))
                         if matches!(
                             operation.opcode(),

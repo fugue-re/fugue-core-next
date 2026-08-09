@@ -10,7 +10,7 @@ use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaConstantInterner, ECodeSsaMemoryDomain,
     ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
 };
-use crate::ir::Address;
+use crate::ir::{Address, AddressRange};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
 
@@ -241,6 +241,27 @@ impl ECodeSsaIr {
     pub(crate) fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
         self.defining_operation(value)?
             .constant(&self.constant_storage)
+    }
+
+    pub fn memory_access_range(&self, operation: &ECodeSsaOp) -> Option<AddressRange> {
+        let space = operation.address_space()?;
+        let pointer = self.defining_operation(self.pointer_operand(operation)?)?;
+        if pointer.opcode() != ECodeSsaOpcode::Address {
+            return None;
+        }
+        let width = match operation.opcode() {
+            ECodeSsaOpcode::Load => operation.width(),
+            ECodeSsaOpcode::Store => self
+                .operation_operands_for(operation)
+                .get(1)
+                .copied()
+                .and_then(|value| self.value_width(value))?,
+            _ => return None,
+        };
+        AddressRange::from_size(
+            Address::new(space, pointer.immediate()),
+            u64::from(width.div_ceil(8)),
+        )
     }
 
     fn defining_operation_index(&self, value: IlValueId) -> Option<usize> {

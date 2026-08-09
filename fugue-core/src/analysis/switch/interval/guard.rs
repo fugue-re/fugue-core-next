@@ -6,7 +6,7 @@ use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlValueId};
 use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
-use crate::ir::{Address, AddressWithContext};
+use crate::ir::{Address, AddressRange, AddressWithContext};
 use crate::lifter::{ContextSet, InsnResolver};
 
 pub(crate) struct SwitchGuard {
@@ -391,10 +391,26 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                 }
                 return false;
             }
-            if oa.opcode() == ECodeSsaOpcode::Load
-                && self.ssa.memory_operand(oa) != self.ssa.memory_operand(ob)
-            {
-                return false;
+            if oa.opcode() == ECodeSsaOpcode::Load {
+                if oa.immediate() != ob.immediate()
+                    || oa.address() != ob.address()
+                    || oa.address_space() != ob.address_space()
+                    || depth >= self.config.max_trace_depth()
+                {
+                    return false;
+                }
+                let (Some(a_pointer), Some(b_pointer)) =
+                    (self.ssa.pointer_operand(oa), self.ssa.pointer_operand(ob))
+                else {
+                    return false;
+                };
+                if self.ssa.memory_operand(oa) != self.ssa.memory_operand(ob)
+                    && !self.observes_same_memory(oa, ob)
+                {
+                    return false;
+                }
+                pending.push((a_pointer, b_pointer, depth + 1));
+                continue;
             }
             if depth >= self.config.max_trace_depth()
                 || oa.opcode().has_side_effect()
@@ -420,6 +436,55 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         }
 
         true
+    }
+
+    fn observes_same_memory(&self, a: &ECodeSsaOp, b: &ECodeSsaOp) -> bool {
+        let (Some(a_range), Some(b_range)) = (
+            self.ssa.memory_access_range(a),
+            self.ssa.memory_access_range(b),
+        ) else {
+            return false;
+        };
+        if a_range != b_range {
+            return false;
+        }
+        let (Some(a_memory), Some(b_memory)) =
+            (self.ssa.memory_operand(a), self.ssa.memory_operand(b))
+        else {
+            return false;
+        };
+        self.memory_preserved_for_range(a_memory, b_memory, &a_range)
+            || self.memory_preserved_for_range(b_memory, a_memory, &a_range)
+    }
+
+    fn memory_preserved_for_range(
+        &self,
+        from: IlValueId,
+        to: IlValueId,
+        range: &AddressRange,
+    ) -> bool {
+        let mut state = from;
+        for _ in 0..self.config.max_trace_steps() {
+            if state == to {
+                return true;
+            }
+            let Some(operation) = self.ssa.defining_operation(state) else {
+                return false;
+            };
+            if operation.opcode() != ECodeSsaOpcode::Store {
+                return false;
+            }
+            if let Some(stored) = self.ssa.memory_access_range(operation)
+                && stored.intersects(range)
+            {
+                return false;
+            }
+            let Some(previous) = self.ssa.memory_operand(operation) else {
+                return false;
+            };
+            state = previous;
+        }
+        false
     }
 
     fn comparison_value(&self, value: IlValueId) -> IlValueId {

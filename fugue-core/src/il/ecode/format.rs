@@ -134,7 +134,7 @@ impl<'a> ECodeExprDisplay<'a> {
     fn write_metadata(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(space) = self.expression.address_space() {
             let space = space.index();
-            write!(f, " @fugue_space<{space}>")?;
+            write!(f, " @space<{space}>")?;
         }
 
         match self.expression.opcode() {
@@ -232,7 +232,7 @@ impl<'a> ECodeStmtDisplay<'a> {
 
         if let Some(space) = self.statement.address_space() {
             let space = space.index();
-            write!(f, " @fugue_space<{space}>")?;
+            write!(f, " @space<{space}>")?;
         }
 
         if let Some(address) = self.statement.address() {
@@ -320,7 +320,7 @@ mod test {
             ir.display().to_string(),
             "%e0:bits<64> = ecode.const 0x2a\n\
              %e1:bits<64> = ecode.const 0x1000\n\
-             @s0 ecode.store @fugue_space<3> %e1, %e0\n\
+             @s0 ecode.store @space<3> %e1, %e0\n\
              @s1 ecode.br -> 0x2:0x2000 %e0"
         );
     }
