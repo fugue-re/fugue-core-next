@@ -326,17 +326,25 @@ mod test {
                 let bytes = view
                     .as_contiguous()
                     .ok_or(SegmentStorageError::InvalidAddressRange)?;
-                let resolved = resolver.resolve_extent(
-                    block.address(),
-                    block.size(),
-                    block.context(),
-                    bytes,
-                )?;
-                insns.extend(
-                    resolved
-                        .into_iter()
-                        .map(|insn| (insn.address(), insn.size())),
-                );
+                let bytes = bytes
+                    .get(..block.size())
+                    .ok_or(SegmentStorageError::InvalidAddressRange)?;
+                block
+                    .context()
+                    .apply(block.address(), resolver.context_mut());
+
+                let mut offset = 0usize;
+                while offset < bytes.len() {
+                    let address = block.address() + offset;
+                    let remaining = bytes.len() - offset;
+                    let insn = resolver.resolve(address, &bytes[offset..])?.into_insn();
+                    let size = insn.size();
+                    if size == 0 || size > remaining {
+                        return Err(SegmentStorageError::InvalidAddressRange.into());
+                    }
+                    insns.insert(address, size);
+                    offset += size;
+                }
             }
         }
 

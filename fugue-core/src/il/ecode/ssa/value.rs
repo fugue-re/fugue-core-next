@@ -1,57 +1,36 @@
-use crate::il::common::{IlBlockId, IlOpId, IlValueId};
+use std::mem::size_of;
+
+use crate::il::common::{IlBlockArgId, IlBlockId, IlOpId, IlSsaDef, IlValueId};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct ECodeSsaValue {
     width: u32,
-    definition_kind: ECodeSsaValueKind,
-    definition_index: u32,
+    definition: IlSsaDef,
 }
 
+const _: () = assert!(size_of::<ECodeSsaValue>() <= 12);
+
 impl ECodeSsaValue {
-    pub(crate) const fn new(
-        width: u32,
-        definition_kind: ECodeSsaValueKind,
-        definition_index: u32,
-    ) -> Self {
-        Self {
-            width,
-            definition_kind,
-            definition_index,
-        }
+    pub(crate) const fn new(width: u32, definition: IlSsaDef) -> Self {
+        Self { width, definition }
     }
 
     pub const fn operation_result(width: u32, operation: IlOpId) -> Self {
-        Self::new(
-            width,
-            ECodeSsaValueKind::Operation,
-            operation.index() as u32,
-        )
+        Self::new(width, IlSsaDef::Operation(operation))
     }
 
-    pub const fn block_argument(width: u32, argument: u32) -> Self {
-        Self::new(width, ECodeSsaValueKind::BlockArgument, argument)
+    pub const fn block_argument(width: u32, argument: IlBlockArgId) -> Self {
+        Self::new(width, IlSsaDef::BlockArgument(argument))
     }
 
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    pub const fn definition_kind(&self) -> ECodeSsaValueKind {
-        self.definition_kind
+    pub const fn definition(&self) -> IlSsaDef {
+        self.definition
     }
-
-    pub const fn definition_index(&self) -> u32 {
-        self.definition_index
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(derive(Debug, PartialEq, Eq))]
-#[repr(u8)]
-pub enum ECodeSsaValueKind {
-    Operation = 0,
-    BlockArgument = 1,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

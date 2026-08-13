@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 use ts_rs::TS;
 
@@ -19,7 +21,7 @@ mod il_render;
 mod server;
 mod session;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -69,7 +71,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn serve(arguments: &ArgMatches) -> anyhow::Result<()> {
+fn serve(arguments: &ArgMatches) -> Result<()> {
     let address = arguments
         .get_one::<String>("address")
         .expect("address has a default")
@@ -81,13 +83,11 @@ fn serve(arguments: &ArgMatches) -> anyhow::Result<()> {
         state.set(Session::open(input, persist, state.change_sender())?);
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(server::serve(state, address))
 }
 
-fn export_bindings(arguments: &ArgMatches) -> anyhow::Result<()> {
+fn export_bindings(arguments: &ArgMatches) -> Result<()> {
     let out = arguments
         .get_one::<PathBuf>("out")
         .expect("out has a default");

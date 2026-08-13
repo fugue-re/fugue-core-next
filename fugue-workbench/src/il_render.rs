@@ -2,15 +2,17 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use fugue_core::arch::Arch;
-use fugue_core::il::common::{IlExprId, IlValueId};
-use fugue_core::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
+use fugue_core::il::common::{IlExprId, IlSourceSpan, IlValueId};
+use fugue_core::il::ecode::ssa::{ECodeSsaDomain, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode};
 use fugue_core::il::ecode::{ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
+use fugue_core::il::mcode::ssa::{MCodeSsaIr, MCodeSsaOp, MCodeSsaOpcode};
+use fugue_core::il::mcode::{MCodeVarId, MCodeVarKind};
 use fugue_core::il::pcode::{PCodeIr, PCodeLocationId, PCodeOp};
 use fugue_core::ir::Address;
 use fugue_core::lifter::{Lifter, Varnode};
 use fugue_core::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
 
-use crate::bindings::{IlLine, IlToken, IlTokenKind};
+use crate::bindings::{Address as BindingAddress, IlLine, IlToken, IlTokenKind};
 
 const PREC_INFIX_MIN: u8 = 1;
 
@@ -28,7 +30,7 @@ impl IlRenderer {
             .flags()
             .iter()
             .filter_map(|flag| {
-                let varnode: &Varnode = flag.borrow();
+                let varnode = flag.borrow();
                 lifter
                     .register_name(varnode)
                     .map(|name| (varnode.offset, name))
@@ -42,7 +44,7 @@ impl IlRenderer {
         }
     }
 
-    fn ordered_addresses(&self, spans: &[fugue_core::il::common::IlSourceSpan]) -> Vec<Address> {
+    fn ordered_addresses(&self, spans: &[IlSourceSpan]) -> Vec<Address> {
         let mut addresses = spans.iter().map(|span| span.address()).collect::<Vec<_>>();
         addresses.sort_by_key(Address::offset);
         addresses.dedup();
@@ -65,9 +67,12 @@ impl IlRenderer {
         IlToken::new(IlTokenKind::Number, format!("{value:#x}"))
     }
 
-    fn register(&self, offset: u64, bytes: u16) -> IlToken {
-        let varnode = Varnode::new(self.register_space, offset, bytes.max(1));
-        match self.lifter.register_name(&varnode) {
+    fn register(&self, offset: u64, bytes: u32) -> IlToken {
+        let name = u16::try_from(bytes.max(1)).ok().and_then(|bytes| {
+            let varnode = Varnode::new(self.register_space, offset, bytes);
+            self.lifter.register_name(&varnode)
+        });
+        match name {
             Some(name) => IlToken::new(IlTokenKind::Register, name),
             None => IlToken::new(IlTokenKind::Register, format!("reg[{offset:#x}]"))
                 .with_title(format!("register offset {offset:#x}, {bytes} bytes")),
@@ -114,7 +119,7 @@ impl IlRenderer {
                 let mut tokens = Vec::new();
                 self.ecode_statement(ir, statement, &mut tokens);
                 lines.push(IlLine {
-                    address: crate::bindings::Address::from(address),
+                    address: BindingAddress::from(address),
                     tokens,
                 });
             }
@@ -127,10 +132,8 @@ impl IlRenderer {
         match statement.opcode() {
             ECodeStmtOpcode::WriteRegister => {
                 let value = statement.value();
-                let bytes = value
-                    .map(|id| self.expr_bytes(ir, id))
-                    .unwrap_or(0);
-                out.push(self.register(statement.immediate(), bytes));
+                let bytes = value.map(|id| self.expr_bytes(ir, id)).unwrap_or(0);
+                out.push(self.register(statement.immediate(), u32::from(bytes)));
                 out.push(Self::punct(" = "));
                 self.ecode_value(ir, value, out);
             }
@@ -271,7 +274,7 @@ impl IlRenderer {
             ECodeExprOpcode::Constant => out.push(Self::number(expression.immediate())),
             ECodeExprOpcode::Address => out.push(self.address_token(expression.immediate())),
             ECodeExprOpcode::ReadRegister => {
-                out.push(self.register(expression.immediate(), (expression.width() / 8) as u16))
+                out.push(self.register(expression.immediate(), expression.width().div_ceil(8)))
             }
             ECodeExprOpcode::ReadFlag => out.push(self.flag(expression.immediate())),
             ECodeExprOpcode::Copy => {
@@ -299,7 +302,11 @@ impl IlRenderer {
                     self.ecode_expr(ir, operands[0], out, precedence);
                     match self.negated_addend(ir, opcode, operands[1]) {
                         Some(magnitude) => {
-                            let flipped = if opcode == ECodeExprOpcode::Add { "-" } else { "+" };
+                            let flipped = if opcode == ECodeExprOpcode::Add {
+                                "-"
+                            } else {
+                                "+"
+                            };
                             out.push(IlToken::new(
                                 IlTokenKind::Punctuation,
                                 format!(" {flipped} "),
@@ -332,9 +339,7 @@ impl IlRenderer {
 
         if matches!(
             expression.opcode(),
-            ECodeExprOpcode::Constant
-                | ECodeExprOpcode::ReadRegister
-                | ECodeExprOpcode::ReadFlag
+            ECodeExprOpcode::Constant | ECodeExprOpcode::ReadRegister | ECodeExprOpcode::ReadFlag
         ) && let Some(token) = out.last_mut()
         {
             token.title = Some(format!("{} bits", expression.width()));
@@ -352,7 +357,7 @@ impl IlRenderer {
                 let mut tokens = Vec::new();
                 self.pcode_operation(ir, operation, &mut tokens);
                 lines.push(IlLine {
-                    address: crate::bindings::Address::from(span.address()),
+                    address: BindingAddress::from(span.address()),
                     tokens,
                 });
             }
@@ -400,7 +405,7 @@ impl IlRenderer {
         if location.is_constant() {
             out.push(Self::number(location.offset()).with_title(format!("{bytes} bytes")));
         } else if location.is_register() {
-            out.push(self.register(location.offset(), bytes));
+            out.push(self.register(location.offset(), u32::from(bytes)));
         } else if location.is_unique() {
             out.push(
                 IlToken::new(IlTokenKind::Value, format!("u{:x}", location.offset()))
@@ -425,7 +430,7 @@ impl IlRenderer {
                 let mut tokens = Vec::new();
                 self.ssa_operation(ir, operation, &mut tokens);
                 lines.push(IlLine {
-                    address: crate::bindings::Address::from(address),
+                    address: BindingAddress::from(address),
                     tokens,
                 });
             }
@@ -437,17 +442,36 @@ impl IlRenderer {
         let token = IlToken::new(IlTokenKind::Value, format!("%v{}", id.index()));
         match ir.values().get(id.index()) {
             Some(value) if value.width() == 0 => token.with_title(self.memory_state_title(ir, id)),
-            Some(value) => token.with_title(format!("{} bits", value.width())),
+            Some(value) => token.with_title(self.bound_value_title(ir, id, value.width())),
             None => token,
+        }
+    }
+
+    fn bound_value_title(&self, ir: &ECodeSsaIr, id: IlValueId, width: u32) -> String {
+        match ir.value_domain(id) {
+            Some(ECodeSsaDomain::Register(offset)) => {
+                let name = u16::try_from(width.div_ceil(8).max(1))
+                    .ok()
+                    .and_then(|bytes| {
+                        let varnode = Varnode::new(self.register_space, offset.value(), bytes);
+                        self.lifter.register_name(&varnode)
+                    });
+                match name {
+                    Some(name) => format!("{name}, {width} bits"),
+                    None => format!("register offset {:#x}, {width} bits", offset.value()),
+                }
+            }
+            Some(ECodeSsaDomain::Flag(offset)) => match self.flags.get(&offset.value()) {
+                Some(name) => format!("{name}, {width} bits"),
+                None => format!("flag offset {:#x}, {width} bits", offset.value()),
+            },
+            _ => format!("{width} bits"),
         }
     }
 
     fn memory_state_title(&self, ir: &ECodeSsaIr, id: IlValueId) -> String {
         let space = ir
-            .values()
-            .get(id.index())
-            .filter(|value| value.definition_kind() == ECodeSsaValueKind::Operation)
-            .and_then(|value| ir.operations().get(value.definition_index() as usize))
+            .defining_operation(id)
             .and_then(|operation| match operation.opcode() {
                 ECodeSsaOpcode::Undefined => {
                     AddressSpaceId::try_new(operation.immediate() as usize).ok()
@@ -514,6 +538,14 @@ impl IlRenderer {
             ECodeSsaOpcode::Intrinsic | ECodeSsaOpcode::IntrinsicResult => {
                 out.push(self.intrinsic_meta(operation.immediate()));
             }
+            ECodeSsaOpcode::WriteFlag => {
+                out.push(Self::punct(" "));
+                out.push(self.flag(operation.immediate()));
+            }
+            ECodeSsaOpcode::WriteRegister => {
+                out.push(Self::punct(" "));
+                out.push(self.register(operation.immediate(), operation.width().div_ceil(8)));
+            }
             _ => {}
         }
 
@@ -535,6 +567,186 @@ impl IlRenderer {
             out.push(self.space(space));
         }
 
+        if let Some(address) = operation.address() {
+            out.push(Self::punct(" -> "));
+            out.push(
+                IlToken::new(IlTokenKind::Address, format!("{:#x}", address.offset()))
+                    .with_nav(address),
+            );
+        }
+    }
+
+    pub fn mcode_ssa(&self, ir: &MCodeSsaIr) -> Vec<IlLine> {
+        let mut lines = Vec::new();
+        for address in self.ordered_addresses(ir.source_spans()) {
+            for (_, operation) in ir.operations_for_source(address) {
+                let mut tokens = Vec::new();
+                self.mcode_ssa_operation(ir, operation, &mut tokens);
+                lines.push(IlLine {
+                    address: BindingAddress::from(address),
+                    tokens,
+                });
+            }
+        }
+        lines
+    }
+
+    fn mcode_ssa_value(&self, ir: &MCodeSsaIr, id: IlValueId) -> IlToken {
+        let Some(value) = ir.values().get(id.index()) else {
+            return IlToken::new(IlTokenKind::Meta, "?");
+        };
+        let Some(binding) = ir.binding(id) else {
+            let token = IlToken::new(IlTokenKind::Value, format!("%v{}", id.index()));
+            return if value.width() == 0 {
+                token.with_title(self.mcode_memory_state_title(ir, id))
+            } else {
+                token.with_title(format!("{} bits", value.width()))
+            };
+        };
+        self.mcode_variable(
+            ir,
+            binding.variable(),
+            Some(binding.version().value()),
+            value.width(),
+        )
+    }
+
+    fn mcode_variable(
+        &self,
+        ir: &MCodeSsaIr,
+        id: MCodeVarId,
+        version: Option<u32>,
+        width: u32,
+    ) -> IlToken {
+        let Some(variable) = ir.variable(id) else {
+            let version = version
+                .map(|version| format!("#{version}"))
+                .unwrap_or_default();
+            return IlToken::new(IlTokenKind::Meta, format!("var<?>{version}"));
+        };
+        let lifetime = (variable.index() != 0).then(|| format!("_{}", variable.index()));
+        let version = version
+            .map(|version| format!("#{version}"))
+            .unwrap_or_default();
+        match variable.kind() {
+            MCodeVarKind::Flag => {
+                let storage = variable
+                    .flag_id()
+                    .expect("flag variable has flag storage")
+                    .value();
+                let mut token = self.flag(storage);
+                if let Some(lifetime) = lifetime {
+                    token.text.push_str(&lifetime);
+                }
+                token.text.push_str(&version);
+                token.with_title(format!("flag storage {storage:#x}, {width} bits"))
+            }
+            MCodeVarKind::Register => {
+                let storage = variable
+                    .register_id()
+                    .expect("register variable has register storage")
+                    .value();
+                let mut token = self.register(storage, width.div_ceil(8));
+                if let Some(lifetime) = lifetime {
+                    token.text.push_str(&lifetime);
+                }
+                token.text.push_str(&version);
+                token.with_title(format!("register storage {storage:#x}, {width} bits"))
+            }
+            MCodeVarKind::Stack => {
+                let storage = variable
+                    .stack_offset()
+                    .expect("stack variable has stack storage");
+                let lifetime = lifetime.unwrap_or_default();
+                IlToken::new(
+                    IlTokenKind::Value,
+                    format!("stack[{storage:#x}]{lifetime}{version}"),
+                )
+                .with_title(format!("stack storage {storage:#x}, {width} bits"))
+            }
+        }
+    }
+
+    fn mcode_memory_state_title(&self, ir: &MCodeSsaIr, id: IlValueId) -> String {
+        let space = ir
+            .defining_operation(id)
+            .and_then(|operation| match operation.opcode() {
+                MCodeSsaOpcode::Undefined => {
+                    AddressSpaceId::try_new(operation.immediate() as usize).ok()
+                }
+                _ => operation.address_space(),
+            });
+        match space {
+            Some(space) => format!("memory state of {}", Self::space_label(space.index())),
+            None => "memory state".to_owned(),
+        }
+    }
+
+    fn mcode_ssa_operation(&self, ir: &MCodeSsaIr, operation: &MCodeSsaOp, out: &mut Vec<IlToken>) {
+        let results = operation.results();
+        for index in results.start()..results.end() {
+            if let Ok(id) = IlValueId::try_from_index(index) {
+                if index != results.start() {
+                    out.push(Self::punct(", "));
+                }
+                out.push(self.mcode_ssa_value(ir, id));
+            }
+        }
+        if !results.is_empty() {
+            out.push(Self::punct(" = "));
+        }
+        out.push(Self::opcode(operation.opcode().mnemonic()));
+
+        match operation.opcode() {
+            MCodeSsaOpcode::Constant if operation.width() > 64 => {
+                if let Some(value) = IlValueId::try_from_index(results.start())
+                    .ok()
+                    .and_then(|value| ir.constant_value(value))
+                {
+                    out.push(Self::punct(" "));
+                    out.push(IlToken::new(IlTokenKind::Number, format!("0x{value:x}")));
+                }
+            }
+            MCodeSsaOpcode::Constant => {
+                out.push(Self::punct(" "));
+                out.push(Self::number(operation.immediate()));
+            }
+            MCodeSsaOpcode::Address => {
+                out.push(Self::punct(" "));
+                out.push(self.address_token(operation.immediate()));
+            }
+            MCodeSsaOpcode::Intrinsic | MCodeSsaOpcode::IntrinsicResult => {
+                out.push(self.intrinsic_meta(operation.immediate()));
+            }
+            MCodeSsaOpcode::SetVarField
+            | MCodeSsaOpcode::VarAliasedField
+            | MCodeSsaOpcode::SetVarAliasedField
+            | MCodeSsaOpcode::AddressOfField => {
+                out.push(Self::punct(" "));
+                out.push(Self::offset_meta(operation.immediate()));
+            }
+            _ => {}
+        }
+
+        if matches!(
+            operation.opcode(),
+            MCodeSsaOpcode::VarAliased
+                | MCodeSsaOpcode::VarAliasedField
+                | MCodeSsaOpcode::AddressOf
+                | MCodeSsaOpcode::AddressOfField
+        ) && let Some(variable) = operation.variable()
+        {
+            out.push(Self::punct(" "));
+            out.push(self.mcode_variable(ir, variable, None, operation.width()));
+        }
+        for operand in ir.operation_operands_for(operation) {
+            out.push(Self::punct(" "));
+            out.push(self.mcode_ssa_value(ir, *operand));
+        }
+        if let Some(space) = operation.address_space() {
+            out.push(Self::punct(" "));
+            out.push(self.space(space));
+        }
         if let Some(address) = operation.address() {
             out.push(Self::punct(" -> "));
             out.push(

@@ -619,8 +619,8 @@ mod test {
     }
 
     impl GraphGenerator {
-        const fn new(seed: u64) -> Self {
-            Self { state: seed }
+        const fn new(state: u64) -> Self {
+            Self { state }
         }
 
         fn edges(&mut self, node_count: usize) -> Vec<Vec<usize>> {

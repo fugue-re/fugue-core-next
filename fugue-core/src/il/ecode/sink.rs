@@ -1,8 +1,7 @@
 use smallvec::SmallVec;
 
-use crate::il::common::IlError;
+use crate::il::common::{FlagId, IlError, RegisterId};
 use crate::il::ecode::{ECodeExprOpcode, ECodeStmtOpcode};
-use crate::il::pcode::{FlagId, RegisterId};
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 

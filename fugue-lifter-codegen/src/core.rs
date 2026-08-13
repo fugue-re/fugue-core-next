@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 
 use fugue_sleigh_language::construct::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
+use fugue_sleigh_language::convention::{
+    Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress,
+};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
     Context, DecisionPair, DisjointPattern, PatternBlock,
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
+use fugue_sleigh_language::varnode::VarnodeData;
 use fugue_sleigh_language::Language;
 use indexmap::IndexMap;
 use proc_macro2::{Ident, Span, TokenStream};
@@ -32,14 +36,12 @@ pub(crate) struct Tables<'a> {
     operand_filters: Vec<TokenStream>,
     pattern_ops: Vec<TokenStream>,
     symbols: Vec<TokenStream>,
-
     // NOTE: we could attempt to dedup. these templates
     const_tpls: IndexMap<&'a ConstTpl, TokenStream>,
     construct_tpls: IndexMap<&'a ConstructTpl, TokenStream>,
     handle_tpls: IndexMap<&'a HandleTpl, TokenStream>,
     op_tpls: IndexMap<&'a OpTpl, TokenStream>,
     varnode_tpls: IndexMap<&'a VarnodeTpl, TokenStream>,
-
     ctor_id_mapping: BTreeMap<(usize, usize, usize), usize>, // (id, scope, ctor) -> ctor
     operand_filter_id_mapping: BTreeMap<usize, usize>,       // sym -> filter
     // FIXME: (id, scope) is not needed--id should be unique across scopes
@@ -952,6 +954,137 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             .keys()
             .collect::<Vec<_>>();
         compiler_ids.sort_unstable();
+
+        let varnode_tokens = |varnode: &VarnodeData| {
+            let space =
+                u8::try_from(varnode.space().index()).expect("address-space identifier fits in u8");
+            let offset = varnode.offset();
+            let size = u16::try_from(varnode.size()).expect("register size fits in u16");
+            quote! {
+                fugue_lifter_runtime::pcode::Varnode::new(#space, #offset, #size)
+            }
+        };
+
+        let operand_tokens = |operand: &PrototypeOperand| match operand {
+            PrototypeOperand::Register { varnode, .. } => {
+                let varnode = varnode_tokens(varnode);
+                quote! {
+                    fugue_lifter_runtime::convention::PrototypeOperand::Register(#varnode)
+                }
+            }
+            PrototypeOperand::RegisterJoin {
+                first_varnode,
+                second_varnode,
+                ..
+            } => {
+                let first = varnode_tokens(first_varnode);
+                let second = varnode_tokens(second_varnode);
+                quote! {
+                    fugue_lifter_runtime::convention::PrototypeOperand::RegisterJoin(#first, #second)
+                }
+            }
+            PrototypeOperand::StackRelative(offset) => quote! {
+                fugue_lifter_runtime::convention::PrototypeOperand::StackRelative(#offset)
+            },
+        };
+
+        let entry_tokens = |entry: &PrototypeEntry| {
+            let min_size = entry.min_size();
+            let max_size = entry.max_size();
+            let alignment = entry.alignment();
+            let operand = operand_tokens(entry.operand());
+            let mut tokens = quote! {
+                fugue_lifter_runtime::convention::PrototypeEntry::new(#min_size, #max_size, #alignment, #operand)
+            };
+            if let Some(meta_type) = entry.meta_type() {
+                tokens = quote! { #tokens.with_meta_type(#meta_type) };
+            }
+            if let Some(extension) = entry.extension() {
+                tokens = quote! { #tokens.with_extension(#extension) };
+            }
+            tokens
+        };
+
+        let prototype_tokens = |prototype: &Prototype| {
+            let name = prototype.name();
+            let extra_pop = prototype.extra_pop();
+            let stack_shift = prototype.stack_shift();
+            let inputs = prototype
+                .inputs()
+                .iter()
+                .map(&entry_tokens)
+                .collect::<Vec<_>>();
+            let outputs = prototype
+                .outputs()
+                .iter()
+                .map(&entry_tokens)
+                .collect::<Vec<_>>();
+            let unaffected = prototype
+                .unaffected()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            let killed_by_call = prototype
+                .killed_by_call()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            let likely_trashed = prototype
+                .likely_trashed()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            quote! {
+                fugue_lifter_runtime::convention::Prototype::new(#name, #extra_pop, #stack_shift)
+                    .with_inputs(&[#(#inputs,)*])
+                    .with_outputs(&[#(#outputs,)*])
+                    .with_unaffected(&[#(#unaffected,)*])
+                    .with_killed_by_call(&[#(#killed_by_call,)*])
+                    .with_likely_trashed(&[#(#likely_trashed,)*])
+            }
+        };
+
+        let conventions = compiler_ids
+            .iter()
+            .map(|compiler| {
+                let convention = self
+                    .language
+                    .compiler_conventions()
+                    .get(*compiler)
+                    .expect("compiler convention comes from the language");
+                let name = convention.name();
+                let stack_pointer = varnode_tokens(convention.stack_pointer().varnode());
+                let prototypes = convention
+                    .prototypes()
+                    .map(&prototype_tokens)
+                    .collect::<Vec<_>>();
+                let mut tokens = quote! {
+                    fugue_lifter_runtime::convention::Convention::new(#name, #stack_pointer)
+                };
+                if let Some(return_address) = convention.return_address() {
+                    let return_address = match return_address {
+                        ReturnAddress::Register { varnode, .. } => {
+                            let varnode = varnode_tokens(varnode);
+                            quote! {
+                                fugue_lifter_runtime::convention::ReturnAddress::Register(#varnode)
+                            }
+                        }
+                        ReturnAddress::StackRelative { offset, size } => quote! {
+                            fugue_lifter_runtime::convention::ReturnAddress::StackRelative {
+                                offset: #offset,
+                                size: #size,
+                            }
+                        },
+                    };
+                    tokens = quote! { #tokens.with_return_address(#return_address) };
+                }
+                quote! {
+                    (#compiler, #tokens.with_prototypes(&[#(#prototypes,)*]))
+                }
+            })
+            .collect::<Vec<_>>();
+        let n_conventions = conventions.len();
+
         let call_preserved_registers = compiler_ids
             .into_iter()
             .map(|compiler| {
@@ -960,16 +1093,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     .call_preserved_registers(compiler)
                     .expect("compiler convention comes from the language")
                     .into_iter()
-                    .map(|varnode| {
-                        let space = u8::try_from(varnode.space().index())
-                            .expect("address-space identifier fits in u8");
-                        let offset = varnode.offset();
-                        let size = u16::try_from(varnode.size())
-                            .expect("call-preserved register size fits in u16");
-                        quote! {
-                            fugue_lifter_runtime::pcode::Varnode::new(#space, #offset, #size)
-                        }
-                    })
+                    .map(|varnode| varnode_tokens(&varnode))
                     .collect::<Vec<_>>();
                 quote! {
                     (#compiler, &[#(#registers,)*])
@@ -1047,6 +1171,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
                     const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
+                    const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
 
                     const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                 }
@@ -1110,6 +1235,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
                         const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
+                        const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
 
                         const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                     }
@@ -1226,6 +1352,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
             static CALL_PRESERVED_REGISTERS: [(&str, &[fugue_lifter_runtime::pcode::Varnode]); #n_call_preserved_registers] = [
                 #(#call_preserved_registers,)*
+            ];
+
+            static CONVENTIONS: [(&str, fugue_lifter_runtime::convention::Convention); #n_conventions] = [
+                #(#conventions,)*
             ];
 
             pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =

@@ -4,13 +4,13 @@ use super::VerifyError;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::verify::StructureError;
 use crate::il::common::{
-    IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
-    IlMetadata, IlOpId, IlValueId,
+    FlagId, IlArtefact, IlBlock, IlBlockArgId, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError,
+    IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId, RegisterId,
 };
 use crate::il::ecode::ssa::optimise::ECodeSsaConstantFolding;
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaBuilderContext, ECodeSsaIr, ECodeSsaMemoryDomain,
-    ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaBuilder, ECodeSsaBuilderContext, ECodeSsaDomain, ECodeSsaIr,
+    ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
 };
 use crate::ir::FunctionId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -69,12 +69,14 @@ impl SsaFixture {
     }
 
     fn build(self, metadata: IlMetadata, graph: IlGraph) -> ECodeSsaIr {
+        let value_domains = vec![None; self.values.len()];
         ECodeSsaIr::new(ECodeSsaBuilderContext {
             metadata,
             graph,
             source_spans: Vec::new(),
             parent_spans: Vec::new(),
             values: self.values,
+            value_domains,
             block_arguments: self.block_arguments,
             edge_arguments: self.edge_arguments,
             edge_argument_values: self.edge_argument_values,
@@ -91,7 +93,10 @@ fn ssa_verifier_rejects_invalid_value_definition() {
     let metadata = IlMetadata::new(FunctionId::default(), 0);
     let ir = SsaFixture::default()
         .with_values(
-            vec![ECodeSsaValue::new(64, ECodeSsaValueKind::Operation, 3)],
+            vec![ECodeSsaValue::new(
+                64,
+                IlSsaDef::Operation(IlOpId::try_from_index(3).unwrap()),
+            )],
             Vec::new(),
         )
         .build(metadata, IlGraph::default());
@@ -100,6 +105,40 @@ fn ssa_verifier_rejects_invalid_value_definition() {
         ir.verify(),
         Err(VerifyError::InvalidValueDefinition)
     ));
+}
+
+#[test]
+fn ssa_verifier_rejects_register_write_with_wrong_domain() {
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
+    let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
+    let (source, source_results) = builder.push_result_value(64).unwrap();
+    builder
+        .push_operation(ECodeSsaOp::new(
+            ECodeSsaOpcode::Constant,
+            source_results,
+            IlIndexRange::EMPTY,
+            64,
+        ))
+        .unwrap();
+
+    let operands = builder.push_value_operands([source]).unwrap();
+    let (written, written_results) = builder.push_result_value(64).unwrap();
+    builder.set_value_domain(written, ECodeSsaDomain::Flag(FlagId::new(7)));
+    builder
+        .push_operation(
+            ECodeSsaOp::new(ECodeSsaOpcode::WriteRegister, written_results, operands, 64)
+                .with_immediate(7),
+        )
+        .unwrap();
+
+    let ir = builder.build(&CancellationToken::default()).unwrap();
+
+    assert_eq!(
+        ir.verify(),
+        Err(VerifyError::InconsistentValueDomain {
+            value: written.value(),
+        })
+    );
 }
 
 #[test]
@@ -457,7 +496,10 @@ fn ssa_verifier_rejects_wrong_edge_argument_count() {
     );
     let ir = SsaFixture::default()
         .with_values(
-            vec![ECodeSsaValue::block_argument(32, 0)],
+            vec![ECodeSsaValue::block_argument(
+                32,
+                IlBlockArgId::try_from_index(0).unwrap(),
+            )],
             vec![ECodeSsaBlockArg::new(successor, argument_value, 32)],
         )
         .with_edge_argument_storage(vec![IlIndexRange::EMPTY], Vec::new())
@@ -501,7 +543,7 @@ fn ssa_verifier_rejects_non_dominating_edge_argument() {
         .with_values(
             vec![
                 ECodeSsaValue::operation_result(32, IlOpId::try_from_index(0).unwrap()),
-                ECodeSsaValue::block_argument(32, 0),
+                ECodeSsaValue::block_argument(32, IlBlockArgId::try_from_index(0).unwrap()),
             ],
             vec![ECodeSsaBlockArg::new(right, argument_value, 32)],
         )
@@ -569,5 +611,110 @@ fn ssa_verifier_rejects_duplicate_operation_placement() {
         Err(VerifyError::Structure(
             StructureError::OverlappingBlockOperations { .. }
         ))
+    ));
+}
+
+#[test]
+fn ssa_verifier_rejects_an_edge_argument_from_a_different_domain() {
+    let successor = IlBlockId::try_from_index(1).unwrap();
+    let graph = IlGraph::new(
+        vec![
+            IlBlock::new(
+                IlIndexRange::new(0, 2).unwrap(),
+                IlIndexRange::new(0, 1).unwrap(),
+                IlBlockProperties::ENTRY,
+            ),
+            IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::EMPTY,
+                IlBlockProperties::EXIT,
+            ),
+        ],
+        vec![successor],
+        vec![IlEdgeKinds::UNCONDITIONAL],
+    );
+    let mut builder = ECodeSsaBuilder::new(IlMetadata::new(FunctionId::default(), 0), graph);
+
+    let (left, left_results) = builder.push_result_value(64).unwrap();
+    builder
+        .push_operation(
+            ECodeSsaOp::new(
+                ECodeSsaOpcode::Undefined,
+                left_results,
+                IlIndexRange::EMPTY,
+                64,
+            )
+            .with_immediate(16),
+        )
+        .unwrap();
+    builder.set_value_domain(left, ECodeSsaDomain::Register(RegisterId::new(16)));
+    let (right, right_results) = builder.push_result_value(64).unwrap();
+    builder
+        .push_operation(
+            ECodeSsaOp::new(
+                ECodeSsaOpcode::Undefined,
+                right_results,
+                IlIndexRange::EMPTY,
+                64,
+            )
+            .with_immediate(24),
+        )
+        .unwrap();
+    builder.set_value_domain(right, ECodeSsaDomain::Register(RegisterId::new(24)));
+
+    let argument = builder.push_block_argument_value(successor, 64).unwrap();
+    builder.set_value_domain(argument, ECodeSsaDomain::Register(RegisterId::new(24)));
+    builder.push_edge_arguments([left]).unwrap();
+
+    let ir = builder.build(&CancellationToken::default()).unwrap();
+
+    assert!(matches!(
+        ir.verify(),
+        Err(VerifyError::InconsistentValueDomain { .. })
+    ));
+}
+
+#[test]
+fn ssa_verifier_checks_edge_argument_width_from_an_unreachable_block() {
+    let successor = IlBlockId::try_from_index(2).unwrap();
+    let graph = IlGraph::new(
+        vec![
+            IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::EMPTY,
+                IlBlockProperties::ENTRY,
+            ),
+            IlBlock::new(
+                IlIndexRange::new(0, 1).unwrap(),
+                IlIndexRange::new(0, 1).unwrap(),
+                IlBlockProperties::empty(),
+            ),
+            IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::EMPTY,
+                IlBlockProperties::EXIT,
+            ),
+        ],
+        vec![successor],
+        vec![IlEdgeKinds::UNCONDITIONAL],
+    );
+    let mut builder = ECodeSsaBuilder::new(IlMetadata::new(FunctionId::default(), 0), graph);
+    let (incoming, results) = builder.push_result_value(32).unwrap();
+    builder
+        .push_operation(ECodeSsaOp::new(
+            ECodeSsaOpcode::Constant,
+            results,
+            IlIndexRange::EMPTY,
+            32,
+        ))
+        .unwrap();
+    builder.push_block_argument_value(successor, 64).unwrap();
+    builder.push_edge_arguments([incoming]).unwrap();
+
+    let ir = builder.build(&CancellationToken::default()).unwrap();
+
+    assert!(matches!(
+        ir.verify(),
+        Err(VerifyError::Il(IlError::WidthMismatch { .. }))
     ));
 }

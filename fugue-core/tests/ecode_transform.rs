@@ -27,7 +27,10 @@ fn every_recovered_function_lifts_to_verified_ecode() -> Result<(), Box<dyn std:
         }
     }
 
-    assert!(lifted > 0, "expected at least one function to lift to ecode");
+    assert!(
+        lifted > 0,
+        "expected at least one function to lift to ecode"
+    );
 
     Ok(())
 }

@@ -1,95 +1,96 @@
 use fixedbitset::FixedBitSet;
 
-use crate::il::common::{IlAnalysis, IlArtefact, IlValueId};
-use crate::il::ecode::ssa::{ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaValueKind};
+use crate::il::common::{IlAnalysis, IlArtefact, IlBlockArgId, IlOpId, IlSsaDef, IlValueId};
+use crate::il::ecode::ssa::{ECodeSsaBlockArgInputs, ECodeSsaIr};
 
-pub(crate) struct ECodeSsaRequiredDefinitions {
+pub(crate) struct ECodeSsaRequiredDefs {
     required_block_arguments: FixedBitSet,
     required_operations: FixedBitSet,
 }
 
 #[derive(Clone, Copy)]
-enum RequiredEntity {
-    BlockArgument(usize),
-    Operation(usize),
+enum RequiredDef {
+    BlockArgument(IlBlockArgId),
+    Operation(IlOpId),
 }
 
-struct ECodeSsaRequiredDefinitionsBuilder {
-    required_block_arguments: FixedBitSet,
-    required_operations: FixedBitSet,
-    worklist: Vec<RequiredEntity>,
-}
-
-impl ECodeSsaRequiredDefinitionsBuilder {
+impl ECodeSsaRequiredDefs {
     fn new(ir: &ECodeSsaIr) -> Self {
-        let mut this = Self {
+        let mut required = Self {
             required_block_arguments: FixedBitSet::with_capacity(ir.block_arguments().len()),
             required_operations: FixedBitSet::with_capacity(ir.operations().len()),
-            worklist: Vec::new(),
         };
+        let mut worklist = Vec::new();
         for (index, operation) in ir.operations().iter().enumerate() {
             if operation.opcode().has_side_effect() {
-                this.required_operations.insert(index);
-                this.worklist.push(RequiredEntity::Operation(index));
+                required.required_operations.insert(index);
+                worklist.push(RequiredDef::Operation(
+                    IlOpId::try_from_index(index).expect("operation id is representable"),
+                ));
             }
         }
-        this
-    }
+        for index in 0..ir.values().len() {
+            let value =
+                IlValueId::try_from_index(index).expect("value count fits the value id space");
+            if ir.value_domain(value).is_some() {
+                required.mark_value_required(ir, value, &mut worklist);
+            }
+        }
 
-    fn build(mut self, ir: &ECodeSsaIr) -> ECodeSsaRequiredDefinitions {
-        let inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
-        while let Some(entity) = self.worklist.pop() {
+        let inputs = ir.analyse::<ECodeSsaBlockArgInputs>();
+        while let Some(entity) = worklist.pop() {
             match entity {
-                RequiredEntity::Operation(operation_index) => {
-                    let operation = &ir.operations()[operation_index];
+                RequiredDef::Operation(operation) => {
+                    let operation = &ir.operations()[operation.index()];
                     for &operand in ir.operation_operands_for(operation) {
-                        self.mark_value_required(ir, operand);
+                        required.mark_value_required(ir, operand, &mut worklist);
                     }
                 }
-                RequiredEntity::BlockArgument(argument_index) => {
-                    let value = ir.block_arguments()[argument_index].value();
+                RequiredDef::BlockArgument(argument) => {
+                    let value = ir.block_arguments()[argument.index()].value();
                     if let Some(argument_inputs) = inputs.inputs_for(value) {
                         for &input in argument_inputs {
-                            self.mark_value_required(ir, input);
+                            required.mark_value_required(ir, input, &mut worklist);
                         }
                     }
                 }
             }
         }
 
-        ECodeSsaRequiredDefinitions {
-            required_block_arguments: self.required_block_arguments,
-            required_operations: self.required_operations,
-        }
+        required
     }
 
-    fn mark_value_required(&mut self, ir: &ECodeSsaIr, value: IlValueId) {
+    fn mark_value_required(
+        &mut self,
+        ir: &ECodeSsaIr,
+        value: IlValueId,
+        worklist: &mut Vec<RequiredDef>,
+    ) {
         let Some(record) = ir.values().get(value.index()) else {
             return;
         };
-        let index = record.definition_index() as usize;
-        match record.definition_kind() {
-            ECodeSsaValueKind::Operation => {
-                if !self.required_operations.put(index) {
-                    self.worklist.push(RequiredEntity::Operation(index));
+        match record.definition() {
+            IlSsaDef::Operation(operation) => {
+                if !self.required_operations.put(operation.index()) {
+                    worklist.push(RequiredDef::Operation(operation));
                 }
             }
-            ECodeSsaValueKind::BlockArgument => {
-                if !self.required_block_arguments.put(index) {
-                    self.worklist.push(RequiredEntity::BlockArgument(index));
+            IlSsaDef::BlockArgument(argument) => {
+                if !self.required_block_arguments.put(argument.index()) {
+                    worklist.push(RequiredDef::BlockArgument(argument));
                 }
             }
         }
     }
 }
 
-impl IlAnalysis<ECodeSsaIr> for ECodeSsaRequiredDefinitions {
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaRequiredDefs {
     fn analyse(ir: &ECodeSsaIr) -> Self {
-        ECodeSsaRequiredDefinitionsBuilder::new(ir).build(ir)
+        Self::new(ir)
     }
 }
 
-impl ECodeSsaRequiredDefinitions {
+impl ECodeSsaRequiredDefs {
     pub(crate) fn block_argument_is_required(&self, index: usize) -> bool {
         self.required_block_arguments.contains(index)
     }

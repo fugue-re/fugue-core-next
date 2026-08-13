@@ -28,7 +28,7 @@ pub use lift::{Lifter, LifterError};
 
 mod resolver;
 pub(crate) use resolver::InsnResolver;
-pub use resolver::{InsnExtentError, InsnResolverError};
+pub use resolver::InsnResolverError;
 
 pub(crate) mod traits;
 

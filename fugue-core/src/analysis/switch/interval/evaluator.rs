@@ -134,6 +134,10 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                     .and_then(|pointer| self.memo.get(&pointer).cloned())?;
                 self.load(operation, &pointer, read_memory)
             }
+            ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister => {
+                let input = self.context.ssa.operation_operands_for(operation).first()?;
+                Some(self.memo.get(input)?.clone().cast(operation.width()))
+            }
             opcode => {
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
                 for value in self.context.ssa.operation_operands_for(operation) {

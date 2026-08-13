@@ -991,20 +991,20 @@ mod test {
             })
             .collect::<Vec<_>>();
         let mut function_ids = vec![None; entries.len()];
-        let mut seed = 0x5eed_u64;
+        let mut state = 0x5eed_u64;
 
         for step in 0..2048 {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
 
-            let index = (seed as usize + step) % entries.len();
+            let index = (state as usize + step) % entries.len();
             let entry = entries[index];
-            let op = (seed >> 11) % 5;
+            let op = (state >> 11) % 5;
 
             if function_ids[index].is_none() || op == 0 {
                 if function_ids[index].is_none() {
-                    let targets = generated_targets(seed, entry, &entries);
+                    let targets = generated_targets(state, entry, &entries);
                     let function_id =
                         insert_function(&mut functions, &mut blocks, language, entry, &targets)?;
                     function_ids[index] = Some(function_id);
@@ -1017,7 +1017,8 @@ mod test {
                 }
             } else {
                 let function_id = function_ids[index].unwrap();
-                let targets = generated_targets(seed.rotate_left((op * 7) as u32), entry, &entries);
+                let targets =
+                    generated_targets(state.rotate_left((op * 7) as u32), entry, &entries);
                 update_function(
                     &mut functions,
                     &mut blocks,
@@ -1035,17 +1036,17 @@ mod test {
         Ok(())
     }
 
-    fn generated_targets(seed: u64, entry: Address, entries: &[Address]) -> Vec<Address> {
+    fn generated_targets(state: u64, entry: Address, entries: &[Address]) -> Vec<Address> {
         let mut targets = BTreeSet::new();
-        let count = ((seed & 0x7) as usize).min(5);
+        let count = ((state & 0x7) as usize).min(5);
 
         for offset in 0..count {
-            let raw = seed.rotate_left((offset * 9) as u32) as usize;
+            let raw = state.rotate_left((offset * 9) as u32) as usize;
             let target = entries[raw % entries.len()];
             targets.insert(Address::new(entry.space(), target.offset()));
         }
 
-        if seed & 0x20 != 0 {
+        if state & 0x20 != 0 {
             targets.insert(entry);
         }
 

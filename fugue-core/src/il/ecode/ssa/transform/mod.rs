@@ -6,9 +6,7 @@ use crate::il::common::{
     IlGenerationError, IlIndexRange, IlMetadata, IlValueId,
 };
 use crate::il::ecode::ECodeIr;
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaOptimiser};
-use crate::il::pcode::{FlagId, RegisterId};
-use crate::storage::segments::space::AddressSpaceId;
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaDomain, ECodeSsaIr, ECodeSsaOptimiser};
 
 mod blocks;
 mod build;
@@ -16,7 +14,7 @@ mod domains;
 mod spans;
 
 #[derive(Debug)]
-enum ExpressionStep {
+enum ECodeSsaExpressionStep {
     Build(IlExprId),
     Visit(IlExprId),
 }
@@ -24,7 +22,7 @@ enum ExpressionStep {
 #[derive(Debug, Default)]
 pub struct ECodeToSsa {
     expression_operands: Vec<IlValueId>,
-    expression_steps: Vec<ExpressionStep>,
+    expression_steps: Vec<ECodeSsaExpressionStep>,
     statement_operands: Vec<IlValueId>,
 }
 
@@ -91,40 +89,23 @@ struct ECodeSsaConstruction<'a, 'b> {
     values: Vec<Option<IlValueId>>,
     built_expressions: Vec<IlExprId>,
     expression_operands: &'b mut Vec<IlValueId>,
-    expression_steps: &'b mut Vec<ExpressionStep>,
-    block_argument_domains: BTreeMap<IlValueId, SsaDomain>,
-    block_arguments: Vec<Vec<(SsaDomain, IlValueId)>>,
-    domain_widths: BTreeMap<SsaDomain, u32>,
+    expression_steps: &'b mut Vec<ECodeSsaExpressionStep>,
+    block_argument_domains: BTreeMap<IlValueId, ECodeSsaDomain>,
+    block_arguments: Vec<Vec<(ECodeSsaDomain, IlValueId)>>,
+    domain_widths: BTreeMap<ECodeSsaDomain, u32>,
     entry_block: Option<IlBlockId>,
-    input_domains: Vec<(SsaDomain, u32)>,
+    input_domains: Vec<(ECodeSsaDomain, u32)>,
     blocks: Vec<Option<IlBlock>>,
     edge_arguments: Vec<Vec<IlValueId>>,
     statement_operands: &'b mut Vec<IlValueId>,
     statement_ranges: Vec<IlIndexRange>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum SsaDomain {
-    Flag(FlagId),
-    Memory(AddressSpaceId),
-    Register(RegisterId),
-}
-
-impl SsaDomain {
-    const fn undefined_immediate(&self) -> u64 {
-        match self {
-            Self::Register(register) => register.value(),
-            Self::Flag(flag) => flag.value(),
-            Self::Memory(space) => space.index() as u64,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
-struct SsaDomains {
-    widths: BTreeMap<SsaDomain, u32>,
-    definitions: BTreeMap<SsaDomain, Vec<IlBlockId>>,
-    reads: BTreeSet<SsaDomain>,
+struct ECodeSsaDomains {
+    widths: BTreeMap<ECodeSsaDomain, u32>,
+    definitions: BTreeMap<ECodeSsaDomain, Vec<IlBlockId>>,
+    reads: BTreeSet<ECodeSsaDomain>,
 }
 
 impl<'a, 'b> ECodeSsaConstruction<'a, 'b> {
@@ -132,7 +113,7 @@ impl<'a, 'b> ECodeSsaConstruction<'a, 'b> {
         source: &'a ECodeIr,
         builder: &'b mut ECodeSsaBuilder,
         expression_operands: &'b mut Vec<IlValueId>,
-        expression_steps: &'b mut Vec<ExpressionStep>,
+        expression_steps: &'b mut Vec<ECodeSsaExpressionStep>,
         statement_operands: &'b mut Vec<IlValueId>,
     ) -> Self {
         Self {

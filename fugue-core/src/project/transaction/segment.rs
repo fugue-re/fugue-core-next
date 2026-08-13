@@ -183,7 +183,7 @@ impl ProjectTransaction<'_> {
         }
     }
 
-    pub fn write_bytes_to_space(
+    pub fn write_bytes_in_space(
         &mut self,
         space: AddressSpaceId,
         addr: impl Into<RawAddress>,

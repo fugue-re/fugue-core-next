@@ -1244,7 +1244,9 @@ fn selected_group(selected: Option<&str>, group: &str) -> bool {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut results = Vec::new();
-    let selected = std::env::args().nth(1);
+    let selected = std::env::args()
+        .skip(1)
+        .find(|argument| argument != "--bench");
 
     if selected_group(selected.as_deref(), "analysis") {
         bench_initial_analysis(&mut results)?;

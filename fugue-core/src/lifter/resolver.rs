@@ -3,51 +3,8 @@ use thiserror::Error;
 use crate::arch::Arch;
 use crate::ir::{Address, Insn, InsnError};
 use crate::lifter::{
-    ContextSet, Disassembler, DisassemblerError, Language, Lifter, LifterError, LiftingContext, Op,
-    RawPCodeOp,
+    Disassembler, DisassemblerError, Language, Lifter, LifterError, LiftingContext, Op, RawPCodeOp,
 };
-
-#[derive(Debug, Error)]
-pub enum InsnExtentError {
-    #[error(
-        "instruction extent at {address} requires {required} contiguous bytes, but only {available} are available"
-    )]
-    InsufficientBytes {
-        address: Address,
-        available: usize,
-        required: usize,
-    },
-    #[error("instruction at {address} has size {size}, with {remaining} extent bytes remaining")]
-    InvalidInsnSize {
-        address: Address,
-        size: usize,
-        remaining: usize,
-    },
-    #[error(transparent)]
-    Resolution(#[from] InsnResolverError),
-}
-
-impl InsnExtentError {
-    pub(crate) const fn insufficient_bytes(
-        address: Address,
-        available: usize,
-        required: usize,
-    ) -> Self {
-        Self::InsufficientBytes {
-            address,
-            available,
-            required,
-        }
-    }
-
-    pub(crate) const fn invalid_insn_size(address: Address, size: usize, remaining: usize) -> Self {
-        Self::InvalidInsnSize {
-            address,
-            size,
-            remaining,
-        }
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum InsnResolverError {
@@ -152,39 +109,6 @@ impl InsnResolver {
             insn,
             indirect_target,
         })
-    }
-
-    pub(crate) fn resolve_extent(
-        &mut self,
-        address: Address,
-        size: usize,
-        context: &ContextSet,
-        bytes: &[u8],
-    ) -> Result<Vec<Insn>, InsnExtentError> {
-        let bytes = bytes
-            .get(..size)
-            .ok_or_else(|| InsnExtentError::insufficient_bytes(address, bytes.len(), size))?;
-        context.apply(address, self.context_mut());
-
-        let mut insns = Vec::new();
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            let insn_address = address + offset;
-            let remaining = bytes.len() - offset;
-            let insn = self.resolve(insn_address, &bytes[offset..])?.into_insn();
-            let insn_size = insn.size();
-            if insn_size == 0 || insn_size > remaining {
-                return Err(InsnExtentError::invalid_insn_size(
-                    insn_address,
-                    insn_size,
-                    remaining,
-                ));
-            }
-            insns.push(insn);
-            offset += insn_size;
-        }
-
-        Ok(insns)
     }
 
     pub(crate) fn lift_into(

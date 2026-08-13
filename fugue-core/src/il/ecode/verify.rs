@@ -56,20 +56,14 @@ impl ECodeIr {
             .then(|| block.operations().end() - 1)
             .and_then(|index| self.statements().get(index))
             .map(ECodeStmt::opcode);
-        let (permitted, required) = match terminator {
-            Some(ECodeStmtOpcode::Branch) => {
-                (IlEdgeKinds::UNCONDITIONAL, IlEdgeKinds::UNCONDITIONAL)
+        let permitted = match terminator {
+            Some(ECodeStmtOpcode::Branch) => IlEdgeKinds::UNCONDITIONAL,
+            Some(ECodeStmtOpcode::BranchIndirect) => IlEdgeKinds::COMPUTED,
+            Some(ECodeStmtOpcode::ConditionalBranch) => {
+                IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::TAKEN
             }
-            Some(ECodeStmtOpcode::BranchIndirect) => (IlEdgeKinds::COMPUTED, IlEdgeKinds::COMPUTED),
-            Some(ECodeStmtOpcode::ConditionalBranch) => (
-                IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::TAKEN,
-                IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::TAKEN,
-            ),
-            Some(ECodeStmtOpcode::Return) => (IlEdgeKinds::empty(), IlEdgeKinds::empty()),
-            _ => (
-                IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::UNCONDITIONAL,
-                IlEdgeKinds::empty(),
-            ),
+            Some(ECodeStmtOpcode::Return) => IlEdgeKinds::empty(),
+            _ => IlEdgeKinds::FALL_THROUGH | IlEdgeKinds::UNCONDITIONAL,
         };
 
         let start = block.successors().start() as u32;
@@ -84,14 +78,6 @@ impl ECodeIr {
                 block: block_id.value(),
                 edge: start.saturating_add(edge as u32),
                 kinds: *kinds,
-            }));
-        }
-
-        if !covered.contains(required) {
-            return Err(VerifyError::Structure(StructureError::EdgeKindMissing {
-                block: block_id.value(),
-                covered,
-                required,
             }));
         }
 
@@ -272,15 +258,9 @@ mod test {
     }
 
     #[test]
-    fn a_conditional_branch_without_a_fall_through_edge_is_rejected() {
+    fn a_conditional_branch_can_leave_one_arm_outside_the_function() {
         let ir = conditional_branch(vec![IlEdgeKinds::TAKEN]);
 
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::Structure(StructureError::EdgeKindMissing {
-                covered: IlEdgeKinds::TAKEN,
-                ..
-            }))
-        ));
+        assert!(ir.verify().is_ok());
     }
 }

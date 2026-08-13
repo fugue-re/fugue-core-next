@@ -64,6 +64,7 @@
 
 pub mod common;
 pub mod ecode;
+pub mod mcode;
 pub mod pcode;
 pub mod registry;
 

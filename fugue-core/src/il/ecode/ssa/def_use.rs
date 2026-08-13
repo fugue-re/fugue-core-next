@@ -1,6 +1,8 @@
 use rustc_hash::FxHashMap;
 
-use crate::il::common::{IlAnalysis, IlCsr, IlOpId, IlValueId};
+use crate::il::common::{
+    IlAnalysis, IlCsr, IlOpId, IlValueId, build_ssa_block_argument_inputs, build_ssa_uses,
+};
 use crate::il::ecode::ssa::ECodeSsaIr;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -40,36 +42,24 @@ impl ECodeSsaUses {
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaUses {
     fn analyse(ir: &ECodeSsaIr) -> Self {
-        let entries =
-            ir.operations()
-                .iter()
-                .enumerate()
-                .flat_map(|(operation_index, operation)| {
-                    let operation_id = IlOpId::try_from_index(operation_index)
-                        .expect("operation count fits the operation id space");
-
-                    ir.operation_operands_for(operation).iter().enumerate().map(
-                        move |(operand_index, operand)| {
-                            (
-                                operand.index(),
-                                ECodeSsaUse::new(operation_id, operand_index as u32),
-                            )
-                        },
-                    )
-                });
-
         Self {
-            uses: IlCsr::from_entries(ir.values().len(), entries),
+            uses: build_ssa_uses(
+                ir.values().len(),
+                ir.operations()
+                    .iter()
+                    .map(|operation| ir.operation_operands_for(operation)),
+                ECodeSsaUse::new,
+            ),
         }
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ECodeSsaBlockArgumentInputs {
+pub struct ECodeSsaBlockArgInputs {
     inputs: FxHashMap<IlValueId, Vec<IlValueId>>,
 }
 
-impl ECodeSsaBlockArgumentInputs {
+impl ECodeSsaBlockArgInputs {
     pub fn inputs_for(&self, argument: IlValueId) -> Option<&[IlValueId]> {
         self.inputs.get(&argument).map(Vec::as_slice)
     }
@@ -81,37 +71,17 @@ impl ECodeSsaBlockArgumentInputs {
     }
 }
 
-impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgumentInputs {
+impl IlAnalysis<ECodeSsaIr> for ECodeSsaBlockArgInputs {
     fn analyse(ir: &ECodeSsaIr) -> Self {
-        let block_count = ir.graph().blocks().len();
-        let arguments = IlCsr::from_entries(
-            block_count,
-            ir.block_arguments()
-                .iter()
-                .map(|argument| (argument.block().index(), argument.value())),
-        );
-        let incoming = IlCsr::from_entries(
-            block_count,
-            ir.graph()
-                .successors()
-                .iter()
-                .enumerate()
-                .map(|(edge, target)| (target.index(), edge)),
-        );
-
-        let mut inputs = FxHashMap::default();
-        for block in 0..block_count {
-            for (position, &argument) in arguments.row(block).iter().enumerate() {
-                let argument_inputs = incoming
-                    .row(block)
+        Self {
+            inputs: build_ssa_block_argument_inputs(
+                ir.graph(),
+                ir.block_arguments()
                     .iter()
-                    .filter_map(|&edge| ir.arguments_for_edge(edge).get(position).copied())
-                    .collect();
-                inputs.insert(argument, argument_inputs);
-            }
+                    .map(|argument| (argument.block(), argument.value())),
+                |edge| ir.arguments_for_edge(edge),
+            ),
         }
-
-        Self { inputs }
     }
 }
 

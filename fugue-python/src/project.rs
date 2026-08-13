@@ -7,16 +7,26 @@ use fugue_core::il::common::{
     IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
     IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlFormId as CoreIlFormId,
     IlGraph as CoreIlGraph, IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
-    IlSourceSpan as CoreIlSourceSpan, IlValueId as CoreIlValueId, PersistableIl,
+    IlSourceSpan as CoreIlSourceSpan, IlSsaDef as CoreIlSsaDef, IlValueId as CoreIlValueId,
+    PersistableIl,
 };
 use fugue_core::il::ecode::ssa::{
-    ECodeSsaBlockArg as CoreECodeSsaBlockArg, ECodeSsaIr as CoreECodeSsaIr,
-    ECodeSsaLiveness as CoreECodeSsaLiveness, ECodeSsaMemoryDomain as CoreECodeSsaMemoryDomain,
-    ECodeSsaOp as CoreECodeSsaOp, ECodeSsaUse as CoreECodeSsaUse, ECodeSsaUses as CoreECodeSsaUses,
-    ECodeSsaValue as CoreECodeSsaValue, ECodeSsaValueKind as CoreECodeSsaValueKind,
+    ECodeSsaBlockArg as CoreECodeSsaBlockArg, ECodeSsaDomain as CoreECodeSsaDomain,
+    ECodeSsaIr as CoreECodeSsaIr, ECodeSsaLiveness as CoreECodeSsaLiveness,
+    ECodeSsaMemoryDomain as CoreECodeSsaMemoryDomain, ECodeSsaOp as CoreECodeSsaOp,
+    ECodeSsaUse as CoreECodeSsaUse, ECodeSsaUses as CoreECodeSsaUses,
+    ECodeSsaValue as CoreECodeSsaValue,
 };
 use fugue_core::il::ecode::{
     ECodeExpr as CoreECodeExpr, ECodeIr as CoreECodeIr, ECodeStmt as CoreECodeStmt,
+};
+use fugue_core::il::mcode::ssa::{
+    MCodeSsaBlockArg as CoreMCodeSsaBlockArg, MCodeSsaIr as CoreMCodeSsaIr,
+    MCodeSsaMemoryDomain as CoreMCodeSsaMemoryDomain, MCodeSsaOp as CoreMCodeSsaOp,
+    MCodeSsaValue as CoreMCodeSsaValue,
+};
+use fugue_core::il::mcode::{
+    MCodeVar as CoreMCodeVar, MCodeVarId as CoreMCodeVarId, MCodeVarKind as CoreMCodeVarKind,
 };
 use fugue_core::il::pcode::{
     PCodeIr as CorePCodeIr, PCodeLocation as CorePCodeLocation, PCodeOp as CorePCodeOp,
@@ -44,6 +54,7 @@ impl Project {
             "pcode" => Ok(<CorePCodeIr as IlArtefact>::FORM),
             "ecode" => Ok(<CoreECodeIr as IlArtefact>::FORM),
             "ecode_ssa" => Ok(<CoreECodeSsaIr as IlArtefact>::FORM),
+            "mcode_ssa" => Ok(<CoreMCodeSsaIr as IlArtefact>::FORM),
             _ => CoreIlFormId::new(form).map_err(|_| BindingError::invalid_form(form).into()),
         }
     }
@@ -124,6 +135,13 @@ impl Project {
             .map_err(project_error)
     }
 
+    fn mcode_ssa(&self, function: &Function) -> PyResult<Option<MCodeSsaIr>> {
+        self.reader
+            .mcode_ssa(function.id)
+            .map(|ir| ir.map(|ir| MCodeSsaIr::from_core(Arc::unwrap_or_clone(ir))))
+            .map_err(project_error)
+    }
+
     fn has_lifted(&self, function: &Function, form: &str) -> PyResult<bool> {
         let form = Self::parse_form(form)?;
         let project = self.reader.project().map_err(project_error)?;
@@ -133,6 +151,8 @@ impl Project {
             project.ecode(function.id).map(|ir| ir.is_some())
         } else if form == <CoreECodeSsaIr as IlArtefact>::FORM {
             project.ecode_ssa(function.id).map(|ir| ir.is_some())
+        } else if form == <CoreMCodeSsaIr as IlArtefact>::FORM {
+            project.mcode_ssa(function.id).map(|ir| ir.is_some())
         } else {
             Ok(false)
         }
@@ -166,6 +186,11 @@ impl Project {
         } else if form == <CoreECodeSsaIr as IlArtefact>::FORM {
             self.reader
                 .ecode_ssa(function.id)
+                .map(|ir| ir.map(|ir| ir.display().to_string()))
+                .map_err(project_error)
+        } else if form == <CoreMCodeSsaIr as IlArtefact>::FORM {
+            self.reader
+                .mcode_ssa(function.id)
                 .map(|ir| ir.map(|ir| ir.display().to_string()))
                 .map_err(project_error)
         } else {
@@ -640,7 +665,11 @@ impl ECodeSsaIr {
             .iter()
             .copied()
             .enumerate()
-            .map(|(index, value)| ECodeSsaValue::from_core(index, value))
+            .map(|(index, value)| {
+                let id = CoreIlValueId::try_from_index(index)
+                    .expect("ECode SSA value index is representable");
+                ECodeSsaValue::from_core(index, value, self.inner.value_domain(id))
+            })
             .collect()
     }
 
@@ -793,6 +822,158 @@ impl ECodeSsaIr {
     fn __repr__(&self) -> String {
         let function = self.inner.metadata().function();
         format!("ECodeSsaIr(function={function:?})")
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+pub(crate) struct MCodeSsaIr {
+    inner: CoreMCodeSsaIr,
+}
+
+impl MCodeSsaIr {
+    fn from_core(ir: CoreMCodeSsaIr) -> Self {
+        Self { inner: ir }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaIr {
+    #[getter]
+    fn form(&self) -> &'static str {
+        <CoreMCodeSsaIr as IlArtefact>::FORM_IDENTIFIER
+    }
+
+    #[getter]
+    fn schema(&self) -> u16 {
+        <CoreMCodeSsaIr as PersistableIl>::SCHEMA.value()
+    }
+
+    fn metadata(&self) -> IlMetadata {
+        IlMetadata::from_core(*self.inner.metadata())
+    }
+
+    fn graph(&self) -> IlGraph {
+        IlGraph::from_core(self.inner.graph().clone())
+    }
+
+    fn source_spans(&self) -> Vec<IlSourceSpan> {
+        self.inner
+            .source_spans()
+            .iter()
+            .copied()
+            .map(IlSourceSpan::from_core)
+            .collect()
+    }
+
+    fn parent_spans(&self) -> Vec<IlParentSpan> {
+        self.inner
+            .parent_spans()
+            .iter()
+            .copied()
+            .map(IlParentSpan::from_core)
+            .collect()
+    }
+
+    fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
+        self.inner
+            .source_span_for(node)
+            .map(IlSourceSpan::from_core)
+    }
+
+    fn parent_span_for(&self, node: usize) -> Option<IlParentSpan> {
+        self.inner
+            .parent_span_for(node)
+            .map(IlParentSpan::from_core)
+    }
+
+    fn variables(&self) -> Vec<MCodeVariable> {
+        self.inner
+            .variables()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(id, variable)| {
+                let variable_id = CoreMCodeVarId::try_from_index(id)
+                    .expect("MCode variable index is representable");
+                MCodeVariable::from_core(id, variable, self.inner.is_aliased(variable_id))
+            })
+            .collect()
+    }
+
+    fn aliased_variables(&self) -> Vec<usize> {
+        self.inner
+            .aliased_variables()
+            .iter()
+            .map(|variable| variable.index())
+            .collect()
+    }
+
+    fn values(&self) -> Vec<MCodeSsaValue> {
+        self.inner
+            .values()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| MCodeSsaValue::from_core(index, value))
+            .collect()
+    }
+
+    fn block_arguments(&self) -> Vec<MCodeSsaBlockArg> {
+        self.inner
+            .block_arguments()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, argument)| MCodeSsaBlockArg::from_core(index, argument))
+            .collect()
+    }
+
+    fn edge_arguments(&self) -> Vec<MCodeSsaEdgeArguments> {
+        self.inner
+            .edge_arguments()
+            .iter()
+            .enumerate()
+            .map(|(edge, _)| MCodeSsaEdgeArguments::from_core(&self.inner, edge))
+            .collect()
+    }
+
+    fn arguments_for_edge(&self, edge: usize) -> Vec<usize> {
+        self.inner
+            .arguments_for_edge(edge)
+            .iter()
+            .map(|argument| argument.index())
+            .collect()
+    }
+
+    fn memory_domains(&self) -> Vec<MCodeSsaMemoryDomain> {
+        self.inner
+            .memory_domains()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, domain)| MCodeSsaMemoryDomain::from_core(index, domain))
+            .collect()
+    }
+
+    fn operations(&self) -> Vec<MCodeSsaOp> {
+        self.inner
+            .operations()
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| MCodeSsaOp::from_core(&self.inner, index, operation))
+            .collect()
+    }
+
+    fn operations_for_source(&self, address: &Address) -> Vec<MCodeSsaOp> {
+        self.inner
+            .operations_for_source(address.inner())
+            .map(|(index, operation)| MCodeSsaOp::from_core(&self.inner, index.index(), operation))
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        let function = self.inner.metadata().function();
+        format!("MCodeSsaIr(function={function:?})")
     }
 }
 
@@ -1298,21 +1479,27 @@ pub(crate) struct ECodeSsaValue {
     index: usize,
     width: u32,
     definition_kind: &'static str,
-    definition_index: u32,
+    definition_index: usize,
+    domain: Option<ECodeSsaDomain>,
 }
 
 impl ECodeSsaValue {
-    fn from_core(index: usize, value: CoreECodeSsaValue) -> Self {
-        let definition_kind = match value.definition_kind() {
-            CoreECodeSsaValueKind::Operation => "operation",
-            CoreECodeSsaValueKind::BlockArgument => "block_argument",
+    fn from_core(
+        index: usize,
+        value: CoreECodeSsaValue,
+        domain: Option<CoreECodeSsaDomain>,
+    ) -> Self {
+        let (definition_kind, definition_index) = match value.definition() {
+            CoreIlSsaDef::BlockArgument(argument) => ("block_argument", argument.index()),
+            CoreIlSsaDef::Operation(operation) => ("operation", operation.index()),
         };
 
         Self {
             index,
             width: value.width(),
             definition_kind,
-            definition_index: value.definition_index(),
+            definition_index,
+            domain: domain.map(ECodeSsaDomain::from_core),
         }
     }
 }
@@ -1335,8 +1522,61 @@ impl ECodeSsaValue {
     }
 
     #[getter]
-    fn definition_index(&self) -> u32 {
+    fn definition_index(&self) -> usize {
         self.definition_index
+    }
+
+    #[getter]
+    fn domain(&self) -> Option<ECodeSsaDomain> {
+        self.domain
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Copy, Clone)]
+pub(crate) struct ECodeSsaDomain {
+    kind: &'static str,
+    storage: Option<u64>,
+    address_space: Option<usize>,
+}
+
+impl ECodeSsaDomain {
+    fn from_core(domain: CoreECodeSsaDomain) -> Self {
+        match domain {
+            CoreECodeSsaDomain::Flag(storage) => Self {
+                kind: "flag",
+                storage: Some(storage.value()),
+                address_space: None,
+            },
+            CoreECodeSsaDomain::Memory(space) => Self {
+                kind: "memory",
+                storage: None,
+                address_space: Some(space.index()),
+            },
+            CoreECodeSsaDomain::Register(storage) => Self {
+                kind: "register",
+                storage: Some(storage.value()),
+                address_space: None,
+            },
+        }
+    }
+}
+
+#[pymethods]
+impl ECodeSsaDomain {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    #[getter]
+    fn storage(&self) -> Option<u64> {
+        self.storage
+    }
+
+    #[getter]
+    fn address_space(&self) -> Option<usize> {
+        self.address_space
     }
 }
 
@@ -1707,6 +1947,324 @@ impl ECodeSsaOp {
     }
 }
 
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeVariable {
+    id: usize,
+    kind: &'static str,
+    storage: i128,
+    index: u32,
+    aliased: bool,
+}
+
+impl MCodeVariable {
+    fn from_core(id: usize, variable: CoreMCodeVar, aliased: bool) -> Self {
+        let kind = match variable.kind() {
+            CoreMCodeVarKind::Flag => "flag",
+            CoreMCodeVarKind::Register => "register",
+            CoreMCodeVarKind::Stack => "stack",
+        };
+        let storage = match variable.kind() {
+            CoreMCodeVarKind::Flag => variable
+                .flag_id()
+                .map(|flag| i128::from(flag.value()))
+                .expect("flag variable has flag storage"),
+            CoreMCodeVarKind::Register => variable
+                .register_id()
+                .map(|register| i128::from(register.value()))
+                .expect("register variable has register storage"),
+            CoreMCodeVarKind::Stack => variable
+                .stack_offset()
+                .map(i128::from)
+                .expect("stack variable has stack storage"),
+        };
+        Self {
+            id,
+            kind,
+            storage,
+            index: variable.index(),
+            aliased,
+        }
+    }
+}
+
+#[pymethods]
+impl MCodeVariable {
+    #[getter]
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    #[getter]
+    fn storage(&self) -> i128 {
+        self.storage
+    }
+
+    #[getter]
+    fn index(&self) -> u32 {
+        self.index
+    }
+
+    #[getter]
+    fn aliased(&self) -> bool {
+        self.aliased
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeSsaValue {
+    index: usize,
+    width: u32,
+    definition_kind: &'static str,
+    definition_index: usize,
+    variable: Option<usize>,
+    version: u32,
+}
+
+impl MCodeSsaValue {
+    fn from_core(index: usize, value: CoreMCodeSsaValue) -> Self {
+        let (definition_kind, definition_index) = match value.definition() {
+            CoreIlSsaDef::BlockArgument(argument) => ("block_argument", argument.index()),
+            CoreIlSsaDef::Operation(operation) => ("operation", operation.index()),
+        };
+        let binding = value.binding();
+        Self {
+            index,
+            width: value.width(),
+            definition_kind,
+            definition_index,
+            variable: binding.map(|binding| binding.variable().index()),
+            version: binding.map_or(0, |binding| binding.version().value()),
+        }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaValue {
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    #[getter]
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[getter]
+    fn definition_kind(&self) -> &'static str {
+        self.definition_kind
+    }
+
+    #[getter]
+    fn definition_index(&self) -> usize {
+        self.definition_index
+    }
+
+    #[getter]
+    fn variable(&self) -> Option<usize> {
+        self.variable
+    }
+
+    #[getter]
+    fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeSsaBlockArg {
+    index: usize,
+    block: usize,
+    value: usize,
+    width: u32,
+}
+
+impl MCodeSsaBlockArg {
+    fn from_core(index: usize, argument: CoreMCodeSsaBlockArg) -> Self {
+        Self {
+            index,
+            block: argument.block().index(),
+            value: argument.value().index(),
+            width: argument.width(),
+        }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaBlockArg {
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    #[getter]
+    fn block(&self) -> usize {
+        self.block
+    }
+
+    #[getter]
+    fn value(&self) -> usize {
+        self.value
+    }
+
+    #[getter]
+    fn width(&self) -> u32 {
+        self.width
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeSsaEdgeArguments {
+    edge: usize,
+    arguments: Vec<usize>,
+}
+
+impl MCodeSsaEdgeArguments {
+    fn from_core(ir: &CoreMCodeSsaIr, edge: usize) -> Self {
+        let arguments = ir
+            .arguments_for_edge(edge)
+            .iter()
+            .map(|argument| argument.index())
+            .collect();
+        Self { edge, arguments }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaEdgeArguments {
+    #[getter]
+    fn edge(&self) -> usize {
+        self.edge
+    }
+
+    #[getter]
+    fn arguments(&self) -> Vec<usize> {
+        self.arguments.clone()
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeSsaMemoryDomain {
+    index: usize,
+    address_space: usize,
+}
+
+impl MCodeSsaMemoryDomain {
+    fn from_core(index: usize, domain: CoreMCodeSsaMemoryDomain) -> Self {
+        Self {
+            index,
+            address_space: domain.space().index(),
+        }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaMemoryDomain {
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    #[getter]
+    fn address_space(&self) -> usize {
+        self.address_space
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) struct MCodeSsaOp {
+    index: usize,
+    opcode: &'static str,
+    results: Vec<usize>,
+    operands: Vec<usize>,
+    width: u32,
+    variable: Option<usize>,
+    immediate: u64,
+    address: Option<Address>,
+    address_space: Option<usize>,
+}
+
+impl MCodeSsaOp {
+    fn from_core(ir: &CoreMCodeSsaIr, index: usize, operation: &CoreMCodeSsaOp) -> Self {
+        let results = (operation.results().start()..operation.results().end()).collect();
+        let operands = ir
+            .operation_operands_for(operation)
+            .iter()
+            .map(|operand| operand.index())
+            .collect();
+        Self {
+            index,
+            opcode: operation.opcode().mnemonic(),
+            results,
+            operands,
+            width: operation.width(),
+            variable: operation.variable().map(|variable| variable.index()),
+            immediate: operation.immediate(),
+            address: operation.address().map(Address::from_core),
+            address_space: operation.address_space().map(|space| space.index()),
+        }
+    }
+}
+
+#[pymethods]
+impl MCodeSsaOp {
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    #[getter]
+    fn opcode(&self) -> &'static str {
+        self.opcode
+    }
+
+    #[getter]
+    fn results(&self) -> Vec<usize> {
+        self.results.clone()
+    }
+
+    #[getter]
+    fn operands(&self) -> Vec<usize> {
+        self.operands.clone()
+    }
+
+    #[getter]
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[getter]
+    fn variable(&self) -> Option<usize> {
+        self.variable
+    }
+
+    #[getter]
+    fn immediate(&self) -> u64 {
+        self.immediate
+    }
+
+    #[getter]
+    fn address(&self) -> Option<Address> {
+        self.address.clone()
+    }
+
+    #[getter]
+    fn address_space(&self) -> Option<usize> {
+        self.address_space
+    }
+}
+
 pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Project>()?;
     module.add_class::<Function>()?;
@@ -1715,6 +2273,7 @@ pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PCodeIr>()?;
     module.add_class::<ECodeIr>()?;
     module.add_class::<ECodeSsaIr>()?;
+    module.add_class::<MCodeSsaIr>()?;
     module.add_class::<IlBlock>()?;
     module.add_class::<IlBlockPredecessors>()?;
     module.add_class::<IlSourceSpan>()?;
@@ -1723,6 +2282,7 @@ pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PCodeOperation>()?;
     module.add_class::<ECodeExpr>()?;
     module.add_class::<ECodeStmt>()?;
+    module.add_class::<ECodeSsaDomain>()?;
     module.add_class::<ECodeSsaValue>()?;
     module.add_class::<ECodeSsaValueUses>()?;
     module.add_class::<ECodeSsaUse>()?;
@@ -1732,6 +2292,12 @@ pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ECodeSsaEdgeArguments>()?;
     module.add_class::<ECodeSsaMemoryDomain>()?;
     module.add_class::<ECodeSsaOp>()?;
+    module.add_class::<MCodeVariable>()?;
+    module.add_class::<MCodeSsaValue>()?;
+    module.add_class::<MCodeSsaBlockArg>()?;
+    module.add_class::<MCodeSsaEdgeArguments>()?;
+    module.add_class::<MCodeSsaMemoryDomain>()?;
+    module.add_class::<MCodeSsaOp>()?;
 
     Ok(())
 }

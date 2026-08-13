@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use super::{ECodeSsaConstruction, SsaDomain};
+use super::ECodeSsaConstruction;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlBlock, IlBlockId, IlDominance, IlError, IlGraph, IlIndexRange, IlValueId,
 };
+use crate::il::ecode::ssa::ECodeSsaDomain;
 
 impl ECodeSsaConstruction<'_, '_> {
     pub(crate) fn build(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
@@ -97,7 +98,7 @@ impl ECodeSsaConstruction<'_, '_> {
         &mut self,
         block: IlBlockId,
         dominance: &IlDominance,
-        current: BTreeMap<SsaDomain, IlValueId>,
+        current: BTreeMap<ECodeSsaDomain, IlValueId>,
         cancellation: &CancellationToken,
     ) -> Result<(), IlError> {
         let mut stack = Vec::new();
@@ -129,9 +130,9 @@ impl ECodeSsaConstruction<'_, '_> {
     fn build_block(
         &mut self,
         block: IlBlockId,
-        mut current: BTreeMap<SsaDomain, IlValueId>,
+        mut current: BTreeMap<ECodeSsaDomain, IlValueId>,
         cancellation: &CancellationToken,
-    ) -> Result<BTreeMap<SsaDomain, IlValueId>, IlError> {
+    ) -> Result<BTreeMap<ECodeSsaDomain, IlValueId>, IlError> {
         cancellation.check()?;
 
         for (domain, value) in &self.block_arguments[block.index()] {
@@ -144,7 +145,7 @@ impl ECodeSsaConstruction<'_, '_> {
         let start = self.builder.operation_count();
 
         if self.entry_block == Some(block) {
-            self.seed_input_domains(&mut current)?;
+            self.allocate_input_values(&mut current)?;
         }
 
         self.reset_expression_cache();
@@ -154,7 +155,7 @@ impl ECodeSsaConstruction<'_, '_> {
             self.build_statement_at(statement_index, &mut current)?;
         }
 
-        self.fill_successor_edges(&mut current, source_block)?;
+        self.build_edge_arguments(source_block, &mut current)?;
 
         let end = self.builder.operation_count();
         self.blocks[block.index()] = Some(IlBlock::new(
@@ -166,10 +167,10 @@ impl ECodeSsaConstruction<'_, '_> {
         Ok(current)
     }
 
-    fn fill_successor_edges(
+    fn build_edge_arguments(
         &mut self,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
         source_block: IlBlock,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
         for (successor_offset, successor) in source_block
             .successors()
@@ -204,9 +205,9 @@ impl ECodeSsaConstruction<'_, '_> {
         Ok(())
     }
 
-    fn seed_input_domains(
+    fn allocate_input_values(
         &mut self,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
         for index in 0..self.input_domains.len() {
             let (domain, width) = self.input_domains[index];

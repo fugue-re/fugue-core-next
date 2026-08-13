@@ -111,6 +111,8 @@ impl SwitchIntervalRecovery<'_> {
                 ECodeSsaOpcode::Add
                 | ECodeSsaOpcode::Sub
                 | ECodeSsaOpcode::Copy
+                | ECodeSsaOpcode::WriteFlag
+                | ECodeSsaOpcode::WriteRegister
                 | ECodeSsaOpcode::ZeroExtend
                 | ECodeSsaOpcode::SignExtend
                 | ECodeSsaOpcode::Truncate

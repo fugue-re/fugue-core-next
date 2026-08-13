@@ -2,19 +2,19 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Result as AnyResult;
 use arc_swap::ArcSwapOption;
-use axum::Json;
-use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Multipart, Path, Query as QueryParams, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use tokio::sync::broadcast;
+use axum::{Json, Router};
 use fugue_core::il::common::{IlArtefact, IlBlockId, IlFormId, IlIndexRange, IlSourceSpan};
 use fugue_core::il::ecode::ECodeIr;
 use fugue_core::il::ecode::ssa::ECodeSsaIr;
+use fugue_core::il::mcode::ssa::MCodeSsaIr;
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::il::registry::IlRegistry;
 use fugue_core::ir::Address;
@@ -22,6 +22,8 @@ use fugue_core::lifter::Lifter;
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::SegmentStorage;
 use serde::Deserialize;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::trace::TraceLayer;
 
@@ -86,7 +88,10 @@ impl std::ops::Deref for CurrentSession {
 impl FromRequestParts<AppState> for CurrentSession {
     type Rejection = WorkbenchError;
 
-    async fn from_request_parts(_parts: &mut Parts, state: &AppState) -> Result<Self, WorkbenchError> {
+    async fn from_request_parts(
+        _parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, WorkbenchError> {
         state.current().map(CurrentSession)
     }
 }
@@ -95,6 +100,7 @@ fn renderable_form(form: &IlFormId) -> bool {
     *form == <PCodeIr as IlArtefact>::FORM
         || *form == <ECodeIr as IlArtefact>::FORM
         || *form == <ECodeSsaIr as IlArtefact>::FORM
+        || *form == <MCodeSsaIr as IlArtefact>::FORM
 }
 
 struct Snapshot<'a> {
@@ -121,7 +127,9 @@ impl<'a> Snapshot<'a> {
         let mut names = HashMap::new();
         for entry in self.reader.symbols() {
             let entry = entry?;
-            names.entry(entry.address()).or_insert_with(|| entry.symbol().to_string());
+            names
+                .entry(entry.address())
+                .or_insert_with(|| entry.symbol().to_string());
         }
 
         let project = self.reader.project()?;
@@ -244,6 +252,11 @@ impl<'a> Snapshot<'a> {
                 Some(ir) => renderer.ssa(&ir),
                 None => Vec::new(),
             }
+        } else if form_id == <MCodeSsaIr as IlArtefact>::FORM {
+            match self.reader.mcode_ssa(function)? {
+                Some(ir) => renderer.mcode_ssa(&ir),
+                None => Vec::new(),
+            }
         } else {
             return Err(WorkbenchError::unrenderable_form(form));
         };
@@ -359,54 +372,42 @@ async fn meta(session: CurrentSession) -> Result<Json<MetaResponse>, WorkbenchEr
         .map(Json)
 }
 
-async fn functions(
-    session: CurrentSession,
-) -> Result<Json<Vec<FunctionRow>>, WorkbenchError> {
+async fn functions(session: CurrentSession) -> Result<Json<Vec<FunctionRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).functions())
         .await
         .map(Json)
 }
 
-async fn symbols(
-    session: CurrentSession,
-) -> Result<Json<Vec<SymbolRow>>, WorkbenchError> {
+async fn symbols(session: CurrentSession) -> Result<Json<Vec<SymbolRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).symbols())
         .await
         .map(Json)
 }
 
-async fn problems(
-    session: CurrentSession,
-) -> Result<Json<Vec<ProblemRow>>, WorkbenchError> {
+async fn problems(session: CurrentSession) -> Result<Json<Vec<ProblemRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).problems())
         .await
         .map(Json)
 }
 
-async fn switches(
-    session: CurrentSession,
-) -> Result<Json<Vec<SwitchRow>>, WorkbenchError> {
+async fn switches(session: CurrentSession) -> Result<Json<Vec<SwitchRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).switches())
         .await
         .map(Json)
 }
 
-async fn segments(
-    session: CurrentSession,
-) -> Result<Json<Vec<SegmentRow>>, WorkbenchError> {
+async fn segments(session: CurrentSession) -> Result<Json<Vec<SegmentRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).segments())
         .await
         .map(Json)
 }
 
-async fn metrics(
-    session: CurrentSession,
-) -> Result<Json<MetricsResponse>, WorkbenchError> {
+async fn metrics(session: CurrentSession) -> Result<Json<MetricsResponse>, WorkbenchError> {
     session.metrics().await.map(Json)
 }
 
@@ -516,7 +517,10 @@ async fn patch_bytes(
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
-    if hex.is_empty() || hex.len() % 2 != 0 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+    if hex.is_empty()
+        || hex.len() % 2 != 0
+        || !hex.chars().all(|character| character.is_ascii_hexdigit())
+    {
         return Err(WorkbenchError::bad_request(
             "byte patch must be an even-length hex string",
         ));
@@ -538,7 +542,7 @@ async fn open(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<Json<MetaResponse>, WorkbenchError> {
-    let mut data: Option<Vec<u8>> = None;
+    let mut data = None::<Vec<u8>>;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -612,7 +616,7 @@ async fn assets(uri: Uri) -> Response {
     }
 }
 
-pub async fn serve(state: AppState, address: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(state: AppState, address: SocketAddr) -> AnyResult<()> {
     let router = Router::new()
         .route("/api/open", post(open))
         .route("/api/meta", get(meta))
@@ -637,8 +641,11 @@ pub async fn serve(state: AppState, address: SocketAddr) -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address).await?;
     tracing::info!(%address, "fugue-workbench listening");
     axum::serve(listener, router).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod test;

@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::LanguageId;
 use crate::context::ContextBitRange;
 use crate::dynamic::constructor::Constructor;
+use crate::dynamic::convention::Convention;
 use crate::dynamic::install::Install;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::resolve::DecisionNode;
@@ -18,6 +19,7 @@ use crate::dynamic::symbol::Symbol;
 use crate::dynamic::tables::Tables;
 use crate::dynamic::template::{ConstructTpl, OpTpl};
 use crate::dynamic::{LanguageLoadError, registry};
+use crate::language::Language as StaticLanguage;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
@@ -48,37 +50,29 @@ pub struct Language {
     pub(crate) processor: Box<str>,
     pub(crate) variant: Box<str>,
     pub(crate) little_endian: bool,
-
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
     pub(crate) address_size: usize,
     pub(crate) address_upper_bound: u64,
-
     pub(crate) constant_space: u8,
     pub(crate) default_space: u8,
     pub(crate) register_space: u8,
     pub(crate) register_space_size: usize,
-
     pub(crate) unique_mask: u64,
     pub(crate) unique_space: u8,
     pub(crate) unique_space_size: usize,
-
     pub(crate) root_dtree: u16,
-
     pub(crate) spaces: Box<[AddressSpace]>,
-
     pub(crate) constructors: Box<[Constructor]>,
     pub(crate) decision_trees: Box<[DecisionNode]>,
     pub(crate) operand_filters: Box<[OperandFilter]>,
     pub(crate) pattern_expressions: Box<[PatternOp]>,
     pub(crate) symbols: Box<[Symbol]>,
-
     pub(crate) const_templates: Box<[ConstTpl]>,
     pub(crate) construct_templates: Box<[ConstructTpl]>,
     pub(crate) handle_templates: Box<[HandleTpl]>,
     pub(crate) op_templates: Box<[OpTpl]>,
     pub(crate) varnode_templates: Box<[VarnodeTpl]>,
-
     pub(crate) registers: Box<[(Box<str>, Varnode)]>,
     pub(crate) register_ranges: Box<[(u64, u16, Box<str>)]>,
     pub(crate) user_ops: Box<[Box<str>]>,
@@ -86,6 +80,7 @@ pub struct Language {
     pub(crate) context_defaults: Box<[(Box<str>, u32)]>,
     #[allow(clippy::type_complexity)]
     pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
+    pub(crate) conventions: Box<[(Box<str>, Convention)]>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -122,9 +117,7 @@ impl Language {
         rkyv::to_bytes::<RkyvError>(self).map(|aligned| aligned.into_vec().into_boxed_slice())
     }
 
-    pub(crate) fn get_or_install(
-        self,
-    ) -> Result<&'static crate::language::Language, LanguageLoadError> {
+    pub(crate) fn get_or_install(self) -> Result<&'static StaticLanguage, LanguageLoadError> {
         let id_str = &*self.id;
         let language_id = id_str
             .parse::<LanguageId>()
@@ -132,7 +125,7 @@ impl Language {
         Ok(registry::get_or_install(language_id, || self.install()))
     }
 
-    pub fn install(self) -> &'static crate::language::Language {
+    pub fn install(self) -> &'static StaticLanguage {
         let Self {
             id,
             processor,
@@ -167,6 +160,7 @@ impl Language {
             context_vars,
             context_defaults,
             call_preserved_registers,
+            conventions,
             space_names,
         } = self;
 
@@ -226,6 +220,7 @@ impl Language {
             context_vars: context_vars.install(),
             context_defaults: context_defaults.install(),
             call_preserved_registers: call_preserved_registers.install(),
+            conventions: conventions.install(),
             data: language_data,
         }))
     }
@@ -307,6 +302,21 @@ impl Language {
             .into_iter()
             .collect::<Box<[(Box<str>, Box<[Varnode]>)]>>();
 
+        let mut conventions = sleigh
+            .compiler_conventions()
+            .iter()
+            .map(|(compiler, convention)| {
+                (
+                    Box::<str>::from(compiler.as_str()),
+                    Convention::from(convention),
+                )
+            })
+            .collect::<Vec<_>>();
+        conventions.sort_by(|a, b| a.0.cmp(&b.0));
+        let conventions = conventions
+            .into_iter()
+            .collect::<Box<[(Box<str>, Convention)]>>();
+
         let root_dtree = tables.root_dtree_id();
 
         let Tables {
@@ -364,6 +374,7 @@ impl Language {
             context_vars: context_pairs.into_boxed_slice(),
             context_defaults,
             call_preserved_registers,
+            conventions,
             space_names,
         }
     }

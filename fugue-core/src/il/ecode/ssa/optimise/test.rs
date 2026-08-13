@@ -4,11 +4,57 @@ use super::{ECodeSsaCompaction, ECodeSsaConstantFolding};
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange,
-    IlMetadata,
+    IlMetadata, IlSsaDef,
 };
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
+use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode};
 use crate::ir::{Address, FunctionId};
 use crate::storage::segments::space::AddressSpaceId;
+
+#[test]
+fn compaction_preserves_interned_constants_across_inline_capacity() {
+    let metadata = IlMetadata::new(FunctionId::default(), 0);
+    let mut builder = ECodeSsaBuilder::new(metadata, IlGraph::default());
+    let mut constants = Vec::new();
+    for width in [65, 128, 192] {
+        let (value, results) = builder.push_result_value(width).unwrap();
+        let operation = builder
+            .push_operation(ECodeSsaOp::new(
+                ECodeSsaOpcode::Constant,
+                results,
+                IlIndexRange::EMPTY,
+                width,
+            ))
+            .unwrap();
+        constants.push((value, operation));
+    }
+    let operands = builder
+        .push_value_operands(constants.iter().map(|(value, _)| *value))
+        .unwrap();
+    builder
+        .push_operation(ECodeSsaOp::new(
+            ECodeSsaOpcode::Return,
+            IlIndexRange::EMPTY,
+            operands,
+            0,
+        ))
+        .unwrap();
+    let mut ir = builder.build(&CancellationToken::default()).unwrap();
+    let values = [
+        BitVec::from_le_bytes(&[1; 9]).unsigned_cast(65),
+        BitVec::from_le_bytes(&[2; 16]),
+        BitVec::from_le_bytes(&[3; 24]),
+    ];
+    for ((_, operation), value) in constants.iter().zip(&values) {
+        ir.rewriter().replace_with_constant(*operation, value);
+    }
+
+    ir.rewrite(ECodeSsaCompaction);
+
+    for ((value, _), expected) in constants.iter().zip(values) {
+        assert_eq!(ir.constant_value(*value), Some(expected));
+    }
+    assert_eq!(ir.constant_storage().len(), 49);
+}
 
 #[test]
 fn fold_constants_materialises_wide_result_in_pool() {
@@ -349,12 +395,12 @@ fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
-    let (seed, seed_results) = builder.push_result_value(32).unwrap();
+    let (initial, initial_results) = builder.push_result_value(32).unwrap();
     builder
         .push_operation(
             ECodeSsaOp::new(
                 ECodeSsaOpcode::Constant,
-                seed_results,
+                initial_results,
                 IlIndexRange::EMPTY,
                 32,
             )
@@ -384,7 +430,7 @@ fn fold_constants_leaves_self_referential_loop_argument_unfolded() {
         ))
         .unwrap();
 
-    builder.push_edge_arguments([seed]).unwrap();
+    builder.push_edge_arguments([initial]).unwrap();
     builder.push_edge_arguments([phi]).unwrap();
     builder.push_edge_arguments([]).unwrap();
 
@@ -575,12 +621,12 @@ fn compact_drops_dead_loop_phi_and_sources() {
     );
     let mut builder = ECodeSsaBuilder::new(metadata, graph);
 
-    let (seed, seed_results) = builder.push_result_value(32).unwrap();
+    let (initial, initial_results) = builder.push_result_value(32).unwrap();
     builder
         .push_operation(
             ECodeSsaOp::new(
                 ECodeSsaOpcode::Constant,
-                seed_results,
+                initial_results,
                 IlIndexRange::EMPTY,
                 32,
             )
@@ -622,7 +668,7 @@ fn compact_drops_dead_loop_phi_and_sources() {
         ))
         .unwrap();
 
-    builder.push_edge_arguments([seed]).unwrap();
+    builder.push_edge_arguments([initial]).unwrap();
     builder.push_edge_arguments([next]).unwrap();
     builder.push_edge_arguments([]).unwrap();
 
@@ -747,10 +793,10 @@ fn compact_preserves_live_phi_and_remaps_edge_arguments() {
         .find(|operation| operation.opcode() == ECodeSsaOpcode::Return)
         .unwrap();
     let consumed = ssa.operation_operands_for(return_op)[0];
-    assert_eq!(
-        ssa.values()[consumed.index()].definition_kind(),
-        ECodeSsaValueKind::BlockArgument
-    );
+    assert!(matches!(
+        ssa.values()[consumed.index()].definition(),
+        IlSsaDef::BlockArgument(_)
+    ));
 }
 
 #[test]

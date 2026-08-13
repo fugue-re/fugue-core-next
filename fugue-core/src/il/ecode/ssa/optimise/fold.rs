@@ -2,16 +2,14 @@ use fugue_bv::BitVec;
 use smallvec::SmallVec;
 
 use crate::il::common::{IlArtefact, IlCsr, IlOpId, IlRewrite, IlValueId};
-use crate::il::ecode::ssa::{
-    ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
-};
+use crate::il::ecode::ssa::{ECodeSsaBlockArgInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses};
 
 pub(crate) struct ECodeSsaConstantFolding;
 
 impl IlRewrite<ECodeSsaIr> for ECodeSsaConstantFolding {
     fn rewrite(&mut self, ir: &mut ECodeSsaIr) {
         let uses = ir.analyse::<ECodeSsaUses>();
-        let inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
+        let inputs = ir.analyse::<ECodeSsaBlockArgInputs>();
         let dependent_arguments = IlCsr::from_entries(
             ir.values().len(),
             inputs.iter().flat_map(|(argument, argument_inputs)| {

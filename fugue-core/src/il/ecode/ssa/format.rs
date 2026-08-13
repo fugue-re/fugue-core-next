@@ -1,9 +1,8 @@
 use std::fmt;
 
-use crate::il::common::IlValueId;
+use crate::il::common::{IlSsaDef, IlValueId};
 use crate::il::ecode::ssa::{
     ECodeSsaBlockArg, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue,
-    ECodeSsaValueKind,
 };
 use crate::ir::Address;
 
@@ -114,11 +113,10 @@ impl fmt::Display for ECodeSsaValueDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.id.index();
         let width = self.value.width();
-        let definition = match self.value.definition_kind() {
-            ECodeSsaValueKind::Operation => "operation",
-            ECodeSsaValueKind::BlockArgument => "block_argument",
+        let (definition, definition_index) = match self.value.definition() {
+            IlSsaDef::BlockArgument(argument) => ("block_argument", argument.index()),
+            IlSsaDef::Operation(operation) => ("operation", operation.index()),
         };
-        let definition_index = self.value.definition_index();
 
         write!(
             f,
@@ -259,6 +257,14 @@ impl<'a> ECodeSsaOpDisplay<'a> {
             {
                 let intrinsic = self.operation.immediate();
                 write!(f, " intrinsic<{intrinsic}>")?;
+            }
+            ECodeSsaOpcode::WriteFlag => {
+                let storage = self.operation.immediate();
+                write!(f, " flag<{storage}>")?;
+            }
+            ECodeSsaOpcode::WriteRegister => {
+                let storage = self.operation.immediate();
+                write!(f, " register<{storage}>")?;
             }
             _ if self.operation.immediate() != 0 => {
                 let immediate = self.operation.immediate();

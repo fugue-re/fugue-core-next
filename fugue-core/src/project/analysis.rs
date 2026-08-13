@@ -623,7 +623,7 @@ mod test {
     }
 
     #[test]
-    fn rename_reports_invalidation_and_seeds_replacement() {
+    fn rename_reports_invalidation_and_records_replacement() {
         let mut coverage = AnalysisCoverage::new();
         coverage.configure([("old-name", AnalysisPhase::Decode)]);
         coverage.mark("old-name", AnalysisPhase::Decode, range(0x1000, 0x1fff));
@@ -710,14 +710,14 @@ mod test {
                 .into_reconfiguration()
                 .reanalysis()
                 .is_empty(),
-            "successfully processed coverage must clear its durable reanalysis seed"
+            "successfully processed coverage must clear its durable reanalysis marker"
         );
 
         Ok(())
     }
 
     #[test]
-    fn invalidated_coverage_is_a_durable_reanalysis_seed() -> Result<(), EntityStorageError> {
+    fn invalidated_coverage_is_a_durable_reanalysis_marker() -> Result<(), EntityStorageError> {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let mut coverage = AnalysisCoverage::new();
         coverage.configure([("decoder", AnalysisPhase::Decode)]);

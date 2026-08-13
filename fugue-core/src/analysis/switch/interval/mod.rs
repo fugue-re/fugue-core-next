@@ -5,7 +5,7 @@ use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTarge
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlValueId};
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaStridedIntervals,
+    ECodeSsaBlockArgInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaStridedIntervals,
 };
 use crate::ir::{
     Address, AddressTable, AddressWithContext, SwitchCase, SwitchCaseLabel, SwitchModel,
@@ -27,7 +27,7 @@ pub(crate) struct SwitchIntervalRecovery<'analysis> {
     config: SwitchRecoveryConfig,
     intervals: ECodeSsaStridedIntervals,
     dominance: IlDominance,
-    block_argument_inputs: ECodeSsaBlockArgumentInputs,
+    block_argument_inputs: ECodeSsaBlockArgInputs,
     cases: Vec<SwitchCase>,
 }
 
@@ -84,7 +84,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             config,
             intervals: ssa.analyse::<ECodeSsaStridedIntervals>(),
             dominance: ssa.analyse::<IlDominance>(),
-            block_argument_inputs: ssa.analyse::<ECodeSsaBlockArgumentInputs>(),
+            block_argument_inputs: ssa.analyse::<ECodeSsaBlockArgInputs>(),
             cases: Vec::new(),
         }
     }

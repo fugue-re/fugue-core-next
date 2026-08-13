@@ -1,17 +1,18 @@
 use std::collections::BTreeMap;
 
-use super::{ECodeSsaConstruction, ExpressionStep, SsaDomain};
-use crate::il::common::{IlArtefact, IlError, IlExprId, IlIndexRange, IlValueId};
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode};
+use super::{ECodeSsaConstruction, ECodeSsaExpressionStep};
+use crate::il::common::{
+    FlagId, IlArtefact, IlError, IlExprId, IlIndexRange, IlValueId, RegisterId,
+};
+use crate::il::ecode::ssa::{ECodeSsaDomain, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode};
 use crate::il::ecode::{ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
-use crate::il::pcode::{FlagId, RegisterId};
 use crate::storage::segments::space::AddressSpaceId;
 
 impl ECodeSsaConstruction<'_, '_> {
     pub(crate) fn build_statement_at(
         &mut self,
         index: usize,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
         let spans = self.source.source_spans();
         let span = spans.partition_point(|span| span.destination().start() < index);
@@ -41,26 +42,44 @@ impl ECodeSsaConstruction<'_, '_> {
     fn build_statement(
         &mut self,
         statement: &ECodeStmt,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
         match statement.opcode() {
-            ECodeStmtOpcode::WriteRegister => {
-                let value = self.build_statement_value(statement, current)?;
-                current.insert(
-                    SsaDomain::Register(RegisterId::new(statement.immediate())),
-                    value,
-                );
-            }
-            ECodeStmtOpcode::WriteFlag => {
-                let value = self.build_statement_value(statement, current)?;
-                current.insert(SsaDomain::Flag(FlagId::new(statement.immediate())), value);
+            ECodeStmtOpcode::WriteRegister | ECodeStmtOpcode::WriteFlag => {
+                let source_expression = statement
+                    .value()
+                    .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "value"))?;
+                let width = self.source.expressions()[source_expression.index()].width();
+                let source = self.build_expression(source_expression, current)?;
+                let (opcode, domain) = match statement.opcode() {
+                    ECodeStmtOpcode::WriteRegister => (
+                        ECodeSsaOpcode::WriteRegister,
+                        ECodeSsaDomain::Register(RegisterId::new(statement.immediate())),
+                    ),
+                    ECodeStmtOpcode::WriteFlag => (
+                        ECodeSsaOpcode::WriteFlag,
+                        ECodeSsaDomain::Flag(FlagId::new(statement.immediate())),
+                    ),
+                    _ => unreachable!(),
+                };
+                let operands = self.builder.push_value_operands([source])?;
+                let value = self.push_value_operation(
+                    opcode,
+                    width,
+                    operands,
+                    statement.immediate(),
+                    None,
+                )?;
+                self.builder.set_value_domain(value, domain);
+                current.insert(domain, value);
             }
             ECodeStmtOpcode::Store => {
                 let address_space = statement
                     .address_space()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
                 self.build_statement_operands(statement, current)?;
-                let memory = self.current_value(SsaDomain::Memory(address_space), 0, current)?;
+                let memory =
+                    self.current_value(ECodeSsaDomain::Memory(address_space), 0, current)?;
 
                 self.statement_operands.push(memory);
 
@@ -68,13 +87,15 @@ impl ECodeSsaConstruction<'_, '_> {
                     .builder
                     .push_value_operands(self.statement_operands.iter().copied())?;
                 let (memory, results) = self.builder.push_result_value(0)?;
+                let domain = ECodeSsaDomain::Memory(address_space);
+                self.builder.set_value_domain(memory, domain);
                 self.builder.ensure_memory_domain(address_space);
                 let operation = ECodeSsaOp::new(ECodeSsaOpcode::Store, results, operands, 0)
                     .with_address_space(address_space)
                     .with_immediate(statement.immediate());
 
                 self.builder.push_operation(operation)?;
-                current.insert(SsaDomain::Memory(address_space), memory);
+                current.insert(domain, memory);
             }
             opcode => {
                 self.build_statement_operands(statement, current)?;
@@ -102,8 +123,10 @@ impl ECodeSsaConstruction<'_, '_> {
                 if matches!(opcode, ECodeSsaOpcode::Call | ECodeSsaOpcode::CallIndirect) {
                     let preserved = self.source.call_preserved_registers();
                     current.retain(|domain, _| match domain {
-                        SsaDomain::Register(register) => preserved.binary_search(register).is_ok(),
-                        SsaDomain::Flag(_) | SsaDomain::Memory(_) => false,
+                        ECodeSsaDomain::Register(register) => {
+                            preserved.binary_search(register).is_ok()
+                        }
+                        ECodeSsaDomain::Flag(_) | ECodeSsaDomain::Memory(_) => false,
                     });
                 }
             }
@@ -112,22 +135,10 @@ impl ECodeSsaConstruction<'_, '_> {
         Ok(())
     }
 
-    fn build_statement_value(
-        &mut self,
-        statement: &ECodeStmt,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
-    ) -> Result<IlValueId, IlError> {
-        let value = statement
-            .value()
-            .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "value"))?;
-
-        self.build_expression(value, current)
-    }
-
     fn build_statement_operands(
         &mut self,
         statement: &ECodeStmt,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<(), IlError> {
         self.statement_operands.clear();
 
@@ -147,14 +158,15 @@ impl ECodeSsaConstruction<'_, '_> {
     fn build_expression(
         &mut self,
         id: IlExprId,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<IlValueId, IlError> {
         self.expression_steps.clear();
-        self.expression_steps.push(ExpressionStep::Visit(id));
+        self.expression_steps
+            .push(ECodeSsaExpressionStep::Visit(id));
 
         while let Some(step) = self.expression_steps.pop() {
             let expression_id = match step {
-                ExpressionStep::Visit(expression_id) => {
+                ECodeSsaExpressionStep::Visit(expression_id) => {
                     if self.values[expression_id.index()].is_some() {
                         continue;
                     }
@@ -163,7 +175,7 @@ impl ECodeSsaConstruction<'_, '_> {
                     match expression.opcode() {
                         ECodeExprOpcode::ReadRegister => {
                             let value = self.current_value(
-                                SsaDomain::Register(RegisterId::new(expression.immediate())),
+                                ECodeSsaDomain::Register(RegisterId::new(expression.immediate())),
                                 expression.width(),
                                 current,
                             )?;
@@ -173,7 +185,7 @@ impl ECodeSsaConstruction<'_, '_> {
                         }
                         ECodeExprOpcode::ReadFlag => {
                             let value = self.current_value(
-                                SsaDomain::Flag(FlagId::new(expression.immediate())),
+                                ECodeSsaDomain::Flag(FlagId::new(expression.immediate())),
                                 expression.width(),
                                 current,
                             )?;
@@ -185,18 +197,19 @@ impl ECodeSsaConstruction<'_, '_> {
                     }
 
                     self.expression_steps
-                        .push(ExpressionStep::Build(expression_id));
+                        .push(ECodeSsaExpressionStep::Build(expression_id));
                     for operand in self
                         .source
                         .expression_operands_for(&expression)
                         .iter()
                         .rev()
                     {
-                        self.expression_steps.push(ExpressionStep::Visit(*operand));
+                        self.expression_steps
+                            .push(ECodeSsaExpressionStep::Visit(*operand));
                     }
                     continue;
                 }
-                ExpressionStep::Build(expression_id) => expression_id,
+                ECodeSsaExpressionStep::Build(expression_id) => expression_id,
             };
 
             if self.values[expression_id.index()].is_some() {
@@ -214,7 +227,8 @@ impl ECodeSsaConstruction<'_, '_> {
                 let address_space = expression
                     .address_space()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
-                let memory = self.current_value(SsaDomain::Memory(address_space), 0, current)?;
+                let memory =
+                    self.current_value(ECodeSsaDomain::Memory(address_space), 0, current)?;
                 self.expression_operands.push(memory);
             }
 
@@ -240,9 +254,9 @@ impl ECodeSsaConstruction<'_, '_> {
 
     fn current_value(
         &mut self,
-        domain: SsaDomain,
+        domain: ECodeSsaDomain,
         width: u32,
-        current: &mut BTreeMap<SsaDomain, IlValueId>,
+        current: &mut BTreeMap<ECodeSsaDomain, IlValueId>,
     ) -> Result<IlValueId, IlError> {
         if let Some(value) = current.get(&domain).copied() {
             return Ok(value);
@@ -257,16 +271,26 @@ impl ECodeSsaConstruction<'_, '_> {
 
     pub(crate) fn push_undefined(
         &mut self,
-        domain: SsaDomain,
+        domain: ECodeSsaDomain,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        self.push_value_operation(
+        let immediate = match domain {
+            ECodeSsaDomain::Flag(flag) => flag.value(),
+            ECodeSsaDomain::Memory(space) => {
+                u64::try_from(space.index()).expect("address-space identifier is representable")
+            }
+            ECodeSsaDomain::Register(register) => register.value(),
+        };
+        let value = self.push_value_operation(
             ECodeSsaOpcode::Undefined,
             width,
             IlIndexRange::EMPTY,
-            domain.undefined_immediate(),
+            immediate,
             None,
-        )
+        )?;
+        self.builder.set_value_domain(value, domain);
+
+        Ok(value)
     }
 
     fn push_value_operation(

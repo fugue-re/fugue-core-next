@@ -17,7 +17,6 @@ use crate::error::WorkbenchError;
 pub const DEFAULT_SPACE: AddressSpaceId = DEFAULT_SPACE_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(transparent)]
 #[ts(export)]
 pub struct Address(String);
 
@@ -33,8 +32,8 @@ impl Address {
 
     fn decode_space(space: &str, input: &str) -> Result<AddressSpaceId, WorkbenchError> {
         let trimmed = space.strip_prefix("0x").unwrap_or(space);
-        let index = usize::from_str_radix(trimmed, 16)
-            .map_err(|_| WorkbenchError::not_mapped(input))?;
+        let index =
+            usize::from_str_radix(trimmed, 16).map_err(|_| WorkbenchError::not_mapped(input))?;
         AddressSpaceId::try_new(index).map_err(|_| WorkbenchError::not_mapped(input))
     }
 }
@@ -48,8 +47,8 @@ impl From<CoreAddress> for Address {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AddressRange {
-    pub start: Address,
-    pub end: Address,
+    pub(crate) start: Address,
+    pub(crate) end: Address,
 }
 
 impl AddressRange {
@@ -64,21 +63,21 @@ impl AddressRange {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MetaResponse {
-    pub arch: String,
-    pub language: String,
-    pub entry_point: Option<Address>,
-    pub revision: u64,
-    pub default_space: u32,
+    pub(crate) arch: String,
+    pub(crate) language: String,
+    pub(crate) entry_point: Option<Address>,
+    pub(crate) revision: u64,
+    pub(crate) default_space: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct FunctionRow {
-    pub entry: Address,
-    pub name: Option<String>,
-    pub non_returning: bool,
-    pub thunk: bool,
-    pub external: bool,
+    pub(crate) entry: Address,
+    pub(crate) name: Option<String>,
+    pub(crate) non_returning: bool,
+    pub(crate) thunk: bool,
+    pub(crate) external: bool,
 }
 
 impl FunctionRow {
@@ -96,12 +95,12 @@ impl FunctionRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SymbolRow {
-    pub address: Address,
-    pub name: String,
-    pub function: bool,
-    pub data: bool,
-    pub export: bool,
-    pub import: bool,
+    pub(crate) address: Address,
+    pub(crate) name: String,
+    pub(crate) function: bool,
+    pub(crate) data: bool,
+    pub(crate) export: bool,
+    pub(crate) import: bool,
 }
 
 impl SymbolRow {
@@ -121,9 +120,9 @@ impl SymbolRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ProblemRow {
-    pub address: Option<Address>,
-    pub kind: String,
-    pub attempts: u8,
+    pub(crate) address: Option<Address>,
+    pub(crate) kind: String,
+    pub(crate) attempts: u8,
 }
 
 impl ProblemRow {
@@ -139,9 +138,9 @@ impl ProblemRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SwitchRow {
-    pub branch: Address,
-    pub cases: u32,
-    pub has_default: bool,
+    pub(crate) branch: Address,
+    pub(crate) cases: u32,
+    pub(crate) has_default: bool,
 }
 
 impl SwitchRow {
@@ -157,11 +156,11 @@ impl SwitchRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SegmentRow {
-    pub start: Address,
-    pub size: u64,
-    pub readable: bool,
-    pub writable: bool,
-    pub executable: bool,
+    pub(crate) start: Address,
+    pub(crate) size: u64,
+    pub(crate) readable: bool,
+    pub(crate) writable: bool,
+    pub(crate) executable: bool,
 }
 
 impl SegmentRow {
@@ -180,12 +179,12 @@ impl SegmentRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ListingLine {
-    pub address: Address,
-    pub bytes: String,
-    pub mnemonic: String,
-    pub operands: String,
-    pub size: u32,
-    pub decoded: bool,
+    pub(crate) address: Address,
+    pub(crate) bytes: String,
+    pub(crate) mnemonic: String,
+    pub(crate) operands: String,
+    pub(crate) size: u32,
+    pub(crate) decoded: bool,
 }
 
 impl ListingLine {
@@ -223,11 +222,11 @@ fn hex_string(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct XrefRow {
-    pub from: Address,
-    pub to: Address,
-    pub call: bool,
-    pub jump: bool,
-    pub data: bool,
+    pub(crate) from: Address,
+    pub(crate) to: Address,
+    pub(crate) call: bool,
+    pub(crate) jump: bool,
+    pub(crate) data: bool,
 }
 
 impl XrefRow {
@@ -246,10 +245,10 @@ impl XrefRow {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct FormInfo {
-    pub id: String,
-    pub root: bool,
-    pub persistable: bool,
-    pub renderable: bool,
+    pub(crate) id: String,
+    pub(crate) root: bool,
+    pub(crate) persistable: bool,
+    pub(crate) renderable: bool,
 }
 
 impl FormInfo {
@@ -267,26 +266,26 @@ impl FormInfo {
 #[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum IlTokenKind {
-    Opcode,
-    Keyword,
-    Register,
-    Flag,
-    Number,
     Address,
-    Space,
-    Value,
-    Punctuation,
+    Flag,
+    Keyword,
     Meta,
+    Number,
+    Opcode,
+    Punctuation,
+    Register,
+    Space,
     Text,
+    Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct IlToken {
-    pub kind: IlTokenKind,
-    pub text: String,
-    pub nav: Option<Address>,
-    pub title: Option<String>,
+    pub(crate) kind: IlTokenKind,
+    pub(crate) text: String,
+    pub(crate) nav: Option<Address>,
+    pub(crate) title: Option<String>,
 }
 
 impl IlToken {
@@ -313,51 +312,51 @@ impl IlToken {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct IlLine {
-    pub address: Address,
-    pub tokens: Vec<IlToken>,
+    pub(crate) address: Address,
+    pub(crate) tokens: Vec<IlToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct IlResponse {
-    pub form: String,
-    pub lines: Vec<IlLine>,
+    pub(crate) form: String,
+    pub(crate) lines: Vec<IlLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CfgBlock {
-    pub id: u32,
-    pub entry: Address,
-    pub entry_block: bool,
-    pub lines: Vec<ListingLine>,
+    pub(crate) id: u32,
+    pub(crate) entry: Address,
+    pub(crate) entry_block: bool,
+    pub(crate) lines: Vec<ListingLine>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CfgEdge {
-    pub from: u32,
-    pub to: u32,
-    pub taken: bool,
-    pub fall_through: bool,
-    pub computed: bool,
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+    pub(crate) taken: bool,
+    pub(crate) fall_through: bool,
+    pub(crate) computed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CfgResponse {
-    pub entry: Address,
-    pub blocks: Vec<CfgBlock>,
-    pub edges: Vec<CfgEdge>,
+    pub(crate) entry: Address,
+    pub(crate) blocks: Vec<CfgBlock>,
+    pub(crate) edges: Vec<CfgEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MetricsResponse {
-    pub dispatches: u64,
-    pub items_dispatched: u64,
-    pub retries: u64,
-    pub retries_exhausted: u64,
+    pub(crate) dispatches: u64,
+    pub(crate) items_dispatched: u64,
+    pub(crate) retries: u64,
+    pub(crate) retries_exhausted: u64,
 }
 
 impl MetricsResponse {
@@ -374,35 +373,35 @@ impl MetricsResponse {
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct RenameRequest {
-    pub address: String,
-    pub name: String,
+    pub(crate) address: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct AddressRequest {
-    pub address: String,
+    pub(crate) address: String,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct PatchRequest {
-    pub address: String,
-    pub bytes: String,
+    pub(crate) address: String,
+    pub(crate) bytes: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct MutationResponse {
-    pub revision: u64,
+    pub(crate) revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ChangeEvent {
-    pub revision: u64,
-    pub kinds: Vec<String>,
-    pub ranges: Vec<AddressRange>,
+    pub(crate) revision: u64,
+    pub(crate) kinds: Vec<String>,
+    pub(crate) ranges: Vec<AddressRange>,
 }
 
 impl ChangeEvent {

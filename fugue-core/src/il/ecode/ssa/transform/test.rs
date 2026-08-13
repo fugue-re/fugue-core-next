@@ -1,10 +1,10 @@
 use super::*;
 use crate::il::common::{
-    IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlParentSpan, IlSourceSpan,
+    FlagId, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlParentSpan,
+    IlSourceSpan, RegisterId,
 };
 use crate::il::ecode::ssa::ECodeSsaOpcode;
 use crate::il::ecode::{ECodeBuilder, ECodeExpr, ECodeExprOpcode, ECodeStmt, ECodeStmtOpcode};
-use crate::il::pcode::RegisterId;
 use crate::ir::{Address, FunctionId};
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -81,16 +81,17 @@ fn register_read_after_write_uses_current_value() {
     let ssa = transform.transform(&source, &cancellation).unwrap();
 
     assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
-    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::Return);
-    assert_eq!(ssa.operation_operands().len(), 1);
+    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::WriteRegister);
+    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Return);
+    assert_eq!(ssa.operation_operands().len(), 2);
     assert_eq!(
-        ssa.operation_operands()[0],
-        IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap()
+        ssa.operation_operands_for(&ssa.operations()[2]),
+        &[IlValueId::try_from_index(ssa.operations()[1].results().start()).unwrap()]
     );
     assert_eq!(
         ssa.parent_spans(),
         &[IlParentSpan::new(
-            IlIndexRange::new(0, 2).unwrap(),
+            IlIndexRange::new(0, 3).unwrap(),
             IlIndexRange::new(4, 6).unwrap(),
         )]
     );
@@ -189,15 +190,17 @@ fn call_preserves_only_declared_register_state() {
         .unwrap();
 
     assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
-    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::Constant);
-    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Call);
-    assert_eq!(ssa.operations()[3].opcode(), ECodeSsaOpcode::Undefined);
-    assert_eq!(ssa.operations()[4].opcode(), ECodeSsaOpcode::Return);
+    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::WriteRegister);
+    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Constant);
+    assert_eq!(ssa.operations()[3].opcode(), ECodeSsaOpcode::WriteRegister);
+    assert_eq!(ssa.operations()[4].opcode(), ECodeSsaOpcode::Call);
+    assert_eq!(ssa.operations()[5].opcode(), ECodeSsaOpcode::Undefined);
+    assert_eq!(ssa.operations()[6].opcode(), ECodeSsaOpcode::Return);
     assert_eq!(
-        ssa.operation_operands_for(&ssa.operations()[4]),
+        ssa.operation_operands_for(&ssa.operations()[6]),
         &[
-            IlValueId::try_from_index(ssa.operations()[0].results().start()).unwrap(),
-            IlValueId::try_from_index(ssa.operations()[3].results().start()).unwrap(),
+            IlValueId::try_from_index(ssa.operations()[1].results().start()).unwrap(),
+            IlValueId::try_from_index(ssa.operations()[5].results().start()).unwrap(),
         ]
     );
 }
@@ -521,12 +524,13 @@ fn store_without_load_registers_memory_domain() {
     let source = builder.build(&CancellationToken::default()).unwrap();
     let mut transform = ECodeToSsa::default();
     let ssa = transform
-        .transform(&source, &CancellationToken::default())
+        .transform_optimised(&source, &CancellationToken::default())
         .unwrap();
+
+    ssa.verify().unwrap();
 
     assert_eq!(ssa.memory_domains().len(), 1);
     assert_eq!(ssa.memory_domains()[0].space(), space);
-    ssa.verify().unwrap();
 }
 
 #[test]
@@ -644,7 +648,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
     assert_eq!(ssa.graph().blocks().len(), block_count);
     assert_eq!(ssa.graph().successors().len(), block_count - 1);
-    assert_eq!(ssa.operations().len(), block_count);
+    assert_eq!(ssa.operations().len(), block_count * 2);
     assert!(ssa.block_arguments().is_empty());
 }
 
@@ -757,10 +761,14 @@ fn merge_block_register_read_becomes_block_argument() {
         ssa.block_arguments()[0].block(),
         IlBlockId::try_from_index(3).unwrap()
     );
-    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::Return);
+    let return_operation = ssa
+        .operations()
+        .iter()
+        .find(|operation| operation.opcode() == ECodeSsaOpcode::Return)
+        .unwrap();
     assert_eq!(
-        ssa.operation_operands()[0],
-        ssa.block_arguments()[0].value()
+        ssa.operation_operands_for(return_operation),
+        &[ssa.block_arguments()[0].value()]
     );
     assert_eq!(ssa.edge_arguments().len(), 4);
     assert_eq!(ssa.edge_argument_values().len(), 2);
@@ -993,12 +1001,215 @@ fn loop_carried_register_uses_header_block_argument() {
     let back_edge_value = ssa.arguments_for_edge(2)[0];
 
     assert_eq!(
-        ssa.operations()[ssa.values()[entry_value.index()].definition_index() as usize].opcode(),
+        ssa.defining_operation(entry_value).unwrap().opcode(),
         ECodeSsaOpcode::Undefined
     );
     assert_eq!(
-        ssa.operations()[ssa.values()[back_edge_value.index()].definition_index() as usize]
-            .opcode(),
-        ECodeSsaOpcode::Constant
+        ssa.defining_operation(back_edge_value).unwrap().opcode(),
+        ECodeSsaOpcode::WriteRegister
     );
+}
+
+#[test]
+fn value_domains_create_distinct_register_and_flag_definitions() {
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
+
+    let source_value = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            8,
+            IlIndexRange::EMPTY,
+            0x2a,
+            None,
+        ))
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(source_value),
+                None,
+                None,
+            )
+            .with_immediate(7),
+        )
+        .unwrap();
+
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(source_value),
+                None,
+                None,
+            )
+            .with_immediate(8),
+        )
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteFlag,
+                IlIndexRange::EMPTY,
+                Some(source_value),
+                None,
+                None,
+            )
+            .with_immediate(3),
+        )
+        .unwrap();
+
+    let register_seven = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            8,
+            IlIndexRange::EMPTY,
+            7,
+            None,
+        ))
+        .unwrap();
+    let register_eight = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            8,
+            IlIndexRange::EMPTY,
+            8,
+            None,
+        ))
+        .unwrap();
+    let flag = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadFlag,
+            8,
+            IlIndexRange::EMPTY,
+            3,
+            None,
+        ))
+        .unwrap();
+    let operands = builder
+        .push_statement_operands([register_seven, register_eight, flag])
+        .unwrap();
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Return,
+            operands,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let source = builder.build(&CancellationToken::default()).unwrap();
+    let mut transform = ECodeToSsa::default();
+    let ssa = transform
+        .transform_optimised(&source, &CancellationToken::default())
+        .unwrap();
+
+    assert_eq!(ssa.operations()[0].opcode(), ECodeSsaOpcode::Constant);
+    assert_eq!(ssa.operations()[1].opcode(), ECodeSsaOpcode::WriteRegister);
+    assert_eq!(ssa.operations()[2].opcode(), ECodeSsaOpcode::WriteRegister);
+    assert_eq!(ssa.operations()[3].opcode(), ECodeSsaOpcode::WriteFlag);
+    assert_eq!(ssa.operations()[4].opcode(), ECodeSsaOpcode::Return);
+
+    let register_seven = IlValueId::try_from_index(ssa.operations()[1].results().start()).unwrap();
+    let register_eight = IlValueId::try_from_index(ssa.operations()[2].results().start()).unwrap();
+    let flag = IlValueId::try_from_index(ssa.operations()[3].results().start()).unwrap();
+
+    assert_eq!(
+        ssa.value_domain(register_seven),
+        Some(ECodeSsaDomain::Register(RegisterId::new(7)))
+    );
+    assert_eq!(
+        ssa.value_domain(register_eight),
+        Some(ECodeSsaDomain::Register(RegisterId::new(8)))
+    );
+    assert_eq!(
+        ssa.value_domain(flag),
+        Some(ECodeSsaDomain::Flag(FlagId::new(3)))
+    );
+    assert_eq!(
+        ssa.constant_value(register_seven)
+            .and_then(|value| value.to_u64()),
+        Some(0x2a)
+    );
+    assert_eq!(
+        ssa.operation_operands_for(&ssa.operations()[4]),
+        &[register_seven, register_eight, flag]
+    );
+
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ssa).unwrap();
+    let restored = rkyv::from_bytes::<ECodeSsaIr, rkyv::rancor::Error>(&bytes).unwrap();
+
+    assert_eq!(restored, ssa);
+}
+
+#[test]
+fn value_domains_survive_compaction_and_rkyv() {
+    let source_metadata = IlMetadata::new(FunctionId::default(), 11);
+    let mut builder = ECodeBuilder::new(source_metadata, IlGraph::default());
+
+    let written = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::Constant,
+            64,
+            IlIndexRange::EMPTY,
+            0x2a,
+            None,
+        ))
+        .unwrap();
+    builder
+        .push_statement(
+            ECodeStmt::new(
+                ECodeStmtOpcode::WriteRegister,
+                IlIndexRange::EMPTY,
+                Some(written),
+                None,
+                None,
+            )
+            .with_immediate(7),
+        )
+        .unwrap();
+
+    let read = builder
+        .push_expression(ECodeExpr::new(
+            ECodeExprOpcode::ReadRegister,
+            64,
+            IlIndexRange::EMPTY,
+            7,
+            None,
+        ))
+        .unwrap();
+    let operands = builder.push_statement_operands([read]).unwrap();
+    builder
+        .push_statement(ECodeStmt::new(
+            ECodeStmtOpcode::Return,
+            operands,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+
+    let source = builder.build(&CancellationToken::default()).unwrap();
+    let mut transform = ECodeToSsa::default();
+    let ssa = transform
+        .transform_optimised(&source, &CancellationToken::default())
+        .unwrap();
+
+    let carries_register = |ir: &ECodeSsaIr| {
+        (0..ir.values().len()).any(|index| {
+            ir.value_domain(IlValueId::try_from_index(index).unwrap())
+                == Some(ECodeSsaDomain::Register(RegisterId::new(7)))
+        })
+    };
+
+    assert!(carries_register(&ssa));
+
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ssa).unwrap();
+    let restored = rkyv::from_bytes::<ECodeSsaIr, rkyv::rancor::Error>(&bytes).unwrap();
+
+    assert!(carries_register(&restored));
 }

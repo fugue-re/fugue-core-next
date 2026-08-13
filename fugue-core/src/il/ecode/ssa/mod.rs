@@ -1,6 +1,6 @@
 mod builder;
-mod constants;
 mod def_use;
+mod domain;
 mod evaluate;
 mod format;
 mod intervals;
@@ -15,8 +15,8 @@ mod value;
 mod verify;
 
 pub(crate) use builder::ECodeSsaBuilder;
-pub(crate) use constants::ECodeSsaConstantInterner;
-pub use def_use::{ECodeSsaBlockArgumentInputs, ECodeSsaUse, ECodeSsaUses};
+pub use def_use::{ECodeSsaBlockArgInputs, ECodeSsaUse, ECodeSsaUses};
+pub use domain::ECodeSsaDomain;
 pub use format::{ECodeSsaIrDisplay, ECodeSsaSourceDisplay};
 pub use intervals::ECodeSsaStridedIntervals;
 pub use ir::ECodeSsaIr;
@@ -26,7 +26,7 @@ pub use opcode::ECodeSsaOpcode;
 pub use operation::ECodeSsaOp;
 pub(crate) use optimise::ECodeSsaOptimiser;
 pub use transform::ECodeToSsa;
-pub use value::{ECodeSsaBlockArg, ECodeSsaValue, ECodeSsaValueKind};
+pub use value::{ECodeSsaBlockArg, ECodeSsaValue};
 
 use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlParentSpan, IlSourceSpan, IlValueId};
 
@@ -36,6 +36,7 @@ pub(crate) struct ECodeSsaBuilderContext {
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
     values: Vec<ECodeSsaValue>,
+    value_domains: Vec<Option<ECodeSsaDomain>>,
     block_arguments: Vec<ECodeSsaBlockArg>,
     edge_arguments: Vec<IlIndexRange>,
     edge_argument_values: Vec<IlValueId>,

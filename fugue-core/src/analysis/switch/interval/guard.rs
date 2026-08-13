@@ -226,6 +226,17 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                     let operands = self.ssa.operation_operands_for(operation);
 
                     match operation.opcode() {
+                        ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister => {
+                            let Some(&inner) = operands.first() else {
+                                intervals.push(None);
+                                continue;
+                            };
+                            steps.push(ConditionStep::Evaluate {
+                                condition: inner,
+                                taken,
+                                depth: depth - 1,
+                            });
+                        }
                         ECodeSsaOpcode::BoolNot => {
                             let Some(&inner) = operands.first() else {
                                 intervals.push(None);

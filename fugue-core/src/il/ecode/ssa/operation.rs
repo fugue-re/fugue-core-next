@@ -34,18 +34,30 @@ impl ECodeSsaOp {
         }
     }
 
-    pub const fn with_immediate(mut self, immediate: u64) -> Self {
+    pub const fn set_immediate(&mut self, immediate: u64) {
         self.immediate = immediate;
+    }
+
+    pub const fn with_immediate(mut self, immediate: u64) -> Self {
+        self.set_immediate(immediate);
         self
+    }
+
+    pub const fn set_address(&mut self, address: Address) {
+        self.address = Some(address);
     }
 
     pub const fn with_address(mut self, address: Address) -> Self {
-        self.address = Some(address);
+        self.set_address(address);
         self
     }
 
-    pub const fn with_address_space(mut self, address_space: AddressSpaceId) -> Self {
+    pub const fn set_address_space(&mut self, address_space: AddressSpaceId) {
         self.address_space = Some(address_space);
+    }
+
+    pub const fn with_address_space(mut self, address_space: AddressSpaceId) -> Self {
+        self.set_address_space(address_space);
         self
     }
 

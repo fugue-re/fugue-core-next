@@ -25,10 +25,10 @@ pub(crate) enum BindingError {
     AttributeValue(String),
     #[error("empty byte mappings are not supported")]
     EmptyMapping,
-    #[error("invalid instruction at {0}")]
-    InvalidInstruction(CoreAddress),
     #[error("invalid IL form `{0}`")]
     InvalidIlForm(String),
+    #[error("invalid instruction at {0}")]
+    InvalidInstruction(CoreAddress),
     #[error("no mapped bytes at {0}")]
     NoMappedBytes(CoreAddress),
 }

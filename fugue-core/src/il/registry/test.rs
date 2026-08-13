@@ -4,6 +4,7 @@ use super::*;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{IlGenerationContext, IlGenerationError, IlMetadata};
 use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::mcode::ssa::MCodeSsaIr;
 use crate::il::pcode::PCodeIr;
 use crate::types::EstimateSize;
 
@@ -72,7 +73,12 @@ fn the_standard_registry_contains_the_built_in_forms() {
 
     assert_eq!(
         form_ids(&registry),
-        vec!["fugue.ecode.cfg", "fugue.ecode.ssa", "fugue.pcode.cfg"]
+        vec![
+            "fugue.ecode.cfg",
+            "fugue.ecode.ssa",
+            "fugue.mcode.ssa",
+            "fugue.pcode.cfg"
+        ]
     );
     assert!(registry.forms().all(IlFormRegistration::is_persistable));
     assert_eq!(
@@ -85,6 +91,12 @@ fn the_standard_registry_contains_the_built_in_forms() {
         registry
             .form_of::<PCodeIr>()
             .is_some_and(IlFormRegistration::is_root)
+    );
+    assert_eq!(
+        registry
+            .form_of::<MCodeSsaIr>()
+            .and_then(IlFormRegistration::source),
+        Some(&ECodeSsaIr::FORM)
     );
 }
 
@@ -107,6 +119,19 @@ fn the_canonical_path_walks_to_the_root_producer() {
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
         vec!["fugue.pcode.cfg"]
+    );
+    assert_eq!(
+        registry
+            .canonical_path(&MCodeSsaIr::FORM)
+            .iter()
+            .map(IlFormId::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "fugue.pcode.cfg",
+            "fugue.ecode.cfg",
+            "fugue.ecode.ssa",
+            "fugue.mcode.ssa"
+        ]
     );
     assert!(registry.canonical_path(&AcmeTaint::FORM).is_empty());
     assert_eq!(
@@ -151,7 +176,7 @@ fn an_external_dialect_registers_without_editing_core() {
             .dependants(&ECodeSsaIr::FORM)
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec!["acme.taint.values"]
+        vec!["acme.taint.values", "fugue.mcode.ssa"]
     );
 }
 

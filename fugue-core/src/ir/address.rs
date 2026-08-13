@@ -29,7 +29,7 @@ use crate::types::Confidence;
     Deserialize,
     Serialize,
 )]
-#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct RawAddress(u64);
 
@@ -1134,7 +1134,7 @@ fn raw_address_bounds(range: &impl RangeBounds<RawAddress>) -> Option<RangeInclu
     Deserialize,
     Serialize,
 )]
-#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct Address {
     space: AddressSpaceId,
     address: RawAddress,

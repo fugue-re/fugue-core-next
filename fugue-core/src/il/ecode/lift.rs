@@ -2,11 +2,10 @@ use rustc_hash::FxHashMap;
 
 use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
-use crate::il::common::{IlArtefact, IlError};
+use crate::il::common::{FlagId, IlArtefact, IlError, IlIndexMapper, RegisterId};
 use crate::il::ecode::{ECodeExprOpcode, ECodeSink, ECodeStmtOpcode};
 use crate::il::pcode::{
-    FlagId, PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode, RegisterBank,
-    RegisterId, RegisterSlice,
+    PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode, RegisterBank, RegisterSlice,
 };
 use crate::lifter::Varnode;
 use crate::storage::segments::space::AddressSpaceId;
@@ -72,7 +71,7 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
             arch,
             source,
             sink,
-            register_bank: RegisterBank::new(language, source)?,
+            register_bank: RegisterBank::for_pcode(language, source)?,
             flags,
             values: FxHashMap::default(),
             register_values: FxHashMap::default(),
@@ -83,8 +82,11 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
         })
     }
 
-    pub(crate) fn lift(&mut self, cancellation: &CancellationToken) -> Result<Vec<u32>, IlError> {
-        let mut offsets = Vec::with_capacity(self.source.operations().len() + 1);
+    pub(crate) fn lift(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<IlIndexMapper, IlError> {
+        let mut operation_map = Vec::with_capacity(self.source.operations().len() + 1);
         let mut source_span = 0usize;
 
         for (index, operation) in self.source.operations().iter().enumerate() {
@@ -104,13 +106,13 @@ impl<'a, 'b, S: ECodeSink> ECodeLifter<'a, 'b, S> {
                 self.flag_values.clear();
                 source_span += 1;
             }
-            offsets.push(self.effects as u32);
+            operation_map.push(self.effects);
             self.lift_operation(operation)?;
         }
 
-        offsets.push(self.effects as u32);
+        operation_map.push(self.effects);
 
-        Ok(offsets)
+        Ok(IlIndexMapper::new(operation_map))
     }
 
     pub(crate) fn register_bank(&self) -> &RegisterBank {

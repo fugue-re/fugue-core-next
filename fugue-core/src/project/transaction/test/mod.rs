@@ -11,6 +11,7 @@ use crate::il::common::{
 };
 use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaLiveness, ECodeSsaUses};
 use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeStmtOpcode, PCodeToECode};
+use crate::il::mcode::ssa::{MCodeSsaBuilder, MCodeSsaIr};
 use crate::il::pcode::{
     LifterSpaceHandle, PCodeBuilder, PCodeIr, PCodeLocation, PCodeLocationProperties, PCodeOp,
     PCodeOpcode,
@@ -281,6 +282,12 @@ fn ecode_ssa_for_test(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
     ECodeSsaBuilder::new(IlMetadata::new(function, 0), graph)
         .build(&CancellationToken::default())
         .expect("test LIR SSA should verify")
+}
+
+fn mcode_ssa_for_test(function: FunctionId, graph: IlGraph) -> MCodeSsaIr {
+    MCodeSsaBuilder::new(IlMetadata::new(function, 0), graph)
+        .build(&CancellationToken::default())
+        .expect("test MCode SSA should verify")
 }
 
 fn first_mapping_placement(

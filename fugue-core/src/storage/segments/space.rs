@@ -32,7 +32,7 @@ pub enum AddressSpaceError {
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
-#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct AddressSpaceId(u16);
 

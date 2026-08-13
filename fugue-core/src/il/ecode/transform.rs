@@ -5,8 +5,8 @@ use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{
     IlBlock, IlBlockId, IlBlockProperties, IlConverter, IlEdgeKinds, IlError, IlExprId,
-    IlGenerationContext, IlGenerationError, IlGraph, IlIndexRange, IlMetadata, IlParentSpan,
-    IlSourceSpan,
+    IlGenerationContext, IlGenerationError, IlGraph, IlIndexMapper, IlIndexRange, IlMetadata,
+    IlParentSpan, IlSourceSpan,
 };
 use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeLiftScratch, ECodeLifter};
 use crate::il::pcode::{PCodeIr, PCodeOp, PCodeOpcode};
@@ -95,7 +95,7 @@ impl PCodeToECode {
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let mut lifter = ECodeLifter::new(source, arch, &mut builder, &mut self.scratch)?;
 
-        let offsets = lifter.lift(cancellation)?;
+        let operation_map = lifter.lift(cancellation)?;
         let call_preserved_registers = lifter.register_bank().call_preserved_registers(
             arch.language(),
             arch.endian(),
@@ -103,14 +103,18 @@ impl PCodeToECode {
         )?;
 
         builder.set_call_preserved_registers(call_preserved_registers);
-        builder.set_graph(self.remap_graph(source, &offsets)?);
-        builder.set_parent_spans(Self::remap_parent_spans(&offsets)?);
-        builder.set_source_spans(Self::remap_source_spans(source, &offsets)?);
+        builder.set_graph(self.remap_graph(source, &operation_map)?);
+        builder.set_parent_spans(Self::remap_parent_spans(source, &operation_map)?);
+        builder.set_source_spans(Self::remap_source_spans(source, &operation_map)?);
 
         builder.build(cancellation)
     }
 
-    fn remap_graph(&mut self, source: &PCodeIr, offsets: &[u32]) -> Result<IlGraph, IlError> {
+    fn remap_graph(
+        &mut self,
+        source: &PCodeIr,
+        operation_map: &IlIndexMapper,
+    ) -> Result<IlGraph, IlError> {
         let mut partitions = Vec::new();
         let mut partition_ranges = Vec::with_capacity(source.graph().blocks().len());
         let mut first_blocks = Vec::with_capacity(source.graph().blocks().len());
@@ -291,10 +295,7 @@ impl PCodeToECode {
                     properties |= IlBlockProperties::EXIT;
                 }
                 blocks.push(IlBlock::new(
-                    IlIndexRange::new(
-                        offsets[range.start()] as usize,
-                        offsets[range.end()] as usize,
-                    )?,
+                    operation_map.map_range(range),
                     IlIndexRange::new(successor_start, successors.len())?,
                     properties,
                 ));
@@ -383,14 +384,18 @@ impl PCodeToECode {
             .then_some(target_operation)
     }
 
-    fn remap_parent_spans(offsets: &[u32]) -> Result<Vec<IlParentSpan>, IlError> {
+    fn remap_parent_spans(
+        source: &PCodeIr,
+        operation_map: &IlIndexMapper,
+    ) -> Result<Vec<IlParentSpan>, IlError> {
         let mut spans = Vec::<IlParentSpan>::new();
-        for (source, offsets) in offsets.windows(2).enumerate() {
-            let destination = IlIndexRange::new(offsets[0] as usize, offsets[1] as usize)?;
+        for source in 0..source.operations().len() {
+            let source_range = IlIndexRange::new(source, source + 1)?;
+            let destination = operation_map.map_range(source_range);
             if destination.is_empty() {
                 continue;
             }
-            let span = IlParentSpan::new(destination, IlIndexRange::new(source, source + 1)?);
+            let span = IlParentSpan::new(destination, source_range);
             if let Some(previous) = spans.last_mut()
                 && previous.try_merge(span)?
             {
@@ -401,17 +406,17 @@ impl PCodeToECode {
         Ok(spans)
     }
 
-    fn remap_source_spans(source: &PCodeIr, offsets: &[u32]) -> Result<Vec<IlSourceSpan>, IlError> {
+    fn remap_source_spans(
+        source: &PCodeIr,
+        operation_map: &IlIndexMapper,
+    ) -> Result<Vec<IlSourceSpan>, IlError> {
         source
             .source_spans()
             .iter()
             .map(|span| {
                 let destination = span.destination();
                 Ok(IlSourceSpan::new(
-                    IlIndexRange::new(
-                        offsets[destination.start()] as usize,
-                        offsets[destination.end()] as usize,
-                    )?,
+                    operation_map.map_range(destination),
                     span.address(),
                     span.first_pcode_index(),
                     span.pcode_count(),
@@ -424,12 +429,12 @@ impl PCodeToECode {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::IlError;
+    use crate::il::common::{FlagId, IlError, RegisterId};
     use crate::il::ecode::ssa::ECodeToSsa;
     use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeSink, ECodeStmt, ECodeStmtOpcode};
     use crate::il::pcode::{
-        FlagId, LifterSpaceHandle, PCodeBuilder, PCodeLocation, PCodeLocationProperties, PCodeOp,
-        PCodeOpcode, RegisterId,
+        LifterSpaceHandle, PCodeBuilder, PCodeLocation, PCodeLocationProperties, PCodeOp,
+        PCodeOpcode,
     };
     use crate::ir::{Address, FunctionId};
     use crate::lifter::{Language, Varnode, resolve_language};

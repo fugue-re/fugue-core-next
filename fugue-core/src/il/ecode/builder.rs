@@ -2,11 +2,10 @@ use std::mem::size_of;
 
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    ControlFlowIl, IlArtefact, IlError, IlExprId, IlGraph, IlIndexRange, IlMetadata, IlOpId,
-    IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan, PersistableIl,
+    ControlFlowIl, FlagId, IlArtefact, IlError, IlExprId, IlGraph, IlIndexRange, IlMetadata,
+    IlOpId, IlParentSpan, IlPool, IlSchemaVersion, IlSourceSpan, PersistableIl, RegisterId,
 };
 use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeSink, ECodeStmt, ECodeStmtOpcode};
-use crate::il::pcode::{FlagId, RegisterId};
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;

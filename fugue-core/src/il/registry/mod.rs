@@ -14,6 +14,7 @@ use crate::il::common::{
 };
 use crate::il::ecode::PCodeToECode;
 use crate::il::ecode::ssa::ECodeToSsa;
+use crate::il::mcode::ECodeSsaToMCode;
 use crate::il::pcode::PCodeCanonicaliser;
 use crate::il::storage::{IlPersist, IlStaging, IlStorageError};
 use crate::ir::FunctionId;
@@ -28,6 +29,7 @@ pub(crate) use runtime::{GeneratedArtefact, IlGenerationSession};
 
 const PCODE_DIALECT: DialectId = DialectId::from_static("fugue.pcode");
 const ECODE_DIALECT: DialectId = DialectId::from_static("fugue.ecode");
+const MCODE_DIALECT: DialectId = DialectId::from_static("fugue.mcode");
 
 #[derive(Debug, ThisError, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IlRegistryError {
@@ -284,9 +286,11 @@ impl IlRegistryBuilder {
         };
         builder.insert_dialect(PCODE_DIALECT);
         builder.insert_dialect(ECODE_DIALECT);
+        builder.insert_dialect(MCODE_DIALECT);
         builder.insert_form(IlFormRegistration::persistable_root::<PCodeCanonicaliser>());
         builder.insert_form(IlFormRegistration::persistable_derived::<PCodeToECode>());
         builder.insert_form(IlFormRegistration::persistable_derived::<ECodeToSsa>());
+        builder.insert_form(IlFormRegistration::persistable_derived::<ECodeSsaToMCode>());
         builder
     }
 

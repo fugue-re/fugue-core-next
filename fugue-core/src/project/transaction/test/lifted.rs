@@ -197,6 +197,7 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
         transaction.replace_lifted(tagged_pcode(function, &[1]))?;
         transaction.replace_lifted(ecode_for_test(function, IlGraph::default()))?;
         transaction.replace_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
+        transaction.replace_lifted(mcode_ssa_for_test(function, IlGraph::default()))?;
         transaction.commit()?;
     }
 
@@ -204,19 +205,20 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
         let mut transaction = project.transaction("test");
         assert_eq!(
             transaction.remove_lifted_descendants(function, &ECodeIr::FORM)?,
-            2
+            3
         );
         drop(transaction);
     }
 
     assert!(project.ecode(function)?.is_some());
     assert!(project.ecode_ssa(function)?.is_some());
+    assert!(project.mcode_ssa(function)?.is_some());
 
     let changes = {
         let mut transaction = project.transaction("test");
         assert_eq!(
             transaction.remove_lifted_descendants(function, &ECodeIr::FORM)?,
-            2
+            3
         );
         transaction.commit()?
     };
@@ -224,6 +226,7 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
     assert!(project.pcode(function)?.is_some());
     assert!(project.ecode(function)?.is_none());
     assert!(project.ecode_ssa(function)?.is_none());
+    assert!(project.mcode_ssa(function)?.is_none());
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
         form: ECodeIr::FORM,
@@ -231,6 +234,10 @@ fn lifted_descendant_removal_preserves_parent() -> Result<(), Box<dyn std::error
     assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
         function,
         form: ECodeSsaIr::FORM,
+    }));
+    assert!(changes.records().contains(&ChangeRecord::LiftedRemoved {
+        function,
+        form: MCodeSsaIr::FORM,
     }));
 
     Ok(())

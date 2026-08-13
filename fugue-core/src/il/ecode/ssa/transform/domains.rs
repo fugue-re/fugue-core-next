@@ -1,14 +1,26 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use super::{ECodeSsaConstruction, SsaDomain, SsaDomains};
-use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlError};
-use crate::il::ecode::ssa::ECodeSsaIr;
+use super::{ECodeSsaConstruction, ECodeSsaDomains};
+use crate::il::common::{FlagId, IlArtefact, IlBlockId, IlDominance, IlError, RegisterId};
+use crate::il::ecode::ssa::{ECodeSsaDomain, ECodeSsaIr};
 use crate::il::ecode::{ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
-use crate::il::pcode::{FlagId, RegisterId};
+
+impl ECodeSsaDomains {
+    fn record_width(&mut self, domain: ECodeSsaDomain, width: u32) -> Result<(), IlError> {
+        match self.widths.get(&domain) {
+            Some(existing) if *existing != width => Err(IlError::width_mismatch(ECodeSsaIr::FORM)),
+            Some(_) => Ok(()),
+            None => {
+                self.widths.insert(domain, width);
+                Ok(())
+            }
+        }
+    }
+}
 
 impl ECodeSsaConstruction<'_, '_> {
-    pub(crate) fn discover_domains(&self) -> Result<SsaDomains, IlError> {
-        let mut domains = SsaDomains::default();
+    pub(crate) fn discover_domains(&self) -> Result<ECodeSsaDomains, IlError> {
+        let mut domains = ECodeSsaDomains::default();
 
         for (block_index, block) in self.source.graph().blocks().iter().enumerate() {
             let block_id = IlBlockId::try_from_index(block_index)?;
@@ -19,9 +31,10 @@ impl ECodeSsaConstruction<'_, '_> {
                 match statement.opcode() {
                     ECodeStmtOpcode::WriteRegister => {
                         let width = self.statement_value_width(statement)?;
-                        let domain = SsaDomain::Register(RegisterId::new(statement.immediate()));
+                        let domain =
+                            ECodeSsaDomain::Register(RegisterId::new(statement.immediate()));
 
-                        Self::record_domain_width(&mut domains.widths, domain, width)?;
+                        domains.record_width(domain, width)?;
                         domains
                             .definitions
                             .entry(domain)
@@ -30,9 +43,9 @@ impl ECodeSsaConstruction<'_, '_> {
                     }
                     ECodeStmtOpcode::WriteFlag => {
                         let width = self.statement_value_width(statement)?;
-                        let domain = SsaDomain::Flag(FlagId::new(statement.immediate()));
+                        let domain = ECodeSsaDomain::Flag(FlagId::new(statement.immediate()));
 
-                        Self::record_domain_width(&mut domains.widths, domain, width)?;
+                        domains.record_width(domain, width)?;
                         domains
                             .definitions
                             .entry(domain)
@@ -43,9 +56,9 @@ impl ECodeSsaConstruction<'_, '_> {
                         let space = statement.address_space().ok_or_else(|| {
                             IlError::missing_component(ECodeIr::FORM, "address space")
                         })?;
-                        let domain = SsaDomain::Memory(space);
+                        let domain = ECodeSsaDomain::Memory(space);
 
-                        Self::record_domain_width(&mut domains.widths, domain, 0)?;
+                        domains.record_width(domain, 0)?;
                         domains
                             .definitions
                             .entry(domain)
@@ -60,13 +73,13 @@ impl ECodeSsaConstruction<'_, '_> {
         for expression in self.source.expressions() {
             match expression.opcode() {
                 ECodeExprOpcode::ReadRegister => {
-                    let domain = SsaDomain::Register(RegisterId::new(expression.immediate()));
-                    Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
+                    let domain = ECodeSsaDomain::Register(RegisterId::new(expression.immediate()));
+                    domains.record_width(domain, expression.width())?;
                     domains.reads.insert(domain);
                 }
                 ECodeExprOpcode::ReadFlag => {
-                    let domain = SsaDomain::Flag(FlagId::new(expression.immediate()));
-                    Self::record_domain_width(&mut domains.widths, domain, expression.width())?;
+                    let domain = ECodeSsaDomain::Flag(FlagId::new(expression.immediate()));
+                    domains.record_width(domain, expression.width())?;
                     domains.reads.insert(domain);
                 }
                 ECodeExprOpcode::Load => {
@@ -74,7 +87,7 @@ impl ECodeSsaConstruction<'_, '_> {
                         IlError::missing_component(ECodeIr::FORM, "address space")
                     })?;
 
-                    Self::record_domain_width(&mut domains.widths, SsaDomain::Memory(space), 0)?;
+                    domains.record_width(ECodeSsaDomain::Memory(space), 0)?;
                 }
                 _ => {}
             }
@@ -95,25 +108,9 @@ impl ECodeSsaConstruction<'_, '_> {
         Ok(self.source.expressions()[value.index()].width())
     }
 
-    fn record_domain_width(
-        widths: &mut BTreeMap<SsaDomain, u32>,
-        domain: SsaDomain,
-        width: u32,
-    ) -> Result<(), IlError> {
-        if let Some(existing) = widths.get(&domain) {
-            if *existing != width {
-                return Err(IlError::width_mismatch(ECodeSsaIr::FORM));
-            }
-        } else {
-            widths.insert(domain, width);
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn place_block_arguments(
         &mut self,
-        domains: &SsaDomains,
+        domains: &ECodeSsaDomains,
         dominance: &IlDominance,
     ) -> Result<(), IlError> {
         let frontiers = dominance.frontiers(
@@ -133,6 +130,7 @@ impl ECodeSsaConstruction<'_, '_> {
                 }
 
                 let value = self.builder.push_block_argument_value(*block, width)?;
+                self.builder.set_value_domain(value, *domain);
                 self.block_argument_domains.insert(value, *domain);
                 self.block_arguments[block.index()].push((*domain, value));
             }

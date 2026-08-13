@@ -375,6 +375,7 @@ impl<T> IdSet<T> {
 }
 
 #[repr(transparent)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ArchivedId(rkyv::primitive::ArchivedU64);
 
 unsafe impl rkyv::Portable for ArchivedId {}

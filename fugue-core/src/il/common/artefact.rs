@@ -33,6 +33,7 @@ impl IlSchemaVersion {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct IlMetadata {
     function: FunctionId,
     input_revision: Revision,

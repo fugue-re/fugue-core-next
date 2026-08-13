@@ -69,7 +69,7 @@ pub struct FunctionRecovery {
     chunk_candidate_limit: Option<usize>,
     chunk_function_limit: Option<usize>,
     continuation_coverage: Option<FunctionCoverage>,
-    project_candidates_seeded: bool,
+    project_candidates_added: bool,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
     reanalysis_candidates: FxHashSet<Address>,
     recovery_active: bool,
@@ -660,7 +660,7 @@ impl FunctionRecovery {
             chunk_candidate_limit: None,
             chunk_function_limit: None,
             continuation_coverage: None,
-            project_candidates_seeded: false,
+            project_candidates_added: false,
             pending_functions: BTreeMap::new(),
             reanalysis_candidates: FxHashSet::default(),
             recovery_active: false,
@@ -878,7 +878,7 @@ impl FunctionRecovery {
         Ok(())
     }
 
-    fn seed_project_candidates(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
+    fn add_project_candidates(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
         self.cancellation.check()?;
         let mut candidates = BTreeSet::new();
 
@@ -937,7 +937,7 @@ impl FunctionRecovery {
             candidates.remove(queued);
         }
         self.candidates.extend(candidates);
-        self.project_candidates_seeded = true;
+        self.project_candidates_added = true;
 
         Ok(())
     }
@@ -1004,8 +1004,8 @@ impl FunctionRecovery {
         if !self.recovery_active {
             self.start_recovery(project)?;
         }
-        if !self.project_candidates_seeded {
-            self.seed_project_candidates(project)?;
+        if !self.project_candidates_added {
+            self.add_project_candidates(project)?;
         }
         self.analyse_candidates(project, updates, 1)
     }
@@ -1018,11 +1018,11 @@ impl FunctionRecovery {
         context: &AnalysisContext,
     ) -> Result<(), AnalysisError> {
         let functions_empty = project.functions().is_empty();
-        let project_seed_required = !self.project_candidates_seeded;
-        if project_seed_required {
-            self.seed_project_candidates(project)?;
+        let first_project_scan = !self.project_candidates_added;
+        if first_project_scan {
+            self.add_project_candidates(project)?;
         }
-        if !functions_empty || !project_seed_required {
+        if !functions_empty || !first_project_scan {
             self.add_region_candidates(project, regions, context)?;
         }
 

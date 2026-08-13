@@ -125,15 +125,79 @@ def test_project_ensures_pcode_for_recovered_function():
     pytest.skip("fixture did not contain a PCode-buildable recovered function")
 
 
+def test_ecode_ssa_exposes_register_and_flag_write_domains():
+    project = fugue.Project.from_file(LS_ELF)
+    project.recover_functions()
+
+    for function in project.functions():
+        try:
+            project.ensure_lifted(function, "ecode_ssa")
+        except fugue.ProjectError:
+            continue
+
+        ir = project.ecode_ssa(function)
+        if ir is None:
+            continue
+        values = ir.values()
+        writes = [
+            operation
+            for operation in ir.operations()
+            if operation.opcode in {"write_flag", "write_reg"}
+        ]
+        if not writes:
+            continue
+
+        for operation in writes:
+            domain = values[operation.results[0]].domain
+            assert domain is not None
+            assert domain.kind == {
+                "write_flag": "flag",
+                "write_reg": "register",
+            }[operation.opcode]
+            assert domain.storage == operation.immediate
+            assert domain.address_space is None
+        return
+
+    pytest.skip("fixture did not contain an ECode SSA register or flag write")
+
+
+def test_mcode_ssa_exposes_variable_bindings():
+    project = fugue.Project.from_file(LS_ELF)
+    project.recover_functions()
+
+    for function in project.functions():
+        try:
+            project.ensure_lifted(function, "mcode_ssa")
+        except fugue.ProjectError:
+            continue
+
+        ir = project.mcode_ssa(function)
+        if ir is None or not ir.variables():
+            continue
+        variables = ir.variables()
+        bindings = [value for value in ir.values() if value.variable is not None]
+        if not bindings:
+            continue
+
+        assert ir.form == "fugue.mcode.ssa"
+        assert project.has_lifted(function, "mcode_ssa")
+        assert project.lifted_display(function, "mcode_ssa")
+        assert all(value.variable < len(variables) for value in bindings)
+        assert all(value.version > 0 for value in bindings)
+        return
+
+    pytest.skip("fixture did not contain an MCode SSA variable binding")
+
+
 def test_project_rejects_unsupported_mlil_levels():
     project = fugue.Project.from_file(LS_ELF)
     project.recover_functions()
     function = project.functions()[0]
 
     for level in ("mapped_mlil", "mlil"):
-        with pytest.raises(ValueError, match="invalid IR level"):
+        with pytest.raises(ValueError, match="invalid IL form"):
             project.ensure_lifted(function, level)
-        with pytest.raises(ValueError, match="invalid IR level"):
+        with pytest.raises(ValueError, match="invalid IL form"):
             project.lifted_display(function, level)
 
 

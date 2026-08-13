@@ -17,5 +17,6 @@ pub use operation::{
     PCodeAddressContext, PCodeLocation, PCodeLocationId, PCodeLocationProperties, PCodeOp,
     PCodeOpcode,
 };
-pub(crate) use register::{FlagId, RegisterBank, RegisterId, RegisterSlice};
+pub use register::RegisterBank;
+pub(crate) use register::RegisterSlice;
 pub use transform::{PCodeCanonicaliser, PCodeFunctionInput};

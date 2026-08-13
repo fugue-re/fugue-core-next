@@ -108,11 +108,17 @@ impl Session {
     }
 
     pub async fn undefine_function(&self, address: Address) -> Result<u64, WorkbenchError> {
-        self.apply(move |engine| engine.remove_function(address)).await
+        self.apply(move |engine| engine.remove_function(address))
+            .await
     }
 
-    pub async fn patch_bytes(&self, address: Address, bytes: Vec<u8>) -> Result<u64, WorkbenchError> {
-        self.apply(move |engine| engine.write_bytes(address, bytes)).await
+    pub async fn patch_bytes(
+        &self,
+        address: Address,
+        bytes: Vec<u8>,
+    ) -> Result<u64, WorkbenchError> {
+        self.apply(move |engine| engine.write_bytes(address, bytes))
+            .await
     }
 
     pub async fn rename(
@@ -122,7 +128,10 @@ impl Session {
         function: bool,
     ) -> Result<u64, WorkbenchError> {
         let index = {
-            let mut indices = self.symbol_indices.lock().expect("symbol index map poisoned");
+            let mut indices = self
+                .symbol_indices
+                .lock()
+                .expect("symbol index map poisoned");
             let next = indices.len();
             *indices.entry(address).or_insert(next)
         };
@@ -133,7 +142,8 @@ impl Session {
         };
         let entry = SymbolEntry::new(address, symbol(&name), properties);
         let symbol_index = SymbolIndex::new(WORKBENCH_SELECTOR, index);
-        self.apply(move |engine| engine.add_symbol(symbol_index, entry)).await
+        self.apply(move |engine| engine.add_symbol(symbol_index, entry))
+            .await
     }
 
     pub async fn read<T, F>(&self, task: F) -> Result<T, WorkbenchError>

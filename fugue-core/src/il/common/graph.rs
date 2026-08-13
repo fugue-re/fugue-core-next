@@ -105,6 +105,7 @@ impl IlBlock {
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
+#[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct IlGraph {
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,

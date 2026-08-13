@@ -1,5 +1,6 @@
 pub mod constructor;
 pub mod context;
+pub mod convention;
 pub mod dynamic;
 pub mod entry;
 pub mod input;
@@ -16,6 +17,7 @@ pub mod template;
 
 pub use constructor::Constructor;
 pub use context::ContextDatabase;
+pub use convention::{Convention, Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress};
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId};
 pub use lifter::Lifter;

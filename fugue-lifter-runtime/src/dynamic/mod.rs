@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::language::LanguageParseError;
 
 mod constructor;
+mod convention;
 mod install;
 mod language;
 mod operand;

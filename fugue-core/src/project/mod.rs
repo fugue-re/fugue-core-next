@@ -9,6 +9,7 @@ use crate::arch::Arch;
 use crate::il::common::{IlError, IlFormId, IlGenerationError, PersistableIl};
 use crate::il::ecode::ECodeIr;
 use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::mcode::ssa::MCodeSsaIr;
 use crate::il::pcode::{PCodeError, PCodeIr};
 use crate::il::registry::{IlFormRegistration, IlRegistry};
 use crate::il::storage::{IlPersist, IlStorageError};
@@ -567,6 +568,10 @@ impl Project {
     }
 
     pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<ECodeSsaIr>, ProjectError> {
+        self.lifted(function)
+    }
+
+    pub fn mcode_ssa(&self, function: FunctionId) -> Result<Option<MCodeSsaIr>, ProjectError> {
         self.lifted(function)
     }
 

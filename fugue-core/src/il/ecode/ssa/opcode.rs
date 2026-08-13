@@ -72,6 +72,8 @@ pub enum ECodeSsaOpcode {
     CallIndirect = 65,
     Return = 66,
     Trap = 67,
+    WriteRegister = 68,
+    WriteFlag = 69,
 }
 
 impl ECodeSsaOpcode {
@@ -145,6 +147,8 @@ impl ECodeSsaOpcode {
             Self::CallIndirect => "icall",
             Self::Return => "ret",
             Self::Trap => "trap",
+            Self::WriteRegister => "write_reg",
+            Self::WriteFlag => "write_flag",
         }
     }
 
@@ -215,7 +219,8 @@ impl ECodeSsaOpcode {
 
     pub const fn from_statement(opcode: ECodeStmtOpcode) -> Option<Self> {
         match opcode {
-            ECodeStmtOpcode::WriteRegister | ECodeStmtOpcode::WriteFlag => None,
+            ECodeStmtOpcode::WriteRegister => Some(Self::WriteRegister),
+            ECodeStmtOpcode::WriteFlag => Some(Self::WriteFlag),
             ECodeStmtOpcode::Store => Some(Self::Store),
             ECodeStmtOpcode::Intrinsic => Some(Self::Intrinsic),
             ECodeStmtOpcode::Branch => Some(Self::Branch),
@@ -245,6 +250,8 @@ impl ECodeSsaOpcode {
                 | Self::CallIndirect
                 | Self::Return
                 | Self::Trap
+                | Self::WriteRegister
+                | Self::WriteFlag
         )
     }
 
@@ -263,6 +270,8 @@ impl ECodeSsaOpcode {
                 | Self::Or
                 | Self::Xor
                 | Self::Not
+                | Self::WriteRegister
+                | Self::WriteFlag
         )
     }
 }

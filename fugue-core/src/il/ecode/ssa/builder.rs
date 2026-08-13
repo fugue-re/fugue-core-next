@@ -1,11 +1,11 @@
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlBlockId, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlPool,
-    IlSourceSpan, IlValueId,
+    IlBlockArgId, IlBlockId, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlParentSpan,
+    IlPool, IlSourceSpan, IlValueId,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaIr, ECodeSsaMemoryDomain, ECodeSsaOp,
-    ECodeSsaValue,
+    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaDomain, ECodeSsaIr, ECodeSsaMemoryDomain,
+    ECodeSsaOp, ECodeSsaValue,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -16,6 +16,7 @@ pub(crate) struct ECodeSsaBuilder {
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
     values: Vec<ECodeSsaValue>,
+    value_domains: Vec<Option<ECodeSsaDomain>>,
     block_arguments: Vec<ECodeSsaBlockArg>,
     edge_arguments: Vec<IlIndexRange>,
     edge_argument_values: IlPool<IlValueId>,
@@ -33,6 +34,7 @@ impl ECodeSsaBuilder {
             source_spans: Vec::new(),
             parent_spans: Vec::new(),
             values: Vec::new(),
+            value_domains: Vec::new(),
             block_arguments: Vec::new(),
             edge_arguments: Vec::new(),
             edge_argument_values: IlPool::new(),
@@ -53,6 +55,7 @@ impl ECodeSsaBuilder {
 
         self.values
             .push(ECodeSsaValue::operation_result(width, operation));
+        self.value_domains.push(None);
 
         Ok((id, results))
     }
@@ -66,16 +69,24 @@ impl ECodeSsaBuilder {
             IlError::range_out_of_bounds(block.value(), self.graph.blocks().len())
         })?;
 
-        let argument_index = u32::try_from(self.block_arguments.len())
-            .map_err(|_| IlError::id_exhausted("SSA block argument"))?;
+        let argument = IlBlockArgId::try_from_index(self.block_arguments.len())?;
         let value = IlValueId::try_from_index(self.values.len())?;
 
         self.values
-            .push(ECodeSsaValue::block_argument(width, argument_index));
+            .push(ECodeSsaValue::block_argument(width, argument));
+        self.value_domains.push(None);
         self.block_arguments
             .push(ECodeSsaBlockArg::new(block, value, width));
 
         Ok(value)
+    }
+
+    pub(crate) fn set_value_domain(&mut self, value: IlValueId, domain: ECodeSsaDomain) {
+        let previous = self.value_domains[value.index()].replace(domain);
+        assert!(
+            previous.is_none(),
+            "ECode SSA value domain is assigned once"
+        );
     }
 
     pub(crate) fn push_operation(&mut self, operation: ECodeSsaOp) -> Result<IlOpId, IlError> {
@@ -149,6 +160,7 @@ impl ECodeSsaBuilder {
             source_spans: self.source_spans,
             parent_spans: self.parent_spans,
             values: self.values,
+            value_domains: self.value_domains,
             block_arguments: self.block_arguments,
             edge_arguments: self.edge_arguments,
             edge_argument_values: self.edge_argument_values.into_values(),

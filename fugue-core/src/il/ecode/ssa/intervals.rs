@@ -1,8 +1,6 @@
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlAnalysis, IlArtefact, IlCsr, IlValueId};
-use crate::il::ecode::ssa::{
-    ECodeSsaBlockArgumentInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses,
-};
+use crate::il::ecode::ssa::{ECodeSsaBlockArgInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaUses};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ECodeSsaStridedIntervals {
@@ -11,7 +9,7 @@ pub struct ECodeSsaStridedIntervals {
 
 impl IlAnalysis<ECodeSsaIr> for ECodeSsaStridedIntervals {
     fn analyse(ir: &ECodeSsaIr) -> Self {
-        let block_argument_inputs = ir.analyse::<ECodeSsaBlockArgumentInputs>();
+        let block_argument_inputs = ir.analyse::<ECodeSsaBlockArgInputs>();
         let mut this = Self {
             intervals: ir
                 .values()
@@ -97,7 +95,9 @@ impl ECodeSsaStridedIntervals {
             };
 
         let result = match operation.opcode() {
-            ECodeSsaOpcode::Copy => unary(operand(0), StridedInterval::cast_to),
+            ECodeSsaOpcode::Copy | ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister => {
+                unary(operand(0), StridedInterval::cast_to)
+            }
             ECodeSsaOpcode::ZeroExtend => unary(operand(0), StridedInterval::zero_extend),
             ECodeSsaOpcode::SignExtend => unary(operand(0), StridedInterval::sign_extend),
             ECodeSsaOpcode::Truncate => unary(operand(0), StridedInterval::truncate),
@@ -259,12 +259,12 @@ mod test {
             vec![IlEdgeKinds::UNCONDITIONAL; 3],
         ));
 
-        let (seed, seed_results) = builder.push_result_value(32).unwrap();
+        let (initial, initial_results) = builder.push_result_value(32).unwrap();
         builder
             .push_operation(
                 ECodeSsaOp::new(
                     ECodeSsaOpcode::Constant,
-                    seed_results,
+                    initial_results,
                     IlIndexRange::EMPTY,
                     32,
                 )
@@ -298,7 +298,7 @@ mod test {
             ))
             .unwrap();
 
-        builder.push_edge_arguments([seed]).unwrap();
+        builder.push_edge_arguments([initial]).unwrap();
         builder.push_edge_arguments([next]).unwrap();
         builder.push_edge_arguments([]).unwrap();
 

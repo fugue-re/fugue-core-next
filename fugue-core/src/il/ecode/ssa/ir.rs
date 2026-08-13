@@ -3,12 +3,12 @@ use std::mem::size_of;
 use fugue_bv::BitVec;
 
 use crate::il::common::{
-    ControlFlowIl, IlArtefact, IlBlockId, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlParentSpan,
-    IlSchemaVersion, IlSourceSpan, IlValueId, PersistableIl,
+    ControlFlowIl, IlArtefact, IlBlockId, IlConstantInterner, IlGraph, IlIndexRange, IlMetadata,
+    IlOpId, IlParentSpan, IlSchemaVersion, IlSourceSpan, IlSsaDef, IlValueId, PersistableIl,
 };
 use crate::il::ecode::ssa::{
-    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaConstantInterner, ECodeSsaMemoryDomain,
-    ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValue, ECodeSsaValueKind,
+    ECodeSsaBlockArg, ECodeSsaBuilderContext, ECodeSsaDomain, ECodeSsaMemoryDomain, ECodeSsaOp,
+    ECodeSsaOpcode, ECodeSsaValue,
 };
 use crate::ir::{Address, AddressRange};
 use crate::storage::segments::space::AddressSpaceId;
@@ -21,6 +21,7 @@ pub struct ECodeSsaIr {
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
     values: Vec<ECodeSsaValue>,
+    value_domains: Vec<Option<ECodeSsaDomain>>,
     block_arguments: Vec<ECodeSsaBlockArg>,
     edge_arguments: Vec<IlIndexRange>,
     edge_argument_values: Vec<IlValueId>,
@@ -38,6 +39,7 @@ impl ECodeSsaIr {
             source_spans,
             parent_spans,
             values,
+            value_domains,
             block_arguments,
             edge_arguments,
             edge_argument_values,
@@ -52,6 +54,7 @@ impl ECodeSsaIr {
             source_spans,
             parent_spans,
             values,
+            value_domains,
             block_arguments,
             edge_arguments,
             edge_argument_values,
@@ -63,10 +66,15 @@ impl ECodeSsaIr {
     }
 
     pub(crate) fn rewriter(&mut self) -> ECodeSsaRewriter<'_> {
-        let mut constants = ECodeSsaConstantInterner::new(&mut self.constant_storage);
-        constants.seed(&self.operations);
+        let mut constants = IlConstantInterner::new();
+        for operation in &self.operations {
+            if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
+                constants.index_existing(bytes, operation.immediate());
+            }
+        }
         ECodeSsaRewriter {
             operations: &mut self.operations,
+            constant_storage: &mut self.constant_storage,
             constants,
         }
     }
@@ -97,6 +105,14 @@ impl ECodeSsaIr {
 
     pub fn values(&self) -> &[ECodeSsaValue] {
         &self.values
+    }
+
+    pub fn value_domain(&self, value: IlValueId) -> Option<ECodeSsaDomain> {
+        self.value_domains.get(value.index()).copied().flatten()
+    }
+
+    pub(crate) fn value_domains(&self) -> &[Option<ECodeSsaDomain>] {
+        &self.value_domains
     }
 
     pub fn block_arguments(&self) -> &[ECodeSsaBlockArg] {
@@ -137,7 +153,7 @@ impl ECodeSsaIr {
         operation.operands().slice(&self.value_operands)
     }
 
-    pub(crate) fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
+    pub fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
         self.graph
             .blocks()
             .iter()
@@ -168,11 +184,15 @@ impl ECodeSsaIr {
             .map(|span| span.address())
     }
 
-    pub(crate) fn defining_operation(&self, value: IlValueId) -> Option<&ECodeSsaOp> {
-        self.operations.get(self.defining_operation_index(value)?)
+    pub fn defining_operation(&self, value: IlValueId) -> Option<&ECodeSsaOp> {
+        let record = self.values.get(value.index())?;
+        let IlSsaDef::Operation(operation) = record.definition() else {
+            return None;
+        };
+        self.operations.get(operation.index())
     }
 
-    pub(crate) fn memory_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
+    pub fn memory_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
         if !operation.opcode().requires_memory_domain() {
             return None;
         }
@@ -180,7 +200,7 @@ impl ECodeSsaIr {
         self.operation_operands_for(operation).last().copied()
     }
 
-    pub(crate) fn pointer_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
+    pub fn pointer_operand(&self, operation: &ECodeSsaOp) -> Option<IlValueId> {
         if !matches!(
             operation.opcode(),
             ECodeSsaOpcode::Load | ECodeSsaOpcode::Store
@@ -191,7 +211,7 @@ impl ECodeSsaIr {
         self.operation_operands_for(operation).first().copied()
     }
 
-    pub(crate) fn underlying_value(&self, value: IlValueId) -> IlValueId {
+    pub fn underlying_value(&self, value: IlValueId) -> IlValueId {
         let mut current = value;
         for _ in 0..self.values.len() {
             let Some(operation) = self.defining_operation(current) else {
@@ -201,6 +221,8 @@ impl ECodeSsaIr {
                 ECodeSsaOpcode::Copy
                 | ECodeSsaOpcode::SignExtend
                 | ECodeSsaOpcode::Truncate
+                | ECodeSsaOpcode::WriteFlag
+                | ECodeSsaOpcode::WriteRegister
                 | ECodeSsaOpcode::ZeroExtend => {
                     let Some(inner) = self.operation_operands_for(operation).first().copied()
                     else {
@@ -234,13 +256,23 @@ impl ECodeSsaIr {
         (offset == 0).then_some(source)
     }
 
-    pub(crate) fn value_width(&self, value: IlValueId) -> Option<u32> {
+    pub fn value_width(&self, value: IlValueId) -> Option<u32> {
         self.values.get(value.index()).map(ECodeSsaValue::width)
     }
 
-    pub(crate) fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
-        self.defining_operation(value)?
-            .constant(&self.constant_storage)
+    pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
+        let mut current = value;
+        for _ in 0..self.values.len() {
+            let operation = self.defining_operation(current)?;
+            if !matches!(
+                operation.opcode(),
+                ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister
+            ) {
+                return operation.constant(&self.constant_storage);
+            }
+            current = *self.operation_operands_for(operation).first()?;
+        }
+        None
     }
 
     pub fn memory_access_range(&self, operation: &ECodeSsaOp) -> Option<AddressRange> {
@@ -262,12 +294,6 @@ impl ECodeSsaIr {
             Address::new(space, pointer.immediate()),
             u64::from(width.div_ceil(8)),
         )
-    }
-
-    fn defining_operation_index(&self, value: IlValueId) -> Option<usize> {
-        let record = self.values.get(value.index())?;
-        (record.definition_kind() == ECodeSsaValueKind::Operation)
-            .then(|| record.definition_index() as usize)
     }
 
     pub fn arguments_for_edge(&self, edge: usize) -> &[IlValueId] {
@@ -330,6 +356,7 @@ impl ECodeSsaIr {
         self.source_spans.shrink_to_fit();
         self.parent_spans.shrink_to_fit();
         self.values.shrink_to_fit();
+        self.value_domains.shrink_to_fit();
         self.block_arguments.shrink_to_fit();
         self.edge_arguments.shrink_to_fit();
         self.edge_argument_values.shrink_to_fit();
@@ -342,7 +369,8 @@ impl ECodeSsaIr {
 
 pub(crate) struct ECodeSsaRewriter<'a> {
     operations: &'a mut Vec<ECodeSsaOp>,
-    constants: ECodeSsaConstantInterner<'a>,
+    constant_storage: &'a mut Vec<u8>,
+    constants: IlConstantInterner,
 }
 
 impl ECodeSsaRewriter<'_> {
@@ -351,7 +379,7 @@ impl ECodeSsaRewriter<'_> {
     }
 
     pub(crate) fn replace_with_constant(&mut self, operation: IlOpId, value: &BitVec) {
-        let immediate = self.constants.intern(value);
+        let immediate = self.constants.intern(self.constant_storage, value);
         self.operations[operation.index()].replace_with_constant(immediate);
     }
 }
@@ -377,7 +405,7 @@ impl ControlFlowIl for ECodeSsaIr {
 }
 
 impl PersistableIl for ECodeSsaIr {
-    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(2);
 
     fn metadata_mut(&mut self) -> &mut IlMetadata {
         &mut self.metadata
@@ -397,6 +425,9 @@ impl EstimateSize for ECodeSsaIr {
             self.values
                 .capacity()
                 .saturating_mul(size_of::<ECodeSsaValue>()),
+            self.value_domains
+                .capacity()
+                .saturating_mul(size_of::<Option<ECodeSsaDomain>>()),
             self.block_arguments
                 .capacity()
                 .saturating_mul(size_of::<ECodeSsaBlockArg>()),

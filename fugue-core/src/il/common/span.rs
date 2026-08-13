@@ -13,6 +13,7 @@ use crate::ir::Address;
 /// carried through ECode and SSA unchanged — only `destination` is remapped
 /// between levels.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct IlSourceSpan {
     destination: IlIndexRange,
     address: Address,

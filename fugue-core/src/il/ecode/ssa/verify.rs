@@ -2,9 +2,10 @@ use thiserror::Error;
 
 use crate::il::common::verify::{StructureError, StructureVerifierError};
 use crate::il::common::{
-    ControlFlowIl, IlArtefact, IlBlockId, IlDominance, IlError, IlOpId, IlValueId,
+    ControlFlowIl, FlagId, IlArtefact, IlBlockArgId, IlBlockId, IlDominance, IlError, IlOpId,
+    IlSsaDef, IlValueId, RegisterId,
 };
-use crate::il::ecode::ssa::{ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode, ECodeSsaValueKind};
+use crate::il::ecode::ssa::{ECodeSsaDomain, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode};
 
 #[cfg(test)]
 mod test;
@@ -21,6 +22,16 @@ pub(crate) enum VerifyError {
     DuplicateMemoryDomain,
     #[error(transparent)]
     Il(#[from] IlError),
+    #[error("ECode SSA value {value} has an inconsistent domain")]
+    InconsistentValueDomain { value: u32 },
+    #[error(
+        "ECode SSA operation {operation} has an invalid operand count: expected {expected}, found {found}"
+    )]
+    InvalidOperandCount {
+        operation: u32,
+        expected: usize,
+        found: usize,
+    },
     #[error("ECode SSA operation {operation} has invalid block placement")]
     InvalidOperationPlacement { operation: u32 },
     #[error(
@@ -45,6 +56,77 @@ pub(crate) enum VerifyError {
     NonDominatingUse { value: u32, user: u32 },
     #[error(transparent)]
     Structure(StructureError),
+    #[error("ECode SSA value-domain count mismatch: expected {expected}, found {found}")]
+    ValueDomainCount { expected: usize, found: usize },
+}
+
+impl VerifyError {
+    const fn block_argument_count(block: u32, expected: usize, found: usize) -> Self {
+        Self::BlockArgumentCount {
+            block,
+            expected,
+            found,
+        }
+    }
+
+    const fn duplicate_memory_domain() -> Self {
+        Self::DuplicateMemoryDomain
+    }
+
+    const fn inconsistent_value_domain(value: IlValueId) -> Self {
+        Self::InconsistentValueDomain {
+            value: value.value(),
+        }
+    }
+
+    const fn invalid_operand_count(operation: IlOpId, expected: usize, found: usize) -> Self {
+        Self::InvalidOperandCount {
+            operation: operation.value(),
+            expected,
+            found,
+        }
+    }
+
+    const fn invalid_operation_placement(operation: IlOpId) -> Self {
+        Self::InvalidOperationPlacement {
+            operation: operation.value(),
+        }
+    }
+
+    const fn invalid_result_count(operation: IlOpId, expected: usize, found: usize) -> Self {
+        Self::InvalidResultCount {
+            operation: operation.value(),
+            expected,
+            found,
+        }
+    }
+
+    const fn invalid_value_definition() -> Self {
+        Self::InvalidValueDefinition
+    }
+
+    const fn non_dominating_edge_argument(
+        value: IlValueId,
+        predecessor: IlBlockId,
+        successor: IlBlockId,
+    ) -> Self {
+        Self::NonDominatingEdgeArgument {
+            value: value.value(),
+            predecessor: predecessor.value(),
+            successor: successor.value(),
+        }
+    }
+
+    const fn non_dominating_use(value: IlValueId, user: IlOpId) -> Self {
+        Self::NonDominatingUse {
+            value: value.value(),
+            user: user.value(),
+        }
+    }
+
+    const fn value_domain_count(expected: usize, found: usize) -> Self {
+        Self::ValueDomainCount { expected, found }
+    }
 }
 
 impl StructureVerifierError for VerifyError {
@@ -61,9 +143,11 @@ impl ECodeSsaIr {
             self.operations().len(),
         )?;
         self.verify_memory_domains()?;
+        self.verify_value_domains()?;
         self.verify_edge_arguments()?;
 
         for (argument_index, argument) in self.block_arguments().iter().enumerate() {
+            let argument_id = IlBlockArgId::try_from_index(argument_index)?;
             self.graph().blocks().get(argument.block().index()).ok_or(
                 IlError::range_out_of_bounds(argument.block().value(), self.graph().blocks().len()),
             )?;
@@ -74,11 +158,10 @@ impl ECodeSsaIr {
 
             let value = self.values()[argument.value().index()];
 
-            if value.definition_kind() != ECodeSsaValueKind::BlockArgument
-                || value.definition_index() != argument_index as u32
+            if value.definition() != IlSsaDef::BlockArgument(argument_id)
                 || value.width() != argument.width()
             {
-                return Err(VerifyError::InvalidValueDefinition);
+                return Err(VerifyError::invalid_value_definition());
             }
         }
 
@@ -92,10 +175,8 @@ impl ECodeSsaIr {
             for result_index in operation.results().start()..operation.results().end() {
                 let value = self.values()[result_index];
 
-                if value.definition_kind() != ECodeSsaValueKind::Operation
-                    || value.definition_index() != operation_index as u32
-                {
-                    return Err(VerifyError::InvalidValueDefinition);
+                if value.definition() != IlSsaDef::Operation(operation_id) {
+                    return Err(VerifyError::invalid_value_definition());
                 }
 
                 if value.width() != operation.width() {
@@ -104,8 +185,11 @@ impl ECodeSsaIr {
             }
 
             if operation.opcode() == ECodeSsaOpcode::Constant && operation.width() > 64 {
-                let bytes = operation.width().div_ceil(8) as usize;
-                let end = (operation.immediate() as usize).saturating_add(bytes);
+                let bytes = usize::try_from(operation.width().div_ceil(8))
+                    .map_err(|_| IlError::integer_overflow("ECode SSA constant width"))?;
+                let start = usize::try_from(operation.immediate())
+                    .map_err(|_| IlError::integer_overflow("ECode SSA constant offset"))?;
+                let end = start.saturating_add(bytes);
                 if end > self.constant_storage().len() {
                     return Err(IlError::range_out_of_bounds(
                         u32::try_from(end).unwrap_or(u32::MAX),
@@ -114,6 +198,8 @@ impl ECodeSsaIr {
                     .into());
                 }
             }
+
+            self.verify_domain_write(operation_id, operation)?;
 
             let uniform_operand_width = operation.opcode().has_uniform_operand_width();
             for operand in operation
@@ -149,27 +235,23 @@ impl ECodeSsaIr {
         for (value_index, value) in self.values().iter().enumerate() {
             let value_id = IlValueId::try_from_index(value_index)?;
 
-            match value.definition_kind() {
-                ECodeSsaValueKind::Operation => {
-                    let Some(operation) = self.operations().get(value.definition_index() as usize)
-                    else {
-                        return Err(VerifyError::InvalidValueDefinition);
+            match value.definition() {
+                IlSsaDef::Operation(operation) => {
+                    let Some(operation) = self.operations().get(operation.index()) else {
+                        return Err(VerifyError::invalid_value_definition());
                     };
 
                     if !operation.results().contains_index(value_id.index()) {
-                        return Err(VerifyError::InvalidValueDefinition);
+                        return Err(VerifyError::invalid_value_definition());
                     }
                 }
-                ECodeSsaValueKind::BlockArgument => {
-                    let Some(argument) = self
-                        .block_arguments()
-                        .get(value.definition_index() as usize)
-                    else {
-                        return Err(VerifyError::InvalidValueDefinition);
+                IlSsaDef::BlockArgument(argument) => {
+                    let Some(argument) = self.block_arguments().get(argument.index()) else {
+                        return Err(VerifyError::invalid_value_definition());
                     };
 
                     if argument.value() != value_id || argument.width() != value.width() {
-                        return Err(VerifyError::InvalidValueDefinition);
+                        return Err(VerifyError::invalid_value_definition());
                     }
                 }
             }
@@ -179,14 +261,114 @@ impl ECodeSsaIr {
 
         Ok(())
     }
+
     fn verify_memory_domains(&self) -> Result<(), VerifyError> {
         for (index, domain) in self.memory_domains().iter().enumerate() {
             if self.memory_domains()[..index]
                 .iter()
                 .any(|existing| existing.space() == domain.space())
             {
-                return Err(VerifyError::DuplicateMemoryDomain);
+                return Err(VerifyError::duplicate_memory_domain());
             }
+        }
+
+        Ok(())
+    }
+
+    fn verify_value_domains(&self) -> Result<(), VerifyError> {
+        if self.value_domains().len() != self.values().len() {
+            return Err(VerifyError::value_domain_count(
+                self.values().len(),
+                self.value_domains().len(),
+            ));
+        }
+
+        for (index, value) in self.values().iter().enumerate() {
+            let value_id = IlValueId::try_from_index(index)?;
+            let Some(domain) = self.value_domain(value_id) else {
+                continue;
+            };
+            let consistent = match value.definition() {
+                IlSsaDef::BlockArgument(_) => {
+                    if domain.is_register_or_flag() {
+                        value.width() != 0
+                    } else {
+                        value.width() == 0
+                    }
+                }
+                IlSsaDef::Operation(operation) => {
+                    let operation = self.operations().get(operation.index());
+                    match (domain, operation) {
+                        (ECodeSsaDomain::Flag(storage), Some(operation)) => {
+                            value.width() != 0
+                                && operation.immediate() == storage.value()
+                                && matches!(
+                                    operation.opcode(),
+                                    ECodeSsaOpcode::Undefined | ECodeSsaOpcode::WriteFlag
+                                )
+                        }
+                        (ECodeSsaDomain::Memory(space), Some(operation)) => {
+                            value.width() == 0
+                                && match operation.opcode() {
+                                    ECodeSsaOpcode::Store => {
+                                        operation.address_space() == Some(space)
+                                    }
+                                    ECodeSsaOpcode::Undefined => u64::try_from(space.index())
+                                        .is_ok_and(|space| operation.immediate() == space),
+                                    _ => false,
+                                }
+                        }
+                        (ECodeSsaDomain::Register(storage), Some(operation)) => {
+                            value.width() != 0
+                                && operation.immediate() == storage.value()
+                                && matches!(
+                                    operation.opcode(),
+                                    ECodeSsaOpcode::Undefined | ECodeSsaOpcode::WriteRegister
+                                )
+                        }
+                        (_, None) => false,
+                    }
+                }
+            };
+            if !consistent {
+                return Err(VerifyError::inconsistent_value_domain(value_id));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn verify_domain_write(
+        &self,
+        operation_id: IlOpId,
+        operation: &ECodeSsaOp,
+    ) -> Result<(), VerifyError> {
+        let expected_domain = match operation.opcode() {
+            ECodeSsaOpcode::WriteFlag => ECodeSsaDomain::Flag(FlagId::new(operation.immediate())),
+            ECodeSsaOpcode::WriteRegister => {
+                ECodeSsaDomain::Register(RegisterId::new(operation.immediate()))
+            }
+            _ => return Ok(()),
+        };
+
+        if operation.operands().len() != 1 {
+            return Err(VerifyError::invalid_operand_count(
+                operation_id,
+                1,
+                operation.operands().len(),
+            ));
+        }
+        if operation.results().len() != 1 {
+            return Err(VerifyError::invalid_result_count(
+                operation_id,
+                1,
+                operation.results().len(),
+            ));
+        }
+
+        let result = IlValueId::try_from_index(operation.results().start())?;
+        if self.value_domain(result) != Some(expected_domain) {
+            return Err(VerifyError::inconsistent_value_domain(result));
         }
 
         Ok(())
@@ -212,11 +394,11 @@ impl ECodeSsaIr {
 
         if operation.opcode() == ECodeSsaOpcode::Store {
             if operation.results().len() != 1 {
-                return Err(VerifyError::InvalidResultCount {
-                    operation: operation_id.value(),
-                    expected: 1,
-                    found: operation.results().len(),
-                });
+                return Err(VerifyError::invalid_result_count(
+                    operation_id,
+                    1,
+                    operation.results().len(),
+                ));
             }
 
             let result = self.values()[operation.results().start()];
@@ -231,11 +413,11 @@ impl ECodeSsaIr {
 
     fn verify_edge_arguments(&self) -> Result<(), VerifyError> {
         if self.edge_arguments().len() != self.graph().successors().len() {
-            return Err(VerifyError::BlockArgumentCount {
-                block: 0,
-                expected: self.graph().successors().len(),
-                found: self.edge_arguments().len(),
-            });
+            return Err(VerifyError::block_argument_count(
+                0,
+                self.graph().successors().len(),
+                self.edge_arguments().len(),
+            ));
         }
 
         for range in self.edge_arguments() {
@@ -264,9 +446,7 @@ impl ECodeSsaIr {
         for (operation_index, operation) in self.operations().iter().enumerate() {
             let operation_id = IlOpId::try_from_index(operation_index)?;
             let Some(user_block) = operation_blocks[operation_index] else {
-                return Err(VerifyError::InvalidOperationPlacement {
-                    operation: operation_id.value(),
-                });
+                return Err(VerifyError::invalid_operation_placement(operation_id));
             };
 
             if !dominance.is_reachable(user_block) {
@@ -282,10 +462,7 @@ impl ECodeSsaIr {
                     &dominance,
                     &operation_blocks,
                 )? {
-                    return Err(VerifyError::NonDominatingUse {
-                        value: operand.value(),
-                        user: operation_id.value(),
-                    });
+                    return Err(VerifyError::non_dominating_use(*operand, operation_id));
                 }
             }
         }
@@ -303,13 +480,10 @@ impl ECodeSsaIr {
         for operand in self.operation_operands_for(operation) {
             let value = self.values()[operand.index()];
 
-            if value.definition_kind() == ECodeSsaValueKind::Operation
-                && value.definition_index() as usize >= operation_index
+            if let IlSsaDef::Operation(definition) = value.definition()
+                && definition.index() >= operation_index
             {
-                return Err(VerifyError::NonDominatingUse {
-                    value: operand.value(),
-                    user: operation_id.value(),
-                });
+                return Err(VerifyError::non_dominating_use(*operand, operation_id));
             }
         }
 
@@ -339,15 +513,11 @@ impl ECodeSsaIr {
                 let expected = block_arguments.clone().count();
 
                 if arguments.len() != expected {
-                    return Err(VerifyError::BlockArgumentCount {
-                        block: successor.value(),
+                    return Err(VerifyError::block_argument_count(
+                        successor.value(),
                         expected,
-                        found: arguments.len(),
-                    });
-                }
-
-                if !dominance.is_reachable(predecessor_id) {
-                    continue;
+                        arguments.len(),
+                    ));
                 }
 
                 for (value, argument) in arguments.iter().zip(block_arguments) {
@@ -356,18 +526,23 @@ impl ECodeSsaIr {
                     if incoming.width() != argument.width() {
                         return Err(IlError::width_mismatch(ECodeSsaIr::FORM).into());
                     }
+                    if self.value_domain(*value) != self.value_domain(argument.value()) {
+                        return Err(VerifyError::inconsistent_value_domain(argument.value()));
+                    }
 
-                    if !self.value_dominates_edge(
-                        *value,
-                        predecessor_id,
-                        dominance,
-                        operation_blocks,
-                    )? {
-                        return Err(VerifyError::NonDominatingEdgeArgument {
-                            value: value.value(),
-                            predecessor: predecessor_id.value(),
-                            successor: successor.value(),
-                        });
+                    if dominance.is_reachable(predecessor_id)
+                        && !self.value_dominates_edge(
+                            *value,
+                            predecessor_id,
+                            dominance,
+                            operation_blocks,
+                        )?
+                    {
+                        return Err(VerifyError::non_dominating_edge_argument(
+                            *value,
+                            predecessor_id,
+                            *successor,
+                        ));
                     }
                 }
             }
@@ -394,18 +569,15 @@ impl ECodeSsaIr {
     ) -> Result<bool, VerifyError> {
         let value = self.values()[value_id.index()];
 
-        match value.definition_kind() {
-            ECodeSsaValueKind::Operation => {
-                let definition_operation = value.definition_index() as usize;
-                let operation_id = IlOpId::try_from_index(definition_operation)?;
+        match value.definition() {
+            IlSsaDef::Operation(operation_id) => {
+                let definition_operation = operation_id.index();
                 let Some(definition_block) = operation_blocks
                     .get(definition_operation)
                     .copied()
                     .flatten()
                 else {
-                    return Err(VerifyError::InvalidOperationPlacement {
-                        operation: operation_id.value(),
-                    });
+                    return Err(VerifyError::invalid_operation_placement(operation_id));
                 };
 
                 if definition_block == user_block {
@@ -414,8 +586,11 @@ impl ECodeSsaIr {
                     Ok(dominance.dominates(definition_block, user_block))
                 }
             }
-            ECodeSsaValueKind::BlockArgument => {
-                let argument = self.block_arguments()[value.definition_index() as usize];
+            IlSsaDef::BlockArgument(argument) => {
+                let argument = self
+                    .block_arguments()
+                    .get(argument.index())
+                    .ok_or_else(VerifyError::invalid_value_definition)?;
 
                 Ok(dominance.dominates(argument.block(), user_block))
             }
@@ -431,25 +606,25 @@ impl ECodeSsaIr {
     ) -> Result<bool, VerifyError> {
         let value = self.values()[value_id.index()];
 
-        match value.definition_kind() {
-            ECodeSsaValueKind::Operation => {
-                let definition_operation = value.definition_index() as usize;
-                let operation_id = IlOpId::try_from_index(definition_operation)?;
+        match value.definition() {
+            IlSsaDef::Operation(operation_id) => {
+                let definition_operation = operation_id.index();
                 let Some(definition_block) = operation_blocks
                     .get(definition_operation)
                     .copied()
                     .flatten()
                 else {
-                    return Err(VerifyError::InvalidOperationPlacement {
-                        operation: operation_id.value(),
-                    });
+                    return Err(VerifyError::invalid_operation_placement(operation_id));
                 };
 
                 Ok(definition_block == predecessor
                     || dominance.dominates(definition_block, predecessor))
             }
-            ECodeSsaValueKind::BlockArgument => {
-                let argument = self.block_arguments()[value.definition_index() as usize];
+            IlSsaDef::BlockArgument(argument) => {
+                let argument = self
+                    .block_arguments()
+                    .get(argument.index())
+                    .ok_or_else(VerifyError::invalid_value_definition)?;
 
                 Ok(dominance.dominates(argument.block(), predecessor))
             }

@@ -68,6 +68,43 @@ impl IlIndexRange {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IlIndexMapper {
+    indices: Vec<usize>,
+}
+
+impl IlIndexMapper {
+    pub(crate) fn new(indices: Vec<usize>) -> Self {
+        assert!(!indices.is_empty(), "index map has a terminal boundary");
+        assert!(
+            indices.windows(2).all(|pair| pair[0] <= pair[1]),
+            "index map preserves boundary order"
+        );
+        Self { indices }
+    }
+
+    pub(crate) fn from_kept(len: usize, mut kept: impl FnMut(usize) -> bool) -> Self {
+        let mut indices = Vec::with_capacity(len.checked_add(1).expect("index count fits usize"));
+        indices.push(0usize);
+        for index in 0..len {
+            let next = indices[index]
+                .checked_add(usize::from(kept(index)))
+                .expect("compacted index fits usize");
+            indices.push(next);
+        }
+        Self { indices }
+    }
+
+    pub(crate) fn map_index(&self, index: usize) -> usize {
+        self.indices[index]
+    }
+
+    pub(crate) fn map_range(&self, range: IlIndexRange) -> IlIndexRange {
+        IlIndexRange::new(self.map_index(range.start()), self.map_index(range.end()))
+            .expect("index remapping preserves range order")
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct IlPool<T> {
     values: Vec<T>,
@@ -206,6 +243,17 @@ mod test {
             range.verify_bounds(1),
             Err(IlError::RangeOutOfBounds { .. })
         ));
+    }
+
+    #[test]
+    fn index_mapper_maps_source_boundaries() {
+        let mapper = IlIndexMapper::new(vec![0, 0, 1, 3]);
+
+        assert_eq!(mapper.map_index(1), 0);
+        assert_eq!(
+            mapper.map_range(IlIndexRange::new(1, 3).unwrap()),
+            IlIndexRange::new(0, 3).unwrap()
+        );
     }
 
     #[test]

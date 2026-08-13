@@ -67,6 +67,7 @@ pub(crate) use archived_bitflags;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
 pub struct Revision(u64);
 

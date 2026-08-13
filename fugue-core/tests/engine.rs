@@ -23,9 +23,11 @@ use fugue_core::engine::{
     MappingMetadataUpdate, Priority, ProjectUpdate, ProjectView, Subscription,
 };
 use fugue_core::extension::{self, Registration};
-use fugue_core::il::common::{IlArtefact, IlError};
+use fugue_core::il::common::{IlArtefact, IlError, RegisterId};
 use fugue_core::il::ecode::ECodeIr;
 use fugue_core::il::ecode::ssa::ECodeSsaIr;
+use fugue_core::il::mcode::MCodeVarKind;
+use fugue_core::il::mcode::ssa::{MCodeSsaIr, MCodeSsaOpcode};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FlowKind,
@@ -1700,7 +1702,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn test_function_recovery_cancel_before_seeding_leaves_project_unchanged()
+fn test_function_recovery_cancel_before_project_candidates_are_added_leaves_project_unchanged()
 -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut project = Project::new_transient(&loader)?;
@@ -1965,6 +1967,111 @@ fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn Error>> 
     assert!(reader.ecode_ssa(function)?.is_some());
     assert!(reader.project()?.ecode(function)?.is_none());
     assert!(reader.project()?.ecode_ssa(function)?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
+
+    let reader = engine.query_reader()?;
+    let restored_function = reader
+        .function_id_at(Address::from(0x10b70u64))?
+        .ok_or_else(|| io::Error::other("RBP restoration fixture function missing"))?;
+    let rbp_register = RegisterId::new(
+        resolve_language("x86:LE:64")?
+            .register_by_name("RBP")
+            .ok_or_else(|| io::Error::other("RBP register missing"))?
+            .offset(),
+    );
+    let functions = reader
+        .project()?
+        .functions()
+        .iter()
+        .map(|function| function.id())
+        .collect::<Vec<_>>();
+    let mut saw_address_of = false;
+    let mut saw_aliased_read = false;
+    let mut saw_aliased_write = false;
+    let mut saw_call = false;
+    let mut saw_partial_write = false;
+    let mut saw_rbp_restore = false;
+    let mut saw_stack_variable = false;
+    let mut saw_tail_call = false;
+    for function in functions {
+        let mcode = reader
+            .lifted::<MCodeSsaIr>(function)?
+            .ok_or_else(|| io::Error::other("MCode SSA missing after generation"))?;
+        assert_eq!(mcode.metadata().function(), function);
+        if function == restored_function {
+            saw_rbp_restore =
+                mcode
+                    .operations_for_source(Address::from(0x10bdau64))
+                    .any(|(_, operation)| {
+                        operation.opcode() == MCodeSsaOpcode::SetVar
+                            && operation
+                                .variable()
+                                .and_then(|variable| mcode.variable(variable))
+                                .is_some_and(|variable| {
+                                    variable.register_id() == Some(rbp_register)
+                                })
+                    });
+        }
+        for operation in mcode.operations() {
+            saw_address_of |= matches!(
+                operation.opcode(),
+                MCodeSsaOpcode::AddressOf | MCodeSsaOpcode::AddressOfField
+            );
+            saw_aliased_read |= matches!(
+                operation.opcode(),
+                MCodeSsaOpcode::VarAliased | MCodeSsaOpcode::VarAliasedField
+            );
+            saw_aliased_write |= matches!(
+                operation.opcode(),
+                MCodeSsaOpcode::SetVarAliased | MCodeSsaOpcode::SetVarAliasedField
+            );
+            saw_partial_write |= operation.opcode() == MCodeSsaOpcode::SetVarField;
+            saw_tail_call |= matches!(
+                operation.opcode(),
+                MCodeSsaOpcode::TailCall | MCodeSsaOpcode::TailCallIndirect
+            );
+            if matches!(
+                operation.opcode(),
+                MCodeSsaOpcode::Call | MCodeSsaOpcode::CallIndirect
+            ) {
+                saw_call = true;
+                let memory = mcode
+                    .operation_operands_for(operation)
+                    .last()
+                    .expect("a call has a memory operand");
+                assert_eq!(mcode.values()[memory.index()].width(), 0);
+                assert_eq!(mcode.values()[operation.results().start()].width(), 0);
+            }
+        }
+        saw_stack_variable |= mcode
+            .variables()
+            .iter()
+            .any(|variable| variable.kind() == MCodeVarKind::Stack);
+        for value in mcode.values() {
+            if let Some(binding) = value.binding() {
+                assert!(mcode.variable(binding.variable()).is_some());
+                assert_ne!(binding.version().value(), 0);
+            }
+        }
+    }
+
+    assert!(saw_address_of);
+    assert!(saw_aliased_read);
+    assert!(saw_aliased_write);
+    assert!(saw_call);
+    assert!(saw_partial_write);
+    assert!(saw_rbp_restore);
+    assert!(saw_stack_variable);
+    assert!(saw_tail_call);
 
     Ok(())
 }

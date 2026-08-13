@@ -5,48 +5,10 @@ use std::sync::{Arc, LazyLock};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use crate::il::common::{IlArtefact, IlError};
+use crate::il::common::{IlArtefact, IlError, RegisterId};
 use crate::il::pcode::{PCodeIr, PCodeLocation};
 use crate::ir::Endian;
 use crate::lifter::Language;
-
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub(crate) struct RegisterId(u64);
-
-impl RegisterId {
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn value(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct FlagId(u64);
-
-impl FlagId {
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn value(self) -> u64 {
-        self.0
-    }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct RegisterSlice {
@@ -125,8 +87,29 @@ struct RegisterRange {
     end: u64,
 }
 
+impl RegisterRange {
+    fn new(start: u64, size: usize) -> Result<Option<Self>, IlError> {
+        if size == 0 {
+            return Ok(None);
+        }
+        let size = u64::try_from(size).map_err(|_| IlError::integer_overflow("register range"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| IlError::integer_overflow("register range"))?;
+        Ok(Some(Self { start, end }))
+    }
+
+    fn merge(&mut self, other: Self) -> bool {
+        if other.start >= self.end {
+            return false;
+        }
+        self.end = self.end.max(other.end);
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default)]
-pub(crate) struct RegisterBank {
+pub struct RegisterBank {
     roots: Vec<RegisterRange>,
 }
 
@@ -142,7 +125,7 @@ impl RegisterBank {
 
         let mut ranges = Vec::new();
         for (_, register) in language.registers() {
-            Self::push_range(&mut ranges, register.offset(), register.size())?;
+            ranges.extend(RegisterRange::new(register.offset(), register.size())?);
         }
         ranges.sort_unstable_by_key(|range| (range.start, range.end));
         let ranges = Arc::<[RegisterRange]>::from(ranges);
@@ -151,7 +134,22 @@ impl RegisterBank {
         Ok(ranges)
     }
 
-    pub(crate) fn new(language: &'static Language, source: &PCodeIr) -> Result<Self, IlError> {
+    pub fn new(language: &'static Language) -> Result<Self, IlError> {
+        let language_ranges = Self::language_ranges(language)?;
+        let mut roots = Vec::<RegisterRange>::with_capacity(language_ranges.len());
+        for range in language_ranges.iter().copied() {
+            if roots.last_mut().is_none_or(|root| !root.merge(range)) {
+                roots.push(range);
+            }
+        }
+
+        Ok(Self { roots })
+    }
+
+    pub(crate) fn for_pcode(
+        language: &'static Language,
+        source: &PCodeIr,
+    ) -> Result<Self, IlError> {
         let language_ranges = Self::language_ranges(language)?;
         let mut ranges = Vec::new();
         for location in source
@@ -159,17 +157,16 @@ impl RegisterBank {
             .iter()
             .filter(|location| location.is_register())
         {
-            Self::push_range(&mut ranges, location.offset(), usize::from(location.size()))?;
+            ranges.extend(RegisterRange::new(
+                location.offset(),
+                usize::from(location.size()),
+            )?);
         }
         ranges.sort_unstable_by_key(|range| (range.start, range.end));
 
         let mut roots = Vec::<RegisterRange>::with_capacity(language_ranges.len());
         let mut merge = |range: RegisterRange| {
-            if let Some(root) = roots.last_mut()
-                && range.start < root.end
-            {
-                root.end = root.end.max(range.end);
-            } else {
+            if roots.last_mut().is_none_or(|root| !root.merge(range)) {
                 roots.push(range);
             }
         };
@@ -190,6 +187,31 @@ impl RegisterBank {
         }
 
         Ok(Self { roots })
+    }
+
+    pub fn root_id(&self, offset: u64, size: usize) -> Option<RegisterId> {
+        let size = u64::try_from(size).ok()?;
+        let end = offset.checked_add(size)?;
+        let index = self.roots.partition_point(|root| root.end <= offset);
+        self.roots
+            .get(index)
+            .filter(|root| root.start <= offset && end <= root.end)
+            .map(|root| RegisterId::new(root.start))
+    }
+
+    pub fn root_bits(&self, root: RegisterId) -> Option<u32> {
+        let index = self
+            .roots
+            .partition_point(|range| range.start < root.value());
+        let range = self
+            .roots
+            .get(index)
+            .filter(|range| range.start == root.value())?;
+        range
+            .end
+            .checked_sub(range.start)
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bits| u32::try_from(bits).ok())
     }
 
     pub(crate) fn slice(
@@ -227,7 +249,7 @@ impl RegisterBank {
         })
     }
 
-    pub(crate) fn call_preserved_registers(
+    pub fn call_preserved_registers(
         &self,
         language: &'static Language,
         endian: Endian,
@@ -259,18 +281,6 @@ impl RegisterBank {
             .filter_map(|(root, coverage)| coverage.covers_root().then_some(root))
             .collect()
     }
-
-    fn push_range(ranges: &mut Vec<RegisterRange>, start: u64, size: usize) -> Result<(), IlError> {
-        if size == 0 {
-            return Ok(());
-        }
-        let size = u64::try_from(size).map_err(|_| IlError::integer_overflow("register range"))?;
-        let end = start
-            .checked_add(size)
-            .ok_or_else(|| IlError::integer_overflow("register range"))?;
-        ranges.push(RegisterRange { start, end });
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -278,10 +288,19 @@ mod test {
     use super::*;
     use crate::il::pcode::{LifterSpaceHandle, PCodeLocationProperties};
 
+    fn slice(root: u64, root_bits: u32, offset: u32, bits: u32) -> RegisterSlice {
+        RegisterSlice {
+            root: RegisterId::new(root),
+            root_bits,
+            offset,
+            bits,
+        }
+    }
+
     #[test]
     fn register_slice_offset_follows_endianness() {
         let bank = RegisterBank {
-            roots: vec![RegisterRange { start: 0, end: 8 }],
+            roots: vec![RegisterRange::new(0, 8).unwrap().unwrap()],
         };
         let location = PCodeLocation::new(
             LifterSpaceHandle::new(1),
@@ -297,15 +316,6 @@ mod test {
         assert_eq!(big.offset(), 6);
         assert_eq!(little.root_bits(), 64);
         assert_eq!(big.root_bits(), 64);
-    }
-
-    fn slice(root: u64, root_bits: u32, offset: u32, bits: u32) -> RegisterSlice {
-        RegisterSlice {
-            root: RegisterId::new(root),
-            root_bits,
-            offset,
-            bits,
-        }
     }
 
     #[test]

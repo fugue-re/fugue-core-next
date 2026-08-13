@@ -16,12 +16,6 @@ pub enum StructureError {
         edge: u32,
         kinds: IlEdgeKinds,
     },
-    #[error("block {block} carries kinds {covered:?} but its terminator requires {required:?}")]
-    EdgeKindMissing {
-        block: u32,
-        covered: IlEdgeKinds,
-        required: IlEdgeKinds,
-    },
     #[error(transparent)]
     Il(#[from] IlError),
     #[error("block {block} operation range overlaps at operation {operation}")]
