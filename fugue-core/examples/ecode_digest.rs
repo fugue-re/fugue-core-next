@@ -36,15 +36,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut digest = Sha256::new();
         let mut lifted = 0usize;
-        let mut statements = 0usize;
-        let mut expressions = 0usize;
+        let mut operations = 0usize;
+        let mut values = 0usize;
         for function in functions.iter().copied() {
             let Some(ecode) = reader.ecode(function)? else {
                 continue;
             };
             lifted += 1;
-            statements += ecode.statements().len();
-            expressions += ecode.expressions().len();
+            operations += ecode.operations().len();
+            values += ecode.values().len();
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(ecode.as_ref())?;
             digest.update(bytes.as_slice());
         }
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         println!(
-            "{}: lifted={lifted} statements={statements} expressions={expressions} \
+            "{}: lifted={lifted} operations={operations} values={values} \
              data_refs={data_references} digest={:x}",
             input.display(),
             digest.finalize()

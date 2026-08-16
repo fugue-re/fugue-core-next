@@ -1,3 +1,4 @@
+#[macro_export]
 macro_rules! il_id {
     ($name:ident, $kind:literal) => {
         #[derive(
@@ -39,7 +40,7 @@ macro_rules! il_id {
     };
 }
 
-pub(crate) use il_id;
+pub use crate::il_id;
 
 il_id!(IlBlockArgId, "block argument");
 il_id!(IlBlockId, "block");
@@ -67,7 +68,7 @@ mod test {
     }
 
     #[test]
-    fn block_argument_id_index_round_trips() {
+    fn block_arg_id_index_round_trips() {
         let id = IlBlockArgId::try_from_index(41).unwrap();
 
         assert_eq!(id.index(), 41);

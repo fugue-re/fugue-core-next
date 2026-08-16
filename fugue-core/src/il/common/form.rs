@@ -210,9 +210,9 @@ mod test {
 
     #[test]
     fn identifiers_round_trip_through_their_durable_encoding() {
-        let form = IlFormId::from_static("fugue.ecode.ssa");
+        let form = IlFormId::from_static("fugue.ecode.cfg");
 
-        assert_eq!(form.as_str(), "fugue.ecode.ssa");
+        assert_eq!(form.as_str(), "fugue.ecode.cfg");
         assert_eq!(form.as_str().parse(), Ok(form.clone()));
         assert_eq!(form.dialect(), DialectId::from_static("fugue.ecode"));
         assert!(form.dialect().is_reserved());

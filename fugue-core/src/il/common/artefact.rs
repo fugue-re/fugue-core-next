@@ -58,6 +58,11 @@ impl IlMetadata {
     pub fn set_input_revision(&mut self, revision: Revision) {
         self.input_revision = revision;
     }
+
+    pub fn with_input_revision(mut self, revision: Revision) -> Self {
+        self.set_input_revision(revision);
+        self
+    }
 }
 
 pub trait IlArtefact: EstimateSize + Send + Sync + Sized + 'static {

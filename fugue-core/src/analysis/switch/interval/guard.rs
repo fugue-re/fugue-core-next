@@ -5,7 +5,7 @@ use super::SwitchIntervalRecovery;
 use crate::analysis::switch::SwitchTargetResolver;
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlValueId};
-use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
+use crate::il::ecode::{ECodeOp, ECodeOpcode};
 use crate::ir::{Address, AddressRange, AddressWithContext};
 use crate::lifter::{ContextSet, InsnResolver};
 
@@ -99,8 +99,13 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let ceiling = BitVec::max_value_with(width, false);
         let mut guard_block = Some(switch_block);
         while let Some(block) = guard_block {
-            for (_, operation) in self.ssa.operations_for_block(block).rev() {
-                if operation.opcode() != ECodeSsaOpcode::ConditionalBranch {
+            for (_, operation) in self
+                .ssa
+                .graph()
+                .operations_for_block(block, self.ssa.operations())
+                .rev()
+            {
+                if operation.opcode() != ECodeOpcode::ConditionalBranch {
                     continue;
                 }
                 let Some(&condition) = self.ssa.operation_operands_for(operation).first() else {
@@ -183,12 +188,12 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         })
     }
 
-    fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeSsaOp> {
+    fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeOp> {
         let mut conditional = None;
         for (_, operation) in self.ssa.operations_for_source(branch) {
             match operation.opcode() {
-                ECodeSsaOpcode::ConditionalBranch => conditional = Some(operation),
-                ECodeSsaOpcode::BranchIndirect => break,
+                ECodeOpcode::ConditionalBranch => conditional = Some(operation),
+                ECodeOpcode::BranchIndirect => break,
                 _ => {}
             }
         }
@@ -226,7 +231,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                     let operands = self.ssa.operation_operands_for(operation);
 
                     match operation.opcode() {
-                        ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister => {
+                        ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister => {
                             let Some(&inner) = operands.first() else {
                                 intervals.push(None);
                                 continue;
@@ -237,7 +242,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                                 depth: depth - 1,
                             });
                         }
-                        ECodeSsaOpcode::BoolNot => {
+                        ECodeOpcode::BoolNot => {
                             let Some(&inner) = operands.first() else {
                                 intervals.push(None);
                                 continue;
@@ -248,15 +253,14 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                                 depth: depth - 1,
                             });
                         }
-                        ECodeSsaOpcode::BoolAnd | ECodeSsaOpcode::BoolOr => {
+                        ECodeOpcode::BoolAnd | ECodeOpcode::BoolOr => {
                             let (Some(&left), Some(&right)) = (operands.first(), operands.get(1))
                             else {
                                 intervals.push(None);
                                 continue;
                             };
                             steps.push(ConditionStep::Merge {
-                                conjunction: (operation.opcode() == ECodeSsaOpcode::BoolAnd)
-                                    == taken,
+                                conjunction: (operation.opcode() == ECodeOpcode::BoolAnd) == taken,
                             });
                             steps.push(ConditionStep::Evaluate {
                                 condition: right,
@@ -298,18 +302,16 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
 
     fn index_interval_from_comparison(
         &self,
-        operation: &ECodeSsaOp,
+        operation: &ECodeOp,
         index: IlValueId,
         taken: bool,
     ) -> Option<StridedInterval> {
         let width = self.ssa.value_width(index)?;
         let relation = match operation.opcode() {
-            ECodeSsaOpcode::IntLess | ECodeSsaOpcode::IntSignedLess => Relation::Less,
-            ECodeSsaOpcode::IntLessEqual | ECodeSsaOpcode::IntSignedLessEqual => {
-                Relation::LessEqual
-            }
-            ECodeSsaOpcode::IntEqual => Relation::Equal,
-            ECodeSsaOpcode::IntNotEqual => Relation::NotEqual,
+            ECodeOpcode::IntLess | ECodeOpcode::IntSignedLess => Relation::Less,
+            ECodeOpcode::IntLessEqual | ECodeOpcode::IntSignedLessEqual => Relation::LessEqual,
+            ECodeOpcode::IntEqual => Relation::Equal,
+            ECodeOpcode::IntNotEqual => Relation::NotEqual,
             _ => return None,
         };
         let operands = self.ssa.operation_operands_for(operation);
@@ -351,13 +353,13 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let operands = self.ssa.operation_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         match operation.opcode() {
-            ECodeSsaOpcode::Sub if self.matches_index(a, index) => {
+            ECodeOpcode::Sub if self.matches_index(a, index) => {
                 Some(&BitVec::zero(width) - &self.ssa.constant_value(b)?.unsigned_cast(width))
             }
-            ECodeSsaOpcode::Add if self.matches_index(a, index) => {
+            ECodeOpcode::Add if self.matches_index(a, index) => {
                 Some(self.ssa.constant_value(b)?.unsigned_cast(width))
             }
-            ECodeSsaOpcode::Add if self.matches_index(b, index) => {
+            ECodeOpcode::Add if self.matches_index(b, index) => {
                 Some(self.ssa.constant_value(a)?.unsigned_cast(width))
             }
             _ => None,
@@ -386,8 +388,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             ) else {
                 return false;
             };
-            if oa.opcode() == ECodeSsaOpcode::Undefined && ob.opcode() == ECodeSsaOpcode::Undefined
-            {
+            if oa.opcode() == ECodeOpcode::Undefined && ob.opcode() == ECodeOpcode::Undefined {
                 if oa.width() == ob.width() && oa.immediate() == ob.immediate() {
                     continue;
                 }
@@ -396,13 +397,13 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             if oa.opcode() != ob.opcode() || oa.width() != ob.width() {
                 return false;
             }
-            if oa.opcode() == ECodeSsaOpcode::Constant {
+            if oa.opcode() == ECodeOpcode::Constant {
                 if self.ssa.constant_value(a) == self.ssa.constant_value(b) {
                     continue;
                 }
                 return false;
             }
-            if oa.opcode() == ECodeSsaOpcode::Load {
+            if oa.opcode() == ECodeOpcode::Load {
                 if oa.immediate() != ob.immediate()
                     || oa.address() != ob.address()
                     || oa.address_space() != ob.address_space()
@@ -449,7 +450,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         true
     }
 
-    fn observes_same_memory(&self, a: &ECodeSsaOp, b: &ECodeSsaOp) -> bool {
+    fn observes_same_memory(&self, a: &ECodeOp, b: &ECodeOp) -> bool {
         let (Some(a_range), Some(b_range)) = (
             self.ssa.memory_access_range(a),
             self.ssa.memory_access_range(b),
@@ -482,7 +483,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             let Some(operation) = self.ssa.defining_operation(state) else {
                 return false;
             };
-            if operation.opcode() != ECodeSsaOpcode::Store {
+            if operation.opcode() != ECodeOpcode::Store {
                 return false;
             }
             if let Some(stored) = self.ssa.memory_access_range(operation)
@@ -523,7 +524,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
     ) -> Option<AddressWithContext> {
         if let Some(address) = self
             .conditional_branch_within_instruction(branch)
-            .and_then(ECodeSsaOp::address)
+            .and_then(ECodeOp::address)
         {
             tracing::trace!(
                 "switch at {branch}: resolving intra-instruction default branch at {address}"

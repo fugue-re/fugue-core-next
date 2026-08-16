@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +12,7 @@ use fugue_core::ir::{
 use fugue_core::loader::{LoadableFromBytes, Loader};
 use fugue_core::project::{ChangeSet, Project};
 use fugue_core::queries::QueryReader;
+use rustc_hash::FxHashMap;
 use tokio::sync::broadcast;
 
 use crate::bindings::{ChangeEvent, MetricsResponse};
@@ -24,7 +24,7 @@ const FEED_POLL: Duration = Duration::from_millis(200);
 pub struct Session {
     engine: Arc<AnalysisEngine>,
     reader: QueryReader,
-    symbol_indices: Mutex<HashMap<Address, usize>>,
+    symbol_indices: Mutex<FxHashMap<Address, usize>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -97,7 +97,7 @@ impl Session {
         Ok(Self {
             engine,
             reader,
-            symbol_indices: Mutex::new(HashMap::new()),
+            symbol_indices: Mutex::new(FxHashMap::default()),
             shutdown,
         })
     }

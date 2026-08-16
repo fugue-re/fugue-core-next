@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 
 use super::SwitchIntervalRecovery;
 use crate::il::common::IlValueId;
-use crate::il::ecode::ssa::{ECodeSsaOp, ECodeSsaOpcode};
+use crate::il::ecode::{ECodeOp, ECodeOpcode};
 use crate::ir::{Address, RawAddress};
 use crate::storage::AddressSpaceId;
 
@@ -65,7 +65,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                         }
 
                         let Some(operation) = self.context.ssa.defining_operation(value) else {
-                            if let Some(input) = self.context.common_block_argument_input(value) {
+                            if let Some(input) = self.context.common_block_arg_input(value) {
                                 self.stack.push(EvaluationStep::Forward { value, input });
                                 if !self.memo.contains_key(&input) {
                                     self.stack.push(EvaluationStep::Evaluate(input));
@@ -75,7 +75,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                         };
 
                         self.stack.push(EvaluationStep::Apply(value));
-                        if operation.opcode() == ECodeSsaOpcode::Load {
+                        if operation.opcode() == ECodeOpcode::Load {
                             let pointer = self.context.ssa.pointer_operand(operation)?;
                             if !self.memo.contains_key(&pointer) {
                                 self.stack.push(EvaluationStep::Evaluate(pointer));
@@ -121,12 +121,12 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
     fn apply(
         &mut self,
         value: IlValueId,
-        operation: &ECodeSsaOp,
+        operation: &ECodeOp,
         read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
     ) -> Option<BitVec> {
         match operation.opcode() {
-            ECodeSsaOpcode::Constant => self.context.ssa.constant_value(value),
-            ECodeSsaOpcode::Load => {
+            ECodeOpcode::Constant => self.context.ssa.constant_value(value),
+            ECodeOpcode::Load => {
                 let pointer = self
                     .context
                     .ssa
@@ -134,7 +134,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                     .and_then(|pointer| self.memo.get(&pointer).cloned())?;
                 self.load(operation, &pointer, read_memory)
             }
-            ECodeSsaOpcode::WriteFlag | ECodeSsaOpcode::WriteRegister => {
+            ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister => {
                 let input = self.context.ssa.operation_operands_for(operation).first()?;
                 Some(self.memo.get(input)?.clone().cast(operation.width()))
             }
@@ -150,7 +150,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
 
     fn load(
         &mut self,
-        operation: &ECodeSsaOp,
+        operation: &ECodeOp,
         pointer: &BitVec,
         read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
     ) -> Option<BitVec> {

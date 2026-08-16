@@ -5,7 +5,7 @@ use rustc_hash::FxHashSet;
 
 use super::SwitchIntervalRecovery;
 use crate::il::common::IlValueId;
-use crate::il::ecode::ssa::ECodeSsaOpcode;
+use crate::il::ecode::ECodeOpcode;
 use crate::ir::RawAddress;
 
 pub(crate) struct SwitchTableLayout {
@@ -95,7 +95,7 @@ impl SwitchIntervalRecovery<'_> {
             };
             let operands = self.ssa.operation_operands_for(operation);
             match operation.opcode() {
-                ECodeSsaOpcode::Load => {
+                ECodeOpcode::Load => {
                     if let Some(pointer) = self.ssa.pointer_operand(operation) {
                         let element_size = operation.width().div_ceil(8);
                         if let Some((address, index)) = self.table_pointer(pointer, element_size) {
@@ -108,16 +108,16 @@ impl SwitchIntervalRecovery<'_> {
                         queue.push_back(pointer);
                     }
                 }
-                ECodeSsaOpcode::Add
-                | ECodeSsaOpcode::Sub
-                | ECodeSsaOpcode::Copy
-                | ECodeSsaOpcode::WriteFlag
-                | ECodeSsaOpcode::WriteRegister
-                | ECodeSsaOpcode::ZeroExtend
-                | ECodeSsaOpcode::SignExtend
-                | ECodeSsaOpcode::Truncate
-                | ECodeSsaOpcode::Mul
-                | ECodeSsaOpcode::LeftShift => {
+                ECodeOpcode::Add
+                | ECodeOpcode::Sub
+                | ECodeOpcode::Copy
+                | ECodeOpcode::WriteFlag
+                | ECodeOpcode::WriteRegister
+                | ECodeOpcode::ZeroExtend
+                | ECodeOpcode::SignExtend
+                | ECodeOpcode::Truncate
+                | ECodeOpcode::Mul
+                | ECodeOpcode::LeftShift => {
                     queue.extend(operands.iter().copied());
                 }
                 _ => {}
@@ -139,7 +139,7 @@ impl SwitchIntervalRecovery<'_> {
     pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
         let mut target = self.canonical_value(target);
         if let Some(operation) = self.ssa.defining_operation(target)
-            && operation.opcode() == ECodeSsaOpcode::And
+            && operation.opcode() == ECodeOpcode::And
         {
             let operands = self.ssa.operation_operands_for(operation);
             let (&a, &b) = (operands.first()?, operands.get(1)?);
@@ -168,7 +168,7 @@ impl SwitchIntervalRecovery<'_> {
     fn base_scale_index(&self, value: IlValueId) -> Option<BaseScaleIndex> {
         let value = self.canonical_value(value);
         let operation = self.ssa.defining_operation(value)?;
-        if operation.opcode() != ECodeSsaOpcode::Add {
+        if operation.opcode() != ECodeOpcode::Add {
             return None;
         }
         let operands = self.ssa.operation_operands_for(operation);
@@ -181,21 +181,21 @@ impl SwitchIntervalRecovery<'_> {
         };
         if !matches!(
             operation.opcode(),
-            ECodeSsaOpcode::Mul | ECodeSsaOpcode::LeftShift
+            ECodeOpcode::Mul | ECodeOpcode::LeftShift
         ) {
             return Some(BaseScaleIndex::new(base, None, scaled));
         }
         let operands = self.ssa.operation_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         let (scale, index) = match operation.opcode() {
-            ECodeSsaOpcode::Mul => self.constant_and_value(a, b)?,
-            ECodeSsaOpcode::LeftShift => (self.ssa.constant_value(b)?, a),
+            ECodeOpcode::Mul => self.constant_and_value(a, b)?,
+            ECodeOpcode::LeftShift => (self.ssa.constant_value(b)?, a),
             _ => unreachable!(),
         };
         let scale = scale.to_u64()?;
         let scale = match operation.opcode() {
-            ECodeSsaOpcode::Mul => scale,
-            ECodeSsaOpcode::LeftShift => 1u64.checked_shl(u32::try_from(scale).ok()?)?,
+            ECodeOpcode::Mul => scale,
+            ECodeOpcode::LeftShift => 1u64.checked_shl(u32::try_from(scale).ok()?)?,
             _ => unreachable!(),
         };
         Some(BaseScaleIndex::new(

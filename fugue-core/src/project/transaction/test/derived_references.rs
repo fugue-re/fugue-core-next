@@ -455,9 +455,9 @@ fn project_ensure_pcode_builds_from_recovered_instruction_bytes()
     assert_eq!(pcode.source_spans()[0].address(), entry);
     assert!(
         ecode
-            .statements()
+            .operations()
             .iter()
-            .any(|statement| statement.opcode() == ECodeStmtOpcode::WriteRegister)
+            .any(|operation| operation.opcode() == ECodeOpcode::WriteRegister)
     );
 
     Ok(())
@@ -491,7 +491,7 @@ fn project_ensure_pcode_records_zero_operation_source_gap() -> Result<(), Box<dy
     assert_eq!(source_spans.len(), 1);
     assert_eq!(source_spans[0].address(), entry);
     assert!(source_spans[0].destination().is_empty());
-    assert_eq!(source_spans[0].pcode_count(), 0);
+    assert_eq!(source_spans[0].source_count(), 0);
 
     Ok(())
 }

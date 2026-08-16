@@ -1016,10 +1016,8 @@ mod test {
 
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
-    use crate::il::pcode::{
-        AddressAnnotation, AddressAnnotationValue, PCodeAddressContext, PCodeBuilder,
-    };
+    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
+    use crate::il::pcode::{PCodeBuilder, PCodeLocation, PCodeOpSpec, PCodeOpcode};
     use crate::ir::{
         CodeBlockTable, FunctionId, FunctionTable, FunctionTableStaging, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry,
@@ -1431,30 +1429,31 @@ mod test {
         let data_space = insn_address.space();
         let data_address = 0x4000u64;
         let register_value = Varnode::new(language.register_space(), 0, 8);
-        let load_operation = RawPCodeOp {
-            op: Op::Load(default_space),
-            inputs: Inputs::one(Varnode::constant(data_address, 8)),
-            output: register_value,
-        };
-        let store_operation = RawPCodeOp {
-            op: Op::Store(default_space),
-            inputs: Inputs([Varnode::constant(data_address, 8), register_value]),
-            output: Varnode::INVALID,
-        };
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let annotations = [
-            AddressAnnotation::new(
-                IlOpId::try_from_index(0).unwrap(),
-                AddressAnnotationValue::ComputedSpace(data_space),
-            ),
-            AddressAnnotation::new(
-                IlOpId::try_from_index(1).unwrap(),
-                AddressAnnotationValue::ComputedSpace(data_space),
-            ),
-        ];
-        let mut context = PCodeAddressContext::new(insn_address, &annotations);
-        let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
-        builder.push_lifted_operations(&[load_operation, store_operation], &mut context)?;
+        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
+        {
+            let mut emitter = builder.emitter();
+            let pointer = emitter.intern_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::constant(data_address, 8),
+            ))?;
+            let register =
+                emitter.intern_location(PCodeLocation::from_varnode(language, &register_value))?;
+            emitter.emit(
+                PCodeOpSpec::new(PCodeOpcode::Load)
+                    .with_immediate(u32::from(default_space))
+                    .with_address_space(data_space),
+                Some(register),
+                [pointer],
+            )?;
+            emitter.emit(
+                PCodeOpSpec::new(PCodeOpcode::Store)
+                    .with_immediate(u32::from(default_space))
+                    .with_address_space(data_space),
+                None,
+                [pointer, register],
+            )?;
+        }
         builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 2).unwrap(),
             insn_address,
@@ -1480,18 +1479,25 @@ mod test {
         );
 
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let annotations = [AddressAnnotation::new(
-            IlOpId::try_from_index(0).unwrap(),
-            AddressAnnotationValue::ComputedSpace(data_space),
-        )];
-        let mut context = PCodeAddressContext::new(insn_address, &annotations);
-        let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
-        let register_relative = RawPCodeOp {
-            op: Op::Load(default_space),
-            inputs: Inputs::one(Varnode::new(language.register_space(), 0x20, 8)),
-            output: Varnode::new(language.register_space(), 0, 8),
-        };
-        builder.push_lifted_operations(&[register_relative], &mut context)?;
+        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
+        {
+            let mut emitter = builder.emitter();
+            let pointer = emitter.intern_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::new(language.register_space(), 0x20, 8),
+            ))?;
+            let output = emitter.intern_location(PCodeLocation::from_varnode(
+                language,
+                &Varnode::new(language.register_space(), 0, 8),
+            ))?;
+            emitter.emit(
+                PCodeOpSpec::new(PCodeOpcode::Load)
+                    .with_immediate(u32::from(default_space))
+                    .with_address_space(data_space),
+                Some(output),
+                [pointer],
+            )?;
+        }
         builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1).unwrap(),
             insn_address,

@@ -129,11 +129,11 @@ pub trait IlProducer: Default + Send + 'static {
     ) -> Result<Self::Output, IlGenerationError>;
 }
 
-pub trait IlConverter: Default + Send + 'static {
+pub trait IlTransformer: Default + Send + 'static {
     type Input: IlArtefact;
     type Output: IlArtefact;
 
-    fn convert(
+    fn transform(
         &mut self,
         source: &Self::Input,
         context: &IlGenerationContext<'_>,

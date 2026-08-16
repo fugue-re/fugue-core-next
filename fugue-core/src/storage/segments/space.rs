@@ -57,8 +57,12 @@ impl AddressSpaceId {
         Self(index as u16)
     }
 
+    pub const fn value(&self) -> u16 {
+        self.0
+    }
+
     pub const fn index(&self) -> usize {
-        self.0 as usize
+        self.value() as usize
     }
 }
 
@@ -70,7 +74,7 @@ impl EntityKeyCodec for AddressSpaceId {
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        output.extend((self.index() as u16).to_be_bytes());
+        output.extend(self.value().to_be_bytes());
     }
 }
 

@@ -18,19 +18,21 @@ pub(crate) mod verify;
 pub use analysis::{IlAnalyser, IlAnalysis};
 pub use artefact::{ControlFlowIl, IlArtefact, IlMetadata, IlSchemaVersion, PersistableIl};
 pub(crate) use constants::IlConstantInterner;
-pub use dominance::{IlDominance, IlDominanceFrontier};
+pub use dominance::{
+    IlDominance, IlDominanceEvent, IlDominanceEvents, IlDominanceFrontier, IlPhiPlacement,
+};
 pub use error::IlError;
 pub(crate) use evaluate::IlScalarOp;
 pub use form::{DialectId, IlFormId, IlFormIdError};
-pub use generate::{IlConverter, IlGenerationContext, IlGenerationError, IlProducer, IlSubject};
-pub use graph::{IlBlock, IlBlockPredecessors, IlBlockProperties, IlEdgeKinds, IlGraph};
-pub(crate) use id::il_id;
-pub use id::{IlBlockArgId, IlBlockId, IlExprId, IlOpId, IlValueId};
-pub use pool::IlIndexRange;
-pub(crate) use pool::{IlCsr, IlIndexMapper, IlPool};
-pub use register::{FlagId, RegisterId};
+pub use generate::{IlGenerationContext, IlGenerationError, IlProducer, IlSubject, IlTransformer};
+pub use graph::{
+    IlBlock, IlBlockPredecessors, IlBlockProperties, IlEdgeKinds, IlGraph, IlGraphBuilder,
+};
+pub use id::{IlBlockArgId, IlBlockId, IlExprId, IlOpId, IlValueId, il_id};
+pub use pool::{IlCsr, IlIndexMapper, IlIndexRange, IlIndexRangeMap, IlPool};
+pub use register::{FlagId, RegisterBank, RegisterId, RegisterRange, RegisterSlice};
 pub use rewrite::IlRewrite;
 pub use span::{IlParentSpan, IlSourceSpan};
-pub use ssa::IlSsaDef;
-pub(crate) use ssa::{build_ssa_block_argument_inputs, build_ssa_uses};
-pub use verify::{StructureError, StructureVerifierError};
+pub use ssa::{IlRequiredDefs, IlSsaDef, SsaIl};
+pub(crate) use ssa::{IlSsaBlockArgInputs, collect_ssa_block_arg_inputs, collect_ssa_uses};
+pub use verify::{SsaVerifier, SsaVerifyError, StructureError, StructureVerifierError};

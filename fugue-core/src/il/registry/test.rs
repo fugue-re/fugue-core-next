@@ -3,8 +3,8 @@ use std::mem::size_of;
 use super::*;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{IlGenerationContext, IlGenerationError, IlMetadata};
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::mcode::ssa::MCodeSsaIr;
+use crate::il::ecode::ECodeIr;
+use crate::il::mcode::MCodeIr;
 use crate::il::pcode::PCodeIr;
 use crate::types::EstimateSize;
 
@@ -38,13 +38,13 @@ external_form!(AcmeDerived, "acme.taint.derived");
 external_form!(ImpostorPCode, "fugue.pcode.cfg");
 
 #[derive(Default)]
-struct AcmeDerivedConverter;
+struct AcmeDerivedTransformer;
 
-impl IlConverter for AcmeDerivedConverter {
-    type Input = ECodeSsaIr;
+impl IlTransformer for AcmeDerivedTransformer {
+    type Input = ECodeIr;
     type Output = AcmeDerived;
 
-    fn convert(
+    fn transform(
         &mut self,
         source: &Self::Input,
         _context: &IlGenerationContext<'_>,
@@ -73,12 +73,7 @@ fn the_standard_registry_contains_the_built_in_forms() {
 
     assert_eq!(
         form_ids(&registry),
-        vec![
-            "fugue.ecode.cfg",
-            "fugue.ecode.ssa",
-            "fugue.mcode.ssa",
-            "fugue.pcode.cfg"
-        ]
+        vec!["fugue.ecode.cfg", "fugue.mcode.cfg", "fugue.pcode.cfg"]
     );
     assert!(registry.forms().all(IlFormRegistration::is_persistable));
     assert_eq!(
@@ -94,9 +89,9 @@ fn the_standard_registry_contains_the_built_in_forms() {
     );
     assert_eq!(
         registry
-            .form_of::<MCodeSsaIr>()
+            .form_of::<MCodeIr>()
             .and_then(IlFormRegistration::source),
-        Some(&ECodeSsaIr::FORM)
+        Some(&ECodeIr::FORM)
     );
 }
 
@@ -106,11 +101,11 @@ fn the_canonical_path_walks_to_the_root_producer() {
 
     assert_eq!(
         registry
-            .canonical_path(&ECodeSsaIr::FORM)
+            .canonical_path(&ECodeIr::FORM)
             .iter()
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec!["fugue.pcode.cfg", "fugue.ecode.cfg", "fugue.ecode.ssa"]
+        vec!["fugue.pcode.cfg", "fugue.ecode.cfg"]
     );
     assert_eq!(
         registry
@@ -122,16 +117,11 @@ fn the_canonical_path_walks_to_the_root_producer() {
     );
     assert_eq!(
         registry
-            .canonical_path(&MCodeSsaIr::FORM)
+            .canonical_path(&MCodeIr::FORM)
             .iter()
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec![
-            "fugue.pcode.cfg",
-            "fugue.ecode.cfg",
-            "fugue.ecode.ssa",
-            "fugue.mcode.ssa"
-        ]
+        vec!["fugue.pcode.cfg", "fugue.ecode.cfg", "fugue.mcode.cfg"]
     );
     assert!(registry.canonical_path(&AcmeTaint::FORM).is_empty());
     assert_eq!(
@@ -147,7 +137,7 @@ fn the_canonical_path_walks_to_the_root_producer() {
 fn an_external_dialect_registers_without_editing_core() {
     let registry = IlRegistryBuilder::built_in()
         .with_dialect(acme())
-        .with_derived_form::<AcmeTaint>(ECodeSsaIr::FORM)
+        .with_derived_form::<AcmeTaint>(ECodeIr::FORM)
         .build()
         .expect("external registration is valid");
 
@@ -157,26 +147,21 @@ fn an_external_dialect_registers_without_editing_core() {
 
     assert_eq!(taint.form().as_str(), "acme.taint.values");
     assert!(!taint.is_persistable());
-    assert_eq!(taint.source(), Some(&ECodeSsaIr::FORM));
+    assert_eq!(taint.source(), Some(&ECodeIr::FORM));
     assert_eq!(
         registry
             .canonical_path(&AcmeTaint::FORM)
             .iter()
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec![
-            "fugue.pcode.cfg",
-            "fugue.ecode.cfg",
-            "fugue.ecode.ssa",
-            "acme.taint.values"
-        ]
+        vec!["fugue.pcode.cfg", "fugue.ecode.cfg", "acme.taint.values"]
     );
     assert_eq!(
         registry
-            .dependants(&ECodeSsaIr::FORM)
+            .dependants(&ECodeIr::FORM)
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec!["acme.taint.values", "fugue.mcode.ssa"]
+        vec!["acme.taint.values", "fugue.mcode.cfg"]
     );
 }
 
@@ -184,13 +169,13 @@ fn an_external_dialect_registers_without_editing_core() {
 fn registration_order_does_not_change_the_registry() {
     let forward = IlRegistryBuilder::built_in()
         .with_dialect(acme())
-        .with_derived_form::<AcmeTaint>(ECodeSsaIr::FORM)
+        .with_derived_form::<AcmeTaint>(ECodeIr::FORM)
         .with_derived_form::<AcmeSummary>(AcmeTaint::FORM)
         .build()
         .expect("valid");
     let shuffled = IlRegistryBuilder::built_in()
         .with_derived_form::<AcmeSummary>(AcmeTaint::FORM)
-        .with_derived_form::<AcmeTaint>(ECodeSsaIr::FORM)
+        .with_derived_form::<AcmeTaint>(ECodeIr::FORM)
         .with_dialect(acme())
         .build()
         .expect("valid");
@@ -360,21 +345,21 @@ fn aggregated_errors_render_every_problem() {
 }
 
 #[test]
-fn a_registered_conversion_dispatches_without_a_core_match_arm() {
+fn a_registered_transformation_dispatches_without_a_core_match_arm() {
     let registry = IlRegistryBuilder::built_in()
         .with_dialect(acme())
-        .with_converted_form::<AcmeDerivedConverter>()
+        .with_transformed_form::<AcmeDerivedTransformer>()
         .build()
-        .expect("a typed conversion registers");
+        .expect("a typed transformation registers");
 
     let registration = registry
         .form_of::<AcmeDerived>()
-        .expect("the conversion is registered");
+        .expect("the transformation is registered");
 
-    assert_eq!(registration.source(), Some(&ECodeSsaIr::FORM));
+    assert_eq!(registration.source(), Some(&ECodeIr::FORM));
     assert!(matches!(
         registration.recipe(),
-        Some(IlRecipe::Converter(_))
+        Some(IlRecipe::Transformer(_))
     ));
     assert_eq!(
         registry
@@ -382,12 +367,7 @@ fn a_registered_conversion_dispatches_without_a_core_match_arm() {
             .iter()
             .map(IlFormId::as_str)
             .collect::<Vec<_>>(),
-        vec![
-            "fugue.pcode.cfg",
-            "fugue.ecode.cfg",
-            "fugue.ecode.ssa",
-            "acme.taint.derived"
-        ]
+        vec!["fugue.pcode.cfg", "fugue.ecode.cfg", "acme.taint.derived"]
     );
     assert!(matches!(
         registry

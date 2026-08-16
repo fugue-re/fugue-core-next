@@ -9,7 +9,7 @@ pub(crate) enum MCodeAliasOverride {
     Unaliased,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MCodeAliasOverrides(FxHashMap<MCodeVar, MCodeAliasOverride>);
 
 impl MCodeAliasOverrides {
@@ -26,7 +26,7 @@ impl MCodeAliasOverrides {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MCodeAliasSet {
     aliased: Vec<MCodeVarId>,
 }
@@ -64,8 +64,8 @@ impl MCodeAliasSet {
         self.aliased.iter().copied()
     }
 
-    pub(crate) fn contains(&self, id: MCodeVarId) -> bool {
-        self.aliased.binary_search(&id).is_ok()
+    pub(crate) fn contains(&self, variable: MCodeVarId) -> bool {
+        self.aliased.binary_search(&variable).is_ok()
     }
 }
 
@@ -73,79 +73,63 @@ impl MCodeAliasSet {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, RegisterId};
-    use crate::il::ecode::ssa::{
-        ECodeSsaBuilder, ECodeSsaDomain, ECodeSsaIr, ECodeSsaOp, ECodeSsaOpcode,
-    };
+    use crate::il::common::{IlGraph, IlMetadata, RegisterId};
+    use crate::il::ecode::test::emit_value;
+    use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::MCodeVarKind;
     use crate::il::mcode::recovery::MCodeStackModel;
     use crate::ir::FunctionId;
 
     const STACK_POINTER: u64 = 0x20;
 
-    fn escaping_frame() -> (ECodeSsaIr, MCodeStackModel, MCodeVariableModel) {
-        let mut builder = ECodeSsaBuilder::new(
+    fn escaping_frame() -> (ECodeIr, MCodeStackModel, MCodeVariableModel) {
+        let mut builder = ECodeBuilder::new(
             IlMetadata::new(FunctionId::default(), 0),
             IlGraph::default(),
         );
 
-        let (sp, sp_results) = builder.push_result_value(64).unwrap();
+        let sp = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Undefined, 64),
+            [],
+        )
+        .unwrap();
         builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Undefined,
-                sp_results,
-                IlIndexRange::EMPTY,
-                64,
-            ))
-            .unwrap();
-        builder.set_value_domain(sp, ECodeSsaDomain::Register(RegisterId::new(STACK_POINTER)));
-
-        let (size, size_results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Constant,
-                    size_results,
-                    IlIndexRange::EMPTY,
-                    64,
-                )
-                .with_immediate(0x20),
-            )
+            .emitter()
+            .set_value_domain(sp, ECodeDomain::Register(RegisterId::new(STACK_POINTER)))
             .unwrap();
 
-        let sub_operands = builder.push_value_operands([sp, size]).unwrap();
-        let (frame, frame_results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Sub,
-                frame_results,
-                sub_operands,
-                64,
-            ))
-            .unwrap();
+        let size = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x20),
+            [],
+        )
+        .unwrap();
 
-        let (junk, junk_results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Undefined,
-                junk_results,
-                IlIndexRange::EMPTY,
-                64,
-            ))
-            .unwrap();
+        let frame = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Sub, 64),
+            [sp, size],
+        )
+        .unwrap();
 
-        let escape_operands = builder.push_value_operands([frame, junk]).unwrap();
-        let (_, escape_results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Add,
-                escape_results,
-                escape_operands,
-                64,
-            ))
-            .unwrap();
+        let junk = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Undefined, 64),
+            [],
+        )
+        .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let _ = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Add, 64),
+            [frame, junk],
+        )
+        .unwrap();
+
+        let ir = builder
+            .build_unchecked(&CancellationToken::default())
+            .unwrap();
         let stack = MCodeStackModel::new(&ir, RegisterId::new(STACK_POINTER), []);
         let variables = MCodeVariableModel::new(&ir, &stack);
         (ir, stack, variables)

@@ -196,7 +196,7 @@ mod benchmark {
         >(project_path)?)
     }
 
-    pub(super) fn run() -> Result<(), Box<dyn Error>> {
+    pub(crate) fn run() -> Result<(), Box<dyn Error>> {
         if env::var_os("RUST_LOG").is_some() {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

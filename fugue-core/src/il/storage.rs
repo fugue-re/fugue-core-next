@@ -160,6 +160,18 @@ struct StagedIlRecord {
     value: Option<StagedIlArtefact>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IlStagedChange {
+    Materialised {
+        function: FunctionId,
+        form: IlFormId,
+    },
+    Removed {
+        function: FunctionId,
+        form: IlFormId,
+    },
+}
+
 #[derive(Default)]
 pub(crate) struct IlStaging {
     records: BTreeMap<IlOverrideKey, StagedIlRecord>,
@@ -308,11 +320,23 @@ impl IlStaging {
         Ok(removed)
     }
 
-    pub(crate) fn for_each_change(&self, mut f: impl FnMut(FunctionId, IlFormId, bool)) {
+    pub(crate) fn for_each_change(&self, mut f: impl FnMut(IlStagedChange)) {
         for (key, record) in &self.records {
-            if record.base_present || record.value.is_some() {
-                f(key.function(), key.form().clone(), record.value.is_some());
+            if !record.base_present && record.value.is_none() {
+                continue;
             }
+            let change = if record.value.is_some() {
+                IlStagedChange::Materialised {
+                    function: key.function(),
+                    form: key.form().clone(),
+                }
+            } else {
+                IlStagedChange::Removed {
+                    function: key.function(),
+                    form: key.form().clone(),
+                }
+            };
+            f(change);
         }
     }
 }

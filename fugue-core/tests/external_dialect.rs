@@ -9,19 +9,32 @@ use fugue_core::engine::{
 };
 use fugue_core::extension::submit;
 use fugue_core::il::common::{
-    DialectId, IlAnalyser, IlAnalysis, IlArtefact, IlConverter, IlError, IlGenerationContext,
-    IlGenerationError, IlMetadata, IlProducer, IlRewrite, IlSchemaVersion, PersistableIl,
+    ControlFlowIl, DialectId, IlAnalyser, IlAnalysis, IlArtefact, IlBlockArgId, IlBlockId,
+    IlBlockProperties, IlDominance, IlEdgeKinds, IlError, IlGenerationContext, IlGenerationError,
+    IlGraph, IlGraphBuilder, IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlProducer, IlRewrite,
+    IlSchemaVersion, IlSourceSpan, IlSsaDef, IlTransformer, IlValueId, PersistableIl, RegisterId,
+    SsaIl, SsaVerifier, SsaVerifyError,
 };
-use fugue_core::il::ecode::ECodeIr as CoreECodeIr;
-use fugue_core::il::ecode::ssa::ECodeSsaIr;
-use fugue_core::il::pcode::PCodeIr;
+use fugue_core::il::ecode::{
+    ECodeBuilder, ECodeDomain, ECodeIr, ECodeLiveness, ECodeOpSpec, ECodeOpcode,
+};
+use fugue_core::il::mcode::{
+    MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeUses, MCodeVar, MCodeVersion,
+};
+use fugue_core::il::pcode::{
+    PCodeBuilder, PCodeIr, PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationProperties,
+    PCodeOpSpec, PCodeOpcode,
+};
 use fugue_core::il::registry::{
     IlDialectRegistration, IlFormRegistration, IlRegistryBuilder, IlRegistryError,
 };
-use fugue_core::ir::{FunctionId, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector};
+use fugue_core::ir::{
+    Address, FunctionId, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+};
 use fugue_core::loader::Loader;
 use fugue_core::project::{ChangeKinds, Project, ProjectError};
 use fugue_core::queries::{QueryError, QueryableIl};
+use fugue_core::storage::AddressSpaceId;
 use fugue_core::types::EstimateSize;
 
 const ACME_IL_ANALYSER_ATTRIBUTE: &str = "acme.il-analyser";
@@ -94,6 +107,480 @@ impl PersistableIl for AcmePersistedSummary {
 impl QueryableIl for AcmePersistedSummary {}
 
 submit! { IlFormRegistration::persistable::<AcmePersistedSummary>() }
+
+fugue_core::il::common::il_id!(AcmeValueId, "Acme value");
+
+#[derive(Debug, Copy, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct AcmeCfgOp {
+    result: AcmeValueId,
+}
+
+#[derive(Debug, Copy, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct AcmeCfgValue {
+    width: u32,
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct AcmeCfg {
+    metadata: IlMetadata,
+    graph: IlGraph,
+    operations: Vec<AcmeCfgOp>,
+    values: Vec<AcmeCfgValue>,
+    edge_args: Vec<IlIndexRange>,
+    source_spans: Vec<IlSourceSpan>,
+    parent_spans: Vec<IlParentSpan>,
+}
+
+impl EstimateSize for AcmeCfg {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.graph.estimate_size())
+            .saturating_add(
+                self.operations
+                    .capacity()
+                    .saturating_mul(size_of::<AcmeCfgOp>()),
+            )
+            .saturating_add(
+                self.values
+                    .capacity()
+                    .saturating_mul(size_of::<AcmeCfgValue>()),
+            )
+            .saturating_add(
+                self.edge_args
+                    .capacity()
+                    .saturating_mul(size_of::<IlIndexRange>()),
+            )
+            .saturating_add(
+                self.source_spans
+                    .capacity()
+                    .saturating_mul(size_of::<IlSourceSpan>()),
+            )
+            .saturating_add(
+                self.parent_spans
+                    .capacity()
+                    .saturating_mul(size_of::<IlParentSpan>()),
+            )
+    }
+}
+
+impl IlArtefact for AcmeCfg {
+    const FORM_IDENTIFIER: &str = "acme.cfg.graph";
+
+    fn metadata(&self) -> &IlMetadata {
+        &self.metadata
+    }
+}
+
+impl ControlFlowIl for AcmeCfg {
+    fn graph(&self) -> &IlGraph {
+        &self.graph
+    }
+}
+
+impl SsaIl for AcmeCfg {
+    fn value_count(&self) -> usize {
+        self.values.len()
+    }
+
+    fn value_definition(&self, value: IlValueId) -> Option<IlSsaDef> {
+        self.values.get(value.index())?;
+        let operation = IlOpId::try_from_index(value.index()).ok()?;
+        self.operations
+            .get(operation.index())
+            .map(|_| IlSsaDef::Operation(operation))
+    }
+
+    fn value_width(&self, value: IlValueId) -> Option<u32> {
+        self.values.get(value.index()).map(|value| value.width)
+    }
+
+    fn block_arg_count(&self) -> usize {
+        0
+    }
+
+    fn block_arg_block(&self, _arg: IlBlockArgId) -> Option<IlBlockId> {
+        None
+    }
+
+    fn block_arg_value(&self, _arg: IlBlockArgId) -> Option<IlValueId> {
+        None
+    }
+
+    fn block_arg_width(&self, _arg: IlBlockArgId) -> Option<u32> {
+        None
+    }
+
+    fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+
+    fn operation_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
+        self.operations.get(operation.index()).map(|_| &[][..])
+    }
+
+    fn edge_args(&self) -> &[IlIndexRange] {
+        &self.edge_args
+    }
+
+    fn edge_arg_values(&self) -> &[IlValueId] {
+        &[]
+    }
+
+    fn memory_domain_count(&self) -> usize {
+        0
+    }
+
+    fn memory_domain_space(&self, _index: usize) -> Option<AddressSpaceId> {
+        None
+    }
+}
+
+impl PersistableIl for AcmeCfg {
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
+
+    fn metadata_mut(&mut self) -> &mut IlMetadata {
+        &mut self.metadata
+    }
+}
+
+impl QueryableIl for AcmeCfg {}
+
+submit! { IlDialectRegistration::new("acme.cfg") }
+submit! { IlFormRegistration::persistable::<AcmeCfg>() }
+
+fn acme_cfg() -> AcmeCfg {
+    let mut graph = IlGraphBuilder::new();
+    let entry = graph
+        .push_block_with_source(
+            IlIndexRange::new(0, 1).expect("the operation range is valid"),
+            IlBlockProperties::ENTRY,
+            Address::new(AddressSpaceId::new(0), 0x1000u64),
+        )
+        .expect("the entry block is allocated");
+    let left = graph
+        .push_block_with_source(
+            IlIndexRange::new(1, 2).expect("the operation range is valid"),
+            IlBlockProperties::empty(),
+            Address::new(AddressSpaceId::new(0), 0x1004u64),
+        )
+        .expect("the left block is allocated");
+    let right = graph
+        .push_block_with_source(
+            IlIndexRange::new(2, 3).expect("the operation range is valid"),
+            IlBlockProperties::empty(),
+            Address::new(AddressSpaceId::new(0), 0x1008u64),
+        )
+        .expect("the right block is allocated");
+    let exit = graph
+        .push_block_with_source(
+            IlIndexRange::new(3, 4).expect("the operation range is valid"),
+            IlBlockProperties::EXIT,
+            Address::new(AddressSpaceId::new(0), 0x100cu64),
+        )
+        .expect("the exit block is allocated");
+    graph
+        .add_successor(entry, left, IlEdgeKinds::TAKEN)
+        .expect("the taken edge is valid");
+    graph
+        .add_successor(entry, right, IlEdgeKinds::FALL_THROUGH)
+        .expect("the fall-through edge is valid");
+    graph
+        .add_successor(left, exit, IlEdgeKinds::UNCONDITIONAL)
+        .expect("the left join edge is valid");
+    graph
+        .add_successor(right, exit, IlEdgeKinds::UNCONDITIONAL)
+        .expect("the right join edge is valid");
+
+    let operations = (0..4)
+        .map(|index| AcmeCfgOp {
+            result: AcmeValueId::try_from_index(index).expect("the value id is representable"),
+        })
+        .collect::<Vec<_>>();
+    let values = vec![AcmeCfgValue { width: 64 }; 4];
+    let source_spans = (0..4)
+        .map(|index| {
+            IlSourceSpan::try_new(
+                IlIndexRange::new(index, index + 1).expect("the span range is valid"),
+                Address::new(AddressSpaceId::new(0), 0x1000u64 + index as u64 * 4),
+                0,
+                1,
+            )
+            .expect("the source span is valid")
+        })
+        .collect::<Vec<_>>();
+    let parent_spans = (0..4)
+        .map(|index| {
+            let range = IlIndexRange::new(index, index + 1).expect("the span range is valid");
+            IlParentSpan::new(range, range)
+        })
+        .collect();
+
+    let graph = graph.build(operations.len()).expect("the graph is valid");
+    let edge_args = vec![IlIndexRange::EMPTY; graph.successors().len()];
+    AcmeCfg {
+        metadata: IlMetadata::new(FunctionId::default(), 0u64),
+        graph,
+        operations,
+        values,
+        edge_args,
+        source_spans,
+        parent_spans,
+    }
+}
+
+#[test]
+fn an_external_ssa_dialect_uses_the_common_verifier_contract() {
+    let ir = acme_cfg();
+    let verifier = SsaVerifier::new(&ir);
+
+    verifier.verify_memory_domains().unwrap();
+    verifier.verify_edge_args().unwrap();
+    verifier
+        .verify_uses::<SsaVerifyError>(|_, _| Ok(()))
+        .unwrap();
+}
+
+#[test]
+fn an_external_control_flow_dialect_builds_analyses_and_persists() {
+    let cfg = acme_cfg();
+    let entry = cfg.graph.entry_block().expect("the graph has an entry");
+    let left = cfg.graph.successors_for(entry)[0];
+    let right = cfg.graph.successors_for(entry)[1];
+    let exit = cfg.graph.successors_for(left)[0];
+    let dominance = cfg.analyse::<IlDominance>();
+    let frontiers = dominance.frontiers(cfg.graph.blocks(), cfg.graph.successors());
+    let placement = frontiers
+        .place_phis(cfg.graph.blocks().len(), [left, right])
+        .expect("the definitions name valid blocks");
+
+    assert_eq!(placement.blocks(), &[exit]);
+    assert_eq!(cfg.operations[0].result.index(), 0);
+    assert_eq!(cfg.values[0].width, 64);
+    assert_eq!(cfg.graph.block_sources().len(), 4);
+    assert_eq!(
+        IlSourceSpan::find(&cfg.source_spans, 2)
+            .expect("the operation has provenance")
+            .address(),
+        Address::new(AddressSpaceId::new(0), 0x1008u64)
+    );
+
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ls.elf");
+    let loader = Loader::from_file(fixture).expect("the fixture loads");
+    let mut project = Project::new_transient(&loader).expect("the project opens");
+    let function = cfg.metadata.function();
+    let mut transaction = project.transaction("external control-flow dialect round trip");
+    transaction
+        .replace_lifted(cfg)
+        .expect("the external CFG is serialisable");
+    transaction.commit().expect("the external CFG commits");
+
+    let engine = AnalysisEngine::new(project).expect("the engine starts");
+    let stored = engine
+        .query_reader()
+        .expect("a reader is available")
+        .lifted::<AcmeCfg>(function)
+        .expect("the external CFG is readable")
+        .expect("the external CFG survived persistence");
+
+    assert_eq!(stored.graph.blocks().len(), 4);
+    assert_eq!(stored.operations.len(), 4);
+    assert_eq!(stored.parent_spans.len(), 4);
+}
+
+#[test]
+fn built_in_dialects_have_target_native_external_build_apis() {
+    let cancellation = CancellationToken::default();
+    let metadata = IlMetadata::new(FunctionId::default(), 0u64);
+
+    let mut pcode = PCodeBuilder::new(metadata, IlGraph::default());
+    {
+        let mut emitter = pcode.emitter();
+        let input = emitter
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(0),
+                7,
+                8,
+                PCodeLocationProperties::CONSTANT,
+            ))
+            .expect("the constant location is allocated");
+        let output = emitter
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(1),
+                0,
+                8,
+                PCodeLocationProperties::UNIQUE,
+            ))
+            .expect("the output location is allocated");
+        emitter
+            .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
+            .expect("the PCode operation is emitted");
+        let target = emitter
+            .emit_target(Address::new(AddressSpaceId::new(0), 0x1010u64).into())
+            .expect("the PCode branch target is allocated");
+        emitter
+            .emit(
+                PCodeOpSpec::new(PCodeOpcode::Branch).with_target(target),
+                None,
+                [input],
+            )
+            .expect("the PCode branch is emitted");
+    }
+    let pcode = pcode.build(&cancellation).expect("the PCode is valid");
+    assert_eq!(pcode.operations().len(), 2);
+    assert_eq!(pcode.targets().len(), 1);
+    assert!(pcode.display().to_string().contains("copy"));
+
+    let mut ecode = ECodeBuilder::new(metadata, IlGraph::default());
+    let register = RegisterId::new(0x10);
+    let block = IlBlockId::try_from_index(0).expect("the ECode block identifier is valid");
+    let (written, arg) = {
+        let mut emitter = ecode.emitter();
+        let (_, constant_results) = emitter
+            .emit(
+                ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(7),
+                [],
+                1,
+            )
+            .expect("the ECode operation is emitted");
+        let constant = IlValueId::try_from_index(constant_results.start())
+            .expect("the ECode constant result exists");
+        let (_, written_results) = emitter
+            .emit(
+                ECodeOpSpec::new(ECodeOpcode::WriteRegister, 64).with_immediate(register.value()),
+                [constant],
+                1,
+            )
+            .expect("the ECode register write is emitted");
+        let written = IlValueId::try_from_index(written_results.start())
+            .expect("the ECode register result exists");
+        emitter
+            .set_value_domain(written, ECodeDomain::Register(register))
+            .expect("the ECode register domain is assigned");
+        let arg = emitter
+            .emit_block_arg(block, 64)
+            .expect("the ECode block argument is emitted");
+        emitter
+            .set_value_domain(arg, ECodeDomain::Register(register))
+            .expect("the ECode block-argument domain is assigned");
+        (written, arg)
+    };
+    let ecode_operation_count = ecode.emitter().operation_count();
+    let ecode_operations =
+        IlIndexRange::new(0, ecode_operation_count).expect("the ECode operation range is valid");
+    let mut ecode_graph = IlGraphBuilder::new();
+    ecode_graph
+        .push_block(
+            ecode_operations,
+            IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
+        )
+        .expect("the ECode block is allocated");
+    ecode.set_graph(
+        ecode_graph
+            .build(ecode_operation_count)
+            .expect("the ECode graph is valid"),
+    );
+    ecode.set_source_spans(vec![
+        IlSourceSpan::try_new(
+            ecode_operations,
+            Address::new(AddressSpaceId::new(0), 0x1000u64),
+            0,
+            1,
+        )
+        .expect("the ECode source span is valid"),
+    ]);
+    ecode.set_parent_spans(vec![IlParentSpan::new(ecode_operations, ecode_operations)]);
+    let ecode = ecode.build(&cancellation).expect("the ECode is valid");
+    assert_eq!(ecode.operations().len(), 2);
+    assert_eq!(ecode.graph().blocks().len(), 1);
+    assert_eq!(ecode.block_args().len(), 1);
+    assert_eq!(ecode.block_args()[0].value(), arg);
+    assert_eq!(
+        ecode.value_domain(written),
+        Some(ECodeDomain::Register(register))
+    );
+    assert_eq!(
+        ecode.value_domain(arg),
+        Some(ECodeDomain::Register(register))
+    );
+    assert_eq!(ecode.source_spans().len(), 1);
+    assert_eq!(ecode.parent_spans().len(), 1);
+    assert!(ecode.display().to_string().contains("const"));
+    let _: ECodeLiveness = ecode.analyse();
+
+    let mut mcode = MCodeBuilder::new(metadata, IlGraph::default());
+    let (bound, variable, aliased) = {
+        let mut emitter = mcode.emitter();
+        let variable = emitter
+            .intern_variable(MCodeVar::register(register, 0))
+            .expect("the MCode register variable is interned");
+        let aliased = emitter
+            .intern_variable(MCodeVar::stack(-8))
+            .expect("the MCode stack variable is interned");
+        let (_, constant_results) = emitter
+            .emit(
+                MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(7),
+                [],
+                [64],
+            )
+            .expect("the MCode operation is emitted");
+        let constant = IlValueId::try_from_index(constant_results.start())
+            .expect("the MCode constant result exists");
+        let (_, bound_results) = emitter
+            .emit(
+                MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
+                [constant],
+                [64],
+            )
+            .expect("the MCode variable definition is emitted");
+        let bound = IlValueId::try_from_index(bound_results.start())
+            .expect("the MCode variable result exists");
+        emitter
+            .bind_value(bound, variable, MCodeVersion::new(1))
+            .expect("the MCode variable result is bound");
+        (bound, variable, aliased)
+    };
+    mcode.set_aliased_variables(vec![aliased]);
+    let mcode_operation_count = mcode.emitter().operation_count();
+    let mcode_operations =
+        IlIndexRange::new(0, mcode_operation_count).expect("the MCode operation range is valid");
+    let mut mcode_graph = IlGraphBuilder::new();
+    mcode_graph
+        .push_block(
+            mcode_operations,
+            IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
+        )
+        .expect("the MCode block is allocated");
+    mcode.set_graph(
+        mcode_graph
+            .build(mcode_operation_count)
+            .expect("the MCode graph is valid"),
+    );
+    mcode.set_source_spans(vec![
+        IlSourceSpan::try_new(
+            mcode_operations,
+            Address::new(AddressSpaceId::new(0), 0x1000u64),
+            0,
+            1,
+        )
+        .expect("the MCode source span is valid"),
+    ]);
+    mcode.set_parent_spans(vec![IlParentSpan::new(mcode_operations, mcode_operations)]);
+    let mcode = mcode.build(&cancellation).expect("the MCode is valid");
+    assert_eq!(mcode.operations().len(), 2);
+    assert_eq!(mcode.graph().blocks().len(), 1);
+    assert_eq!(
+        mcode
+            .binding(bound)
+            .expect("the MCode binding is retained")
+            .variable(),
+        variable
+    );
+    assert!(mcode.is_aliased(aliased));
+    assert_eq!(mcode.source_spans().len(), 1);
+    assert_eq!(mcode.parent_spans().len(), 1);
+    assert!(mcode.display().to_string().contains("const"));
+    assert!(mcode.analyse::<MCodeUses>().uses_for(bound).is_empty());
+}
 
 #[derive(Default)]
 struct AcmeIlAnalyser {
@@ -357,7 +844,7 @@ fn a_registered_form_without_a_recipe_is_reported() {
     ));
     assert!(
         reader
-            .lifted::<CoreECodeIr>(function)
+            .lifted::<ECodeIr>(function)
             .expect("a built-in form queries through the same entry point")
             .is_some()
     );
@@ -384,13 +871,13 @@ impl IlArtefact for AcmeBlockCount {
 }
 
 #[derive(Default)]
-struct AcmeBlockCountConverter;
+struct AcmeBlockCountTransformer;
 
-impl IlConverter for AcmeBlockCountConverter {
-    type Input = ECodeSsaIr;
+impl IlTransformer for AcmeBlockCountTransformer {
+    type Input = ECodeIr;
     type Output = AcmeBlockCount;
 
-    fn convert(
+    fn transform(
         &mut self,
         source: &Self::Input,
         _context: &IlGenerationContext<'_>,
@@ -405,7 +892,7 @@ impl IlConverter for AcmeBlockCountConverter {
 
 impl QueryableIl for AcmeBlockCount {}
 
-submit! { IlFormRegistration::derived::<AcmeBlockCountConverter>() }
+submit! { IlFormRegistration::derived::<AcmeBlockCountTransformer>() }
 
 #[derive(Debug)]
 struct ConfiguredBlockCount {
@@ -429,15 +916,15 @@ impl IlArtefact for ConfiguredBlockCount {
 }
 
 #[derive(Default)]
-struct ConfiguredBlockCountConverter {
+struct ConfiguredBlockCountTransformer {
     generated: usize,
 }
 
-impl IlConverter for ConfiguredBlockCountConverter {
-    type Input = ECodeSsaIr;
+impl IlTransformer for ConfiguredBlockCountTransformer {
+    type Input = ECodeIr;
     type Output = ConfiguredBlockCount;
 
-    fn convert(
+    fn transform(
         &mut self,
         source: &Self::Input,
         _context: &IlGenerationContext<'_>,
@@ -515,22 +1002,22 @@ fn the_engine_generates_an_external_form_through_its_registered_recipe() {
     let summary = reader
         .lifted::<AcmeBlockCount>(function)
         .expect("the external form generates")
-        .expect("the engine produced it through the registered conversion");
+        .expect("the engine produced it through the registered transformation");
 
     assert_eq!(summary.metadata().function(), function);
     assert!(summary.blocks > 0);
 
     let ssa = reader
-        .lifted::<ECodeSsaIr>(function)
+        .lifted::<ECodeIr>(function)
         .expect("the source form is available")
-        .expect("the conversion source was generated too");
+        .expect("the transformation source was generated too");
     assert_eq!(summary.blocks, ssa.graph().blocks().len());
 }
 
 #[test]
 fn the_engine_uses_a_form_registered_only_in_its_configured_registry() {
     let registry = IlRegistryBuilder::standard()
-        .with_converted_form::<ConfiguredBlockCountConverter>()
+        .with_transformed_form::<ConfiguredBlockCountTransformer>()
         .build()
         .expect("the configured form is valid");
     let engine = analysed_engine(AnalysisEngineConfig::default().with_registry(registry));

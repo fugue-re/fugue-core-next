@@ -4,9 +4,7 @@ use rustc_hash::FxHashMap;
 use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTargetResolver};
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlValueId};
-use crate::il::ecode::ssa::{
-    ECodeSsaBlockArgInputs, ECodeSsaIr, ECodeSsaOpcode, ECodeSsaStridedIntervals,
-};
+use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode, ECodeStridedIntervals};
 use crate::ir::{
     Address, AddressTable, AddressWithContext, SwitchCase, SwitchCaseLabel, SwitchModel,
     SwitchProperties,
@@ -22,12 +20,12 @@ use guard::SwitchGuard;
 use layout::{SwitchInlineTableLayout, SwitchTableLayout};
 
 pub(crate) struct SwitchIntervalRecovery<'analysis> {
-    ssa: &'analysis ECodeSsaIr,
+    ssa: &'analysis ECodeIr,
     blocks_by_source: FxHashMap<Address, IlBlockId>,
     config: SwitchRecoveryConfig,
-    intervals: ECodeSsaStridedIntervals,
+    intervals: ECodeStridedIntervals,
     dominance: IlDominance,
-    block_argument_inputs: ECodeSsaBlockArgInputs,
+    block_arg_inputs: ECodeBlockArgInputs,
     cases: Vec<SwitchCase>,
 }
 
@@ -73,7 +71,7 @@ impl SwitchCaseEnumeration {
 }
 
 impl<'analysis> SwitchIntervalRecovery<'analysis> {
-    pub(crate) fn new(ssa: &'analysis ECodeSsaIr, config: SwitchRecoveryConfig) -> Self {
+    pub(crate) fn new(ssa: &'analysis ECodeIr, config: SwitchRecoveryConfig) -> Self {
         let mut blocks_by_source = FxHashMap::default();
         for (block, source) in ssa.graph().blocks_with_sources() {
             blocks_by_source.entry(source).or_insert(block);
@@ -82,9 +80,9 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             ssa,
             blocks_by_source,
             config,
-            intervals: ssa.analyse::<ECodeSsaStridedIntervals>(),
+            intervals: ssa.analyse::<ECodeStridedIntervals>(),
             dominance: ssa.analyse::<IlDominance>(),
-            block_argument_inputs: ssa.analyse::<ECodeSsaBlockArgInputs>(),
+            block_arg_inputs: ssa.analyse::<ECodeBlockArgInputs>(),
             cases: Vec::new(),
         }
     }
@@ -99,7 +97,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let target = self
             .ssa
             .operations_for_source(branch)
-            .find(|(_, operation)| operation.opcode() == ECodeSsaOpcode::BranchIndirect)
+            .find(|(_, operation)| operation.opcode() == ECodeOpcode::BranchIndirect)
             .and_then(|(_, operation)| {
                 self.ssa.operation_operands_for(operation).first().copied()
             })?;
@@ -260,12 +258,12 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         };
         let operands = self.ssa.operation_operands_for(operation);
         match operation.opcode() {
-            ECodeSsaOpcode::Sub => operands
+            ECodeOpcode::Sub => operands
                 .get(1)
                 .and_then(|&operand| self.ssa.constant_value(operand))
                 .and_then(|constant| constant.to_u64())
                 .map_or(0, |constant| constant as i64),
-            ECodeSsaOpcode::Add => operands
+            ECodeOpcode::Add => operands
                 .iter()
                 .find_map(|&operand| self.ssa.constant_value(operand))
                 .and_then(|constant| constant.to_u64())
@@ -274,8 +272,8 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         }
     }
 
-    fn common_block_argument_input(&self, value: IlValueId) -> Option<IlValueId> {
-        let inputs = self.block_argument_inputs.inputs_for(value)?;
+    fn common_block_arg_input(&self, value: IlValueId) -> Option<IlValueId> {
+        let inputs = self.block_arg_inputs.inputs_for(value)?;
         let first = *inputs.first()?;
         inputs.iter().all(|&input| input == first).then_some(first)
     }
@@ -283,7 +281,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
     fn canonical_value(&self, value: IlValueId) -> IlValueId {
         let mut current = self.ssa.underlying_value(value);
         for _ in 0..self.config.max_trace_depth() {
-            let Some(input) = self.common_block_argument_input(current) else {
+            let Some(input) = self.common_block_arg_input(current) else {
                 break;
             };
             let next = self.ssa.underlying_value(input);

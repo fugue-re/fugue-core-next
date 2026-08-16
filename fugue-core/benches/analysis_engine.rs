@@ -10,9 +10,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fugue_core::analysis::control::CancellationToken;
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
 use fugue_core::engine::{AnalysisEngine, ProjectUpdate, ProjectView};
+use fugue_core::il::common::{
+    IlBlockId, IlBlockProperties, IlDominance, IlDominanceEvent, IlEdgeKinds, IlGraphBuilder,
+    IlIndexRange,
+};
+use fugue_core::il::ecode::{ECodeIr, ECodeOpcode};
+use fugue_core::il::mcode::ECodeToMCode;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
     ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
@@ -38,6 +45,8 @@ use fugue_core::types::{AttributeMap, BytesOrSlice};
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const LARGE_FUNCTION_BLOCKS: usize = 4096;
+const DOMINANCE_BRANCHES: usize = 512;
+const DOMINANCE_LIVE_DOMAINS: usize = 256;
 const PAGE_LIMIT: usize = 64;
 const QUERY_REPETITIONS: usize = 128;
 const REPRESENTATIVE_FIXTURE: &str = "tests/libipmi.so";
@@ -320,6 +329,45 @@ struct BenchResult {
     peak_live_bytes: u64,
     retained_bytes: u64,
     rss_kib: Option<u64>,
+}
+
+struct BenchmarkRenameState {
+    values: Vec<u64>,
+    undo: Vec<(usize, u64)>,
+}
+
+impl BenchmarkRenameState {
+    fn new(domains: usize) -> Self {
+        Self {
+            values: vec![0; domains],
+            undo: Vec::new(),
+        }
+    }
+
+    fn checkpoint(&self) -> usize {
+        self.undo.len()
+    }
+
+    fn rename_for(&mut self, block: IlBlockId) {
+        for (index, value) in self.values.iter_mut().enumerate() {
+            self.undo.push((index, *value));
+            *value = block.index() as u64 + 1;
+        }
+    }
+
+    fn rollback(&mut self, checkpoint: usize) {
+        while self.undo.len() > checkpoint {
+            let (index, value) = self
+                .undo
+                .pop()
+                .expect("a benchmark checkpoint is within the undo log");
+            self.values[index] = value;
+        }
+    }
+
+    fn checksum(&self) -> u64 {
+        self.values.iter().copied().sum()
+    }
 }
 
 impl BenchResult {
@@ -659,6 +707,124 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
     })?;
     results.push(admission);
     engine.analyse()?;
+    Ok(())
+}
+
+fn branch_heavy_dominance() -> Result<(IlDominance, IlBlockId), Box<dyn Error>> {
+    let mut builder = IlGraphBuilder::new();
+    let entry = builder.push_block(IlIndexRange::EMPTY, IlBlockProperties::ENTRY)?;
+    for _ in 0..DOMINANCE_BRANCHES {
+        let child = builder.push_block(IlIndexRange::EMPTY, IlBlockProperties::EXIT)?;
+        builder.add_successor(entry, child, IlEdgeKinds::UNCONDITIONAL)?;
+    }
+    let graph = builder.build(0)?;
+    Ok((
+        IlDominance::from_blocks(graph.blocks(), graph.successors(), entry),
+        entry,
+    ))
+}
+
+fn bench_dominance_traversal(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (dominance, entry) = branch_heavy_dominance()?;
+    let (rollback, checksum) = measure("dominance_branch_rollback", || {
+        let mut state = BenchmarkRenameState::new(DOMINANCE_LIVE_DOMAINS);
+        let mut checkpoints = Vec::new();
+        for event in dominance.events_from(entry) {
+            match event {
+                IlDominanceEvent::Enter(block) => {
+                    checkpoints.push(state.checkpoint());
+                    state.rename_for(block);
+                }
+                IlDominanceEvent::Exit(_) => {
+                    state.rollback(
+                        checkpoints
+                            .pop()
+                            .expect("each dominance exit follows a matching entry"),
+                    );
+                }
+            }
+        }
+        Ok((state.checksum(), DOMINANCE_BRANCHES))
+    })?;
+    black_box(checksum);
+    results.push(rollback);
+
+    let (cloned, checksum) = measure("dominance_branch_clone_reference", || {
+        let mut stack = vec![(entry, vec![0u64; DOMINANCE_LIVE_DOMAINS])];
+        let mut checksum = 0u64;
+        while let Some((block, mut state)) = stack.pop() {
+            state.fill(block.index() as u64 + 1);
+            checksum = checksum.wrapping_add(state.iter().copied().sum::<u64>());
+            for child in dominance.children_for(block).iter().rev() {
+                stack.push((*child, state.clone()));
+            }
+        }
+        Ok((checksum, DOMINANCE_BRANCHES))
+    })?;
+    black_box(checksum);
+    results.push(cloned);
+    Ok(())
+}
+
+fn bench_call_heavy_mcode(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let (engine, _) = load_engine()?;
+    let reader = engine.query_reader()?;
+    let project = reader.project()?;
+    let arch = project.arch().clone();
+    let platform = project.platform().clone();
+    let functions = project
+        .functions()
+        .iter()
+        .map(|function| function.id())
+        .collect::<Vec<_>>();
+    drop(project);
+
+    let mut selected = None;
+    for function in functions {
+        let Some(source) = reader.lifted::<ECodeIr>(function)? else {
+            continue;
+        };
+        let calls = source
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.opcode(),
+                    ECodeOpcode::Call | ECodeOpcode::CallIndirect
+                )
+            })
+            .count();
+        if selected
+            .as_ref()
+            .is_none_or(|(_, selected_calls)| calls > *selected_calls)
+        {
+            selected = Some((source, calls));
+        }
+    }
+    let (source, calls) = selected
+        .filter(|(_, calls)| *calls != 0)
+        .ok_or_else(|| std::io::Error::other("fixture contains no ECode calls"))?;
+    let mut transformer = ECodeToMCode::default();
+    black_box(transformer.transform(
+        &source,
+        &arch,
+        &platform,
+        None,
+        &CancellationToken::default(),
+    )?);
+
+    let (result, mcode) = measure("mcode_call_heavy_transform", || {
+        let mcode = transformer.transform(
+            &source,
+            &arch,
+            &platform,
+            None,
+            &CancellationToken::default(),
+        )?;
+        Ok((mcode, calls))
+    })?;
+    black_box(mcode);
+    results.push(result);
     Ok(())
 }
 
@@ -1253,6 +1419,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if selected_group(selected.as_deref(), "representative") {
         bench_representative_analysis(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "il") {
+        bench_dominance_traversal(&mut results)?;
+        bench_call_heavy_mcode(&mut results)?;
     }
     if selected_group(selected.as_deref(), "queries") {
         bench_repeated_flow_targets(&mut results)?;

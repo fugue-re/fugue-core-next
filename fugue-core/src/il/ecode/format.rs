@@ -1,28 +1,15 @@
 use std::fmt;
 
-use crate::il::common::IlExprId;
-use crate::il::ecode::{ECodeExpr, ECodeExprOpcode, ECodeIr, ECodeStmt, ECodeStmtOpcode};
+use crate::il::common::{IlSsaDef, IlValueId};
+use crate::il::ecode::{
+    ECodeBlockArg, ECodeIr, ECodeMemoryDomain, ECodeOp, ECodeOpcode, ECodeValue,
+};
 use crate::ir::Address;
 
-fn write_operand(f: &mut fmt::Formatter<'_>, operand: IlExprId) -> fmt::Result {
-    let index = operand.index();
-    write!(f, "%e{index}")
-}
-
 #[derive(Debug, Copy, Clone)]
-struct ECodeExprOpcodeDisplay(ECodeExprOpcode);
+struct ECodeOpcodeDisplay(ECodeOpcode);
 
-impl fmt::Display for ECodeExprOpcodeDisplay {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mnemonic = self.0.mnemonic();
-        write!(f, "ecode.{mnemonic}")
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct ECodeStmtOpcodeDisplay(ECodeStmtOpcode);
-
-impl fmt::Display for ECodeStmtOpcodeDisplay {
+impl fmt::Display for ECodeOpcodeDisplay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mnemonic = self.0.mnemonic();
         write!(f, "ecode.{mnemonic}")
@@ -40,28 +27,29 @@ impl<'a> ECodeIrDisplay<'a> {
     }
 }
 
-impl ECodeIr {
-    pub const fn display(&self) -> ECodeIrDisplay<'_> {
-        ECodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> ECodeSourceDisplay<'_> {
-        ECodeSourceDisplay::new(self, address)
-    }
-}
-
 impl fmt::Display for ECodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, expression) in self.ir.expressions().iter().enumerate() {
-            let display = ECodeExprDisplay::new(self.ir, index, expression);
+        for (index, value) in self.ir.values().iter().enumerate() {
+            let id = IlValueId::try_from_index(index).map_err(|_| fmt::Error)?;
+            let display = ECodeValueDisplay::new(id, value);
             writeln!(f, "{display}")?;
         }
 
-        for (index, statement) in self.ir.statements().iter().enumerate() {
-            let display = ECodeStmtDisplay::new(self.ir, index, statement);
+        for (index, arg) in self.ir.block_args().iter().enumerate() {
+            let display = ECodeBlockArgDisplay::new(index, arg);
+            writeln!(f, "{display}")?;
+        }
+
+        for (index, domain) in self.ir.memory_domains().iter().enumerate() {
+            let display = ECodeMemoryDomainDisplay::new(index, domain);
+            writeln!(f, "{display}")?;
+        }
+
+        for (index, operation) in self.ir.operations().iter().enumerate() {
+            let display = ECodeOpDisplay::new(self.ir, index, operation);
             write!(f, "{display}")?;
 
-            if index + 1 < self.ir.statements().len() {
+            if index + 1 < self.ir.operations().len() {
                 writeln!(f)?;
             }
         }
@@ -77,20 +65,20 @@ pub struct ECodeSourceDisplay<'a> {
 }
 
 impl<'a> ECodeSourceDisplay<'a> {
-    const fn new(ir: &'a ECodeIr, address: Address) -> Self {
+    pub(crate) const fn new(ir: &'a ECodeIr, address: Address) -> Self {
         Self { ir, address }
     }
 }
 
 impl fmt::Display for ECodeSourceDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut statements = self.ir.statements_for_source(self.address).peekable();
+        let mut operations = self.ir.operations_for_source(self.address).peekable();
 
-        while let Some((id, statement)) = statements.next() {
-            let display = ECodeStmtDisplay::new(self.ir, id.index(), statement);
+        while let Some((id, operation)) = operations.next() {
+            let display = ECodeOpDisplay::new(self.ir, id.index(), operation);
             write!(f, "{display}")?;
 
-            if statements.peek().is_some() {
+            if operations.peek().is_some() {
                 writeln!(f)?;
             }
         }
@@ -100,23 +88,129 @@ impl fmt::Display for ECodeSourceDisplay<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct ECodeExprDisplay<'a> {
-    ir: &'a ECodeIr,
-    index: usize,
-    expression: &'a ECodeExpr,
+struct ECodeValueDisplay<'a> {
+    id: IlValueId,
+    value: &'a ECodeValue,
 }
 
-impl<'a> ECodeExprDisplay<'a> {
-    pub(crate) const fn new(ir: &'a ECodeIr, index: usize, expression: &'a ECodeExpr) -> Self {
+impl<'a> ECodeValueDisplay<'a> {
+    const fn new(id: IlValueId, value: &'a ECodeValue) -> Self {
+        Self { id, value }
+    }
+}
+
+impl fmt::Display for ECodeValueDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let index = self.id.index();
+        let width = self.value.width();
+        let (definition, definition_index) = match self.value.definition() {
+            IlSsaDef::BlockArg(arg) => ("block_arg", arg.index()),
+            IlSsaDef::Operation(operation) => ("operation", operation.index()),
+        };
+
+        write!(
+            f,
+            "%v{index}:bits<{width}> = {definition}<{definition_index}>"
+        )
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ECodeBlockArgDisplay<'a> {
+    index: usize,
+    arg: &'a ECodeBlockArg,
+}
+
+impl<'a> ECodeBlockArgDisplay<'a> {
+    const fn new(index: usize, arg: &'a ECodeBlockArg) -> Self {
+        Self { index, arg }
+    }
+}
+
+impl fmt::Display for ECodeBlockArgDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let index = self.index;
+        let block = self.arg.block().index();
+        let value = self.arg.value().index();
+        let width = self.arg.width();
+
+        write!(f, "^b{block}.arg{index} %v{value}:bits<{width}>")
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ECodeMemoryDomainDisplay<'a> {
+    index: usize,
+    domain: &'a ECodeMemoryDomain,
+}
+
+impl<'a> ECodeMemoryDomainDisplay<'a> {
+    const fn new(index: usize, domain: &'a ECodeMemoryDomain) -> Self {
+        Self { index, domain }
+    }
+}
+
+impl fmt::Display for ECodeMemoryDomainDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let index = self.index;
+        let space = self.domain.space().index();
+
+        write!(f, "@mem{index} @space<{space}>")
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct ECodeOpDisplay<'a> {
+    ir: &'a ECodeIr,
+    index: usize,
+    operation: &'a ECodeOp,
+}
+
+impl<'a> ECodeOpDisplay<'a> {
+    const fn new(ir: &'a ECodeIr, index: usize, operation: &'a ECodeOp) -> Self {
         Self {
             ir,
             index,
-            expression,
+            operation,
         }
     }
 
+    fn write_result(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
+        let value = self.ir.values().get(id.index()).ok_or(fmt::Error)?;
+        let index = id.index();
+        let width = value.width();
+
+        write!(f, "%v{index}:bits<{width}>")
+    }
+
+    fn write_value(&self, f: &mut fmt::Formatter<'_>, id: IlValueId) -> fmt::Result {
+        self.ir.values().get(id.index()).ok_or(fmt::Error)?;
+        let index = id.index();
+
+        write!(f, "%v{index}")
+    }
+
+    fn write_results(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for index in self.operation.results().start()..self.operation.results().end() {
+            let id = IlValueId::try_from_index(index).map_err(|_| fmt::Error)?;
+
+            if index == self.operation.results().start() {
+                self.write_result(f, id)?;
+            } else {
+                write!(f, ", ")?;
+                self.write_result(f, id)?;
+            }
+        }
+
+        if !self.operation.results().is_empty() {
+            write!(f, " = ")?;
+        }
+
+        Ok(())
+    }
+
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.ir.expression_operands_for(self.expression);
+        let operands = self.ir.operation_operands_for(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -125,117 +219,56 @@ impl<'a> ECodeExprDisplay<'a> {
                 write!(f, ", ")?;
             }
 
-            write_operand(f, *operand)?;
+            self.write_value(f, *operand)?;
         }
 
         Ok(())
     }
 
     fn write_metadata(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(space) = self.expression.address_space() {
-            let space = space.index();
-            write!(f, " @space<{space}>")?;
-        }
-
-        match self.expression.opcode() {
-            ECodeExprOpcode::Constant | ECodeExprOpcode::Address => {
-                let immediate = self.expression.immediate();
+        match self.operation.opcode() {
+            ECodeOpcode::Constant if self.operation.width() > 64 => {
+                let constant = self
+                    .operation
+                    .constant(self.ir.constant_storage())
+                    .ok_or(fmt::Error)?;
+                write!(f, " 0x{constant:x}")?;
+            }
+            ECodeOpcode::Constant | ECodeOpcode::Address => {
+                let immediate = self.operation.immediate();
                 write!(f, " 0x{immediate:x}")?;
             }
-            ECodeExprOpcode::ReadRegister => {
-                let register = self.expression.immediate();
-                write!(f, " register<{register}>")?;
-            }
-            ECodeExprOpcode::ReadFlag => {
-                let flag = self.expression.immediate();
-                write!(f, " flag<{flag}>")?;
-            }
-            ECodeExprOpcode::IntrinsicResult => {
-                let intrinsic = self.expression.immediate();
-                write!(f, " intrinsic<{intrinsic}>")?;
-            }
-            ECodeExprOpcode::Undefined => {
-                let origin = self.expression.immediate();
+            ECodeOpcode::Undefined => {
+                let origin = self.operation.immediate();
                 write!(f, " origin<{origin}>")?;
             }
-            _ if self.expression.immediate() != 0 => {
-                let immediate = self.expression.immediate();
+            ECodeOpcode::Intrinsic | ECodeOpcode::IntrinsicResult
+                if self.operation.immediate() != 0 =>
+            {
+                let intrinsic = self.operation.immediate();
+                write!(f, " intrinsic<{intrinsic}>")?;
+            }
+            ECodeOpcode::WriteFlag => {
+                let storage = self.operation.immediate();
+                write!(f, " flag<{storage}>")?;
+            }
+            ECodeOpcode::WriteRegister => {
+                let storage = self.operation.immediate();
+                write!(f, " register<{storage}>")?;
+            }
+            _ if self.operation.immediate() != 0 => {
+                let immediate = self.operation.immediate();
                 write!(f, " imm<{immediate}>")?;
             }
             _ => {}
         }
 
-        Ok(())
-    }
-}
-
-impl fmt::Display for ECodeExprDisplay<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let index = self.index;
-        let width = self.expression.width();
-        let opcode = ECodeExprOpcodeDisplay(self.expression.opcode());
-
-        write!(f, "%e{index}:bits<{width}> = {opcode}")?;
-        self.write_metadata(f)?;
-        self.write_operands(f)
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-struct ECodeStmtDisplay<'a> {
-    ir: &'a ECodeIr,
-    index: usize,
-    statement: &'a ECodeStmt,
-}
-
-impl<'a> ECodeStmtDisplay<'a> {
-    pub(crate) const fn new(ir: &'a ECodeIr, index: usize, statement: &'a ECodeStmt) -> Self {
-        Self {
-            ir,
-            index,
-            statement,
-        }
-    }
-
-    fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.ir.statement_operands_for(self.statement);
-
-        for (index, operand) in operands.iter().enumerate() {
-            if index == 0 && self.statement.value().is_none() {
-                write!(f, " ")?;
-            } else {
-                write!(f, ", ")?;
-            }
-
-            write_operand(f, *operand)?;
-        }
-
-        Ok(())
-    }
-
-    fn write_metadata(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.statement.opcode() {
-            ECodeStmtOpcode::WriteRegister => {
-                let register = self.statement.immediate();
-                write!(f, " register<{register}>")?;
-            }
-            ECodeStmtOpcode::WriteFlag => {
-                let flag = self.statement.immediate();
-                write!(f, " flag<{flag}>")?;
-            }
-            _ if self.statement.immediate() != 0 => {
-                let immediate = self.statement.immediate();
-                write!(f, " imm<{immediate}>")?;
-            }
-            _ => {}
-        }
-
-        if let Some(space) = self.statement.address_space() {
+        if let Some(space) = self.operation.address_space() {
             let space = space.index();
             write!(f, " @space<{space}>")?;
         }
 
-        if let Some(address) = self.statement.address() {
+        if let Some(address) = self.operation.address() {
             write!(f, " -> {address}")?;
         }
 
@@ -243,19 +276,15 @@ impl<'a> ECodeStmtDisplay<'a> {
     }
 }
 
-impl fmt::Display for ECodeStmtDisplay<'_> {
+impl fmt::Display for ECodeOpDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let index = self.index;
-        let opcode = ECodeStmtOpcodeDisplay(self.statement.opcode());
+        let opcode = ECodeOpcodeDisplay(self.operation.opcode());
 
-        write!(f, "@s{index} {opcode}")?;
+        write!(f, "@o{index} ")?;
+        self.write_results(f)?;
+        write!(f, "{opcode}")?;
         self.write_metadata(f)?;
-
-        if let Some(value) = self.statement.value() {
-            write!(f, " value=")?;
-            write_operand(f, value)?;
-        }
-
         self.write_operands(f)
     }
 }
@@ -264,64 +293,32 @@ impl fmt::Display for ECodeStmtDisplay<'_> {
 mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata};
-    use crate::il::ecode::ECodeBuilder;
-    use crate::ir::{Address, FunctionId};
-    use crate::storage::segments::space::AddressSpaceId;
+    use crate::il::common::{IlGraph, IlMetadata};
+    use crate::il::ecode::{ECodeBuilder, ECodeOpSpec};
+    use crate::ir::FunctionId;
 
     #[test]
-    fn ecode_body_display_is_deterministic() {
+    fn ecode_display_is_deterministic() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let value = builder
-            .push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Constant,
-                64,
-                IlIndexRange::EMPTY,
-                0x2a,
-                None,
-            ))
-            .unwrap();
-        let address = builder
-            .push_expression(ECodeExpr::new(
-                ECodeExprOpcode::Constant,
-                64,
-                IlIndexRange::EMPTY,
-                0x1000,
-                None,
-            ))
-            .unwrap();
-        let operands = builder.push_statement_operands([address, value]).unwrap();
-
+        let value = crate::il::ecode::test::emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x2a),
+            [],
+        )
+        .unwrap();
         builder
-            .push_statement(ECodeStmt::new(
-                ECodeStmtOpcode::Store,
-                operands,
-                None,
-                None,
-                Some(AddressSpaceId::new(3)),
-            ))
-            .unwrap();
-
-        let branch_operands = builder.push_statement_operands([value]).unwrap();
-        builder
-            .push_statement(ECodeStmt::new(
-                ECodeStmtOpcode::Branch,
-                branch_operands,
-                None,
-                Some(Address::new(AddressSpaceId::new(2), 0x2000u64)),
-                None,
-            ))
+            .emitter()
+            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
             .unwrap();
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert_eq!(
             ir.display().to_string(),
-            "%e0:bits<64> = ecode.const 0x2a\n\
-             %e1:bits<64> = ecode.const 0x1000\n\
-             @s0 ecode.store @space<3> %e1, %e0\n\
-             @s1 ecode.br -> 0x2:0x2000 %e0"
+            "%v0:bits<64> = operation<0>\n\
+             @o0 %v0:bits<64> = ecode.const 0x2a\n\
+             @o1 ecode.ret %v0"
         );
     }
 }

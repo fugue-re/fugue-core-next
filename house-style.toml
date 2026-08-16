@@ -1,0 +1,134 @@
+entry_points = []
+
+[vocabulary]
+acronyms = ["ecode", "mcode", "pcode"]
+
+[[vocabulary.term]]
+reject = "argument"
+prefer = "arg"
+roles = ["field", "function", "local", "method", "module", "type"]
+modules = ["crate::il"]
+reason = "IL identifiers use Arg and Args consistently"
+
+[[vocabulary.term]]
+reject = "definition"
+prefer = "def"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate definition to Def"
+
+[[vocabulary.term]]
+reject = "identifier"
+prefer = "id"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate identifier to Id"
+
+[[vocabulary.term]]
+reject = "operation"
+prefer = "op"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate operation to Op"
+
+[[vocabulary.term]]
+reject = "op"
+prefer = "operation"
+roles = ["function", "method"]
+modules = ["crate::il"]
+reason = "IL function and method names spell out operation"
+
+[[vocabulary.term]]
+reject = "ssa"
+prefer = "omit the redundant SSA marker"
+roles = ["module", "type"]
+modules = ["crate::il::mcode"]
+reason = "SSA is an invariant of the only MCode form, not a namespace or type discriminator"
+
+[verbs]
+additional = [
+    "canonicalise",
+    "compact",
+    "convert",
+    "evaluate",
+    "fold",
+    "optimise",
+    "produce",
+    "recover",
+    "rewrite",
+    "solve",
+    "transform",
+    "verify",
+]
+
+[[family]]
+name = "ecode-mcode-builders"
+modules = ["crate::il::ecode::builder", "crate::il::mcode::builder"]
+
+[[family]]
+name = "ecode-mcode-def-use"
+modules = ["crate::il::ecode::def_use", "crate::il::mcode::def_use"]
+
+[[family]]
+name = "ecode-mcode-formatting"
+modules = ["crate::il::ecode::format", "crate::il::mcode::format"]
+
+[[family]]
+name = "ecode-mcode-ir"
+modules = ["crate::il::ecode::ir", "crate::il::mcode::ir"]
+
+[[family]]
+name = "ecode-mcode-memory"
+modules = ["crate::il::ecode::memory", "crate::il::mcode::memory"]
+
+[[family]]
+name = "ecode-mcode-opcodes"
+modules = ["crate::il::ecode::opcode", "crate::il::mcode::opcode"]
+
+[[family]]
+name = "ecode-mcode-operations"
+modules = ["crate::il::ecode::operation", "crate::il::mcode::operation"]
+
+[[family]]
+name = "ecode-mcode-compaction"
+modules = ["crate::il::ecode::optimise::compact", "crate::il::mcode::optimise::compact"]
+
+[[family]]
+name = "ecode-mcode-constant-folding"
+modules = ["crate::il::ecode::optimise::fold", "crate::il::mcode::optimise::fold"]
+
+[[family]]
+name = "ecode-mcode-required-defs"
+modules = ["crate::il::ecode::optimise::required", "crate::il::mcode::optimise::required"]
+
+[[family]]
+name = "ecode-mcode-values"
+modules = ["crate::il::ecode::value", "crate::il::mcode::value"]
+
+[[family]]
+name = "ecode-mcode-verification"
+modules = ["crate::il::ecode::verify", "crate::il::mcode::verify"]
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/il/mod.rs"
+item = "crate::il::common"
+reason = "common is the established representation-neutral IL infrastructure module"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/il/mcode/recovery/mod.rs"
+item = "MCodeRecoveryConfig::with_alias_overrides"
+reason = "the consuming composition operation rebinds the configuration's borrowed-fact lifetime and is not a field accessor"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/il/ecode/transform/ssa.rs"
+item = "PCodeToECodeSsaLifter::lift_block_tree"
+reason = "dialect-owned lifting policy consumes the shared IlDominanceEvents traversal without adding a callback protocol solely to merge two orchestration loops"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/il/mcode/transform/lifter.rs"
+item = "ECodeToMCodeLifter::lift_block_tree"
+reason = "dialect-owned lifting policy consumes the shared IlDominanceEvents traversal without adding a callback protocol solely to merge two orchestration loops"

@@ -26,11 +26,24 @@ impl StructureVerifierError for VerifyError {
     }
 }
 
-impl PCodeIr {
-    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        self.verify_structure::<VerifyError>(self.source_spans(), None, self.operations().len())?;
+pub(crate) fn verify(ir: &PCodeIr) -> Result<(), VerifyError> {
+    PCodeVerifier { ir }.verify()
+}
+
+struct PCodeVerifier<'a> {
+    ir: &'a PCodeIr,
+}
+
+impl PCodeVerifier<'_> {
+    fn verify(&self) -> Result<(), VerifyError> {
+        self.ir.verify_structure::<VerifyError>(
+            self.ir.source_spans(),
+            None,
+            self.ir.operations().len(),
+        )?;
 
         if self
+            .ir
             .locations()
             .iter()
             .any(|location| location.properties().bits().count_ones() > 1)
@@ -38,7 +51,7 @@ impl PCodeIr {
             return Err(VerifyError::InvalidLocationProperties);
         }
 
-        for operation in self.operations() {
+        for operation in self.ir.operations() {
             self.verify_operation(operation)?;
         }
 
@@ -48,7 +61,7 @@ impl PCodeIr {
     fn verify_operation(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
         operation
             .operands()
-            .verify_bounds(self.operation_operands().len())?;
+            .verify_bounds(self.ir.operation_operands().len())?;
 
         if let Some(count) = operation.opcode().fixed_operand_count() {
             let found = operation.operands().len();
@@ -64,7 +77,7 @@ impl PCodeIr {
         let output = operation.output();
 
         if operation.opcode().requires_output() && output.is_none() {
-            return Err(IlError::missing_component(Self::FORM, "output").into());
+            return Err(IlError::missing_component(PCodeIr::FORM, "output").into());
         }
 
         if operation.opcode().forbids_output() && output.is_some() {
@@ -72,33 +85,33 @@ impl PCodeIr {
         }
 
         if let Some(output) = output {
-            self.location(output).ok_or_else(|| {
-                IlError::range_out_of_bounds(output.value(), self.locations().len())
+            self.ir.location(output).ok_or_else(|| {
+                IlError::range_out_of_bounds(output.index(), self.ir.locations().len())
             })?;
         }
 
-        for operand in self.operation_operands_for(operation) {
-            self.location(*operand).ok_or_else(|| {
-                IlError::range_out_of_bounds(operand.value(), self.locations().len())
+        for operand in self.ir.operation_operands_for(operation) {
+            self.ir.location(*operand).ok_or_else(|| {
+                IlError::range_out_of_bounds(operand.index(), self.ir.locations().len())
             })?;
         }
 
         if operation.opcode().requires_address_space() && operation.address_space().is_none() {
-            return Err(IlError::missing_component(Self::FORM, "address space").into());
+            return Err(IlError::missing_component(PCodeIr::FORM, "address space").into());
         }
         if !operation.opcode().requires_address_space() && operation.address_space().is_some() {
             return Err(VerifyError::ForbiddenEffectSpace);
         }
 
-        if operation.opcode().requires_address() && operation.immediate() == 0 {
-            return Err(IlError::missing_component(Self::FORM, "address").into());
+        if operation.opcode().requires_address() && operation.target().is_none() {
+            return Err(IlError::missing_component(PCodeIr::FORM, "address").into());
         }
 
-        if operation.opcode().requires_address()
-            && operation.immediate() as usize > self.targets().len()
+        if let Some(target) = operation.target()
+            && self.ir.target(target).is_none()
         {
             return Err(
-                IlError::range_out_of_bounds(operation.immediate(), self.targets().len()).into(),
+                IlError::range_out_of_bounds(target.index(), self.ir.targets().len()).into(),
             );
         }
 
@@ -106,23 +119,27 @@ impl PCodeIr {
     }
 
     fn verify_operation_sizes(&self, operation: &PCodeOp) -> Result<(), VerifyError> {
-        let operands = self.operation_operands_for(operation);
-        let output = operation.output().and_then(|output| self.location(output));
+        let operands = self.ir.operation_operands_for(operation);
+        let output = operation
+            .output()
+            .and_then(|output| self.ir.location(output));
 
         if let Some(output) = output
             && operation.opcode().preserves_first_operand_size()
-            && let Some(first) = operands.first().and_then(|operand| self.location(*operand))
+            && let Some(first) = operands
+                .first()
+                .and_then(|operand| self.ir.location(*operand))
             && output.size() != first.size()
         {
-            return Err(IlError::width_mismatch(Self::FORM).into());
+            return Err(IlError::width_mismatch(PCodeIr::FORM).into());
         }
 
         if operation.opcode().compares_operands()
             && let [left, right] = operands
-            && self.location(*left).map(PCodeLocation::size)
-                != self.location(*right).map(PCodeLocation::size)
+            && self.ir.location(*left).map(PCodeLocation::size)
+                != self.ir.location(*right).map(PCodeLocation::size)
         {
-            return Err(IlError::width_mismatch(Self::FORM).into());
+            return Err(IlError::width_mismatch(PCodeIr::FORM).into());
         }
 
         Ok(())

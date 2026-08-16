@@ -259,10 +259,10 @@ impl Symbol {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolBuilder {
-    pub(super) kind: SymbolKind,
-    pub(super) id: usize,
-    pub(super) scope: usize,
-    pub(super) name: Ustr,
+    pub(crate) kind: SymbolKind,
+    pub(crate) id: usize,
+    pub(crate) scope: usize,
+    pub(crate) name: Ustr,
 }
 
 impl Default for SymbolBuilder {

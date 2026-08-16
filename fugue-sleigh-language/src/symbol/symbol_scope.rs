@@ -4,9 +4,9 @@ use crate::symbol::{Symbol, SymbolTable};
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct SymbolScope {
-    pub(super) id: usize,
-    pub(super) parent: usize,
-    pub(super) tree: Set<usize>,
+    pub(crate) id: usize,
+    pub(crate) parent: usize,
+    pub(crate) tree: Set<usize>,
 }
 
 impl SymbolScope {

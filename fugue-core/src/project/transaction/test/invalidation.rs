@@ -262,7 +262,6 @@ fn byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error:
         let mut transaction = project.transaction("test");
         transaction.replace_lifted(tagged_pcode(function, &[1]))?;
         transaction.replace_lifted(ecode_for_test(function, IlGraph::default()))?;
-        transaction.replace_lifted(ecode_ssa_for_test(function, IlGraph::default()))?;
         transaction.commit()?;
     }
 
@@ -274,8 +273,7 @@ fn byte_write_invalidates_lifted_descendants() -> Result<(), Box<dyn std::error:
 
     assert!(project.pcode(function)?.is_none());
     assert!(project.ecode(function)?.is_none());
-    assert!(project.ecode_ssa(function)?.is_none());
-    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
+    for form in [PCodeIr::FORM, ECodeIr::FORM] {
         assert!(
             changes
                 .records()
@@ -305,13 +303,11 @@ fn symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
 
     let pcode = tagged_pcode(function, &[1]);
     let ecode = ecode_for_test(function, IlGraph::default());
-    let ssa = ecode_ssa_for_test(function, IlGraph::default());
 
     {
         let mut transaction = project.transaction("test");
         transaction.replace_lifted(pcode.clone())?;
         transaction.replace_lifted(ecode.clone())?;
-        transaction.replace_lifted(ssa.clone())?;
         transaction.commit()?;
     }
     let pcode = project
@@ -320,9 +316,6 @@ fn symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
     let ecode = project
         .ecode(function)?
         .expect("materialised ECode should be readable");
-    let ssa = project
-        .ecode_ssa(function)?
-        .expect("materialised ECode SSA should be readable");
 
     let semantic_revision = project.semantic_revision();
     let changes = {
@@ -343,7 +336,6 @@ fn symbol_rename_preserves_lifted() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(project.pcode(function)?, Some(pcode));
     assert_eq!(project.ecode(function)?, Some(ecode));
-    assert_eq!(project.ecode_ssa(function)?, Some(ssa));
 
     Ok(())
 }
@@ -363,13 +355,11 @@ fn reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
 
     let pcode = tagged_pcode(function, &[1]);
     let ecode = ecode_for_test(function, IlGraph::default());
-    let ssa = ecode_ssa_for_test(function, IlGraph::default());
 
     {
         let mut transaction = project.transaction("test");
         transaction.replace_lifted(pcode.clone())?;
         transaction.replace_lifted(ecode.clone())?;
-        transaction.replace_lifted(ssa.clone())?;
         transaction.commit()?;
     }
     let pcode = project
@@ -378,9 +368,6 @@ fn reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
     let ecode = project
         .ecode(function)?
         .expect("materialised ECode should be readable");
-    let ssa = project
-        .ecode_ssa(function)?
-        .expect("materialised ECode SSA should be readable");
 
     let semantic_revision = project.semantic_revision();
     let changes = {
@@ -416,7 +403,6 @@ fn reference_edits_preserve_lifted() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(project.pcode(function)?, Some(pcode));
     assert_eq!(project.ecode(function)?, Some(ecode));
-    assert_eq!(project.ecode_ssa(function)?, Some(ssa));
 
     Ok(())
 }

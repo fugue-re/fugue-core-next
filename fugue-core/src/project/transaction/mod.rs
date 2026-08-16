@@ -11,7 +11,7 @@ use super::{
     MAX_DETAILED_CHANGE_RECORDS, Project, ProjectError, ReadSet,
 };
 use crate::il::registry::IlRegistry;
-use crate::il::storage::IlStaging;
+use crate::il::storage::{IlStagedChange, IlStaging};
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CallGraphStaging, CodeBlockTable, FunctionId,
     FunctionRef, FunctionTable, FunctionTableStaging, PreparedReferenceIndexRecord, Problem,
@@ -525,14 +525,16 @@ impl ProjectTransaction<'_> {
         let span = self.span.clone();
         let _entered = span.enter();
         let changes = &mut self.changes;
-        self.il_staging
-            .for_each_change(|function, form, materialised| {
-                changes.push(if materialised {
+        self.il_staging.for_each_change(|change| {
+            changes.push(match change {
+                IlStagedChange::Materialised { function, form } => {
                     ChangeRecord::LiftedMaterialised { function, form }
-                } else {
+                }
+                IlStagedChange::Removed { function, form } => {
                     ChangeRecord::LiftedRemoved { function, form }
-                });
+                }
             });
+        });
         self.invalidate_semantic_problems();
         let (problems, mut writes) = self.prepare_problems()?;
         let (switches, switch_writes) = self.prepare_switches()?;

@@ -2,10 +2,15 @@ use thiserror::Error;
 
 use crate::analysis::control::Cancelled;
 use crate::il::common::{IlError, IlGenerationError};
-use crate::il::pcode::AddressAnnotationRole;
 use crate::ir::Address;
 use crate::lifter::LifterError;
 use crate::storage::SegmentStorageError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PCodeAddressAnnotationRole {
+    ComputedSpace,
+    DirectTarget,
+}
 
 #[derive(Debug, Error)]
 pub enum PCodeError {
@@ -14,7 +19,7 @@ pub enum PCodeError {
     #[error("duplicate address annotation for ordinal {ordinal} role {role:?}")]
     DuplicateAnnotation {
         ordinal: u32,
-        role: AddressAnnotationRole,
+        role: PCodeAddressAnnotationRole,
     },
     #[error(
         "block at {address} requires {required} contiguous bytes, but only {available} are available"
@@ -27,7 +32,7 @@ pub enum PCodeError {
     #[error(
         "operation at ordinal {ordinal} has invalid argument count {found}, expected {expected}"
     )]
-    InvalidArgumentCount {
+    InvalidArgCount {
         ordinal: u32,
         expected: u8,
         found: u8,
@@ -49,32 +54,32 @@ pub enum PCodeError {
     #[error("missing address annotation for ordinal {ordinal} role {role:?}")]
     MissingAnnotation {
         ordinal: u32,
-        role: AddressAnnotationRole,
+        role: PCodeAddressAnnotationRole,
     },
     #[error("user operation at ordinal {ordinal} is missing {missing} spilled arguments")]
     MissingArg { ordinal: u32, missing: u8 },
     #[error("out-of-order address annotation for ordinal {ordinal} role {role:?}")]
     OutOfOrderAnnotation {
         ordinal: u32,
-        role: AddressAnnotationRole,
+        role: PCodeAddressAnnotationRole,
     },
     #[error(transparent)]
     SegmentStorage(#[from] SegmentStorageError),
     #[error("unused address annotation for ordinal {ordinal} role {role:?}")]
     UnusedAnnotation {
         ordinal: u32,
-        role: AddressAnnotationRole,
+        role: PCodeAddressAnnotationRole,
     },
     #[error("address annotation for ordinal {ordinal} has role {found:?}, expected {expected:?}")]
     WrongAnnotationRole {
         ordinal: u32,
-        expected: AddressAnnotationRole,
-        found: AddressAnnotationRole,
+        expected: PCodeAddressAnnotationRole,
+        found: PCodeAddressAnnotationRole,
     },
 }
 
 impl PCodeError {
-    pub const fn duplicate_annotation(ordinal: u32, role: AddressAnnotationRole) -> Self {
+    pub const fn duplicate_annotation(ordinal: u32, role: PCodeAddressAnnotationRole) -> Self {
         Self::DuplicateAnnotation { ordinal, role }
     }
 
@@ -86,8 +91,8 @@ impl PCodeError {
         }
     }
 
-    pub const fn invalid_argument_count(ordinal: u32, expected: u8, found: u8) -> Self {
-        Self::InvalidArgumentCount {
+    pub const fn invalid_arg_count(ordinal: u32, expected: u8, found: u8) -> Self {
+        Self::InvalidArgCount {
             ordinal,
             expected,
             found,
@@ -114,7 +119,7 @@ impl PCodeError {
         Self::MisplacedArg { ordinal }
     }
 
-    pub const fn missing_annotation(ordinal: u32, role: AddressAnnotationRole) -> Self {
+    pub const fn missing_annotation(ordinal: u32, role: PCodeAddressAnnotationRole) -> Self {
         Self::MissingAnnotation { ordinal, role }
     }
 
@@ -122,18 +127,18 @@ impl PCodeError {
         Self::MissingArg { ordinal, missing }
     }
 
-    pub const fn out_of_order_annotation(ordinal: u32, role: AddressAnnotationRole) -> Self {
+    pub const fn out_of_order_annotation(ordinal: u32, role: PCodeAddressAnnotationRole) -> Self {
         Self::OutOfOrderAnnotation { ordinal, role }
     }
 
-    pub const fn unused_annotation(ordinal: u32, role: AddressAnnotationRole) -> Self {
+    pub const fn unused_annotation(ordinal: u32, role: PCodeAddressAnnotationRole) -> Self {
         Self::UnusedAnnotation { ordinal, role }
     }
 
     pub const fn wrong_annotation_role(
         ordinal: u32,
-        expected: AddressAnnotationRole,
-        found: AddressAnnotationRole,
+        expected: PCodeAddressAnnotationRole,
+        found: PCodeAddressAnnotationRole,
     ) -> Self {
         Self::WrongAnnotationRole {
             ordinal,

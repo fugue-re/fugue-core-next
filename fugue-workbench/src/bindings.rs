@@ -147,7 +147,7 @@ impl SwitchRow {
     pub fn from_entity(entity: &SwitchEntity) -> Self {
         Self {
             branch: Address::from(entity.branch()),
-            cases: entity.case_count() as u32,
+            cases: u32::try_from(entity.case_count()).expect("switch case count is representable"),
             has_default: entity.has_default(),
         }
     }
@@ -194,7 +194,7 @@ impl ListingLine {
             bytes: hex_string(bytes),
             mnemonic,
             operands,
-            size: bytes.len() as u32,
+            size: u32::try_from(bytes.len()).expect("instruction length is representable"),
             decoded: true,
         }
     }
@@ -299,13 +299,21 @@ impl IlToken {
     }
 
     pub fn with_nav(mut self, address: CoreAddress) -> Self {
-        self.nav = Some(Address::from(address));
+        self.set_nav(address);
         self
     }
 
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.title = Some(title.into());
+        self.set_title(title);
         self
+    }
+
+    pub fn set_nav(&mut self, address: CoreAddress) {
+        self.nav = Some(Address::from(address));
+    }
+
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = Some(title.into());
     }
 }
 

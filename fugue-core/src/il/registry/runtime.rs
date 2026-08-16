@@ -5,21 +5,22 @@ use std::sync::Arc;
 use super::{IlProduced, IlRegistry};
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
-    IlArtefact, IlConverter, IlError, IlFormId, IlGenerationContext, IlGenerationError, IlProducer,
+    IlArtefact, IlError, IlFormId, IlGenerationContext, IlGenerationError, IlProducer,
+    IlTransformer,
 };
 
-type IlConverterFactory = fn() -> Box<dyn ErasedIlConverter>;
+type IlTransformerFactory = fn() -> Box<dyn ErasedIlTransformer>;
 type IlProducerFactory = fn() -> Box<dyn ErasedIlProducer>;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IlRecipe {
-    Converter(IlConverterFactory),
+    Transformer(IlTransformerFactory),
     Producer(IlProducerFactory),
 }
 
 impl IlRecipe {
-    pub(crate) const fn converter<T: IlConverter>() -> Self {
-        Self::Converter(new_converter::<T>)
+    pub(crate) const fn transformer<T: IlTransformer>() -> Self {
+        Self::Transformer(new_transformer::<T>)
     }
 
     pub(crate) const fn producer<T: IlProducer>() -> Self {
@@ -28,14 +29,14 @@ impl IlRecipe {
 
     fn instantiate(self) -> IlRecipeExecutor {
         match self {
-            Self::Converter(factory) => IlRecipeExecutor::Converter(factory()),
+            Self::Transformer(factory) => IlRecipeExecutor::Transformer(factory()),
             Self::Producer(factory) => IlRecipeExecutor::Producer(factory()),
         }
     }
 }
 
-pub(crate) trait ErasedIlConverter: Send {
-    fn convert(
+pub(crate) trait ErasedIlTransformer: Send {
+    fn transform(
         &mut self,
         source: &(dyn Any + Send + Sync),
         context: &IlGenerationContext<'_>,
@@ -43,8 +44,8 @@ pub(crate) trait ErasedIlConverter: Send {
     ) -> Result<IlProduced, IlGenerationError>;
 }
 
-impl<T: IlConverter> ErasedIlConverter for T {
-    fn convert(
+impl<T: IlTransformer> ErasedIlTransformer for T {
+    fn transform(
         &mut self,
         source: &(dyn Any + Send + Sync),
         context: &IlGenerationContext<'_>,
@@ -54,7 +55,7 @@ impl<T: IlConverter> ErasedIlConverter for T {
             .downcast_ref::<T::Input>()
             .ok_or_else(|| IlGenerationError::Il(IlError::mismatched_source(T::Input::FORM)))?;
 
-        Ok(Box::new(T::convert(self, source, context, cancellation)?))
+        Ok(Box::new(T::transform(self, source, context, cancellation)?))
     }
 }
 
@@ -76,7 +77,7 @@ impl<T: IlProducer> ErasedIlProducer for T {
     }
 }
 
-fn new_converter<T: IlConverter>() -> Box<dyn ErasedIlConverter> {
+fn new_transformer<T: IlTransformer>() -> Box<dyn ErasedIlTransformer> {
     Box::new(T::default())
 }
 
@@ -85,7 +86,7 @@ fn new_producer<T: IlProducer>() -> Box<dyn ErasedIlProducer> {
 }
 
 enum IlRecipeExecutor {
-    Converter(Box<dyn ErasedIlConverter>),
+    Transformer(Box<dyn ErasedIlTransformer>),
     Producer(Box<dyn ErasedIlProducer>),
 }
 
@@ -187,7 +188,7 @@ impl IlGenerationSession {
             };
             let artefact = match recipe {
                 IlRecipeExecutor::Producer(producer) => producer.produce(context, cancellation)?,
-                IlRecipeExecutor::Converter(converter) => {
+                IlRecipeExecutor::Transformer(transformer) => {
                     let source = if produced_previous {
                         generated
                             .last()
@@ -200,7 +201,7 @@ impl IlGenerationSession {
                             ))
                         })?
                     };
-                    converter.convert(source, context, cancellation)?
+                    transformer.transform(source, context, cancellation)?
                 }
             };
 

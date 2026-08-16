@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use crate::il::common::verify::StructureError;
-use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexRange};
+use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexMapper, IlIndexRange, IlOpId, IlPool};
 use crate::ir::{Address, FlowKind};
 use crate::types::EstimateSize;
 use crate::types::common::archived_bitflags;
@@ -169,13 +169,17 @@ impl IlGraph {
         }
     }
 
-    pub(crate) fn with_block_sources(mut self, block_sources: Vec<Address>) -> Self {
+    pub(crate) fn set_block_sources(&mut self, block_sources: Vec<Address>) {
         debug_assert_eq!(
             block_sources.len(),
             self.blocks.len(),
             "block source count matches the block count",
         );
         self.block_sources = block_sources;
+    }
+
+    pub(crate) fn with_block_sources(mut self, block_sources: Vec<Address>) -> Self {
+        self.set_block_sources(block_sources);
         self
     }
 
@@ -225,6 +229,86 @@ impl IlGraph {
         self.block_sources.get(block.index()).copied()
     }
 
+    pub fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
+        self.blocks
+            .iter()
+            .position(|block| block.operations().contains_index(operation.index()))
+            .and_then(|index| IlBlockId::try_from_index(index).ok())
+    }
+
+    pub fn operation_blocks(&self, operation_count: usize) -> Vec<Option<IlBlockId>> {
+        let mut operation_blocks = vec![None; operation_count];
+        for (index, block) in self.blocks.iter().enumerate() {
+            let block_id =
+                IlBlockId::try_from_index(index).expect("block count fits the block id space");
+            for operation in block.operations().start()..block.operations().end() {
+                if let Some(entry) = operation_blocks.get_mut(operation) {
+                    *entry = Some(block_id);
+                }
+            }
+        }
+        operation_blocks
+    }
+
+    pub fn operations_for_block<'a, T>(
+        &'a self,
+        block: IlBlockId,
+        operations: &'a [T],
+    ) -> impl DoubleEndedIterator<Item = (IlOpId, &'a T)> + 'a {
+        self.blocks
+            .get(block.index())
+            .into_iter()
+            .flat_map(|block| {
+                let start = block.operations().start();
+                block.operations().slice(operations).iter().enumerate().map(
+                    move |(index, operation)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("operation count fits the operation id space"),
+                            operation,
+                        )
+                    },
+                )
+            })
+    }
+
+    pub fn set_operation_ranges(
+        &mut self,
+        operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
+    ) -> Result<(), IlError> {
+        if operation_ranges.len() != self.blocks.len() {
+            return Err(IlError::graph_block_count_mismatch(
+                self.blocks.len(),
+                operation_ranges.len(),
+            ));
+        }
+
+        for (block, operations) in self.blocks.iter_mut().zip(operation_ranges) {
+            block.operations = operations;
+        }
+
+        Ok(())
+    }
+
+    pub fn with_operation_ranges(
+        mut self,
+        operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
+    ) -> Result<Self, IlError> {
+        self.set_operation_ranges(operation_ranges)?;
+        Ok(self)
+    }
+
+    pub fn remap_operation_ranges(&mut self, operation_map: &IlIndexMapper) -> Result<(), IlError> {
+        for block in &self.blocks {
+            operation_map.checked_map_range(block.operations)?;
+        }
+        for block in &mut self.blocks {
+            block.operations = operation_map.map_range(block.operations);
+        }
+
+        Ok(())
+    }
+
     pub fn entry_block(&self) -> Option<IlBlockId> {
         if self.blocks.is_empty() {
             return None;
@@ -261,7 +345,7 @@ impl IlGraph {
             for successor in block.successors().checked_slice(&self.successors)? {
                 if successor.index() >= self.blocks.len() {
                     return Err(
-                        IlError::range_out_of_bounds(successor.value(), self.blocks.len()).into(),
+                        IlError::range_out_of_bounds(successor.index(), self.blocks.len()).into(),
                     );
                 }
             }
@@ -273,7 +357,7 @@ impl IlGraph {
             if operations.start() < previous_operation_end {
                 return Err(StructureError::OverlappingBlockOperations {
                     block: block_id.value(),
-                    operation: operations.start() as u32,
+                    operation: operations.start(),
                 });
             }
             previous_operation_end = operations.end();
@@ -324,6 +408,153 @@ impl IlGraph {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IlGraphBuilder {
+    blocks: Vec<IlGraphBuilderBlock>,
+    block_sources: Option<Vec<Address>>,
+}
+
+impl IlGraphBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_block(
+        &mut self,
+        operations: IlIndexRange,
+        properties: IlBlockProperties,
+    ) -> Result<IlBlockId, IlError> {
+        if self.block_sources.is_some() {
+            return Err(IlError::inconsistent_block_sources());
+        }
+
+        self.push_block_record(operations, properties)
+    }
+
+    pub fn push_block_with_source(
+        &mut self,
+        operations: IlIndexRange,
+        properties: IlBlockProperties,
+        source: Address,
+    ) -> Result<IlBlockId, IlError> {
+        if self.block_sources.is_none() {
+            if !self.blocks.is_empty() {
+                return Err(IlError::inconsistent_block_sources());
+            }
+            self.block_sources = Some(Vec::new());
+        }
+
+        let block = self.push_block_record(operations, properties)?;
+        self.block_sources
+            .as_mut()
+            .expect("source mode was selected above")
+            .push(source);
+
+        Ok(block)
+    }
+
+    pub fn add_successor(
+        &mut self,
+        block: IlBlockId,
+        successor: IlBlockId,
+        kinds: IlEdgeKinds,
+    ) -> Result<(), IlError> {
+        if successor.index() >= self.blocks.len() {
+            return Err(IlError::range_out_of_bounds(
+                successor.index(),
+                self.blocks.len(),
+            ));
+        }
+
+        let block_count = self.blocks.len();
+        let block = self
+            .blocks
+            .get_mut(block.index())
+            .ok_or_else(|| IlError::range_out_of_bounds(block.index(), block_count))?;
+
+        if let Some((_, existing)) = block
+            .successors
+            .iter_mut()
+            .find(|(target, _)| *target == successor)
+        {
+            *existing |= kinds;
+        } else {
+            block.successors.push((successor, kinds));
+        }
+
+        Ok(())
+    }
+
+    pub fn build(self, operation_count: usize) -> Result<IlGraph, IlError> {
+        self.verify_operation_ranges(operation_count)?;
+
+        let mut successors = IlPool::new();
+        let mut successor_kinds = Vec::new();
+        let mut blocks = Vec::with_capacity(self.blocks.len());
+
+        for block in self.blocks {
+            let successor_range =
+                successors.append(block.successors.iter().map(|(successor, _)| *successor))?;
+            successor_kinds.extend(block.successors.iter().map(|(_, kinds)| *kinds));
+            blocks.push(IlBlock::new(
+                block.operations,
+                successor_range,
+                block.properties,
+            ));
+        }
+
+        let graph = IlGraph::new(blocks, successors.into_values(), successor_kinds);
+
+        Ok(match self.block_sources {
+            Some(block_sources) => graph.with_block_sources(block_sources),
+            None => graph,
+        })
+    }
+
+    fn push_block_record(
+        &mut self,
+        operations: IlIndexRange,
+        properties: IlBlockProperties,
+    ) -> Result<IlBlockId, IlError> {
+        let id = IlBlockId::try_from_index(self.blocks.len())?;
+        self.blocks.push(IlGraphBuilderBlock {
+            operations,
+            properties,
+            successors: Vec::new(),
+        });
+
+        Ok(id)
+    }
+
+    fn verify_operation_ranges(&self, operation_count: usize) -> Result<(), IlError> {
+        let mut ranges = self
+            .blocks
+            .iter()
+            .map(|block| block.operations)
+            .filter(|range| !range.is_empty())
+            .collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(IlIndexRange::start);
+
+        let mut previous_end = 0usize;
+        for range in ranges {
+            range.verify_bounds(operation_count)?;
+            if range.start() < previous_end {
+                return Err(IlError::overlapping_ranges(range.start(), previous_end));
+            }
+            previous_end = range.end();
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IlGraphBuilderBlock {
+    operations: IlIndexRange,
+    properties: IlBlockProperties,
+    successors: Vec<(IlBlockId, IlEdgeKinds)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlBlockPredecessors {
     predecessors: IlCsr<IlBlockId>,
@@ -348,7 +579,7 @@ impl IlBlockPredecessors {
     }
 
     pub fn predecessors_for(&self, block: IlBlockId) -> &[IlBlockId] {
-        self.predecessors.row(block.index())
+        self.predecessors.checked_row(block.index()).unwrap_or(&[])
     }
 }
 
@@ -421,6 +652,25 @@ mod test {
     }
 
     #[test]
+    fn invalid_block_queries_are_empty() {
+        let graph = IlGraph::new(
+            vec![IlBlock::new(
+                IlIndexRange::EMPTY,
+                IlIndexRange::EMPTY,
+                IlBlockProperties::empty(),
+            )],
+            Vec::new(),
+            Vec::new(),
+        );
+        let predecessors = IlBlockPredecessors::build(graph.blocks(), graph.successors());
+        let invalid = IlBlockId::try_from_index(graph.blocks().len()).unwrap();
+
+        assert!(graph.successors_for(invalid).is_empty());
+        assert!(graph.successor_kinds_for(invalid).is_empty());
+        assert!(predecessors.predecessors_for(invalid).is_empty());
+    }
+
+    #[test]
     fn interprocedural_flow_has_no_edge_kind() {
         assert_eq!(IlEdgeKinds::from_flow(FlowKind::Call), None);
         assert_eq!(IlEdgeKinds::from_flow(FlowKind::Return), None);
@@ -441,6 +691,102 @@ mod test {
         assert!(collapsed.is_taken());
         assert!(collapsed.is_fall_through());
         assert!(!collapsed.is_computed());
+    }
+
+    #[test]
+    fn graph_builder_allocates_blocks_and_combines_edges() {
+        let mut builder = IlGraphBuilder::new();
+        let entry = builder
+            .push_block(IlIndexRange::new(0, 1).unwrap(), IlBlockProperties::ENTRY)
+            .unwrap();
+        let exit = builder
+            .push_block(IlIndexRange::new(1, 2).unwrap(), IlBlockProperties::EXIT)
+            .unwrap();
+        builder
+            .add_successor(entry, exit, IlEdgeKinds::TAKEN)
+            .unwrap();
+        builder
+            .add_successor(entry, exit, IlEdgeKinds::FALL_THROUGH)
+            .unwrap();
+
+        let graph = builder.build(2).unwrap();
+
+        assert_eq!(graph.successors_for(entry), &[exit]);
+        assert_eq!(
+            graph.successor_kinds_for(entry),
+            &[IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH]
+        );
+    }
+
+    #[test]
+    fn operation_remapping_retains_graph_topology_storage() {
+        let entry = IlBlockId::try_from_index(0).unwrap();
+        let exit = IlBlockId::try_from_index(1).unwrap();
+        let mut graph = IlGraph::new(
+            vec![
+                IlBlock::new(
+                    IlIndexRange::new(0, 2).unwrap(),
+                    IlIndexRange::new(0, 1).unwrap(),
+                    IlBlockProperties::ENTRY,
+                ),
+                IlBlock::new(
+                    IlIndexRange::new(2, 4).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::EXIT,
+                ),
+            ],
+            vec![exit],
+            vec![IlEdgeKinds::FALL_THROUGH],
+        )
+        .with_block_sources(vec![Address::from(0x1000u64), Address::from(0x1004u64)]);
+        let block_storage = graph.blocks.as_ptr();
+        let successor_storage = graph.successors.as_ptr();
+        let kind_storage = graph.successor_kinds.as_ptr();
+        let source_storage = graph.block_sources.as_ptr();
+        let mapper = IlIndexMapper::from_kept(4, |index| index != 1);
+
+        graph.remap_operation_ranges(&mapper).unwrap();
+
+        assert_eq!(graph.blocks.as_ptr(), block_storage);
+        assert_eq!(graph.successors.as_ptr(), successor_storage);
+        assert_eq!(graph.successor_kinds.as_ptr(), kind_storage);
+        assert_eq!(graph.block_sources.as_ptr(), source_storage);
+        assert_eq!(
+            graph.blocks[entry.index()].operations(),
+            IlIndexRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            graph.blocks[exit.index()].operations(),
+            IlIndexRange::new(1, 3).unwrap()
+        );
+    }
+
+    #[test]
+    fn operation_remapping_does_not_mutate_before_validation_completes() {
+        let mut graph = IlGraph::new(
+            vec![
+                IlBlock::new(
+                    IlIndexRange::new(0, 1).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::ENTRY,
+                ),
+                IlBlock::new(
+                    IlIndexRange::new(1, 3).unwrap(),
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::EXIT,
+                ),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let original = graph.clone();
+        let mapper = IlIndexMapper::new(vec![0, 2, 3]).unwrap();
+
+        assert!(matches!(
+            graph.remap_operation_ranges(&mapper),
+            Err(IlError::RangeOutOfBounds { .. })
+        ));
+        assert_eq!(graph, original);
     }
 
     #[test]

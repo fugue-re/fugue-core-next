@@ -2,50 +2,46 @@ use super::*;
 use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
-    RegisterId,
+    IlValueId, RegisterId,
 };
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaOp, ECodeSsaOpcode};
+use crate::il::ecode::test::emit_value;
+use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
 use crate::il::mcode::recovery::MCodeStackModel;
 use crate::ir::FunctionId;
 use crate::storage::segments::space::AddressSpaceId;
 
 const REGISTER: u64 = 0x10;
 
-fn builder() -> ECodeSsaBuilder {
-    ECodeSsaBuilder::new(
+fn builder() -> ECodeBuilder {
+    ECodeBuilder::new(
         IlMetadata::new(FunctionId::default(), 0),
         IlGraph::default(),
     )
 }
 
-fn register_definition(builder: &mut ECodeSsaBuilder) -> IlValueId {
-    let (id, results) = builder.push_result_value(64).unwrap();
+fn register_definition(builder: &mut ECodeBuilder) -> IlValueId {
+    let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Undefined, 64), []).unwrap();
     builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Undefined,
-            results,
-            IlIndexRange::EMPTY,
-            64,
-        ))
+        .emitter()
+        .set_value_domain(id, ECodeDomain::Register(RegisterId::new(REGISTER)))
         .unwrap();
-    builder.set_value_domain(id, ECodeSsaDomain::Register(RegisterId::new(REGISTER)));
     id
 }
 
-fn table(ir: &ECodeSsaIr) -> MCodeVariableModel {
+fn table(ir: &ECodeIr) -> MCodeVariableModel {
     let stack = MCodeStackModel::new(ir, RegisterId::new(0xffff), []);
     MCodeVariableModel::new(ir, &stack)
 }
 
 struct Function {
-    builder: ECodeSsaBuilder,
+    builder: ECodeBuilder,
     operations: usize,
 }
 
 impl Function {
     fn new() -> Self {
         Self {
-            builder: ECodeSsaBuilder::new(
+            builder: ECodeBuilder::new(
                 IlMetadata::new(FunctionId::default(), 0),
                 IlGraph::default(),
             ),
@@ -54,42 +50,45 @@ impl Function {
     }
 
     fn constant(&mut self, value: u64) -> IlValueId {
-        let (id, results) = self.builder.push_result_value(64).unwrap();
-        self.builder
-            .push_operation(
-                ECodeSsaOp::new(ECodeSsaOpcode::Constant, results, IlIndexRange::EMPTY, 64)
-                    .with_immediate(value),
-            )
-            .unwrap();
+        let id = emit_value(
+            &mut self.builder,
+            ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(value),
+            [],
+        )
+        .unwrap();
         self.operations += 1;
         id
     }
 
-    fn unary(&mut self, opcode: ECodeSsaOpcode, source: IlValueId, register: bool) -> IlValueId {
-        let operands = self.builder.push_value_operands([source]).unwrap();
-        let (id, results) = self.builder.push_result_value(64).unwrap();
-        self.builder
-            .push_operation(ECodeSsaOp::new(opcode, results, operands, 64).with_immediate(REGISTER))
-            .unwrap();
+    fn unary(&mut self, opcode: ECodeOpcode, source: IlValueId, register: bool) -> IlValueId {
+        let id = emit_value(
+            &mut self.builder,
+            ECodeOpSpec::new(opcode, 64).with_immediate(REGISTER),
+            [source],
+        )
+        .unwrap();
         if register {
             self.builder
-                .set_value_domain(id, ECodeSsaDomain::Register(RegisterId::new(REGISTER)));
+                .emitter()
+                .set_value_domain(id, ECodeDomain::Register(RegisterId::new(REGISTER)))
+                .unwrap();
         }
         self.operations += 1;
         id
     }
 
-    fn binary(&mut self, opcode: ECodeSsaOpcode, left: IlValueId, right: IlValueId) -> IlValueId {
-        let operands = self.builder.push_value_operands([left, right]).unwrap();
-        let (id, results) = self.builder.push_result_value(64).unwrap();
-        self.builder
-            .push_operation(ECodeSsaOp::new(opcode, results, operands, 64))
-            .unwrap();
+    fn binary(&mut self, opcode: ECodeOpcode, left: IlValueId, right: IlValueId) -> IlValueId {
+        let id = emit_value(
+            &mut self.builder,
+            ECodeOpSpec::new(opcode, 64),
+            [left, right],
+        )
+        .unwrap();
         self.operations += 1;
         id
     }
 
-    fn finish(mut self) -> ECodeSsaIr {
+    fn finish(mut self) -> ECodeIr {
         self.builder.set_graph(IlGraph::new(
             vec![IlBlock::new(
                 IlIndexRange::new(0, self.operations).unwrap(),
@@ -99,15 +98,19 @@ impl Function {
             Vec::new(),
             Vec::new(),
         ));
-        self.builder.build(&CancellationToken::default()).unwrap()
+        self.builder
+            .build_unchecked(&CancellationToken::default())
+            .unwrap()
     }
 
-    fn finish_linear(self) -> ECodeSsaIr {
-        self.builder.build(&CancellationToken::default()).unwrap()
+    fn finish_linear(self) -> ECodeIr {
+        self.builder
+            .build_unchecked(&CancellationToken::default())
+            .unwrap()
     }
 }
 
-fn branching_ir(reverse: bool) -> ECodeSsaIr {
+fn branching_ir(reverse: bool) -> ECodeIr {
     let left = IlBlockId::try_from_index(1).unwrap();
     let right = IlBlockId::try_from_index(2).unwrap();
     let mut builder = builder();
@@ -145,7 +148,9 @@ fn branching_ir(reverse: bool) -> ECodeSsaIr {
         successors,
         kinds,
     ));
-    builder.build(&CancellationToken::default()).unwrap()
+    builder
+        .build_unchecked(&CancellationToken::default())
+        .unwrap()
 }
 
 #[test]
@@ -154,7 +159,9 @@ fn disjoint_register_definitions_split_by_lifetime() {
     let first = register_definition(&mut builder);
     let second = register_definition(&mut builder);
 
-    let ir = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder
+        .build_unchecked(&CancellationToken::default())
+        .unwrap();
     let table = table(&ir);
 
     let first_variable = table.variable_for_value(first).unwrap();
@@ -194,19 +201,21 @@ fn a_phi_connected_web_is_one_variable() {
 
     let _ = entry;
     let definition = register_definition(&mut builder);
-    let argument = builder.push_block_argument_value(merge, 64).unwrap();
-    builder.set_value_domain(
-        argument,
-        ECodeSsaDomain::Register(RegisterId::new(REGISTER)),
-    );
-    builder.push_edge_arguments([definition]).unwrap();
+    let arg = builder.emitter().emit_block_arg(merge, 64).unwrap();
+    builder
+        .emitter()
+        .set_value_domain(arg, ECodeDomain::Register(RegisterId::new(REGISTER)))
+        .unwrap();
+    builder.emitter().emit_edge_args([definition]).unwrap();
 
-    let ir = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder
+        .build_unchecked(&CancellationToken::default())
+        .unwrap();
     let table = table(&ir);
 
     assert_eq!(
         table.variable_for_value(definition),
-        table.variable_for_value(argument)
+        table.variable_for_value(arg)
     );
 }
 
@@ -214,74 +223,59 @@ fn a_phi_connected_web_is_one_variable() {
 fn stack_objects_become_stack_variables() {
     let mut builder = builder();
     let sp = {
-        let (id, results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(ECodeSsaOp::new(
-                ECodeSsaOpcode::Undefined,
-                results,
-                IlIndexRange::EMPTY,
-                64,
-            ))
-            .unwrap();
-        builder.set_value_domain(id, ECodeSsaDomain::Register(RegisterId::new(0x20)));
-        id
-    };
-    let size = {
-        let (id, results) = builder.push_result_value(64).unwrap();
-        builder
-            .push_operation(
-                ECodeSsaOp::new(ECodeSsaOpcode::Constant, results, IlIndexRange::EMPTY, 64)
-                    .with_immediate(0x10),
-            )
-            .unwrap();
-        id
-    };
-    let operands = builder.push_value_operands([sp, size]).unwrap();
-    let (frame, frame_results) = builder.push_result_value(64).unwrap();
-    builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Sub,
-            frame_results,
-            operands,
-            64,
-        ))
+        let id = emit_value(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Undefined, 64),
+            [],
+        )
         .unwrap();
-    let value = {
-        let (id, results) = builder.push_result_value(64).unwrap();
         builder
-            .push_operation(
-                ECodeSsaOp::new(ECodeSsaOpcode::Constant, results, IlIndexRange::EMPTY, 64)
-                    .with_immediate(1),
-            )
+            .emitter()
+            .set_value_domain(id, ECodeDomain::Register(RegisterId::new(0x20)))
             .unwrap();
         id
     };
-    let (memory, _) = builder.push_result_value(0).unwrap();
-    builder
-        .push_operation(ECodeSsaOp::new(
-            ECodeSsaOpcode::Undefined,
-            IlIndexRange::EMPTY,
-            IlIndexRange::EMPTY,
-            0,
-        ))
-        .unwrap();
+    let size = emit_value(
+        &mut builder,
+        ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x10),
+        [],
+    )
+    .unwrap();
+    let frame = emit_value(
+        &mut builder,
+        ECodeOpSpec::new(ECodeOpcode::Sub, 64),
+        [sp, size],
+    )
+    .unwrap();
+    let value = emit_value(
+        &mut builder,
+        ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(1),
+        [],
+    )
+    .unwrap();
     let space = AddressSpaceId::new(0);
-    builder.set_value_domain(memory, ECodeSsaDomain::Memory(space));
-    builder.ensure_memory_domain(space);
-    let store_operands = builder.push_value_operands([frame, value, memory]).unwrap();
+    let memory = emit_value(
+        &mut builder,
+        ECodeOpSpec::new(ECodeOpcode::Undefined, 0),
+        [],
+    )
+    .unwrap();
     builder
-        .push_operation(
-            ECodeSsaOp::new(
-                ECodeSsaOpcode::Store,
-                IlIndexRange::EMPTY,
-                store_operands,
-                0,
-            )
-            .with_address_space(space),
+        .emitter()
+        .set_value_domain(memory, ECodeDomain::Memory(space))
+        .unwrap();
+    builder
+        .emitter()
+        .emit(
+            ECodeOpSpec::new(ECodeOpcode::Store, 0).with_address_space(space),
+            [frame, value, memory],
+            0,
         )
         .unwrap();
 
-    let ir = builder.build(&CancellationToken::default()).unwrap();
+    let ir = builder
+        .build_unchecked(&CancellationToken::default())
+        .unwrap();
     let stack = MCodeStackModel::new(&ir, RegisterId::new(0x20), []);
     let table = MCodeVariableModel::new(&ir, &stack);
 
@@ -302,10 +296,10 @@ fn stack_objects_become_stack_variables() {
 fn an_overlapping_redefinition_is_one_variable() {
     let mut function = Function::new();
     let first_value = function.constant(1);
-    let first = function.unary(ECodeSsaOpcode::WriteRegister, first_value, true);
+    let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
     let second_value = function.constant(2);
-    let second = function.unary(ECodeSsaOpcode::WriteRegister, second_value, true);
-    function.binary(ECodeSsaOpcode::Add, first, second);
+    let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
+    function.binary(ECodeOpcode::Add, first, second);
     let ir = function.finish();
 
     let table = table(&ir);
@@ -322,10 +316,10 @@ fn an_overlapping_redefinition_is_one_variable() {
 fn an_overlapping_linear_redefinition_is_one_variable() {
     let mut function = Function::new();
     let first_value = function.constant(1);
-    let first = function.unary(ECodeSsaOpcode::WriteRegister, first_value, true);
+    let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
     let second_value = function.constant(2);
-    let second = function.unary(ECodeSsaOpcode::WriteRegister, second_value, true);
-    function.binary(ECodeSsaOpcode::Add, first, second);
+    let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
+    function.binary(ECodeOpcode::Add, first, second);
     let ir = function.finish_linear();
 
     let table = table(&ir);
@@ -340,10 +334,10 @@ fn an_overlapping_linear_redefinition_is_one_variable() {
 fn a_partial_update_stays_one_variable() {
     let mut function = Function::new();
     let initial = function.constant(0x1122_3344);
-    let whole = function.unary(ECodeSsaOpcode::WriteRegister, initial, true);
+    let whole = function.unary(ECodeOpcode::WriteRegister, initial, true);
     let byte = function.constant(0xff);
-    let inserted = function.binary(ECodeSsaOpcode::Insert, whole, byte);
-    let updated = function.unary(ECodeSsaOpcode::WriteRegister, inserted, true);
+    let inserted = function.binary(ECodeOpcode::Insert, whole, byte);
+    let updated = function.unary(ECodeOpcode::WriteRegister, inserted, true);
     let ir = function.finish();
 
     let table = table(&ir);
@@ -360,11 +354,11 @@ fn a_partial_update_stays_one_variable() {
 fn proven_disjoint_redefinitions_split_into_distinct_variables() {
     let mut function = Function::new();
     let first_value = function.constant(1);
-    let first = function.unary(ECodeSsaOpcode::WriteRegister, first_value, true);
-    function.unary(ECodeSsaOpcode::Copy, first, false);
+    let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
+    function.unary(ECodeOpcode::Copy, first, false);
     let second_value = function.constant(2);
-    let second = function.unary(ECodeSsaOpcode::WriteRegister, second_value, true);
-    function.unary(ECodeSsaOpcode::Copy, second, false);
+    let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
+    function.unary(ECodeOpcode::Copy, second, false);
     let ir = function.finish();
 
     let table = table(&ir);
@@ -386,14 +380,14 @@ fn proven_disjoint_redefinitions_split_into_distinct_variables() {
 fn shared_expression_ancestry_is_coalesced_once() {
     let mut function = Function::new();
     let initial = function.constant(1);
-    let initial = function.unary(ECodeSsaOpcode::WriteRegister, initial, true);
+    let initial = function.unary(ECodeOpcode::WriteRegister, initial, true);
     let mut shared = initial;
     for _ in 0..2048 {
-        shared = function.unary(ECodeSsaOpcode::Copy, shared, false);
+        shared = function.unary(ECodeOpcode::Copy, shared, false);
     }
     let mut definitions = Vec::new();
     for _ in 0..2048 {
-        definitions.push(function.unary(ECodeSsaOpcode::WriteRegister, shared, true));
+        definitions.push(function.unary(ECodeOpcode::WriteRegister, shared, true));
     }
     let ir = function.finish();
 

@@ -1,7 +1,7 @@
 //! Derived intermediate-language artefacts.
 //!
 //! An artefact is identified by an [`IlFormId`](common::IlFormId) such as
-//! `fugue.ecode.ssa`: a dialect namespace and a form within it. Forms are registered through
+//! `fugue.ecode.cfg`: a dialect namespace and a form within it. Forms are registered through
 //! the crate's extension mechanism, so an out-of-tree crate adds one without editing core.
 //!
 //! # An ephemeral external form
@@ -46,10 +46,10 @@
 //! `reader.lifted::<CallSummary>(function)` now type-checks and participates in the shared
 //! byte-bounded cache. Registering an [`IlProducer`](common::IlProducer) with
 //! [`IlFormRegistration::root`](registry::IlFormRegistration::root), or an
-//! [`IlConverter`](common::IlConverter) with
+//! [`IlTransformer`](common::IlTransformer) with
 //! [`IlFormRegistration::derived`](registry::IlFormRegistration::derived), additionally lets
 //! the engine generate it — `derived` takes its source form from `T::Input`, so a recipe
-//! cannot disagree with the type it converts.
+//! cannot disagree with the type it transforms.
 //!
 //! # Capabilities
 //!

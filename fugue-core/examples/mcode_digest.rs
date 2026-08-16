@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut values = 0usize;
         let mut variables = 0usize;
         for function in functions {
-            let Some(mcode) = reader.mcode_ssa(function)? else {
+            let Some(mcode) = reader.mcode(function)? else {
                 continue;
             };
             lifted += 1;

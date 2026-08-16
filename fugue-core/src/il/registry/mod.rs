@@ -7,14 +7,14 @@ use std::sync::{Arc, LazyLock};
 use rustc_hash::FxHashMap;
 use thiserror::Error as ThisError;
 
+use self::runtime::IlRecipe;
 use crate::extension::{self, Registration};
 use crate::il::common::{
-    DialectId, IlArtefact, IlConverter, IlError, IlFormId, IlProducer, IlSchemaVersion,
+    DialectId, IlArtefact, IlError, IlFormId, IlProducer, IlSchemaVersion, IlTransformer,
     PersistableIl,
 };
 use crate::il::ecode::PCodeToECode;
-use crate::il::ecode::ssa::ECodeToSsa;
-use crate::il::mcode::ECodeSsaToMCode;
+use crate::il::mcode::ECodeToMCode;
 use crate::il::pcode::PCodeCanonicaliser;
 use crate::il::storage::{IlPersist, IlStaging, IlStorageError};
 use crate::ir::FunctionId;
@@ -24,8 +24,7 @@ use crate::types::common::Revision;
 
 mod runtime;
 
-use runtime::IlRecipe;
-pub(crate) use runtime::{GeneratedArtefact, IlGenerationSession};
+pub(crate) use self::runtime::{GeneratedArtefact, IlGenerationSession};
 
 const PCODE_DIALECT: DialectId = DialectId::from_static("fugue.pcode");
 const ECODE_DIALECT: DialectId = DialectId::from_static("fugue.ecode");
@@ -170,8 +169,8 @@ impl IlFormRegistration {
         Self::new::<T::Output>(None, Some(IlRecipe::producer::<T>()))
     }
 
-    pub const fn derived<T: IlConverter>() -> Self {
-        Self::new::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::converter::<T>()))
+    pub const fn derived<T: IlTransformer>() -> Self {
+        Self::new::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::transformer::<T>()))
     }
 
     pub const fn persistable<T: PersistableIl>() -> Self {
@@ -185,11 +184,11 @@ impl IlFormRegistration {
         Self::new_persistable::<T::Output>(None, Some(IlRecipe::producer::<T>()))
     }
 
-    pub const fn persistable_derived<T: IlConverter>() -> Self
+    pub const fn persistable_derived<T: IlTransformer>() -> Self
     where
         T::Output: PersistableIl,
     {
-        Self::new_persistable::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::converter::<T>()))
+        Self::new_persistable::<T::Output>(Some(T::Input::FORM), Some(IlRecipe::transformer::<T>()))
     }
 
     const fn new<T: IlArtefact>(source: Option<IlFormId>, recipe: Option<IlRecipe>) -> Self {
@@ -268,6 +267,70 @@ impl Registration for IlFormRegistration {
 
 extension::collect!(IlFormRegistration);
 
+fn descendants(dependants: &BTreeMap<IlFormId, Vec<IlFormId>>, form: &IlFormId) -> Vec<IlFormId> {
+    let mut ordered = vec![form.clone()];
+    let mut index = 0;
+    while index < ordered.len() {
+        if let Some(children) = dependants.get(&ordered[index]) {
+            for child in children {
+                if !ordered.contains(child) {
+                    ordered.push(child.clone());
+                }
+            }
+        }
+        index += 1;
+    }
+    ordered
+}
+
+fn canonical_path(
+    forms: &BTreeMap<IlFormId, IlFormRegistration>,
+    form: &IlFormId,
+) -> Vec<IlFormId> {
+    let mut path = Vec::new();
+    let mut current = forms.get(form);
+    while let Some(registration) = current {
+        path.push(registration.form().clone());
+        current = registration.source().and_then(|source| forms.get(source));
+    }
+    path.reverse();
+    path
+}
+
+fn report_recipe_cycles(
+    forms: &BTreeMap<IlFormId, IlFormRegistration>,
+    duplicates: &BTreeSet<IlFormId>,
+    errors: &mut Vec<IlRegistryError>,
+) {
+    let mut settled = BTreeSet::<&IlFormId>::new();
+    let mut visited = BTreeMap::<&IlFormId, usize>::new();
+    let mut walk = Vec::<&IlFormId>::new();
+    for start in forms.keys().filter(|form| !duplicates.contains(*form)) {
+        walk.clear();
+        visited.clear();
+        let mut current = Some(start);
+        while let Some(form) = current {
+            if settled.contains(form) {
+                break;
+            }
+            if let Some(&entry) = visited.get(form) {
+                errors.extend(
+                    walk[entry..]
+                        .iter()
+                        .map(|form| IlRegistryError::RecipeCycle {
+                            form: (*form).clone(),
+                        }),
+                );
+                break;
+            }
+            visited.insert(form, walk.len());
+            walk.push(form);
+            current = forms.get(form).and_then(IlFormRegistration::source);
+        }
+        settled.extend(walk.iter().copied());
+    }
+}
+
 #[derive(Debug)]
 pub struct IlRegistryBuilder {
     dialects: BTreeSet<DialectId>,
@@ -289,8 +352,7 @@ impl IlRegistryBuilder {
         builder.insert_dialect(MCODE_DIALECT);
         builder.insert_form(IlFormRegistration::persistable_root::<PCodeCanonicaliser>());
         builder.insert_form(IlFormRegistration::persistable_derived::<PCodeToECode>());
-        builder.insert_form(IlFormRegistration::persistable_derived::<ECodeToSsa>());
-        builder.insert_form(IlFormRegistration::persistable_derived::<ECodeSsaToMCode>());
+        builder.insert_form(IlFormRegistration::persistable_derived::<ECodeToMCode>());
         builder
     }
 
@@ -346,7 +408,7 @@ impl IlRegistryBuilder {
         self.register(IlFormRegistration::root::<T>())
     }
 
-    pub fn with_converted_form<T: IlConverter>(self) -> Self {
+    pub fn with_transformed_form<T: IlTransformer>(self) -> Self {
         self.register(IlFormRegistration::derived::<T>())
     }
 
@@ -394,7 +456,7 @@ impl IlRegistryBuilder {
             });
         }
 
-        Self::report_recipe_cycles(&forms, &duplicates, &mut errors);
+        report_recipe_cycles(&forms, &duplicates, &mut errors);
 
         if !errors.is_empty() {
             return Err(IlRegistryErrors::new(errors));
@@ -415,11 +477,11 @@ impl IlRegistryBuilder {
         }
         let canonical_paths = forms
             .keys()
-            .map(|form| (form.clone(), Self::canonical_path(&forms, form)))
+            .map(|form| (form.clone(), canonical_path(&forms, form)))
             .collect();
         let descendants = forms
             .keys()
-            .map(|form| (form.clone(), Self::descendants(&dependants, form)))
+            .map(|form| (form.clone(), descendants(&dependants, form)))
             .collect();
 
         Ok(IlRegistry {
@@ -456,73 +518,6 @@ impl IlRegistryBuilder {
             self.errors
                 .push(IlRegistryError::DuplicateForm { form: form.clone() });
             self.duplicates.insert(form);
-        }
-    }
-
-    fn descendants(
-        dependants: &BTreeMap<IlFormId, Vec<IlFormId>>,
-        form: &IlFormId,
-    ) -> Vec<IlFormId> {
-        let mut ordered = vec![form.clone()];
-        let mut index = 0;
-        while index < ordered.len() {
-            if let Some(children) = dependants.get(&ordered[index]) {
-                for child in children {
-                    if !ordered.contains(child) {
-                        ordered.push(child.clone());
-                    }
-                }
-            }
-            index += 1;
-        }
-        ordered
-    }
-
-    fn canonical_path(
-        forms: &BTreeMap<IlFormId, IlFormRegistration>,
-        form: &IlFormId,
-    ) -> Vec<IlFormId> {
-        let mut path = Vec::new();
-        let mut current = forms.get(form);
-        while let Some(registration) = current {
-            path.push(registration.form().clone());
-            current = registration.source().and_then(|source| forms.get(source));
-        }
-        path.reverse();
-        path
-    }
-
-    fn report_recipe_cycles(
-        forms: &BTreeMap<IlFormId, IlFormRegistration>,
-        duplicates: &BTreeSet<IlFormId>,
-        errors: &mut Vec<IlRegistryError>,
-    ) {
-        let mut settled = BTreeSet::<&IlFormId>::new();
-        let mut visited = BTreeMap::<&IlFormId, usize>::new();
-        let mut walk = Vec::<&IlFormId>::new();
-        for start in forms.keys().filter(|form| !duplicates.contains(*form)) {
-            walk.clear();
-            visited.clear();
-            let mut current = Some(start);
-            while let Some(form) = current {
-                if settled.contains(form) {
-                    break;
-                }
-                if let Some(&entry) = visited.get(form) {
-                    errors.extend(
-                        walk[entry..]
-                            .iter()
-                            .map(|form| IlRegistryError::RecipeCycle {
-                                form: (*form).clone(),
-                            }),
-                    );
-                    break;
-                }
-                visited.insert(form, walk.len());
-                walk.push(form);
-                current = forms.get(form).and_then(IlFormRegistration::source);
-            }
-            settled.extend(walk.iter().copied());
         }
     }
 }

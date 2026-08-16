@@ -7,8 +7,7 @@ use quick_cache::{DefaultHashBuilder, OptionsBuilder, Weighter};
 
 use crate::il::common::{IlArtefact, IlError, IlFormId};
 use crate::il::ecode::ECodeIr;
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::mcode::ssa::MCodeSsaIr;
+use crate::il::mcode::MCodeIr;
 use crate::il::pcode::PCodeIr;
 use crate::ir::cfg::FlowTargets;
 use crate::ir::{Address, FunctionId};
@@ -76,9 +75,7 @@ impl QueryableIl for PCodeIr {}
 
 impl QueryableIl for ECodeIr {}
 
-impl QueryableIl for ECodeSsaIr {}
-
-impl QueryableIl for MCodeSsaIr {}
+impl QueryableIl for MCodeIr {}
 
 impl QueryCache {
     pub(crate) fn new(lifted_cache_bytes: usize) -> Self {

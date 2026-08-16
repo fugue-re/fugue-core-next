@@ -1,20 +1,31 @@
-pub mod ssa;
-
 mod builder;
-mod expression;
+mod def_use;
+mod domain;
 mod format;
-mod lift;
+mod intervals;
+mod ir;
+mod liveness;
+mod memory;
+mod opcode;
 mod operation;
-mod sink;
+mod optimise;
 mod transform;
-#[cfg(debug_assertions)]
+mod value;
 mod verify;
 
-pub(crate) use builder::ECodeBuilder;
-pub use builder::ECodeIr;
-pub use expression::{ECodeExpr, ECodeExprOpcode};
+pub use builder::{ECodeBuilder, ECodeEmitter};
+pub use def_use::{ECodeBlockArgInputs, ECodeUse, ECodeUses};
+pub use domain::ECodeDomain;
 pub use format::{ECodeIrDisplay, ECodeSourceDisplay};
-pub(crate) use lift::{ECodeLiftScratch, ECodeLifter};
-pub use operation::{ECodeStmt, ECodeStmtOpcode};
-pub(crate) use sink::ECodeSink;
+pub use intervals::ECodeStridedIntervals;
+pub use ir::ECodeIr;
+pub use liveness::ECodeLiveness;
+pub use memory::ECodeMemoryDomain;
+pub use opcode::ECodeOpcode;
+pub use operation::{ECodeOp, ECodeOpSpec};
+pub(crate) use optimise::ECodeOptimiser;
 pub use transform::PCodeToECode;
+pub use value::{ECodeBlockArg, ECodeValue};
+
+#[cfg(test)]
+pub(crate) mod test;

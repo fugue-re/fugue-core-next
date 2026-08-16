@@ -10,8 +10,7 @@ use crate::il::common::{
     IlArtefact, IlBlockId, IlDominance, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan, IlValueId,
     PersistableIl,
 };
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaLiveness, ECodeSsaUses};
-use crate::il::ecode::{ECodeBuilder, ECodeIr};
+use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeLiveness, ECodeUses};
 use crate::il::pcode::{PCodeBuilder, PCodeIr};
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteCodeBlock, IncompleteFunction,
@@ -29,7 +28,6 @@ use crate::types::Revision;
 struct PublishedIl {
     pcode: PCodeIr,
     ecode: ECodeIr,
-    ecode_ssa: ECodeSsaIr,
 }
 
 struct Fixture {
@@ -127,11 +125,7 @@ impl Fixture {
     }
 
     fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
-        let mut builder = PCodeBuilder::new(
-            self.project.read().language(),
-            IlMetadata::new(function, 0),
-            IlGraph::default(),
-        );
+        let mut builder = PCodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default());
 
         builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::EMPTY,
@@ -146,13 +140,9 @@ impl Fixture {
     }
 
     fn pcode_for(&self, function: FunctionId) -> PCodeIr {
-        PCodeBuilder::new(
-            self.project.read().language(),
-            IlMetadata::new(function, 0),
-            IlGraph::default(),
-        )
-        .build(&CancellationToken::default())
-        .expect("empty pcode ir should build")
+        PCodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
+            .build(&CancellationToken::default())
+            .expect("empty pcode ir should build")
     }
 
     fn ecode_for(function: FunctionId) -> ECodeIr {
@@ -161,29 +151,17 @@ impl Fixture {
             .expect("empty ecode ir should build")
     }
 
-    fn ecode_ssa_for(function: FunctionId) -> ECodeSsaIr {
-        ECodeSsaBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
-            .build(&CancellationToken::default())
-            .expect("empty ecode ssa ir should build")
-    }
-
     fn replace_lifted_chain(
         &mut self,
         function: FunctionId,
     ) -> Result<PublishedIl, Box<dyn Error>> {
         let mut pcode = self.pcode_for(function);
         let mut ecode = Self::ecode_for(function);
-        let mut ecode_ssa = Self::ecode_ssa_for(function);
 
         self.replace_lifted(&mut pcode)?;
         self.replace_lifted(&mut ecode)?;
-        self.replace_lifted(&mut ecode_ssa)?;
 
-        Ok(PublishedIl {
-            pcode,
-            ecode,
-            ecode_ssa,
-        })
+        Ok(PublishedIl { pcode, ecode })
     }
 }
 
@@ -272,13 +250,8 @@ fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn Error>> {
     let ecode = reader
         .ecode(function)?
         .expect("ecode should be visible to query reader");
-    let ecode_ssa = reader
-        .ecode_ssa(function)?
-        .expect("ecode ssa should be visible to query reader");
-
     assert_eq!(pcode.as_ref(), &materialised.pcode);
     assert_eq!(ecode.as_ref(), &materialised.ecode);
-    assert_eq!(ecode_ssa.as_ref(), &materialised.ecode_ssa);
     Ok(())
 }
 
@@ -291,12 +264,12 @@ fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn Error>> {
 
     let reader = fixture.reader();
     let ir = reader
-        .ecode_ssa(function)?
-        .expect("ssa ir should be available");
-    let uses = ir.analyse::<ECodeSsaUses>();
+        .ecode(function)?
+        .expect("ECode IR should be available");
+    let uses = ir.analyse::<ECodeUses>();
     let dominance = ir.analyse::<IlDominance>();
     let frontiers = dominance.frontiers(ir.graph().blocks(), ir.graph().successors());
-    let liveness = ir.analyse::<ECodeSsaLiveness>();
+    let liveness = ir.analyse::<ECodeLiveness>();
 
     let value = IlValueId::try_from_index(0)?;
     let block = IlBlockId::try_from_index(0)?;

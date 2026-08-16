@@ -40,13 +40,15 @@ fn repeated_replacement_retains_only_the_final_artefact() {
     assert_eq!(writes.len(), 1);
 
     let mut changes = Vec::new();
-    staging.for_each_change(|function, form, present| {
-        changes.push((function, form, present));
-    });
+    staging.for_each_change(|change| changes.push(change));
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].0, function);
-    assert_eq!(changes[0].1, PCodeIr::FORM);
-    assert!(changes[0].2);
+    assert_eq!(
+        changes[0],
+        IlStagedChange::Materialised {
+            function,
+            form: PCodeIr::FORM,
+        }
+    );
 }
 
 #[test]
@@ -71,7 +73,7 @@ fn removing_an_unpublished_replacement_elides_the_mutation() {
             .expect("staging should prepare")
             .is_empty()
     );
-    staging.for_each_change(|_, _, _| panic!("elided record must not publish a change"));
+    staging.for_each_change(|_| panic!("elided record must not publish a change"));
 }
 
 #[test]
@@ -165,6 +167,12 @@ fn deleting_a_function_sweeps_every_stored_form_without_decoding() {
     );
 
     let mut swept = Vec::new();
-    staging.for_each_change(|function, form, present| swept.push((function, form, present)));
-    assert_eq!(swept, vec![(function, PCodeIr::FORM, false)]);
+    staging.for_each_change(|change| swept.push(change));
+    assert_eq!(
+        swept,
+        vec![IlStagedChange::Removed {
+            function,
+            form: PCodeIr::FORM,
+        }]
+    );
 }

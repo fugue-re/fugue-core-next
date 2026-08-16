@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use crate::il::common::{FlagId, RegisterId, il_id};
 
 #[derive(

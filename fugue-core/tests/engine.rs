@@ -25,9 +25,7 @@ use fugue_core::engine::{
 use fugue_core::extension::{self, Registration};
 use fugue_core::il::common::{IlArtefact, IlError, RegisterId};
 use fugue_core::il::ecode::ECodeIr;
-use fugue_core::il::ecode::ssa::ECodeSsaIr;
-use fugue_core::il::mcode::MCodeVarKind;
-use fugue_core::il::mcode::ssa::{MCodeSsaIr, MCodeSsaOpcode};
+use fugue_core::il::mcode::{MCodeIr, MCodeOpcode, MCodeVarKind};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FlowKind,
@@ -1862,19 +1860,19 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
     );
     assert!(!ensured.records().iter().any(|record| matches!(
         record,
-        ChangeRecord::LiftedMaterialised { form, .. }
-            if form == &ECodeIr::FORM || form == &ECodeSsaIr::FORM
+        ChangeRecord::LiftedMaterialised { form, .. } if form == &ECodeIr::FORM
     )));
 
-    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
+    let ensured = engine.ensure_lifted(function, ECodeIr::FORM)?;
 
-    for form in [ECodeIr::FORM, ECodeSsaIr::FORM] {
-        assert!(
-            ensured
-                .records()
-                .contains(&ChangeRecord::LiftedMaterialised { function, form })
-        );
-    }
+    assert!(
+        ensured
+            .records()
+            .contains(&ChangeRecord::LiftedMaterialised {
+                function,
+                form: ECodeIr::FORM,
+            })
+    );
     assert!(
         !ensured
             .records()
@@ -1887,11 +1885,11 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
     let reader = engine.query_reader()?;
     assert!(reader.ecode(function)?.is_some());
     let ssa = reader
-        .ecode_ssa(function)?
-        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
+        .ecode(function)?
+        .ok_or_else(|| io::Error::other("ECode missing after ensure_lifted"))?;
     assert_eq!(ssa.metadata().function(), function);
 
-    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
+    let ensured = engine.ensure_lifted(function, ECodeIr::FORM)?;
     assert!(ensured.records().is_empty());
 
     Ok(())
@@ -1918,7 +1916,7 @@ fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
     cancellation.cancel();
 
     assert!(matches!(
-        engine.ensure_lifted(function, ECodeSsaIr::FORM),
+        engine.ensure_lifted(function, ECodeIr::FORM),
         Err(EngineError::Project(ProjectError::Il(IlError::Cancelled)))
     ));
 
@@ -1927,19 +1925,18 @@ fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
     let snapshot = reader.project()?;
     assert!(snapshot.pcode(function)?.is_none());
     assert!(snapshot.ecode(function)?.is_none());
-    assert!(snapshot.ecode_ssa(function)?.is_none());
     drop(snapshot);
 
     cancellation.clear();
-    let ensured = engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
-    for form in [PCodeIr::FORM, ECodeIr::FORM, ECodeSsaIr::FORM] {
+    let ensured = engine.ensure_lifted(function, ECodeIr::FORM)?;
+    for form in [PCodeIr::FORM, ECodeIr::FORM] {
         assert!(
             ensured
                 .records()
                 .contains(&ChangeRecord::LiftedMaterialised { function, form })
         );
     }
-    assert!(engine.query_reader()?.ecode_ssa(function)?.is_some());
+    assert!(engine.query_reader()?.ecode(function)?.is_some());
 
     Ok(())
 }
@@ -1964,9 +1961,8 @@ fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn Error>> 
     assert!(reader.pcode(function)?.is_some());
     assert!(reader.project()?.pcode(function)?.is_none());
 
-    assert!(reader.ecode_ssa(function)?.is_some());
+    assert!(reader.ecode(function)?.is_some());
     assert!(reader.project()?.ecode(function)?.is_none());
-    assert!(reader.project()?.ecode_ssa(function)?.is_none());
 
     Ok(())
 }
@@ -2004,15 +2000,15 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
     let mut saw_tail_call = false;
     for function in functions {
         let mcode = reader
-            .lifted::<MCodeSsaIr>(function)?
-            .ok_or_else(|| io::Error::other("MCode SSA missing after generation"))?;
+            .lifted::<MCodeIr>(function)?
+            .ok_or_else(|| io::Error::other("MCode missing after generation"))?;
         assert_eq!(mcode.metadata().function(), function);
         if function == restored_function {
             saw_rbp_restore =
                 mcode
                     .operations_for_source(Address::from(0x10bdau64))
                     .any(|(_, operation)| {
-                        operation.opcode() == MCodeSsaOpcode::SetVar
+                        operation.opcode() == MCodeOpcode::SetVar
                             && operation
                                 .variable()
                                 .and_then(|variable| mcode.variable(variable))
@@ -2024,24 +2020,24 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
         for operation in mcode.operations() {
             saw_address_of |= matches!(
                 operation.opcode(),
-                MCodeSsaOpcode::AddressOf | MCodeSsaOpcode::AddressOfField
+                MCodeOpcode::AddressOf | MCodeOpcode::AddressOfField
             );
             saw_aliased_read |= matches!(
                 operation.opcode(),
-                MCodeSsaOpcode::VarAliased | MCodeSsaOpcode::VarAliasedField
+                MCodeOpcode::VarAliased | MCodeOpcode::VarAliasedField
             );
             saw_aliased_write |= matches!(
                 operation.opcode(),
-                MCodeSsaOpcode::SetVarAliased | MCodeSsaOpcode::SetVarAliasedField
+                MCodeOpcode::SetVarAliased | MCodeOpcode::SetVarAliasedField
             );
-            saw_partial_write |= operation.opcode() == MCodeSsaOpcode::SetVarField;
+            saw_partial_write |= operation.opcode() == MCodeOpcode::SetVarField;
             saw_tail_call |= matches!(
                 operation.opcode(),
-                MCodeSsaOpcode::TailCall | MCodeSsaOpcode::TailCallIndirect
+                MCodeOpcode::TailCall | MCodeOpcode::TailCallIndirect
             );
             if matches!(
                 operation.opcode(),
-                MCodeSsaOpcode::Call | MCodeSsaOpcode::CallIndirect
+                MCodeOpcode::Call | MCodeOpcode::CallIndirect
             ) {
                 saw_call = true;
                 let memory = mcode
@@ -2786,16 +2782,13 @@ fn test_drop_reopen_reads_explicitly_materialised_lifted() -> Result<(), Box<dyn
         .function_id_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
-    engine.ensure_lifted(function, ECodeSsaIr::FORM)?;
+    engine.ensure_lifted(function, ECodeIr::FORM)?;
     let pcode = reader
         .pcode(function)?
         .ok_or_else(|| io::Error::other("PCode IR missing after ensure_lifted"))?;
     let ecode = reader
         .ecode(function)?
         .ok_or_else(|| io::Error::other("LIR missing after ensure_lifted"))?;
-    let ssa = reader
-        .ecode_ssa(function)?
-        .ok_or_else(|| io::Error::other("LIR SSA missing after ensure_lifted"))?;
     let revision = reader.revision()?;
 
     drop(reader);
@@ -2816,7 +2809,6 @@ fn test_drop_reopen_reads_explicitly_materialised_lifted() -> Result<(), Box<dyn
     let snapshot = reader.project()?;
     assert_eq!(snapshot.pcode(function)?.as_ref(), Some(&*pcode));
     assert_eq!(snapshot.ecode(function)?.as_ref(), Some(&*ecode));
-    assert_eq!(snapshot.ecode_ssa(function)?.as_ref(), Some(&*ssa));
 
     Ok(())
 }
@@ -2846,14 +2838,13 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     let pcode = reader
         .pcode(function)?
         .ok_or_else(|| io::Error::other("generated PCode missing"))?;
-    let ecode_ssa = reader
-        .ecode_ssa(function)?
-        .ok_or_else(|| io::Error::other("generated ECode SSA missing"))?;
+    let ecode = reader
+        .ecode(function)?
+        .ok_or_else(|| io::Error::other("generated ECode missing"))?;
     let revision = reader.revision()?;
     let snapshot = reader.project()?;
     assert!(snapshot.pcode(function)?.is_none());
     assert!(snapshot.ecode(function)?.is_none());
-    assert!(snapshot.ecode_ssa(function)?.is_none());
     drop(snapshot);
     drop(reader);
     drop(engine);
@@ -2865,19 +2856,14 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
     assert_eq!(reopened.revision(), revision);
     assert!(reopened.pcode(function)?.is_none());
     assert!(reopened.ecode(function)?.is_none());
-    assert!(reopened.ecode_ssa(function)?.is_none());
 
     let engine = AnalysisEngine::new(reopened)?;
     let reader = engine.query_reader()?;
     assert_eq!(reader.pcode(function)?.as_deref(), Some(pcode.as_ref()));
-    assert_eq!(
-        reader.ecode_ssa(function)?.as_deref(),
-        Some(ecode_ssa.as_ref())
-    );
+    assert_eq!(reader.ecode(function)?.as_deref(), Some(ecode.as_ref()));
     let snapshot = reader.project()?;
     assert!(snapshot.pcode(function)?.is_none());
     assert!(snapshot.ecode(function)?.is_none());
-    assert!(snapshot.ecode_ssa(function)?.is_none());
 
     Ok(())
 }
@@ -3938,7 +3924,6 @@ fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
 
     assert!(reader.pcode(function_id)?.is_some());
     assert!(reader.ecode(function_id)?.is_some());
-    assert!(reader.ecode_ssa(function_id)?.is_some());
 
     Ok(())
 }

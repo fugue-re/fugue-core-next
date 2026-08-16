@@ -65,21 +65,21 @@ fn main() -> Result<()> {
         .get_matches();
 
     match matches.subcommand() {
-        Some(("serve", arguments)) => serve(arguments),
-        Some(("export-bindings", arguments)) => export_bindings(arguments),
+        Some(("serve", args)) => serve(args),
+        Some(("export-bindings", args)) => export_bindings(args),
         _ => unreachable!("subcommand is required"),
     }
 }
 
-fn serve(arguments: &ArgMatches) -> Result<()> {
-    let address = arguments
+fn serve(args: &ArgMatches) -> Result<()> {
+    let address = args
         .get_one::<String>("address")
         .expect("address has a default")
         .parse::<SocketAddr>()?;
-    let persist = arguments.get_flag("persist");
+    let persist = args.get_flag("persist");
 
     let state = AppState::new();
-    if let Some(input) = arguments.get_one::<PathBuf>("input") {
+    if let Some(input) = args.get_one::<PathBuf>("input") {
         state.set(Session::open(input, persist, state.change_sender())?);
     }
 
@@ -87,10 +87,8 @@ fn serve(arguments: &ArgMatches) -> Result<()> {
     runtime.block_on(server::serve(state, address))
 }
 
-fn export_bindings(arguments: &ArgMatches) -> Result<()> {
-    let out = arguments
-        .get_one::<PathBuf>("out")
-        .expect("out has a default");
+fn export_bindings(args: &ArgMatches) -> Result<()> {
+    let out = args.get_one::<PathBuf>("out").expect("out has a default");
     std::fs::create_dir_all(out)?;
 
     MetaResponse::export_all_to(out)?;

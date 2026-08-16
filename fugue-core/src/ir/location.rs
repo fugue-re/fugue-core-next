@@ -17,6 +17,7 @@ use crate::lifter::{Language, Varnode};
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct Location {
     address: Address,
     position: u16,

@@ -1,8 +1,8 @@
 use fugue_lifter::runtime::convention::Convention;
 
-use crate::il::common::{IlArtefact, IlError, RegisterId};
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::pcode::RegisterBank;
+use crate::il::common::{IlArtefact, IlError, RegisterBank, RegisterId};
+use crate::il::ecode::ECodeIr;
+use crate::il::mcode::MCodeStorageLocation;
 use crate::lifter::Varnode;
 
 mod abi;
@@ -10,46 +10,47 @@ mod aliases;
 mod stack;
 mod variables;
 
-pub use abi::MCodeStorageLocation;
 pub(crate) use abi::{
-    MCodeAbiModel, MCodeCallArgument, MCodeCallFacts, MCodeCallingConvention, MCodeFunctionFacts,
-    MCodeStorageFact,
+    MCodeAbiModel, MCodeCallArg, MCodeCallOutputComponent, MCodeCallingConvention,
+    MCodeExitRequirement,
 };
+pub use abi::{MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 pub(crate) use aliases::{MCodeAliasOverride, MCodeAliasOverrides, MCodeAliasSet};
 pub(crate) use stack::{MCodeStackModel, MCodeStackObjectId};
 pub(crate) use variables::MCodeVariableModel;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MCodeRecoveryConfig<'a> {
     stack_pointer: RegisterId,
     calling_convention: MCodeCallingConvention,
-    function: MCodeFunctionFacts,
-    calls: Option<&'a MCodeCallFacts>,
+    return_live_outputs: Vec<MCodeStorageFact>,
+    tail_call_live_outputs: Vec<MCodeStorageFact>,
+    facts: Option<&'a MCodeFunctionFacts>,
     alias_overrides: Option<&'a MCodeAliasOverrides>,
 }
 
 impl<'a> MCodeRecoveryConfig<'a> {
     pub(crate) fn from_convention(
-        bank: &RegisterBank,
+        registers: &RegisterBank,
         convention: &Convention,
         preserved: Vec<RegisterId>,
-        address_bits: u32,
     ) -> Result<Self, IlError> {
         let pointer = convention.stack_pointer();
-        let stack_pointer = bank
+        let stack_pointer = registers
             .root_id(pointer.offset(), pointer.size())
             .ok_or_else(|| {
-                IlError::missing_component(ECodeSsaIr::FORM, "stack pointer register root")
+                IlError::missing_component(ECodeIr::FORM, "stack pointer register root")
             })?;
         let calling_convention = match convention.default_prototype() {
             Some(prototype) => MCodeCallingConvention::from_prototype(
                 prototype,
-                address_bits,
+                registers.language().address_bits(),
                 |varnode: &Varnode| {
-                    bank.root_id(varnode.offset(), varnode.size())
+                    registers
+                        .root_id(varnode.offset(), varnode.size())
                         .ok_or_else(|| {
                             IlError::missing_component(
-                                ECodeSsaIr::FORM,
+                                ECodeIr::FORM,
                                 "calling-convention register root",
                             )
                         })
@@ -57,24 +58,32 @@ impl<'a> MCodeRecoveryConfig<'a> {
             )?,
             None => MCodeCallingConvention::default(),
         };
-        let mut function = MCodeFunctionFacts::new();
-        for register in preserved {
-            let location = MCodeStorageLocation::Register(register);
-            function.add_return_live_output(location);
-            function.add_tail_call_live_output(location);
+        let mut return_live_outputs = Vec::new();
+        let mut tail_call_live_outputs = Vec::new();
+        for register in preserved.into_iter().chain([stack_pointer]) {
+            let width = registers.root_bits(register).ok_or_else(|| {
+                IlError::missing_component(ECodeIr::FORM, "live-output register width")
+            })?;
+            let fact = MCodeStorageFact::new(MCodeStorageLocation::Register(register), width);
+            return_live_outputs.push(fact);
+            tail_call_live_outputs.push(fact);
         }
-        let stack_pointer_location = MCodeStorageLocation::Register(stack_pointer);
-        function.add_return_live_output(stack_pointer_location);
-        function.add_tail_call_live_output(stack_pointer_location);
         for output in calling_convention.outputs() {
-            function.add_return_live_output(output.location());
+            if let Some(fact) = output.resolve_fact(registers)? {
+                return_live_outputs.push(fact);
+            }
         }
+        return_live_outputs.sort_unstable();
+        return_live_outputs.dedup();
+        tail_call_live_outputs.sort_unstable();
+        tail_call_live_outputs.dedup();
 
         Ok(Self {
             stack_pointer,
             calling_convention,
-            function,
-            calls: None,
+            return_live_outputs,
+            tail_call_live_outputs,
+            facts: None,
             alias_overrides: None,
         })
     }
@@ -89,27 +98,32 @@ impl<'a> MCodeRecoveryConfig<'a> {
         MCodeRecoveryConfig {
             stack_pointer: self.stack_pointer,
             calling_convention: self.calling_convention,
-            function: self.function,
-            calls: self.calls,
+            return_live_outputs: self.return_live_outputs,
+            tail_call_live_outputs: self.tail_call_live_outputs,
+            facts: self.facts,
             alias_overrides: Some(alias_overrides),
         }
     }
 
-    pub(crate) fn with_call_facts<'b>(self, calls: &'b MCodeCallFacts) -> MCodeRecoveryConfig<'b>
+    pub(crate) fn with_call_facts<'b>(
+        self,
+        facts: &'b MCodeFunctionFacts,
+    ) -> MCodeRecoveryConfig<'b>
     where
         'a: 'b,
     {
         MCodeRecoveryConfig {
             stack_pointer: self.stack_pointer,
             calling_convention: self.calling_convention,
-            function: self.function,
-            calls: Some(calls),
+            return_live_outputs: self.return_live_outputs,
+            tail_call_live_outputs: self.tail_call_live_outputs,
+            facts: Some(facts),
             alias_overrides: self.alias_overrides,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MCodeRecovery {
     stack: MCodeStackModel,
     variables: MCodeVariableModel,
@@ -119,21 +133,34 @@ pub(crate) struct MCodeRecovery {
 
 impl MCodeRecovery {
     pub(crate) fn new(
-        ir: &ECodeSsaIr,
+        ir: &ECodeIr,
         config: &MCodeRecoveryConfig<'_>,
         registers: &RegisterBank,
     ) -> Result<Self, IlError> {
-        let empty_calls = MCodeCallFacts::new();
-        let calls = config.calls.unwrap_or(&empty_calls);
-        let stack = MCodeStackModel::new(ir, config.stack_pointer, calls.stack_storage());
+        if let Some(facts) = config.facts {
+            facts.validate(ir, registers)?;
+        }
+        let stack = MCodeStackModel::new(
+            ir,
+            config.stack_pointer,
+            config
+                .facts
+                .into_iter()
+                .flat_map(MCodeFunctionFacts::stack_storage),
+        );
+        if let Some(facts) = config.facts {
+            facts.validate_stack(&stack)?;
+        }
         let variables = MCodeVariableModel::new(ir, &stack);
         let aliases = MCodeAliasSet::new(&stack, &variables, config.alias_overrides);
         let abi = MCodeAbiModel::new(
             ir,
             &config.calling_convention,
-            &config.function,
-            calls,
+            &config.return_live_outputs,
+            &config.tail_call_live_outputs,
+            config.facts,
             registers,
+            &stack,
         )?;
 
         Ok(Self {
@@ -168,10 +195,9 @@ mod test {
     use super::abi::MCodeCallingConventionEntry;
     use super::*;
     use crate::analysis::control::CancellationToken;
-    use crate::il::common::{
-        IlBlock, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata, IlOpId,
-    };
-    use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaDomain, ECodeSsaOp, ECodeSsaOpcode};
+    use crate::il::common::{IlBlock, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata};
+    use crate::il::ecode::test::emit_value;
+    use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeOpSpec, ECodeOpcode};
     use crate::ir::{Address, FunctionId};
     use crate::lifter::resolve_language;
 
@@ -184,7 +210,7 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let bank = RegisterBank::new(language).unwrap();
         let convention = language.convention("gcc").expect("gcc convention");
-        MCodeRecoveryConfig::from_convention(&bank, convention, Vec::new(), language.address_bits())
+        MCodeRecoveryConfig::from_convention(&bank, convention, Vec::new())
             .expect("resolvable convention")
     }
 
@@ -193,8 +219,7 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let bank = RegisterBank::new(language).unwrap();
         let convention = Convention::new("test", Varnode::new(0, RSP, 8));
-        let config =
-            MCodeRecoveryConfig::from_convention(&bank, &convention, Vec::new(), 64).unwrap();
+        let config = MCodeRecoveryConfig::from_convention(&bank, &convention, Vec::new()).unwrap();
 
         assert_eq!(config.stack_pointer, RegisterId::new(RSP));
         assert!(config.calling_convention.inputs().is_empty());
@@ -239,37 +264,31 @@ mod test {
 
     #[test]
     fn recovery_bundles_all_models() {
-        let mut builder = ECodeSsaBuilder::new(
+        let mut builder = ECodeBuilder::new(
             IlMetadata::new(FunctionId::default(), 0),
             IlGraph::default(),
         );
         let mut operations = 0;
-        let mut define = |builder: &mut ECodeSsaBuilder, root: u64| {
-            let (id, results) = builder.push_result_value(64).unwrap();
+        let mut define = |builder: &mut ECodeBuilder, root: u64| {
+            let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Constant, 64), []).unwrap();
             builder
-                .push_operation(
-                    ECodeSsaOp::new(ECodeSsaOpcode::Constant, results, IlIndexRange::EMPTY, 64)
-                        .with_immediate(0),
-                )
+                .emitter()
+                .set_value_domain(id, ECodeDomain::Register(RegisterId::new(root)))
                 .unwrap();
-            builder.set_value_domain(id, ECodeSsaDomain::Register(RegisterId::new(root)));
             operations += 1;
             id
         };
 
         let rdi = define(&mut builder, RDI);
         let rsi = define(&mut builder, RSI);
-        let site = IlOpId::try_from_index(operations).unwrap();
-        builder
-            .push_operation(
-                ECodeSsaOp::new(
-                    ECodeSsaOpcode::Call,
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    0,
-                )
-                .with_address(Address::from(0x1000u64)),
+        let site = builder
+            .emitter()
+            .emit(
+                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+                [],
+                0,
             )
+            .map(|(operation, _)| operation)
             .unwrap();
         operations += 1;
 
@@ -282,7 +301,9 @@ mod test {
             Vec::new(),
             Vec::new(),
         ));
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder
+            .build_unchecked(&CancellationToken::default())
+            .unwrap();
 
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
         let recovery = MCodeRecovery::new(&ir, &x86_64_config(), &registers).unwrap();
@@ -292,14 +313,17 @@ mod test {
         assert!(recovery.variables().variable_for_value(rdi).is_some());
         let call = recovery.abi().call(site).expect("a recovered call");
         assert_eq!(
-            call.arguments(),
-            &[MCodeCallArgument::Value(rdi), MCodeCallArgument::Value(rsi)]
+            call.args(),
+            &[MCodeCallArg::Value(rdi), MCodeCallArg::Value(rsi)]
         );
         assert_eq!(
             call.outputs()
                 .iter()
                 .flat_map(|output| output.components())
-                .filter_map(|component| component.register_id())
+                .filter_map(|component| match component {
+                    MCodeCallOutputComponent::Register { register, .. } => Some(*register),
+                    MCodeCallOutputComponent::Stack { .. } => None,
+                })
                 .collect::<Vec<_>>(),
             &[RegisterId::new(RAX), RegisterId::new(0x10)]
         );

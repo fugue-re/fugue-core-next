@@ -24,16 +24,6 @@ impl<'a> PCodeIrDisplay<'a> {
     }
 }
 
-impl PCodeIr {
-    pub const fn display(&self) -> PCodeIrDisplay<'_> {
-        PCodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
-        PCodeSourceDisplay::new(self, address)
-    }
-}
-
 impl fmt::Display for PCodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, operation) in self.ir.operations().iter().enumerate() {
@@ -86,7 +76,7 @@ struct PCodeLocationDisplay<'a> {
 }
 
 impl<'a> PCodeLocationDisplay<'a> {
-    pub(crate) const fn new(id: PCodeLocationId, location: &'a PCodeLocation) -> Self {
+    const fn new(id: PCodeLocationId, location: &'a PCodeLocation) -> Self {
         Self { id, location }
     }
 }
@@ -122,7 +112,7 @@ struct PCodeOpDisplay<'a> {
 }
 
 impl<'a> PCodeOpDisplay<'a> {
-    pub(crate) const fn new(ir: &'a PCodeIr, index: usize, operation: &'a PCodeOp) -> Self {
+    const fn new(ir: &'a PCodeIr, index: usize, operation: &'a PCodeOp) -> Self {
         Self {
             ir,
             index,
@@ -167,8 +157,8 @@ impl<'a> PCodeOpDisplay<'a> {
         }
 
         if matches!(self.operation.opcode(), PCodeOpcode::UserOp) {
-            let user_op = self.operation.immediate();
-            write!(f, " @user_op<{user_op}>")?;
+            let user_operation = self.operation.immediate();
+            write!(f, " @user_op<{user_operation}>")?;
         }
 
         Ok(())
@@ -176,10 +166,8 @@ impl<'a> PCodeOpDisplay<'a> {
 
     fn write_target(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.operation.opcode().requires_address() {
-            let target = self
-                .ir
-                .target(self.operation.immediate())
-                .ok_or(fmt::Error)?;
+            let id = self.operation.target().ok_or(fmt::Error)?;
+            let target = self.ir.target(id).ok_or(fmt::Error)?;
 
             if target.position() == 0 {
                 write!(f, " -> {}", target.address())?;
@@ -216,56 +204,49 @@ mod test {
     use super::*;
     use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
-    use crate::il::pcode::{LifterSpaceHandle, PCodeBuilder, PCodeLocationProperties};
+    use crate::il::pcode::{
+        PCodeBuilder, PCodeLifterSpaceHandle, PCodeLocationProperties, PCodeOpSpec,
+    };
     use crate::ir::FunctionId;
-    use crate::lifter::{Language, resolve_language};
     use crate::storage::segments::space::AddressSpaceId;
-
-    fn language() -> &'static Language {
-        resolve_language("x86:LE:64").expect("test language should resolve")
-    }
 
     #[test]
     fn pcode_ir_display_is_deterministic() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
+        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
         let input = builder
-            .push_location(PCodeLocation::new(
-                LifterSpaceHandle::new(0),
+            .emitter()
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(0),
                 0x11,
                 8,
                 PCodeLocationProperties::CONSTANT,
             ))
             .unwrap();
         let output = builder
-            .push_location(PCodeLocation::new(
-                LifterSpaceHandle::new(1),
+            .emitter()
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(1),
                 0x20,
                 8,
                 PCodeLocationProperties::REGISTER,
             ))
             .unwrap();
-        let operands = builder.push_operands([input]).unwrap();
-
-        builder.push_operation(PCodeOp::new(
-            PCodeOpcode::Copy,
-            Some(output),
-            operands,
-            0,
-            None,
-        ));
+        builder
+            .emitter()
+            .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
+            .unwrap();
 
         let target = Address::new(AddressSpaceId::new(2), 0x2000u64);
-        let branch_target = builder.push_target(target.into()).unwrap();
-        let branch_operands = builder.push_operands([input]).unwrap();
-
-        builder.push_operation(PCodeOp::new(
-            PCodeOpcode::Branch,
-            None,
-            branch_operands,
-            branch_target,
-            None,
-        ));
+        let branch_target = builder.emitter().emit_target(target.into()).unwrap();
+        builder
+            .emitter()
+            .emit(
+                PCodeOpSpec::new(PCodeOpcode::Branch).with_target(branch_target),
+                None,
+                [input],
+            )
+            .unwrap();
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
@@ -281,7 +262,7 @@ mod test {
         let first = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let second = Address::new(AddressSpaceId::new(1), 0x1004u64);
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = PCodeBuilder::new(language(), metadata, IlGraph::default());
+        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
 
         builder.set_source_spans(vec![
             IlSourceSpan::new(IlIndexRange::new(0, 1).unwrap(), first, 0, 1),
@@ -289,38 +270,35 @@ mod test {
         ]);
 
         let input = builder
-            .push_location(PCodeLocation::new(
-                LifterSpaceHandle::new(0),
+            .emitter()
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(0),
                 0x11,
                 8,
                 PCodeLocationProperties::CONSTANT,
             ))
             .unwrap();
         let output = builder
-            .push_location(PCodeLocation::new(
-                LifterSpaceHandle::new(1),
+            .emitter()
+            .intern_location(PCodeLocation::new(
+                PCodeLifterSpaceHandle::new(1),
                 0x20,
                 8,
                 PCodeLocationProperties::REGISTER,
             ))
             .unwrap();
-        let first_operands = builder.push_operands([input]).unwrap();
-        let second_operands = builder.push_operands([output]).unwrap();
-
-        builder.push_operation(PCodeOp::new(
-            PCodeOpcode::Copy,
-            Some(output),
-            first_operands,
-            0,
-            None,
-        ));
-        builder.push_operation(PCodeOp::new(
-            PCodeOpcode::IntNeg,
-            Some(output),
-            second_operands,
-            0,
-            None,
-        ));
+        builder
+            .emitter()
+            .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
+            .unwrap();
+        builder
+            .emitter()
+            .emit(
+                PCodeOpSpec::new(PCodeOpcode::IntNeg),
+                Some(output),
+                [output],
+            )
+            .unwrap();
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
         let operations = ir.operations_for_source(second).collect::<Vec<_>>();

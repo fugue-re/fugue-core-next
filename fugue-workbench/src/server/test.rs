@@ -19,9 +19,9 @@ fn mcode_endpoint_renders_a_real_function() -> Result<(), Box<dyn std::error::Er
     engine.analyse()?;
 
     let reader = engine.query_reader()?;
-    let response = Snapshot::new(&reader).il(entry, MCodeSsaIr::FORM.as_str())?;
+    let response = Snapshot::new(&reader).il(entry, MCodeIr::FORM.as_str())?;
 
-    assert_eq!(response.form, MCodeSsaIr::FORM.as_str());
+    assert_eq!(response.form, MCodeIr::FORM.as_str());
     assert!(!response.lines.is_empty());
 
     Ok(())

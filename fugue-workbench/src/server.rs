@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::ops::Deref;
+use std::str;
 use std::sync::Arc;
 
 use anyhow::Result as AnyResult;
@@ -13,14 +14,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use fugue_core::il::common::{IlArtefact, IlBlockId, IlFormId, IlIndexRange, IlSourceSpan};
 use fugue_core::il::ecode::ECodeIr;
-use fugue_core::il::ecode::ssa::ECodeSsaIr;
-use fugue_core::il::mcode::ssa::MCodeSsaIr;
+use fugue_core::il::mcode::MCodeIr;
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::il::registry::IlRegistry;
 use fugue_core::ir::Address;
 use fugue_core::lifter::Lifter;
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::SegmentStorage;
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -77,7 +78,7 @@ impl AppState {
 
 struct CurrentSession(Arc<Session>);
 
-impl std::ops::Deref for CurrentSession {
+impl Deref for CurrentSession {
     type Target = Session;
 
     fn deref(&self) -> &Session {
@@ -99,8 +100,7 @@ impl FromRequestParts<AppState> for CurrentSession {
 fn renderable_form(form: &IlFormId) -> bool {
     *form == <PCodeIr as IlArtefact>::FORM
         || *form == <ECodeIr as IlArtefact>::FORM
-        || *form == <ECodeSsaIr as IlArtefact>::FORM
-        || *form == <MCodeSsaIr as IlArtefact>::FORM
+        || *form == <MCodeIr as IlArtefact>::FORM
 }
 
 struct Snapshot<'a> {
@@ -119,12 +119,13 @@ impl<'a> Snapshot<'a> {
             language: project.language().id().to_owned(),
             entry_point: project.entry_point().map(bindings::Address::from),
             revision: project.revision().value(),
-            default_space: DEFAULT_SPACE.index() as u32,
+            default_space: u32::try_from(DEFAULT_SPACE.index())
+                .expect("default address-space identifier is representable"),
         })
     }
 
     fn functions(&self) -> Result<Vec<FunctionRow>, WorkbenchError> {
-        let mut names = HashMap::new();
+        let mut names = FxHashMap::default();
         for entry in self.reader.symbols() {
             let entry = entry?;
             names
@@ -247,14 +248,9 @@ impl<'a> Snapshot<'a> {
                 Some(ir) => renderer.ecode(&ir),
                 None => Vec::new(),
             }
-        } else if form_id == <ECodeSsaIr as IlArtefact>::FORM {
-            match self.reader.ecode_ssa(function)? {
-                Some(ir) => renderer.ssa(&ir),
-                None => Vec::new(),
-            }
-        } else if form_id == <MCodeSsaIr as IlArtefact>::FORM {
-            match self.reader.mcode_ssa(function)? {
-                Some(ir) => renderer.mcode_ssa(&ir),
+        } else if form_id == <MCodeIr as IlArtefact>::FORM {
+            match self.reader.mcode(function)? {
+                Some(ir) => renderer.mcode(&ir),
                 None => Vec::new(),
             }
         } else {
@@ -304,7 +300,7 @@ impl<'a> Snapshot<'a> {
                 .collect();
 
             blocks.push(CfgBlock {
-                id: index as u32,
+                id: id.value(),
                 entry: bindings::Address::from(block_entry),
                 entry_block: block.is_entry(),
                 lines,
@@ -314,8 +310,8 @@ impl<'a> Snapshot<'a> {
             let kinds = graph.successor_kinds_for(id);
             for (successor, kind) in successors.iter().zip(kinds) {
                 edges.push(CfgEdge {
-                    from: index as u32,
-                    to: successor.index() as u32,
+                    from: id.value(),
+                    to: successor.value(),
                     taken: kind.is_taken(),
                     fall_through: kind.is_fall_through(),
                     computed: kind.is_computed(),
@@ -527,7 +523,7 @@ async fn patch_bytes(
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     for pair in hex.as_bytes().chunks(2) {
-        let digits = std::str::from_utf8(pair).expect("hex digits are ascii");
+        let digits = str::from_utf8(pair).expect("hex digits are ascii");
         bytes.push(u8::from_str_radix(digits, 16).expect("validated hex digits"));
     }
     let revision = session.patch_bytes(address, bytes).await.map_err(|error| {

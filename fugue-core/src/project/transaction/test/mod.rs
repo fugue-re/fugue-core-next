@@ -9,12 +9,13 @@ use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlError, IlGraph, IlIndexRange,
     IlMetadata, IlSourceSpan, IlValueId,
 };
-use crate::il::ecode::ssa::{ECodeSsaBuilder, ECodeSsaIr, ECodeSsaLiveness, ECodeSsaUses};
-use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeStmtOpcode, PCodeToECode};
-use crate::il::mcode::ssa::{MCodeSsaBuilder, MCodeSsaIr};
+use crate::il::ecode::{
+    ECodeBuilder, ECodeIr, ECodeLiveness, ECodeOpcode, ECodeUses, PCodeToECode,
+};
+use crate::il::mcode::{MCodeBuilder, MCodeIr};
 use crate::il::pcode::{
-    LifterSpaceHandle, PCodeBuilder, PCodeIr, PCodeLocation, PCodeLocationProperties, PCodeOp,
-    PCodeOpcode,
+    PCodeBuilder, PCodeIr, PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationProperties,
+    PCodeOpSpec, PCodeOpcode,
 };
 use crate::ir::{
     AddressRange, AddressRangeSet, AddressWithContext, IncompleteCodeBlock, IncompleteFunction,
@@ -40,9 +41,8 @@ fn pcode_reference_ir(
     target_offset: u64,
     opcode: PCodeOpcode,
 ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
-    let language = resolve_language("x86:LE:64")?;
     let metadata = IlMetadata::new(function, 0);
-    let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
+    let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
 
     builder.set_source_spans(vec![IlSourceSpan::new(
         IlIndexRange::new(0, 1)?,
@@ -51,31 +51,35 @@ fn pcode_reference_ir(
         1,
     )]);
 
-    let pointer = builder.push_location(PCodeLocation::new(
-        LifterSpaceHandle::new(0),
+    let pointer = builder.emitter().intern_location(PCodeLocation::new(
+        PCodeLifterSpaceHandle::new(0),
         target_offset,
         8,
         PCodeLocationProperties::CONSTANT,
     ))?;
-    let value = builder.push_location(PCodeLocation::new(
-        LifterSpaceHandle::new(1),
+    let value = builder.emitter().intern_location(PCodeLocation::new(
+        PCodeLifterSpaceHandle::new(1),
         0,
         8,
         PCodeLocationProperties::REGISTER,
     ))?;
-    let operands = match opcode {
-        PCodeOpcode::Store => builder.push_operands([pointer, value])?,
-        _ => builder.push_operands([pointer])?,
-    };
     let output = opcode.requires_output().then_some(value);
-
-    builder.push_operation(PCodeOp::new(
-        opcode,
-        output,
-        operands,
-        0,
-        Some(target_space),
-    ));
+    match opcode {
+        PCodeOpcode::Store => {
+            builder.emitter().emit(
+                PCodeOpSpec::new(opcode).with_address_space(target_space),
+                output,
+                [pointer, value],
+            )?;
+        }
+        _ => {
+            builder.emitter().emit(
+                PCodeOpSpec::new(opcode).with_address_space(target_space),
+                output,
+                [pointer],
+            )?;
+        }
+    }
 
     Ok(builder.build(&CancellationToken::default())?)
 }
@@ -84,9 +88,8 @@ fn pcode_copy_ir(
     function: FunctionId,
     source: Address,
 ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
-    let language = resolve_language("x86:LE:64")?;
     let metadata = IlMetadata::new(function, 0);
-    let mut builder = PCodeBuilder::new(language, metadata, IlGraph::default());
+    let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
 
     builder.set_source_spans(vec![IlSourceSpan::new(
         IlIndexRange::new(0, 1)?,
@@ -95,21 +98,17 @@ fn pcode_copy_ir(
         1,
     )]);
 
-    let location = builder.push_location(PCodeLocation::new(
-        LifterSpaceHandle::new(1),
+    let location = builder.emitter().intern_location(PCodeLocation::new(
+        PCodeLifterSpaceHandle::new(1),
         0,
         8,
         PCodeLocationProperties::REGISTER,
     ))?;
-    let operands = builder.push_operands([location])?;
-
-    builder.push_operation(PCodeOp::new(
-        PCodeOpcode::Copy,
+    builder.emitter().emit(
+        PCodeOpSpec::new(PCodeOpcode::Copy),
         Some(location),
-        operands,
-        0,
-        None,
-    ));
+        [location],
+    )?;
 
     Ok(builder.build(&CancellationToken::default())?)
 }
@@ -257,15 +256,13 @@ fn single_block_graph() -> IlGraph {
 }
 
 fn pcode_for_test(function: FunctionId, graph: IlGraph) -> PCodeIr {
-    let language = resolve_language("x86:LE:64").expect("test language should resolve");
-    PCodeBuilder::new(language, IlMetadata::new(function, 0), graph)
+    PCodeBuilder::new(IlMetadata::new(function, 0), graph)
         .build(&CancellationToken::default())
         .expect("test PCode IR should verify")
 }
 
 fn tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
-    let language = resolve_language("x86:LE:64").expect("test language should resolve");
-    let mut builder = PCodeBuilder::new(language, IlMetadata::new(function, 0), IlGraph::default());
+    let mut builder = PCodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default());
     builder.set_source_spans(tagged_source_spans(payload));
     builder
         .build(&CancellationToken::default())
@@ -275,19 +272,13 @@ fn tagged_pcode(function: FunctionId, payload: &[u8]) -> PCodeIr {
 fn ecode_for_test(function: FunctionId, graph: IlGraph) -> ECodeIr {
     ECodeBuilder::new(IlMetadata::new(function, 0), graph)
         .build(&CancellationToken::default())
-        .expect("test LIR should verify")
+        .expect("test ECode IR should verify")
 }
 
-fn ecode_ssa_for_test(function: FunctionId, graph: IlGraph) -> ECodeSsaIr {
-    ECodeSsaBuilder::new(IlMetadata::new(function, 0), graph)
+fn mcode_for_test(function: FunctionId, graph: IlGraph) -> MCodeIr {
+    MCodeBuilder::new(IlMetadata::new(function, 0), graph)
         .build(&CancellationToken::default())
-        .expect("test LIR SSA should verify")
-}
-
-fn mcode_ssa_for_test(function: FunctionId, graph: IlGraph) -> MCodeSsaIr {
-    MCodeSsaBuilder::new(IlMetadata::new(function, 0), graph)
-        .build(&CancellationToken::default())
-        .expect("test MCode SSA should verify")
+        .expect("test MCode should verify")
 }
 
 fn first_mapping_placement(

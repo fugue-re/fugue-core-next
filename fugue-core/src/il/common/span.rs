@@ -1,38 +1,69 @@
 use std::cmp::Ordering;
 
 use crate::il::common::verify::StructureError;
-use crate::il::common::{IlError, IlIndexRange};
+use crate::il::common::{IlError, IlIndexRange, IlOpId};
 use crate::ir::Address;
 
-/// Maps a *destination* range of IL nodes back to the *source* machine
-/// instruction they derive from.
-///
-/// Provenance bottoms out at the root dialect: every IL node at every level
-/// ultimately derives from an instruction's pcode operations, so
-/// `first_pcode_index`/`pcode_count` identify that micro-op range and are
-/// carried through ECode and SSA unchanged — only `destination` is remapped
-/// between levels.
+fn find_destination_span<T: Copy>(
+    spans: &[T],
+    node: usize,
+    destination: impl Fn(&T) -> IlIndexRange,
+) -> Option<T> {
+    spans
+        .binary_search_by(|span| {
+            let range = destination(span);
+            if range.contains_index(node) {
+                Ordering::Equal
+            } else if node < range.start() {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        })
+        .ok()
+        .map(|index| spans[index])
+}
+
+/// Maps a destination range of IL nodes back to its source range.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct IlSourceSpan {
     destination: IlIndexRange,
     address: Address,
-    first_pcode_index: u32,
-    pcode_count: u32,
+    first_source_index: u32,
+    source_count: u32,
 }
 
 impl IlSourceSpan {
+    pub fn try_new(
+        destination: IlIndexRange,
+        address: Address,
+        first_source_index: u32,
+        source_count: u32,
+    ) -> Result<Self, IlError> {
+        first_source_index
+            .checked_add(source_count)
+            .ok_or_else(|| IlError::integer_overflow("source range"))?;
+
+        Ok(Self::new(
+            destination,
+            address,
+            first_source_index,
+            source_count,
+        ))
+    }
+
     pub(crate) const fn new(
         destination: IlIndexRange,
         address: Address,
-        first_pcode_index: u32,
-        pcode_count: u32,
+        first_source_index: u32,
+        source_count: u32,
     ) -> Self {
         Self {
             destination,
             address,
-            first_pcode_index,
-            pcode_count,
+            first_source_index,
+            source_count,
         }
     }
 
@@ -44,18 +75,19 @@ impl IlSourceSpan {
         self.address
     }
 
-    pub const fn first_pcode_index(&self) -> u32 {
-        self.first_pcode_index
+    pub const fn first_source_index(&self) -> u32 {
+        self.first_source_index
     }
 
-    pub const fn pcode_count(&self) -> u32 {
-        self.pcode_count
+    pub const fn source_count(&self) -> u32 {
+        self.source_count
     }
 
-    pub fn contains_source(&self, address: Address, pcode_index: u32) -> bool {
+    pub fn contains_source(&self, address: Address, source_index: u32) -> bool {
         self.address == address
-            && self.first_pcode_index <= pcode_index
-            && pcode_index - self.first_pcode_index < self.pcode_count
+            && source_index
+                .checked_sub(self.first_source_index)
+                .is_some_and(|offset| offset < self.source_count)
     }
 
     pub const fn contains_destination(&self, node: usize) -> bool {
@@ -63,41 +95,59 @@ impl IlSourceSpan {
     }
 
     pub fn find(spans: &[Self], node: usize) -> Option<Self> {
+        find_destination_span(spans, node, Self::destination)
+    }
+
+    pub fn operations<'a, T>(
+        spans: &'a [Self],
+        operations: &'a [T],
+        address: Address,
+    ) -> impl Iterator<Item = (IlOpId, &'a T)> + 'a {
         spans
-            .binary_search_by(|span| {
-                if span.contains_destination(node) {
-                    Ordering::Equal
-                } else if node < span.destination().start() {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
+            .iter()
+            .filter(move |span| span.address() == address)
+            .flat_map(move |span| {
+                let start = span.destination().start();
+                span.destination().slice(operations).iter().enumerate().map(
+                    move |(index, operation)| {
+                        (
+                            IlOpId::try_from_index(start + index)
+                                .expect("operation count fits the operation id space"),
+                            operation,
+                        )
+                    },
+                )
             })
-            .ok()
-            .map(|index| spans[index])
     }
 
     pub fn find_all(
         spans: &[Self],
         address: Address,
-        pcode_index: u32,
+        source_index: u32,
     ) -> impl Iterator<Item = Self> + '_ {
         spans
             .iter()
             .copied()
-            .filter(move |span| span.contains_source(address, pcode_index))
+            .filter(move |span| span.contains_source(address, source_index))
     }
 
     pub fn try_merge(&mut self, span: IlSourceSpan) -> Result<bool, IlError> {
+        let next_source_index = self
+            .first_source_index
+            .checked_add(self.source_count)
+            .ok_or_else(|| IlError::integer_overflow("source range"))?;
         if self.address != span.address
             || self.destination.end() != span.destination.start()
-            || self.first_pcode_index + self.pcode_count != span.first_pcode_index
+            || next_source_index != span.first_source_index
         {
             return Ok(false);
         }
 
         self.destination = IlIndexRange::new(self.destination.start(), span.destination.end())?;
-        self.pcode_count += span.pcode_count;
+        self.source_count = self
+            .source_count
+            .checked_add(span.source_count)
+            .ok_or_else(|| IlError::integer_overflow("source count"))?;
 
         Ok(true)
     }
@@ -110,7 +160,7 @@ impl IlSourceSpan {
 
             if span.destination.start() < previous_end {
                 return Err(StructureError::OverlappingSourceSpan {
-                    node: span.destination.start() as u32,
+                    node: span.destination.start(),
                 });
             }
 
@@ -129,7 +179,7 @@ pub struct IlParentSpan {
 }
 
 impl IlParentSpan {
-    pub(crate) const fn new(destination: IlIndexRange, source: IlIndexRange) -> Self {
+    pub const fn new(destination: IlIndexRange, source: IlIndexRange) -> Self {
         Self {
             destination,
             source,
@@ -157,7 +207,7 @@ impl IlParentSpan {
 
             if span.destination.start() < previous_end {
                 return Err(StructureError::OverlappingParentSpan {
-                    node: span.destination.start() as u32,
+                    node: span.destination.start(),
                 });
             }
 
@@ -172,18 +222,7 @@ impl IlParentSpan {
     }
 
     pub fn find(spans: &[Self], node: usize) -> Option<Self> {
-        spans
-            .binary_search_by(|span| {
-                if span.contains_destination(node) {
-                    Ordering::Equal
-                } else if node < span.destination().start() {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
-            })
-            .ok()
-            .map(|index| spans[index])
+        find_destination_span(spans, node, Self::destination)
     }
 
     pub fn find_all(spans: &[Self], node: usize) -> impl Iterator<Item = Self> + '_ {
@@ -235,7 +274,7 @@ mod test {
             .unwrap()
         );
         assert_eq!(span.destination(), IlIndexRange::new(0, 4).unwrap());
-        assert_eq!(span.pcode_count(), 5);
+        assert_eq!(span.source_count(), 5);
         assert!(span.contains_destination(3));
         assert!(span.contains_source(address, 4));
     }

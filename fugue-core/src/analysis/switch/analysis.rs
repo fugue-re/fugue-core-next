@@ -9,7 +9,7 @@ use crate::analysis::switch::resolver::SwitchTargetResolver;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
 use crate::il::common::{IlArtefact, IlError, IlGenerationError};
-use crate::il::ecode::ssa::ECodeSsaIr;
+use crate::il::ecode::ECodeIr;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
 use crate::project::Project;
 use crate::types::common::Revision;
@@ -116,7 +116,7 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
 
             if !unresolved.is_empty() || !retry.is_empty() {
                 let ssa = project
-                    .speculative_il::<ECodeSsaIr>(function, Revision::default(), &cancellation)
+                    .speculative_il::<ECodeIr>(function, Revision::default(), &cancellation)
                     .map_err(|error| match error {
                         IlGenerationError::Il(IlError::Cancelled) => {
                             AnalysisError::Cancelled(Cancelled)
@@ -126,7 +126,7 @@ impl AnalysisPass<FunctionRecoveryState> for SwitchRecovery {
                     .ok_or_else(|| {
                         AnalysisError::pass_failed(
                             SWITCH_RECOVERY_ANALYSER,
-                            IlError::missing_artefact(FunctionId::INVALID, ECodeSsaIr::FORM),
+                            IlError::missing_artefact(FunctionId::INVALID, ECodeIr::FORM),
                         )
                     })?;
                 let mut interval_recovery = SwitchIntervalRecovery::new(&ssa, self.config);

@@ -10,8 +10,7 @@ use thiserror::Error;
 use crate::engine::{EngineError, Intake};
 use crate::il::common::IlError;
 use crate::il::ecode::ECodeIr;
-use crate::il::ecode::ssa::ECodeSsaIr;
-use crate::il::mcode::ssa::MCodeSsaIr;
+use crate::il::mcode::MCodeIr;
 use crate::il::pcode::PCodeIr;
 use crate::il::registry::IlRegistry;
 use crate::ir::cfg::FlowTargets;
@@ -225,12 +224,8 @@ impl QueryReader {
         self.lifted::<ECodeIr>(function)
     }
 
-    pub fn ecode_ssa(&self, function: FunctionId) -> Result<Option<Arc<ECodeSsaIr>>, QueryError> {
-        self.lifted::<ECodeSsaIr>(function)
-    }
-
-    pub fn mcode_ssa(&self, function: FunctionId) -> Result<Option<Arc<MCodeSsaIr>>, QueryError> {
-        self.lifted::<MCodeSsaIr>(function)
+    pub fn mcode(&self, function: FunctionId) -> Result<Option<Arc<MCodeIr>>, QueryError> {
+        self.lifted::<MCodeIr>(function)
     }
 
     fn cached_il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
