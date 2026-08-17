@@ -34,6 +34,8 @@ pub(crate) enum VerifyError {
     InconsistentBinding { value: u32 },
     #[error("MCode call operation {operation} is malformed")]
     InvalidCall { operation: u32 },
+    #[error("MCode operation {operation} has invalid block placement")]
+    InvalidOpPlacement { operation: u32 },
     #[error(
         "MCode operation {operation} has an invalid operand count: expected {expected}, found {found}"
     )]
@@ -42,8 +44,6 @@ pub(crate) enum VerifyError {
         expected: usize,
         found: usize,
     },
-    #[error("MCode operation {operation} has invalid block placement")]
-    InvalidOperationPlacement { operation: u32 },
     #[error(
         "MCode operation {operation} has an invalid result count: expected {expected}, found {found}"
     )]
@@ -55,7 +55,7 @@ pub(crate) enum VerifyError {
     #[error("MCode split operation {operation} is malformed")]
     InvalidSplit { operation: u32 },
     #[error("MCode value has an invalid definition")]
-    InvalidValueDefinition,
+    InvalidValueDef,
     #[error("MCode variable {variable} has an invalid version: expected {expected}, found {found}")]
     InvalidVersion {
         variable: u32,
@@ -124,7 +124,7 @@ impl VerifyError {
     }
 
     const fn invalid_operation_placement(operation: IlOpId) -> Self {
-        Self::InvalidOperationPlacement {
+        Self::InvalidOpPlacement {
             operation: operation.value(),
         }
     }
@@ -144,7 +144,7 @@ impl VerifyError {
     }
 
     const fn invalid_value_definition() -> Self {
-        Self::InvalidValueDefinition
+        Self::InvalidValueDef
     }
 
     const fn invalid_version(
@@ -205,10 +205,10 @@ impl From<SsaVerifyError> for VerifyError {
                 Self::EdgeArgTableCount { expected, found }
             }
             SsaVerifyError::Il(error) => Self::Il(error),
-            SsaVerifyError::InvalidOperationPlacement { operation } => {
-                Self::InvalidOperationPlacement { operation }
+            SsaVerifyError::InvalidOpPlacement { operation } => {
+                Self::InvalidOpPlacement { operation }
             }
-            SsaVerifyError::InvalidValueDefinition => Self::InvalidValueDefinition,
+            SsaVerifyError::InvalidValueDef => Self::InvalidValueDef,
             SsaVerifyError::NonDominatingEdgeArg {
                 value,
                 predecessor,
@@ -271,7 +271,7 @@ impl MCodeVerifier<'_> {
             for result_index in operation.results().start()..operation.results().end() {
                 let value = self.ir.values()[result_index];
 
-                if value.definition() != IlSsaDef::Operation(operation_id) {
+                if value.definition() != IlSsaDef::Op(operation_id) {
                     return Err(VerifyError::invalid_value_definition());
                 }
             }
@@ -322,7 +322,7 @@ impl MCodeVerifier<'_> {
             let value_id = IlValueId::try_from_index(value_index)?;
 
             match value.definition() {
-                IlSsaDef::Operation(operation) => {
+                IlSsaDef::Op(operation) => {
                     let Some(operation) = self.ir.operations().get(operation.index()) else {
                         return Err(VerifyError::invalid_value_definition());
                     };
@@ -413,7 +413,7 @@ impl MCodeVerifier<'_> {
         value_id: IlValueId,
         value: &MCodeValue,
     ) -> Result<(), VerifyError> {
-        let IlSsaDef::Operation(operation_id) = value.definition() else {
+        let IlSsaDef::Op(operation_id) = value.definition() else {
             return Ok(());
         };
         let operation_index = operation_id.index();

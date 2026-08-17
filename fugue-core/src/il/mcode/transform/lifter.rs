@@ -318,12 +318,12 @@ pub(crate) struct ECodeToMCodeLifter<'a, 'b> {
 
 impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
     pub(crate) fn new(
-        source: &'a ECodeIr,
+        ir: &'a ECodeIr,
         recovery: &'a MCodeRecovery,
         mut builder: MCodeBuilder,
         scratch: &'b mut ECodeToMCodeScratch,
     ) -> Result<Self, IlError> {
-        let call_outputs = MCodeCallOutputVariables::new(source, recovery)?;
+        let call_outputs = MCodeCallOutputVariables::new(ir, recovery)?;
         let mut target_variables = Vec::with_capacity(recovery.variables().variables().len());
         for index in 0..recovery.variables().variables().len() {
             let recovered = MCodeVarId::try_from_index(index)?;
@@ -331,28 +331,28 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             let variable = recovery.variables().variables()[representative.index()];
             target_variables.push(builder.emitter().intern_variable(variable)?);
         }
-        let variable_widths = MCodeVariableWidths::new(source, recovery, &target_variables)?;
+        let variable_widths = MCodeVariableWidths::new(ir, recovery, &target_variables)?;
 
         Ok(Self {
-            source,
+            source: ir,
             recovery,
             builder,
             scratch,
-            target_values: vec![None; source.values().len()],
+            target_values: vec![None; ir.values().len()],
             target_variables,
             variable_widths,
             bindings: MCodeBindings::default(),
             call_output_variables: call_outputs,
-            block_args: vec![Vec::new(); source.graph().blocks().len()],
-            blocks: vec![None; source.graph().blocks().len()],
-            edge_args: vec![Vec::new(); source.graph().successors().len()],
-            operation_blocks: source.operation_blocks(),
-            operation_ranges: IlIndexRangeMap::unmapped(source.operations().len()),
+            block_args: vec![Vec::new(); ir.graph().blocks().len()],
+            blocks: vec![None; ir.graph().blocks().len()],
+            edge_args: vec![Vec::new(); ir.graph().successors().len()],
+            operation_blocks: ir.operation_blocks(),
+            operation_ranges: IlIndexRangeMap::unmapped(ir.operations().len()),
         })
     }
 
-    fn target_variable(&self, recovered: MCodeVarId) -> MCodeVarId {
-        self.target_variables[recovered.index()]
+    fn target_variable(&self, variable: MCodeVarId) -> MCodeVarId {
+        self.target_variables[variable.index()]
     }
 
     fn target_variable_for_value(&self, value: IlValueId) -> Result<MCodeVarId, IlError> {
@@ -1164,7 +1164,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 value
             }
         };
-        let mut operands = Vec::new();
+        let mut operands = mem::take(&mut self.scratch.operands);
+        operands.clear();
         if operation.opcode() == ECodeOpcode::CallIndirect {
             let destination = self
                 .source
@@ -1215,7 +1216,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if let Some(address) = operation.address() {
             spec = spec.with_address(address);
         }
-        let (_, results) = self.builder.emitter().emit(spec, operands, widths)?;
+        let results = self
+            .builder
+            .emitter()
+            .emit(spec, operands.iter().copied(), widths);
+        operands.clear();
+        self.scratch.operands = operands;
+        let (_, results) = results?;
         let memory_result = IlValueId::try_from_index(results.start())?;
         current.clear_memory();
         current.clear_unmatched_call_memory();
@@ -1282,7 +1289,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 value
             }
         };
-        let mut operands = Vec::new();
+        let mut operands = mem::take(&mut self.scratch.operands);
+        operands.clear();
         if operation.opcode() == ECodeOpcode::BranchIndirect {
             let destination = self
                 .source
@@ -1324,7 +1332,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if let Some(address) = operation.address() {
             spec = spec.with_address(address);
         }
-        self.builder.emitter().emit(spec, operands, [])?;
+        let results = self
+            .builder
+            .emitter()
+            .emit(spec, operands.iter().copied(), []);
+        operands.clear();
+        self.scratch.operands = operands;
+        results?;
 
         Ok(())
     }

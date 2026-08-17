@@ -723,7 +723,7 @@ fn verifier_rejects_a_terminator_before_the_end_of_a_block() {
 
     assert!(matches!(
         ir.verify(),
-        Err(VerifyError::InvalidOperationPlacement { .. })
+        Err(VerifyError::InvalidOpPlacement { .. })
     ));
 }
 
@@ -748,7 +748,7 @@ fn verifier_rejects_a_terminator_before_the_end_of_a_linear_body() {
 
     assert!(matches!(
         ir.verify(),
-        Err(VerifyError::InvalidOperationPlacement { .. })
+        Err(VerifyError::InvalidOpPlacement { .. })
     ));
 }
 

@@ -23,6 +23,8 @@ pub(crate) enum VerifyError {
     Il(#[from] IlError),
     #[error("ECode value {value} has an inconsistent domain")]
     InconsistentValueDomain { value: u32 },
+    #[error("ECode operation {operation} has invalid block placement")]
+    InvalidOpPlacement { operation: u32 },
     #[error(
         "ECode operation {operation} has an invalid operand count: expected {expected}, found {found}"
     )]
@@ -31,8 +33,6 @@ pub(crate) enum VerifyError {
         expected: usize,
         found: usize,
     },
-    #[error("ECode operation {operation} has invalid block placement")]
-    InvalidOperationPlacement { operation: u32 },
     #[error(
         "ECode operation {operation} has an invalid result count: expected {expected}, found {found}"
     )]
@@ -42,7 +42,7 @@ pub(crate) enum VerifyError {
         found: usize,
     },
     #[error("ECode value has an invalid definition")]
-    InvalidValueDefinition,
+    InvalidValueDef,
     #[error(
         "ECode value {value} does not dominate edge from block {predecessor} to block {successor}"
     )]
@@ -83,7 +83,7 @@ impl VerifyError {
     }
 
     const fn invalid_value_definition() -> Self {
-        Self::InvalidValueDefinition
+        Self::InvalidValueDef
     }
 
     const fn value_domain_count(expected: usize, found: usize) -> Self {
@@ -114,10 +114,10 @@ impl From<SsaVerifyError> for VerifyError {
                 Self::EdgeArgTableCount { expected, found }
             }
             SsaVerifyError::Il(error) => Self::Il(error),
-            SsaVerifyError::InvalidOperationPlacement { operation } => {
-                Self::InvalidOperationPlacement { operation }
+            SsaVerifyError::InvalidOpPlacement { operation } => {
+                Self::InvalidOpPlacement { operation }
             }
-            SsaVerifyError::InvalidValueDefinition => Self::InvalidValueDefinition,
+            SsaVerifyError::InvalidValueDef => Self::InvalidValueDef,
             SsaVerifyError::NonDominatingEdgeArg {
                 value,
                 predecessor,
@@ -180,7 +180,7 @@ impl ECodeVerifier<'_> {
             for result_index in operation.results().start()..operation.results().end() {
                 let value = self.ir.values()[result_index];
 
-                if value.definition() != IlSsaDef::Operation(operation_id) {
+                if value.definition() != IlSsaDef::Op(operation_id) {
                     return Err(VerifyError::invalid_value_definition());
                 }
 
@@ -237,7 +237,7 @@ impl ECodeVerifier<'_> {
             let value_id = IlValueId::try_from_index(value_index)?;
 
             match value.definition() {
-                IlSsaDef::Operation(operation) => {
+                IlSsaDef::Op(operation) => {
                     let Some(operation) = self.ir.operations().get(operation.index()) else {
                         return Err(VerifyError::invalid_value_definition());
                     };
@@ -289,7 +289,7 @@ impl ECodeVerifier<'_> {
                         value.width() == 0
                     }
                 }
-                IlSsaDef::Operation(operation) => {
+                IlSsaDef::Op(operation) => {
                     let operation = self.ir.operations().get(operation.index());
                     match (domain, operation) {
                         (ECodeDomain::Flag(storage), Some(operation)) => {

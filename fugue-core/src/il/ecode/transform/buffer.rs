@@ -108,7 +108,7 @@ impl PCodeToECodeBuffer {
 
     pub(crate) fn constant(&mut self, width: u32, value: u64) -> Result<IlExprId, IlError> {
         self.push_nullary(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             width,
             value,
         )
@@ -116,7 +116,7 @@ impl PCodeToECodeBuffer {
 
     pub(crate) fn address(&mut self, width: u32, offset: u64) -> Result<IlExprId, IlError> {
         self.push_nullary(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Address),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Address),
             width,
             offset,
         )
@@ -124,7 +124,7 @@ impl PCodeToECodeBuffer {
 
     pub(crate) fn undefined(&mut self, width: u32, discriminant: u64) -> Result<IlExprId, IlError> {
         self.push_nullary(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Undefined),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Undefined),
             width,
             discriminant,
         )
@@ -152,7 +152,7 @@ impl PCodeToECodeBuffer {
     ) -> Result<IlExprId, IlError> {
         let operands = self.push_expression_operands(operands.iter().copied())?;
         self.push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(opcode),
+            PCodeToECodeExprKind::Op(opcode),
             width,
             operands,
             immediate,

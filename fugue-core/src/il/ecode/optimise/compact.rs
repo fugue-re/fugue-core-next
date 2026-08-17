@@ -23,7 +23,7 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
         for (index, value) in ir.values().iter().enumerate() {
             value_kept[index] = match value.definition() {
                 IlSsaDef::BlockArg(arg) => required.block_arg_is_required(arg.index()),
-                IlSsaDef::Operation(operation) => required.operation_is_required(operation.index()),
+                IlSsaDef::Op(operation) => required.operation_is_required(operation.index()),
             };
         }
         let value_map = IlIndexMapper::from_kept(ir.values().len(), |index| value_kept[index]);
@@ -40,9 +40,9 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
             .filter(|(index, _)| value_kept[*index])
             .map(|(_, value)| {
                 let definition = match value.definition() {
-                    IlSsaDef::Operation(operation) => {
+                    IlSsaDef::Op(operation) => {
                         let operation = operation_map.map_index(operation.index());
-                        IlSsaDef::Operation(
+                        IlSsaDef::Op(
                             IlOpId::try_from_index(operation)
                                 .expect("remapped operation id is representable"),
                         )

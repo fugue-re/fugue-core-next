@@ -210,11 +210,11 @@ impl MCodeCallFacts {
         self.outputs = Some(outputs.into_iter().collect());
     }
 
-    pub fn add_input(&mut self, input: MCodeStorageFact) {
+    pub fn insert_input(&mut self, input: MCodeStorageFact) {
         self.inputs.get_or_insert_with(Vec::new).push(input);
     }
 
-    pub fn add_output(&mut self, output: MCodeStorageFact) {
+    pub fn insert_output(&mut self, output: MCodeStorageFact) {
         self.outputs.get_or_insert_with(Vec::new).push(output);
     }
 
@@ -310,14 +310,14 @@ impl MCodeFunctionFacts {
         self.tail_call_live_outputs = Some(outputs);
     }
 
-    pub fn add_return_live_output(&mut self, output: MCodeStorageFact) {
+    pub fn insert_return_live_output(&mut self, output: MCodeStorageFact) {
         let outputs = self.return_live_outputs.get_or_insert_with(Vec::new);
         if let Err(index) = outputs.binary_search(&output) {
             outputs.insert(index, output);
         }
     }
 
-    pub fn add_tail_call_live_output(&mut self, output: MCodeStorageFact) {
+    pub fn insert_tail_call_live_output(&mut self, output: MCodeStorageFact) {
         let outputs = self.tail_call_live_outputs.get_or_insert_with(Vec::new);
         if let Err(index) = outputs.binary_search(&output) {
             outputs.insert(index, output);

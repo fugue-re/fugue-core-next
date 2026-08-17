@@ -279,8 +279,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         self.assign_output(output, expression)
     }
 
-    fn assign_output(&mut self, output: PCodeLocationId, value: IlExprId) -> Result<(), IlError> {
-        let location = *self.location(output);
+    fn assign_output(&mut self, id: PCodeLocationId, value: IlExprId) -> Result<(), IlError> {
+        let location = *self.location(id);
         if let Some(flag) = self.flags.get(&location).copied() {
             self.flag_values.insert(flag, value);
             self.buffer.write_flag(flag, value)?;
@@ -290,7 +290,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         } else if location.lifter_space().value() == self.arch.language().default_space() {
             self.lift_memory_write(&location, value)?;
         } else {
-            self.values.insert((output, LocationRole::Value), value);
+            self.values.insert((id, LocationRole::Value), value);
         }
 
         Ok(())

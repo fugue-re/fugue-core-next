@@ -1,5 +1,5 @@
 use crate::il::common::{
-    IlAnalysis, IlCsr, IlOpId, IlSsaBlockArgInputs, IlValueId, collect_ssa_block_arg_inputs,
+    IlAnalysis, IlCsr, IlOpId, IlSsaBlockArgInputs, IlValueId,
     collect_ssa_uses,
 };
 use crate::il::ecode::ECodeIr;
@@ -71,7 +71,7 @@ impl ECodeBlockArgInputs {
 impl IlAnalysis<ECodeIr> for ECodeBlockArgInputs {
     fn analyse(ir: &ECodeIr) -> Self {
         Self {
-            inputs: collect_ssa_block_arg_inputs(
+            inputs: IlSsaBlockArgInputs::new(
                 ir.values().len(),
                 ir.graph(),
                 ir.block_args().iter().map(|arg| (arg.block(), arg.value())),

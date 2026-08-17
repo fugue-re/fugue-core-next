@@ -88,7 +88,7 @@ impl ECodeIr {
         let mut constants = IlConstantInterner::new();
         for operation in &self.operations {
             if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
-                constants.index_existing(bytes, operation.immediate());
+                constants.index_existing(operation.immediate(), bytes);
             }
         }
         ECodeRewriter {
@@ -211,7 +211,7 @@ impl ECodeIr {
 
     pub fn defining_operation(&self, value: IlValueId) -> Option<&ECodeOp> {
         let record = self.values.get(value.index())?;
-        let IlSsaDef::Operation(operation) = record.definition() else {
+        let IlSsaDef::Op(operation) = record.definition() else {
             return None;
         };
         self.operations.get(operation.index())

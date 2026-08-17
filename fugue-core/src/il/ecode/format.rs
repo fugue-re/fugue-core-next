@@ -105,7 +105,7 @@ impl fmt::Display for ECodeValueDisplay<'_> {
         let width = self.value.width();
         let (definition, definition_index) = match self.value.definition() {
             IlSsaDef::BlockArg(arg) => ("block_arg", arg.index()),
-            IlSsaDef::Operation(operation) => ("operation", operation.index()),
+            IlSsaDef::Op(operation) => ("operation", operation.index()),
         };
 
         write!(

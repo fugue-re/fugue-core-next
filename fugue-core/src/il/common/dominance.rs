@@ -312,7 +312,7 @@ impl<'a> DominanceSolver<'a> {
             blocks,
             successors,
             entry,
-            predecessors: IlBlockPredecessors::build(blocks, successors),
+            predecessors: IlBlockPredecessors::new(blocks, successors),
             reachable: vec![false; blocks.len()],
             reverse_postorder: Vec::new(),
             positions: vec![u32::MAX; blocks.len()],

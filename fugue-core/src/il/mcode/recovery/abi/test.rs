@@ -56,11 +56,11 @@ fn exact_stack_facts_produce_stack_inputs_and_outputs() {
     let site = function.call();
     let ir = function.finish();
     let mut call = MCodeCallFacts::new(site);
-    call.add_input(MCodeStorageFact::new(
+    call.insert_input(MCodeStorageFact::new(
         MCodeStorageLocation::Stack { offset: -16 },
         128,
     ));
-    call.add_output(MCodeStorageFact::new(
+    call.insert_output(MCodeStorageFact::new(
         MCodeStorageLocation::Stack { offset: 8 },
         192,
     ));
@@ -239,9 +239,9 @@ fn function_live_outputs_are_sorted_and_deduplicated() {
     let stack = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -8 }, 64);
     let mut facts = MCodeFunctionFacts::new(FunctionId::default());
 
-    facts.add_return_live_output(stack);
-    facts.add_return_live_output(register);
-    facts.add_return_live_output(stack);
+    facts.insert_return_live_output(stack);
+    facts.insert_return_live_output(register);
+    facts.insert_return_live_output(stack);
     facts.set_tail_call_live_outputs([stack, register, stack]);
 
     assert_eq!(facts.return_live_outputs(), Some(&[register, stack][..]));
@@ -256,7 +256,7 @@ fn storage_fact_validation_rejects_inconsistent_widths_and_roots() {
     let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
     let validate = |fact| {
         let mut call = MCodeCallFacts::new(site);
-        call.add_input(fact);
+        call.insert_input(fact);
         let mut facts = MCodeFunctionFacts::new(ir.metadata().function());
         facts.insert_call(call);
         facts.validate(&ir, &registers)
@@ -564,7 +564,7 @@ fn a_reaching_register_value_must_match_the_root_width() {
     let ir = function.finish();
     let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
     let mut call = MCodeCallFacts::new(site);
-    call.add_input(MCodeStorageFact::new(
+    call.insert_input(MCodeStorageFact::new(
         MCodeStorageLocation::Register(RegisterId::new(RDI)),
         64,
     ));

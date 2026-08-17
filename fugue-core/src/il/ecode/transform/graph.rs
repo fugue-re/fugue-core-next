@@ -572,7 +572,7 @@ mod test {
                 .expressions()
                 .iter()
                 .filter(|expression| expression.kind()
-                    == PCodeToECodeExprKind::Operation(ECodeOpcode::Constant))
+                    == PCodeToECodeExprKind::Op(ECodeOpcode::Constant))
                 .count(),
             3
         );
@@ -590,7 +590,7 @@ mod test {
         assert_eq!(lifted.expressions().len(), 2);
         assert_eq!(
             lifted.expressions()[1].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Copy)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Copy)
         );
         assert_eq!(lifted.operations().len(), 1);
         assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::WriteRegister);
@@ -657,7 +657,7 @@ mod test {
         let extract = &lifted.expressions()[1];
         assert_eq!(
             extract.kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Extract)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Extract)
         );
         assert_eq!(extract.immediate(), 256);
         assert_eq!(extract.operands().len(), 1);
@@ -736,14 +736,14 @@ mod test {
             .expressions()
             .iter()
             .filter(|expression| {
-                expression.kind() == PCodeToECodeExprKind::Operation(ECodeOpcode::Extract)
+                expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Extract)
             })
             .collect::<Vec<_>>();
         let insert = lifted
             .expressions()
             .iter()
             .find(|expression| {
-                expression.kind() == PCodeToECodeExprKind::Operation(ECodeOpcode::Insert)
+                expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Insert)
             })
             .expect("partial write should insert into the root");
 
@@ -909,7 +909,7 @@ mod test {
 
         assert_eq!(
             lifted.expressions()[0].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Undefined)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Undefined)
         );
     }
 
@@ -1003,7 +1003,7 @@ mod test {
         assert_eq!(lifted.expressions().len(), 2);
         assert_eq!(
             lifted.expressions()[1].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::IntrinsicResult)
+            PCodeToECodeExprKind::Op(ECodeOpcode::IntrinsicResult)
         );
         assert_eq!(lifted.expressions()[1].operands().len(), 1);
     }
@@ -1022,11 +1022,11 @@ mod test {
         let operands = lifted.operation_operands_for(&lifted.operations()[0]);
         assert_eq!(
             lifted.expressions()[operands[0].index()].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Address)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Address)
         );
         assert_eq!(
             lifted.expressions()[operands[1].index()].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant)
         );
         assert_eq!(
             lifted.operations()[0].address_space(),
@@ -1069,11 +1069,11 @@ mod test {
         assert_ne!(operands[0], operands[1]);
         assert_eq!(
             lifted.expressions()[operands[0].index()].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Address)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Address)
         );
         assert_eq!(
             lifted.expressions()[operands[1].index()].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant)
         );
     }
 
@@ -1162,7 +1162,7 @@ mod test {
         let target = lifted.operation_operands_for(&lifted.operations()[0])[0];
         assert_eq!(
             lifted.expressions()[target.index()].kind(),
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Address)
+            PCodeToECodeExprKind::Op(ECodeOpcode::Address)
         );
         assert_eq!(
             lifted.operations()[0].address_space(),

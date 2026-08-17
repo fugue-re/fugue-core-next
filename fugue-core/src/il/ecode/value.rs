@@ -17,7 +17,7 @@ impl ECodeValue {
     }
 
     pub const fn operation_result(width: u32, operation: IlOpId) -> Self {
-        Self::new(width, IlSsaDef::Operation(operation))
+        Self::new(width, IlSsaDef::Op(operation))
     }
 
     pub const fn block_arg(width: u32, arg: IlBlockArgId) -> Self {

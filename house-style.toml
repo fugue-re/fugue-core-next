@@ -132,3 +132,135 @@ rule = "duplicate_helper"
 path = "fugue-core/src/il/mcode/transform/lifter.rs"
 item = "ECodeToMCodeLifter::lift_block_tree"
 reason = "dialect-owned lifting policy consumes the shared IlDominanceEvents traversal without adding a callback protocol solely to merge two orchestration loops"
+
+[[vocabulary.term]]
+reject = "converter"
+prefer = "transformer"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[vocabulary.term]]
+reject = "convert"
+prefer = "transform"
+roles = ["function", "method"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[vocabulary.term]]
+reject = "converted"
+prefer = "transformed"
+roles = ["function", "method"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraph::blocks"
+reason = "IlGraph is the deliberate common owner of graph mechanics; its invariants bind blocks, successors and block sources together, and range checking already lives on IlIndexMapper"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraph::block_sources"
+reason = "IlGraph is the deliberate common owner of graph mechanics; its invariants bind blocks, successors and block sources together, and range checking already lives on IlIndexMapper"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraphBuilder::blocks"
+reason = "builder internals of the deliberate graph owner"
+
+[[exception]]
+rule = "collection_custody"
+item = "ECodeIr::memory_domains"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "MCodeIr::values"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "MCodeIr::memory_domains"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "PCodeIr::source_spans"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlRegistry::forms"
+reason = "form lookup surface of the registry owner"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlStaging::records"
+reason = "staging lifecycle methods form the owner's contract; the stored cache is the only sibling state"
+
+[[exception]]
+rule = "allocating_getter"
+item = "IlFormId::dialect"
+reason = "component access on the form identifier; the derived id is small and the accessor form is the established call-site idiom"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/il/pcode/transform.rs"
+item = "metadata"
+reason = "assembles the conversion's metadata record at one natural point; not a repeated accessor"
+
+[[exception]]
+rule = "associated_namespace_helper"
+item = "IlFormId::component_count"
+reason = "the IlFormId:: spelling is the point; the constant-like query reads as form-id vocabulary"
+
+[[exception]]
+rule = "large_inherent_impl"
+item = "ECodeToMCodeLifter"
+reason = "cohesive one-function transformation owner; splitting it was reviewed and rejected"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/il/ecode/verify/mod.rs"
+reason = "the verify constructors mirror each other across dialects; the three-parameter shape is the mirrored surface"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/il/mcode"
+reason = "MCode is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "defining_operation"
+reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "evaluate"
+reason = "the opcode families stay separate; MCode's opcode set is scheduled to change and consolidation now would be premature"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "rollback"
+reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "define"
+reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/il/ecode/optimise/required.rs"
+reason = "ECode's required defs arrive through the analysis trait while MCode's take recovery inputs directly; the constructors are not corresponding operations"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "write_operands"
+reason = "dialect display adapters mirror deliberately; the shared shape is a separator loop over dialect-specific writers"
+
+[[exception]]
+rule = "index_conversion_churn"
+item = "evaluate"
+reason = "the scalar evaluator bridges bit-width, shift-amount and byte-count domains at the BitVec boundary; each conversion is the boundary"

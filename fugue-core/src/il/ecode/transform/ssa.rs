@@ -166,18 +166,18 @@ impl ECodeDomains {
                         PCodeToECodeExprKind::ReadRegister => {
                             ECodeDomain::Register(RegisterId::new(expression.immediate()))
                         }
-                        PCodeToECodeExprKind::Operation(_) => unreachable!(),
+                        PCodeToECodeExprKind::Op(_) => unreachable!(),
                     };
                     domains.record_width(domain, expression.width())?;
                     domains.reads.insert(domain);
                 }
-                PCodeToECodeExprKind::Operation(ECodeOpcode::Load) => {
+                PCodeToECodeExprKind::Op(ECodeOpcode::Load) => {
                     let space = expression.address_space().ok_or_else(|| {
                         IlError::missing_component(ECodeIr::FORM, "address space")
                     })?;
                     domains.record_width(ECodeDomain::Memory(space), 0)?;
                 }
-                PCodeToECodeExprKind::Operation(_) => {}
+                PCodeToECodeExprKind::Op(_) => {}
             }
         }
 
@@ -599,14 +599,14 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                                 PCodeToECodeExprKind::ReadRegister => {
                                     ECodeDomain::Register(RegisterId::new(expression.immediate()))
                                 }
-                                PCodeToECodeExprKind::Operation(_) => unreachable!(),
+                                PCodeToECodeExprKind::Op(_) => unreachable!(),
                             };
                             let value = self.current_value(domain, expression.width(), current)?;
                             self.values[expression_id.index()] = Some(value);
                             self.built_expressions.push(expression_id);
                             continue;
                         }
-                        PCodeToECodeExprKind::Operation(_) => {}
+                        PCodeToECodeExprKind::Op(_) => {}
                     }
 
                     self.scratch
@@ -636,7 +636,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "operand"))?;
                 self.scratch.expression_operands.push(operand);
             }
-            if expression.kind() == PCodeToECodeExprKind::Operation(ECodeOpcode::Load) {
+            if expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Load) {
                 let address_space = expression
                     .address_space()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
@@ -644,7 +644,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                 self.scratch.expression_operands.push(memory);
             }
 
-            let PCodeToECodeExprKind::Operation(opcode) = expression.kind() else {
+            let PCodeToECodeExprKind::Op(opcode) = expression.kind() else {
                 return Err(IlError::unsupported_opcode(ECodeIr::FORM));
             };
             let mut spec =

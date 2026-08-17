@@ -15,12 +15,12 @@ pub(crate) struct MCodeVariableWidths(FxHashMap<MCodeVarId, u32>);
 
 impl MCodeVariableWidths {
     pub(crate) fn new(
-        source: &ECodeIr,
+        ir: &ECodeIr,
         recovery: &MCodeRecovery,
         variables: &[MCodeVarId],
     ) -> Result<Self, IlError> {
         let mut widths = Self(FxHashMap::default());
-        for (index, value) in source.values().iter().enumerate() {
+        for (index, value) in ir.values().iter().enumerate() {
             let source_value = IlValueId::try_from_index(index)?;
             let Some(recovered) = recovery.variables().variable_for_value(source_value) else {
                 continue;
@@ -60,13 +60,13 @@ pub(crate) struct MCodeStackDefs(BTreeMap<MCodeVarId, Vec<IlBlockId>>);
 
 impl MCodeStackDefs {
     pub(crate) fn new(
-        source: &ECodeIr,
+        ir: &ECodeIr,
         recovery: &MCodeRecovery,
         variables: &[MCodeVarId],
         operation_blocks: &[Option<IlBlockId>],
     ) -> Result<Self, IlError> {
         let mut definitions = BTreeMap::<MCodeVarId, Vec<IlBlockId>>::new();
-        for (index, operation) in source.operations().iter().enumerate() {
+        for (index, operation) in ir.operations().iter().enumerate() {
             if operation.opcode() != ECodeOpcode::Store {
                 continue;
             }
@@ -204,8 +204,8 @@ impl MCodeCallOutputCandidates {
 }
 
 impl MCodeCallOutputVariables {
-    pub(crate) fn new(source: &ECodeIr, recovery: &MCodeRecovery) -> Result<Self, IlError> {
-        MCodeCallOutputSolver::new(source, recovery).solve()
+    pub(crate) fn new(ir: &ECodeIr, recovery: &MCodeRecovery) -> Result<Self, IlError> {
+        MCodeCallOutputSolver::new(ir, recovery).solve()
     }
 
     pub(crate) fn representative_for(&self, variable: MCodeVarId) -> MCodeVarId {
@@ -221,9 +221,9 @@ impl MCodeCallOutputVariables {
 }
 
 impl<'a> MCodeCallOutputSolver<'a> {
-    fn new(source: &'a ECodeIr, recovery: &'a MCodeRecovery) -> Self {
+    fn new(ir: &'a ECodeIr, recovery: &'a MCodeRecovery) -> Self {
         Self {
-            source,
+            source: ir,
             recovery,
             representatives: DisjointSet::new(recovery.variables().variables().len()),
             outputs: FxHashMap::default(),

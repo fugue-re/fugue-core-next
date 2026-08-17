@@ -132,7 +132,7 @@ fn an_external_consumer_can_supply_function_scoped_facts() -> Result<(), Box<dyn
         .ok_or_else(|| io::Error::other("fixture contains no direct ECode call"))?;
     let storage = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -8 }, 64);
     let mut call = MCodeCallFacts::new(site);
-    call.add_input(storage);
+    call.insert_input(storage);
     assert_eq!(call.inputs(), Some(&[storage][..]));
     call.set_inputs([]);
     call.set_outputs([]);

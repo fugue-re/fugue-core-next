@@ -1,7 +1,8 @@
 use thiserror::Error;
 
 use crate::il::common::{
-    IlBlockId, IlCsr, IlDominance, IlEdgeKinds, IlError, IlOpId, IlSsaDef, IlValueId, SsaIl,
+    IlBlockArgId, IlBlockId, IlCsr, IlDominance, IlEdgeKinds, IlError, IlOpId, IlSsaDef,
+    IlValueId, SsaIl,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -19,9 +20,9 @@ pub enum SsaVerifyError {
     #[error(transparent)]
     Il(#[from] IlError),
     #[error("SSA operation {operation} has invalid block placement")]
-    InvalidOperationPlacement { operation: u32 },
+    InvalidOpPlacement { operation: u32 },
     #[error("SSA value has an invalid definition")]
-    InvalidValueDefinition,
+    InvalidValueDef,
     #[error(
         "SSA value {value} does not dominate edge from block {predecessor} to block {successor}"
     )]
@@ -105,7 +106,7 @@ where
                 .map_err(SsaVerifyError::from)
                 .map_err(E::from)?;
             let Some(user_block) = operation_blocks[operation_index] else {
-                return Err(E::from(SsaVerifyError::InvalidOperationPlacement {
+                return Err(E::from(SsaVerifyError::InvalidOpPlacement {
                     operation: operation.value(),
                 }));
             };
@@ -117,7 +118,7 @@ where
             }
 
             let operands = self.ir.operation_operands(operation).ok_or_else(|| {
-                E::from(SsaVerifyError::InvalidOperationPlacement {
+                E::from(SsaVerifyError::InvalidOpPlacement {
                     operation: operation.value(),
                 })
             })?;
@@ -155,7 +156,7 @@ where
         let block_args = IlCsr::try_from_entries(
             self.ir.graph().blocks().len(),
             (0..self.ir.block_arg_count()).map(|index| {
-                let arg = crate::il::common::IlBlockArgId::try_from_index(index)
+                let arg = IlBlockArgId::try_from_index(index)
                     .expect("block argument count fits the identifier space");
                 (
                     self.ir
@@ -204,13 +205,13 @@ where
                 }
 
                 for (&value, &arg_index) in args.iter().zip(block_args) {
-                    let arg = crate::il::common::IlBlockArgId::try_from_index(arg_index)
+                    let arg = IlBlockArgId::try_from_index(arg_index)
                         .map_err(SsaVerifyError::from)
                         .map_err(E::from)?;
                     let destination = self
                         .ir
                         .block_arg_value(arg)
-                        .ok_or_else(|| E::from(SsaVerifyError::InvalidValueDefinition))?;
+                        .ok_or_else(|| E::from(SsaVerifyError::InvalidValueDef))?;
                     if self.ir.value_width(value) != self.ir.block_arg_width(arg) {
                         return Err(E::from(SsaVerifyError::Il(IlError::width_mismatch(
                             I::FORM,
@@ -256,7 +257,7 @@ where
         operation_index: usize,
     ) -> Result<(), SsaVerifyError> {
         let operands = self.ir.operation_operands(operation).ok_or(
-            SsaVerifyError::InvalidOperationPlacement {
+            SsaVerifyError::InvalidOpPlacement {
                 operation: operation.value(),
             },
         )?;
@@ -264,8 +265,8 @@ where
             let definition = self
                 .ir
                 .value_definition(operand)
-                .ok_or(SsaVerifyError::InvalidValueDefinition)?;
-            if let IlSsaDef::Operation(definition) = definition
+                .ok_or(SsaVerifyError::InvalidValueDef)?;
+            if let IlSsaDef::Op(definition) = definition
                 && definition.index() >= operation_index
             {
                 return Err(SsaVerifyError::NonDominatingUse {
@@ -289,16 +290,16 @@ where
         match self
             .ir
             .value_definition(value)
-            .ok_or(SsaVerifyError::InvalidValueDefinition)?
+            .ok_or(SsaVerifyError::InvalidValueDef)?
         {
-            IlSsaDef::Operation(operation) => {
+            IlSsaDef::Op(operation) => {
                 let definition_operation = operation.index();
                 let Some(definition_block) = operation_blocks
                     .get(definition_operation)
                     .copied()
                     .flatten()
                 else {
-                    return Err(SsaVerifyError::InvalidOperationPlacement {
+                    return Err(SsaVerifyError::InvalidOpPlacement {
                         operation: operation.value(),
                     });
                 };
@@ -313,7 +314,7 @@ where
                 let block = self
                     .ir
                     .block_arg_block(arg)
-                    .ok_or(SsaVerifyError::InvalidValueDefinition)?;
+                    .ok_or(SsaVerifyError::InvalidValueDef)?;
                 Ok(dominance.dominates(block, user_block))
             }
         }
@@ -329,16 +330,16 @@ where
         match self
             .ir
             .value_definition(value)
-            .ok_or(SsaVerifyError::InvalidValueDefinition)?
+            .ok_or(SsaVerifyError::InvalidValueDef)?
         {
-            IlSsaDef::Operation(operation) => {
+            IlSsaDef::Op(operation) => {
                 let definition_operation = operation.index();
                 let Some(definition_block) = operation_blocks
                     .get(definition_operation)
                     .copied()
                     .flatten()
                 else {
-                    return Err(SsaVerifyError::InvalidOperationPlacement {
+                    return Err(SsaVerifyError::InvalidOpPlacement {
                         operation: operation.value(),
                     });
                 };
@@ -350,7 +351,7 @@ where
                 let block = self
                     .ir
                     .block_arg_block(arg)
-                    .ok_or(SsaVerifyError::InvalidValueDefinition)?;
+                    .ok_or(SsaVerifyError::InvalidValueDef)?;
                 Ok(dominance.dominates(block, predecessor))
             }
         }
@@ -374,7 +375,7 @@ pub enum StructureError {
     #[error(transparent)]
     Il(#[from] IlError),
     #[error("block {block} operation range overlaps at operation {operation}")]
-    OverlappingBlockOperations { block: u32, operation: usize },
+    OverlappingBlockOps { block: u32, operation: usize },
     #[error("parent spans overlap at destination node {node}")]
     OverlappingParentSpan { node: usize },
     #[error("source spans overlap at destination node {node}")]

@@ -30,7 +30,7 @@ struct ECodeToMCodeScratch {
 impl ECodeToMCode {
     pub fn transform(
         &mut self,
-        source: &ECodeIr,
+        ir: &ECodeIr,
         arch: &Arch,
         platform: &Platform,
         facts: Option<&MCodeFunctionFacts>,
@@ -51,15 +51,15 @@ impl ECodeToMCode {
             None => config,
         }
         .with_alias_overrides(&self.overrides);
-        let recovery = MCodeRecovery::new(source, &config, &registers)?;
+        let recovery = MCodeRecovery::new(ir, &config, &registers)?;
 
         self.scratch.required_values.clear();
         let metadata = IlMetadata::new(
-            source.metadata().function(),
-            source.metadata().input_revision(),
+            ir.metadata().function(),
+            ir.metadata().input_revision(),
         );
         let builder = MCodeBuilder::new(metadata, IlGraph::default());
-        let mut mcode = ECodeToMCodeLifter::new(source, &recovery, builder, &mut self.scratch)?
+        let mut mcode = ECodeToMCodeLifter::new(ir, &recovery, builder, &mut self.scratch)?
             .lift(cancellation)?;
         #[cfg(debug_assertions)]
         {

@@ -34,5 +34,5 @@ pub use register::{FlagId, RegisterBank, RegisterId, RegisterRange, RegisterSlic
 pub use rewrite::IlRewrite;
 pub use span::{IlParentSpan, IlSourceSpan};
 pub use ssa::{IlRequiredDefs, IlSsaDef, SsaIl};
-pub(crate) use ssa::{IlSsaBlockArgInputs, collect_ssa_block_arg_inputs, collect_ssa_uses};
+pub(crate) use ssa::{IlSsaBlockArgInputs, collect_ssa_uses};
 pub use verify::{SsaVerifier, SsaVerifyError, StructureError, StructureVerifierError};

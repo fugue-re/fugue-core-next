@@ -13,7 +13,7 @@ impl ECodeRequiredDefs {
         let mut worklist = Vec::new();
         for (index, operation) in ir.operations().iter().enumerate() {
             if operation.opcode().has_side_effect() {
-                let definition = IlSsaDef::Operation(
+                let definition = IlSsaDef::Op(
                     IlOpId::try_from_index(index).expect("operation id is representable"),
                 );
                 required.definitions.mark(definition);
@@ -41,7 +41,7 @@ impl ECodeRequiredDefs {
         let inputs = ir.analyse::<ECodeBlockArgInputs>();
         while let Some(entity) = worklist.pop() {
             match entity {
-                IlSsaDef::Operation(operation) => {
+                IlSsaDef::Op(operation) => {
                     let operation = &ir.operations()[operation.index()];
                     for &operand in ir.operation_operands_for(operation) {
                         let Some(definition) = ir

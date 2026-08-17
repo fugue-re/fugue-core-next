@@ -10,7 +10,7 @@ use crate::storage::segments::space::AddressSpaceId;
 #[repr(u8)]
 pub enum IlSsaDef {
     BlockArg(IlBlockArgId),
-    Operation(IlOpId),
+    Op(IlOpId),
 }
 
 pub trait SsaIl: ControlFlowIl {
@@ -58,7 +58,7 @@ impl IlRequiredDefs {
     pub fn mark(&mut self, definition: IlSsaDef) -> bool {
         match definition {
             IlSsaDef::BlockArg(arg) => !self.block_args.put(arg.index()),
-            IlSsaDef::Operation(operation) => !self.operations.put(operation.index()),
+            IlSsaDef::Op(operation) => !self.operations.put(operation.index()),
         }
     }
 
@@ -95,6 +95,48 @@ impl IlSsaBlockArgInputs {
                 )
             })
     }
+
+    pub(crate) fn new<'a>(
+        value_count: usize,
+        graph: &IlGraph,
+        args: impl Clone + Iterator<Item = (IlBlockId, IlValueId)>,
+        args_for_edge: impl Fn(usize) -> &'a [IlValueId],
+    ) -> Self {
+        let block_count = graph.blocks().len();
+        let mut present = FixedBitSet::with_capacity(value_count);
+        for (_, arg) in args.clone() {
+            present.insert(arg.index());
+        }
+        let args = IlCsr::from_entries(
+            block_count,
+            args.map(|(block, value)| (block.index(), value)),
+        );
+        let incoming = IlCsr::from_entries(
+            block_count,
+            graph
+                .successors()
+                .iter()
+                .enumerate()
+                .map(|(edge, target)| (target.index(), edge)),
+        );
+
+        let mut entries = Vec::new();
+        for block in 0..block_count {
+            for (position, &arg) in args.row(block).iter().enumerate() {
+                entries.extend(incoming.row(block).iter().filter_map(|&edge| {
+                    args_for_edge(edge)
+                        .get(position)
+                        .copied()
+                        .map(|input| (arg.index(), input))
+                }));
+            }
+        }
+
+        IlSsaBlockArgInputs {
+            args: present,
+            inputs: IlCsr::from_entries(value_count, entries.into_iter()),
+        }
+    }
 }
 
 pub(crate) fn collect_ssa_uses<'a, T>(
@@ -119,47 +161,6 @@ where
     IlCsr::from_entries(value_count, entries)
 }
 
-pub(crate) fn collect_ssa_block_arg_inputs<'a>(
-    value_count: usize,
-    graph: &IlGraph,
-    args: impl Clone + Iterator<Item = (IlBlockId, IlValueId)>,
-    args_for_edge: impl Fn(usize) -> &'a [IlValueId],
-) -> IlSsaBlockArgInputs {
-    let block_count = graph.blocks().len();
-    let mut present = FixedBitSet::with_capacity(value_count);
-    for (_, arg) in args.clone() {
-        present.insert(arg.index());
-    }
-    let args = IlCsr::from_entries(
-        block_count,
-        args.map(|(block, value)| (block.index(), value)),
-    );
-    let incoming = IlCsr::from_entries(
-        block_count,
-        graph
-            .successors()
-            .iter()
-            .enumerate()
-            .map(|(edge, target)| (target.index(), edge)),
-    );
-
-    let mut entries = Vec::new();
-    for block in 0..block_count {
-        for (position, &arg) in args.row(block).iter().enumerate() {
-            entries.extend(incoming.row(block).iter().filter_map(|&edge| {
-                args_for_edge(edge)
-                    .get(position)
-                    .copied()
-                    .map(|input| (arg.index(), input))
-            }));
-        }
-    }
-
-    IlSsaBlockArgInputs {
-        args: present,
-        inputs: IlCsr::from_entries(value_count, entries.into_iter()),
-    }
-}
 
 #[cfg(test)]
 mod test {
@@ -174,8 +175,8 @@ mod test {
 
         assert!(required.mark(IlSsaDef::BlockArg(arg)));
         assert!(!required.mark(IlSsaDef::BlockArg(arg)));
-        assert!(required.mark(IlSsaDef::Operation(operation)));
-        assert!(!required.mark(IlSsaDef::Operation(operation)));
+        assert!(required.mark(IlSsaDef::Op(operation)));
+        assert!(!required.mark(IlSsaDef::Op(operation)));
         assert!(required.block_arg_is_required(arg.index()));
         assert!(required.operation_is_required(operation.index()));
     }
@@ -230,7 +231,7 @@ mod test {
         let value_count = ARG_COUNT + PREDECESSOR_COUNT * ARG_COUNT;
 
         let inputs =
-            collect_ssa_block_arg_inputs(value_count, &graph, args.iter().copied(), |edge| {
+            IlSsaBlockArgInputs::new(value_count, &graph, args.iter().copied(), |edge| {
                 &edge_args[edge]
             });
 

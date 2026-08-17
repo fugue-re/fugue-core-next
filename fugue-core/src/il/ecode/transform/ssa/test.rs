@@ -130,7 +130,7 @@ fn register_read_after_write_uses_current_value() {
     let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
     let value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2a,
@@ -205,7 +205,7 @@ fn call_preserves_only_declared_register_state() {
     builder.set_call_preserved_registers(vec![RegisterId::new(7)]);
     let preserved = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2a,
@@ -226,7 +226,7 @@ fn call_preserves_only_declared_register_state() {
         .unwrap();
     let clobbered = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2b,
@@ -321,7 +321,7 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
         .unwrap();
     let decrement = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             8,
@@ -333,7 +333,7 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
         .unwrap();
     let address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Sub),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Sub),
             64,
             subtract_operands,
             0,
@@ -355,7 +355,7 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
 
     let value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2a,
@@ -442,7 +442,7 @@ fn load_preserves_fugue_address_space() {
     let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
     let offset = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -453,7 +453,7 @@ fn load_preserves_fugue_address_space() {
     let space = AddressSpaceId::new(3);
     let load = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Load),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Load),
             8,
             load_operands,
             0,
@@ -502,7 +502,7 @@ fn load_after_store_uses_store_memory_result() {
     let space = AddressSpaceId::new(3);
     let store_address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -511,7 +511,7 @@ fn load_after_store_uses_store_memory_result() {
         .unwrap();
     let store_value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             32,
             IlIndexRange::EMPTY,
             0x2a,
@@ -534,7 +534,7 @@ fn load_after_store_uses_store_memory_result() {
 
     let load_address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -544,7 +544,7 @@ fn load_after_store_uses_store_memory_result() {
     let load_operands = builder.push_expression_operands([load_address]).unwrap();
     let load = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Load),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Load),
             32,
             load_operands,
             0,
@@ -594,7 +594,7 @@ fn store_without_load_registers_memory_domain() {
     let space = AddressSpaceId::new(3);
     let address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -603,7 +603,7 @@ fn store_without_load_registers_memory_domain() {
         .unwrap();
     let value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             32,
             IlIndexRange::EMPTY,
             0x2a,
@@ -640,7 +640,7 @@ fn direct_branch_preserves_fugue_address() {
     let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
     let condition = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             1,
             IlIndexRange::EMPTY,
             1,
@@ -649,7 +649,7 @@ fn direct_branch_preserves_fugue_address() {
         .unwrap();
     let target_expression = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2000,
@@ -717,7 +717,7 @@ fn deep_dominance_chain_constructs_iteratively() {
     for index in 0..block_count {
         let value = builder
             .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 index as u64,
@@ -783,7 +783,7 @@ fn branch_heavy_ssa_restores_live_domains_between_siblings() {
     for register in 0..DOMAIN_COUNT {
         let value = builder
             .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 register as u64,
@@ -806,7 +806,7 @@ fn branch_heavy_ssa_restores_live_domains_between_siblings() {
     for register in 0..DOMAIN_COUNT {
         let value = builder
             .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000 + register as u64,
@@ -911,7 +911,7 @@ fn merge_block_register_read_becomes_block_arg() {
     let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, graph);
     let left = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             1,
@@ -920,7 +920,7 @@ fn merge_block_register_read_becomes_block_arg() {
         .unwrap();
     let right = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             2,
@@ -1039,7 +1039,7 @@ fn merge_block_load_uses_memory_block_arg() {
     let space = AddressSpaceId::new(3);
     let store_address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -1048,7 +1048,7 @@ fn merge_block_load_uses_memory_block_arg() {
         .unwrap();
     let store_value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             32,
             IlIndexRange::EMPTY,
             0x2a,
@@ -1057,7 +1057,7 @@ fn merge_block_load_uses_memory_block_arg() {
         .unwrap();
     let load_address = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x1000,
@@ -1067,7 +1067,7 @@ fn merge_block_load_uses_memory_block_arg() {
     let load_operands = builder.push_expression_operands([load_address]).unwrap();
     let load = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Load),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Load),
             32,
             load_operands,
             0,
@@ -1167,7 +1167,7 @@ fn loop_carried_register_uses_header_block_arg() {
         .unwrap();
     let constant = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             32,
             IlIndexRange::EMPTY,
             1,
@@ -1229,7 +1229,7 @@ fn value_domains_create_distinct_register_and_flag_definitions() {
 
     let source_value = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             8,
             IlIndexRange::EMPTY,
             0x2a,
@@ -1365,7 +1365,7 @@ fn value_domains_survive_compaction_and_rkyv() {
 
     let written = builder
         .push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Operation(ECodeOpcode::Constant),
+            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
             64,
             IlIndexRange::EMPTY,
             0x2a,

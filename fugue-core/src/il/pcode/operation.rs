@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::num::NonZeroU32;
 
 use crate::il::common::{IlIndexRange, il_id};
 use crate::lifter::{Language, Op, Varnode};
@@ -40,7 +41,7 @@ const _: () = assert!(size_of::<Option<PCodeLocationId>>() == 4);
 
 impl PCodeTargetId {
     const fn from_value(value: u32) -> Option<Self> {
-        match std::num::NonZeroU32::new(value) {
+        match NonZeroU32::new(value) {
             Some(value) => Some(Self(value)),
             None => None,
         }

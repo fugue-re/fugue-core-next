@@ -6,7 +6,7 @@ use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum PCodeToECodeExprKind {
-    Operation(ECodeOpcode),
+    Op(ECodeOpcode),
     ReadFlag,
     ReadRegister,
 }

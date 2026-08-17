@@ -27,7 +27,7 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .iter()
             .map(|value| match value.definition() {
                 IlSsaDef::BlockArg(arg) => required.block_arg_is_required(arg.index()),
-                IlSsaDef::Operation(operation) => required.operation_is_required(operation.index()),
+                IlSsaDef::Op(operation) => required.operation_is_required(operation.index()),
             })
             .collect::<Vec<_>>();
         let value_map = IlIndexMapper::from_kept(ir.values().len(), |index| value_kept[index]);
@@ -87,9 +87,9 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .filter(|(index, _)| value_kept[*index])
             .map(|(index, value)| {
                 let definition = match value.definition() {
-                    IlSsaDef::Operation(operation) => {
+                    IlSsaDef::Op(operation) => {
                         let operation = operation_map.map_index(operation.index());
-                        IlSsaDef::Operation(
+                        IlSsaDef::Op(
                             IlOpId::try_from_index(operation)
                                 .expect("remapped operation id is representable"),
                         )

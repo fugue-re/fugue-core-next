@@ -412,8 +412,8 @@ impl IlRegistryBuilder {
         self.register(IlFormRegistration::derived::<T>())
     }
 
-    pub fn with_derived_form<T: IlArtefact>(self, source: IlFormId) -> Self {
-        self.register(IlFormRegistration::new::<T>(Some(source), None))
+    pub fn with_derived_form<T: IlArtefact>(self, form: IlFormId) -> Self {
+        self.register(IlFormRegistration::new::<T>(Some(form), None))
     }
 
     pub fn build(self) -> Result<IlRegistry, IlRegistryErrors> {

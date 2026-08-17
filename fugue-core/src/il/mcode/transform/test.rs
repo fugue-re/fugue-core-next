@@ -290,7 +290,7 @@ fn memory_domain_identifiers_round_trip_through_ecode_and_mcode() {
     push_store(&mut builder, space, pointer, stored, memory);
     push_return(&mut builder, [stored]);
     let source = builder.build(&CancellationToken::default()).unwrap();
-    let IlSsaDef::Operation(memory_definition) = source.values()[memory.index()].definition()
+    let IlSsaDef::Op(memory_definition) = source.values()[memory.index()].definition()
     else {
         panic!("the ECode memory value is operation-defined");
     };
@@ -796,11 +796,11 @@ fn exact_stack_call_facts_materialise_stack_inputs_and_outputs() {
     push_return(&mut builder, [memory]);
     let source = builder.build(&CancellationToken::default()).unwrap();
     let mut call_facts = MCodeCallFacts::new(call);
-    call_facts.add_input(MCodeStorageFact::new(
+    call_facts.insert_input(MCodeStorageFact::new(
         MCodeStorageLocation::Stack { offset: -16 },
         128,
     ));
-    call_facts.add_output(MCodeStorageFact::new(
+    call_facts.insert_output(MCodeStorageFact::new(
         MCodeStorageLocation::Stack { offset: 8 },
         192,
     ));
@@ -1055,7 +1055,7 @@ fn transform_rejects_mismatched_and_out_of_range_function_facts() {
     ));
     let non_call_site = IlOpId::try_from_index(0).unwrap();
     let mut non_call = MCodeCallFacts::new(non_call_site);
-    non_call.add_input(MCodeStorageFact::new(
+    non_call.insert_input(MCodeStorageFact::new(
         MCodeStorageLocation::Stack { offset: -8 },
         64,
     ));
@@ -1286,7 +1286,7 @@ fn exact_register_pair_and_stack_facts_survive_tail_call_lifting() {
                 .then(|| IlValueId::try_from_index(index).unwrap())
         })
         .expect("the stack live output survives optimisation");
-    let IlSsaDef::Operation(stack_definition) = mcode.values()[stack_output.index()].definition()
+    let IlSsaDef::Op(stack_definition) = mcode.values()[stack_output.index()].definition()
     else {
         panic!("the stack live output has an operation definition");
     };

@@ -16,7 +16,7 @@ impl IlConstantInterner {
         }
     }
 
-    pub(crate) fn index_existing(&mut self, bytes: &[u8], offset: u64) {
+    pub(crate) fn index_existing(&mut self, offset: u64, bytes: &[u8]) {
         if !self.offsets.contains_key(bytes) {
             self.offsets.insert(Box::<[u8]>::from(bytes), offset);
         }

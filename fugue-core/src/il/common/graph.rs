@@ -319,10 +319,6 @@ impl IlGraph {
         Some(IlBlockId::try_from_index(index).expect("block count fits the block id space"))
     }
 
-    pub fn predecessors(&self) -> IlBlockPredecessors {
-        IlBlockPredecessors::build(&self.blocks, &self.successors)
-    }
-
     pub fn shrink_to_fit(&mut self) {
         self.blocks.shrink_to_fit();
         self.successors.shrink_to_fit();
@@ -355,7 +351,7 @@ impl IlGraph {
         let mut previous_operation_end = 0usize;
         for (operations, block_id) in operation_ranges {
             if operations.start() < previous_operation_end {
-                return Err(StructureError::OverlappingBlockOperations {
+                return Err(StructureError::OverlappingBlockOps {
                     block: block_id.value(),
                     operation: operations.start(),
                 });
@@ -561,7 +557,7 @@ pub struct IlBlockPredecessors {
 }
 
 impl IlBlockPredecessors {
-    pub(crate) fn build(blocks: &[IlBlock], successors: &[IlBlockId]) -> Self {
+    pub(crate) fn new(blocks: &[IlBlock], successors: &[IlBlockId]) -> Self {
         let entries = blocks.iter().enumerate().flat_map(|(block_index, block)| {
             let block_id = IlBlockId::try_from_index(block_index)
                 .expect("block count fits the block id space");
@@ -644,7 +640,7 @@ mod test {
             ),
         ];
         let successors = vec![block1, block2, block2];
-        let index = IlBlockPredecessors::build(&blocks, &successors);
+        let index = IlBlockPredecessors::new(&blocks, &successors);
 
         assert_eq!(index.predecessors_for(block0), &[]);
         assert_eq!(index.predecessors_for(block1), &[block0]);
@@ -662,7 +658,7 @@ mod test {
             Vec::new(),
             Vec::new(),
         );
-        let predecessors = IlBlockPredecessors::build(graph.blocks(), graph.successors());
+        let predecessors = IlBlockPredecessors::new(graph.blocks(), graph.successors());
         let invalid = IlBlockId::try_from_index(graph.blocks().len()).unwrap();
 
         assert!(graph.successors_for(invalid).is_empty());
@@ -886,7 +882,7 @@ mod test {
 
         assert!(matches!(
             graph.verify(),
-            Err(StructureError::OverlappingBlockOperations { .. })
+            Err(StructureError::OverlappingBlockOps { .. })
         ));
     }
 }

@@ -89,7 +89,7 @@ fn ecode_verifier_rejects_invalid_value_definition() {
         .with_values(
             vec![ECodeValue::new(
                 64,
-                IlSsaDef::Operation(IlOpId::try_from_index(3).unwrap()),
+                IlSsaDef::Op(IlOpId::try_from_index(3).unwrap()),
             )],
             Vec::new(),
         )
@@ -97,7 +97,7 @@ fn ecode_verifier_rejects_invalid_value_definition() {
 
     assert!(matches!(
         ir.verify(),
-        Err(VerifyError::InvalidValueDefinition)
+        Err(VerifyError::InvalidValueDef)
     ));
 }
 
@@ -653,7 +653,7 @@ fn ecode_verifier_rejects_duplicate_operation_placement() {
     assert!(matches!(
         ir.verify(),
         Err(VerifyError::Structure(
-            StructureError::OverlappingBlockOperations { .. }
+            StructureError::OverlappingBlockOps { .. }
         ))
     ));
 }

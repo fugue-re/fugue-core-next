@@ -86,7 +86,7 @@ impl fmt::Display for MCodeIrDisplay<'_> {
             let width = value.width();
             let (definition, definition_index) = match value.definition() {
                 IlSsaDef::BlockArg(arg) => ("block_arg", arg.index()),
-                IlSsaDef::Operation(operation) => ("operation", operation.index()),
+                IlSsaDef::Op(operation) => ("operation", operation.index()),
             };
             writeln!(
                 f,
